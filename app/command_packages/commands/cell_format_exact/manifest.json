@@ -1,0 +1,25 @@
+{
+  "op": "cell_format_exact",
+  "version": "local-cli/cell-format-exact/v1-package",
+  "summary": "Command-bundle package for cell_format_exact delegating to the existing server primitive.",
+  "module": "app.command_packages.commands.cell_format_exact.run",
+  "read_only": false,
+  "dirty_default": true,
+  "allowed_keys": [
+    "op",
+    "operation",
+    "label",
+    "section_anchor",
+    "page_from",
+    "page_to",
+    "around",
+    "target_id",
+    "expected_hash",
+    "expected_page",
+    "cell_margin_hu",
+    "cell_margin_mm",
+    "vertical_align",
+    "confirm_layout",
+    "max_controls"
+  ]
+}

@@ -1,0 +1,19 @@
+{
+  "op": "paragraph_style_apply_exact",
+  "version": "local-cli/paragraph-style-apply-exact/v1-package",
+  "summary": "Command-bundle package for paragraph_style_apply_exact delegating to the existing server primitive.",
+  "module": "app.command_packages.commands.paragraph_style_apply_exact.run",
+  "read_only": false,
+  "dirty_default": true,
+  "allowed_keys": [
+    "op",
+    "operation",
+    "label",
+    "match",
+    "expected_page",
+    "keep_with_next",
+    "widow_orphan",
+    "pagebreak_before",
+    "confirm_layout"
+  ]
+}

@@ -1,0 +1,13 @@
+{
+  "op": "export_pdf",
+  "version": "local-cli/export-pdf/v1-package",
+  "summary": "Command-bundle package for export_pdf delegating to the existing server primitive.",
+  "module": "app.command_packages.commands.export_pdf.run",
+  "read_only": true,
+  "dirty_default": false,
+  "allowed_keys": [
+    "op",
+    "operation",
+    "label"
+  ]
+}

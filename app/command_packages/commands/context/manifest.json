@@ -1,0 +1,9 @@
+{
+  "op": "context",
+  "version": "local-cli/context/v1-package",
+  "summary": "Read-only structured edit-context observation for LLM and local CLI formatting.",
+  "module": "app.command_packages.commands.context.run",
+  "read_only": true,
+  "dirty_default": false,
+  "allowed_keys": ["op", "operation", "label"]
+}

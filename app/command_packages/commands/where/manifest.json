@@ -1,0 +1,9 @@
+{
+  "op": "where",
+  "version": "local-cli/where/v2-package",
+  "summary": "Read-only LLM-friendly live cursor/page/context observation.",
+  "module": "app.command_packages.commands.where.run",
+  "read_only": true,
+  "dirty_default": false,
+  "allowed_keys": ["op", "operation", "label"]
+}

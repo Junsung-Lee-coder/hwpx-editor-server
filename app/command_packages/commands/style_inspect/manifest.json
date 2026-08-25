@@ -1,0 +1,9 @@
+{
+  "op": "style_inspect",
+  "version": "local-cli/style-inspect/v1-package",
+  "summary": "Read-only style inspection package around the existing native style probe.",
+  "module": "app.command_packages.commands.style_inspect.run",
+  "read_only": true,
+  "dirty_default": false,
+  "allowed_keys": ["op", "operation", "label", "match", "keep_position"]
+}

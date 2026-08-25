@@ -1,0 +1,14 @@
+{
+  "op": "get_selected_text",
+  "version": "local-cli/get-selected-text/v1-package",
+  "summary": "Command-bundle package for get_selected_text delegating to the existing server primitive.",
+  "module": "app.command_packages.commands.get_selected_text.run",
+  "read_only": true,
+  "dirty_default": false,
+  "allowed_keys": [
+    "op",
+    "operation",
+    "label",
+    "keep_select"
+  ]
+}

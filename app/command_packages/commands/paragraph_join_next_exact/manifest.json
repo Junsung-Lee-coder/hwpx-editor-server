@@ -1,0 +1,22 @@
+{
+  "op": "paragraph_join_next_exact",
+  "version": "local-cli/paragraph-join-next-exact/v1-package",
+  "summary": "Command-bundle package for paragraph_join_next_exact delegating to the existing server primitive.",
+  "module": "app.command_packages.commands.paragraph_join_next_exact.run",
+  "read_only": false,
+  "dirty_default": true,
+  "allowed_keys": [
+    "op",
+    "operation",
+    "label",
+    "match",
+    "expected_page",
+    "expected_next_contains",
+    "delete_count",
+    "next_match",
+    "max_next_page_after",
+    "insert_line_break",
+    "move_to_line_end",
+    "confirm_layout"
+  ]
+}

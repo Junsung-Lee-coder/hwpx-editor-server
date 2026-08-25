@@ -1,0 +1,20 @@
+{
+  "op": "paragraph_rehome_exact",
+  "version": "local-cli/paragraph-rehome-exact/v1-package",
+  "summary": "Command-bundle package for paragraph_rehome_exact delegating to the existing server primitive.",
+  "module": "app.command_packages.commands.paragraph_rehome_exact.run",
+  "read_only": false,
+  "dirty_default": true,
+  "allowed_keys": [
+    "op",
+    "operation",
+    "label",
+    "delete_match",
+    "delete_expected_page",
+    "insert_before_match",
+    "insert_expected_page",
+    "insert_text",
+    "expected_text_delta",
+    "confirm_layout"
+  ]
+}

@@ -1,0 +1,21 @@
+{
+  "op": "control_inventory",
+  "version": "local-cli/control-inventory/v1-package",
+  "summary": "Command-bundle package for control_inventory delegating to the existing server primitive.",
+  "module": "app.command_packages.commands.control_inventory.run",
+  "read_only": true,
+  "dirty_default": false,
+  "allowed_keys": [
+    "op",
+    "operation",
+    "label",
+    "section_anchor",
+    "page_from",
+    "page_to",
+    "around",
+    "target_id",
+    "expected_hash",
+    "expected_page",
+    "max_controls"
+  ]
+}

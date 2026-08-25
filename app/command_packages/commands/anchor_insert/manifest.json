@@ -1,0 +1,9 @@
+{
+  "op": "anchor_insert",
+  "version": "local-cli/anchor-insert/v1-package",
+  "summary": "Guarded anchor insertion using one live anchor resolution; rendered proof required before save.",
+  "module": "app.command_packages.commands.anchor_insert.run",
+  "read_only": false,
+  "dirty_default": true,
+  "allowed_keys": ["op", "operation", "label", "target", "position", "text", "fragments"]
+}

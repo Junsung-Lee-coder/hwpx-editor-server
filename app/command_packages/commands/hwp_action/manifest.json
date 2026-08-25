@@ -1,0 +1,14 @@
+{
+  "op": "hwp_action",
+  "version": "local-cli/hwp-action/v1-package",
+  "summary": "Command-bundle package for hwp_action delegating to the existing server primitive.",
+  "module": "app.command_packages.commands.hwp_action.run",
+  "read_only": true,
+  "dirty_default": false,
+  "allowed_keys": [
+    "op",
+    "operation",
+    "label",
+    "action_name"
+  ]
+}

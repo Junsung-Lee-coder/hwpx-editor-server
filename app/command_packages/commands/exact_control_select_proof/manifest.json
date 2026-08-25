@@ -1,0 +1,21 @@
+{
+  "op": "exact_control_select_proof",
+  "version": "local-cli/exact-control-select-proof/v1-package",
+  "summary": "Command-bundle package for exact_control_select_proof delegating to the existing server primitive.",
+  "module": "app.command_packages.commands.exact_control_select_proof.run",
+  "read_only": true,
+  "dirty_default": false,
+  "allowed_keys": [
+    "op",
+    "operation",
+    "label",
+    "section_anchor",
+    "page_from",
+    "page_to",
+    "around",
+    "target_id",
+    "expected_hash",
+    "expected_page",
+    "max_controls"
+  ]
+}

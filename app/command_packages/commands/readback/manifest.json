@@ -1,0 +1,19 @@
+{
+  "op": "readback",
+  "version": "local-cli/readback/v1-package",
+  "summary": "Read-only bounded LLM-friendly caret/selection/page/document readback with table-aware context and artifact-backed raw evidence.",
+  "module": "app.command_packages.commands.readback.run",
+  "read_only": true,
+  "dirty_default": false,
+  "allowed_keys": [
+    "op",
+    "operation",
+    "label",
+    "scope",
+    "page_from",
+    "page_to",
+    "max_blocks",
+    "max_table_cells",
+    "max_controls"
+  ]
+}

@@ -1,0 +1,23 @@
+{
+  "op": "table_split_exact",
+  "version": "local-cli/table-split-exact/v1-package",
+  "summary": "Command-bundle package for table_split_exact delegating to the existing server primitive.",
+  "module": "app.command_packages.commands.table_split_exact.run",
+  "read_only": false,
+  "dirty_default": true,
+  "allowed_keys": [
+    "op",
+    "operation",
+    "label",
+    "section_anchor",
+    "page_from",
+    "page_to",
+    "around",
+    "target_id",
+    "expected_hash",
+    "expected_page",
+    "down_rows",
+    "confirm_layout",
+    "max_controls"
+  ]
+}

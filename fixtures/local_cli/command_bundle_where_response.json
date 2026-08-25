@@ -1,0 +1,41 @@
+{
+  "ok": true,
+  "command": "command-bundle",
+  "summary": "command-bundle succeeded: 1/1 step(s)",
+  "dirty": false,
+  "before": {
+    "cursor_summary": "pos 12",
+    "selection_summary": "none",
+    "current_paragraph_preview": "Before paragraph"
+  },
+  "after": {
+    "cursor_summary": "pos 12",
+    "selection_summary": "none",
+    "current_paragraph_preview": "Current paragraph",
+    "caret_in_table_cell": false,
+    "document_is_modified": false
+  },
+  "steps": [
+    {
+      "index": 1,
+      "label": "where:current-location",
+      "op": "where",
+      "ok": true,
+      "dirty": false,
+      "before": {"pos": 12},
+      "after": {"pos": 12},
+      "result": {
+        "location": {
+          "cursor_summary": "pos 12",
+          "selection_summary": "none",
+          "current_paragraph_preview": "Current paragraph",
+          "caret_in_table_cell": false,
+          "document_is_modified": false
+        }
+      }
+    }
+  ],
+  "cursor_summary": "pos 12",
+  "selection_summary": "none",
+  "current_paragraph_preview": "Current paragraph"
+}

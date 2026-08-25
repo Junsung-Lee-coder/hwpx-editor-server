@@ -1,0 +1,13 @@
+{
+  "op": "selection_proof",
+  "version": "local-cli/selection-proof/v1-package",
+  "summary": "Read-only, LLM-friendly proof of the active Hancom selection and safe boundary context.",
+  "module": "app.command_packages.commands.selection_proof.run",
+  "read_only": true,
+  "dirty_default": false,
+  "allowed_keys": [
+    "op",
+    "operation",
+    "label"
+  ]
+}

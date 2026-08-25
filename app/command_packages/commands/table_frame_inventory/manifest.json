@@ -1,0 +1,21 @@
+{
+  "op": "table_frame_inventory",
+  "version": "local-cli/table-frame-inventory/v1-package",
+  "summary": "Command-bundle package for table_frame_inventory delegating to the existing server primitive.",
+  "module": "app.command_packages.commands.table_frame_inventory.run",
+  "read_only": true,
+  "dirty_default": false,
+  "allowed_keys": [
+    "op",
+    "operation",
+    "label",
+    "section_anchor",
+    "page_from",
+    "page_to",
+    "around",
+    "target_id",
+    "expected_hash",
+    "expected_page",
+    "max_controls"
+  ]
+}

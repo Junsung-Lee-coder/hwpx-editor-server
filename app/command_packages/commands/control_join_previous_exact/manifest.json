@@ -1,0 +1,22 @@
+{
+  "op": "control_join_previous_exact",
+  "version": "local-cli/control-join-previous-exact/v1-package",
+  "summary": "Command-bundle package for control_join_previous_exact delegating to the existing server primitive.",
+  "module": "app.command_packages.commands.control_join_previous_exact.run",
+  "read_only": false,
+  "dirty_default": true,
+  "allowed_keys": [
+    "op",
+    "operation",
+    "label",
+    "target_id",
+    "expected_hash",
+    "expected_page",
+    "page_from",
+    "page_to",
+    "max_controls",
+    "delete_back_count",
+    "max_page_after",
+    "confirm_layout"
+  ]
+}

@@ -1,0 +1,17 @@
+{
+  "op": "typography_overview",
+  "version": "local-cli/typography-overview/v1-package",
+  "summary": "Read-only live Hancom/HWPML font, size, bold, italic, underline, and style-variant overview for the active document.",
+  "module": "app.command_packages.commands.typography_overview.run",
+  "read_only": true,
+  "dirty_default": false,
+  "allowed_keys": [
+    "op",
+    "operation",
+    "label",
+    "scope",
+    "max_samples",
+    "max_sections",
+    "max_styles"
+  ]
+}

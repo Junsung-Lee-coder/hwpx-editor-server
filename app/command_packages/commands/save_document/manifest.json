@@ -1,0 +1,13 @@
+{
+  "op": "save_document",
+  "version": "local-cli/save-document/v1-package",
+  "summary": "Command-bundle package for save_document delegating to the existing server primitive.",
+  "module": "app.command_packages.commands.save_document.run",
+  "read_only": false,
+  "dirty_default": false,
+  "allowed_keys": [
+    "op",
+    "operation",
+    "label"
+  ]
+}

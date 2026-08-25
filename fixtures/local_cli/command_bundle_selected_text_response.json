@@ -1,0 +1,97 @@
+{
+  "ok": true,
+  "command": "command-bundle",
+  "summary": "command-bundle succeeded: 3/3 step(s)",
+  "dirty": false,
+  "before": {
+    "cursor_summary": "pos 12",
+    "selection_summary": "selected 4 chars",
+    "current_paragraph_preview": "Before paragraph"
+  },
+  "after": {
+    "cursor_summary": "pos 12",
+    "selection_summary": "selected 4 chars",
+    "current_paragraph_preview": "After paragraph",
+    "document_is_modified": false
+  },
+  "steps": [
+    {
+      "index": 1,
+      "label": "where:before-selection-read",
+      "op": "where",
+      "ok": true,
+      "dirty": false,
+      "before": {"pos": 12},
+      "after": {"pos": 12},
+      "result": {
+        "location": {
+          "cursor_summary": "pos 12",
+          "selection_summary": "selected 4 chars",
+          "current_paragraph_preview": "Before paragraph",
+          "document_is_modified": false
+        }
+      },
+      "future_server_field": "preserved"
+    },
+    {
+      "index": 2,
+      "label": "proof:selected-text",
+      "op": "get_selected_text",
+      "ok": true,
+      "dirty": false,
+      "before": {"pos": 12},
+      "after": {"pos": 12},
+      "result": {
+        "schema_version": "local-cli/selected-text-proof/v1",
+        "proof_method": "pyhwpx.get_selected_text(keep_select=True)+restore_selected_range",
+        "keep_select_requested": true,
+        "text_len": 4,
+        "text_preview": "증빙텍스트",
+        "text_hash": "sha256:fixture",
+        "selected_text": "증빙텍스트",
+        "selected_text_normalized": "증빙텍스트",
+        "selection_source": "active-selection",
+        "used_active_selection": true,
+        "used_cached_selection": false,
+        "cached_selection_available": true,
+        "cached_selected_text_hash": "sha256:fixture",
+        "selected_text_verified_against_cache": true,
+        "selected_range_before": [true, 0, 0, 1, 0, 0, 5],
+        "selected_range_after_read": [true, 0, 0, 1, 0, 0, 5],
+        "selected_range_restored": [true, 0, 0, 1, 0, 0, 5],
+        "has_active_selection_before": true,
+        "has_active_selection_after_read": true,
+        "has_active_selection_restored": true,
+        "selection_preserved_after_read": true,
+        "selection_restored": false,
+        "fail_closed_conditions": [
+          "restore failure when keep_select=true and an active pre-proof selection existed",
+          "empty selected text for selection-required mutations"
+        ]
+      },
+      "warnings": ["fixture step warning"]
+    },
+    {
+      "index": 3,
+      "label": "where:after-selection-read",
+      "op": "where",
+      "ok": true,
+      "dirty": false,
+      "before": {"pos": 12},
+      "after": {"pos": 12},
+      "result": {
+        "location": {
+          "cursor_summary": "pos 12",
+          "selection_summary": "selected 4 chars",
+          "current_paragraph_preview": "After paragraph",
+          "document_is_modified": false
+        }
+      }
+    }
+  ],
+  "warnings": ["fixture top warning"],
+  "cursor_summary": "pos 12",
+  "selection_summary": "selected 4 chars",
+  "current_paragraph_preview": "After paragraph",
+  "unknown_top_field": {"kept": true}
+}

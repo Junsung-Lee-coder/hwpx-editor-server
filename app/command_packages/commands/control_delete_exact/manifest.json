@@ -1,0 +1,22 @@
+{
+  "op": "control_delete_exact",
+  "version": "local-cli/control-delete-exact/v1-package",
+  "summary": "Command-bundle package for control_delete_exact delegating to the existing server primitive.",
+  "module": "app.command_packages.commands.control_delete_exact.run",
+  "read_only": false,
+  "dirty_default": true,
+  "allowed_keys": [
+    "op",
+    "operation",
+    "label",
+    "section_anchor",
+    "page_from",
+    "page_to",
+    "around",
+    "target_id",
+    "expected_hash",
+    "expected_page",
+    "confirm_remove",
+    "max_controls"
+  ]
+}

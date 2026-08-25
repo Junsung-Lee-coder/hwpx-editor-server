@@ -1,0 +1,31 @@
+{
+  "op": "anchor_range_replace_native_table",
+  "version": "local-cli/anchor-range-replace-native-table/v1",
+  "summary": "Guarded anchor-range replacement that deletes a proven text range and inserts a native HWP table at the same position.",
+  "module": "app.command_packages.commands.anchor_range_replace_native_table.run",
+  "read_only": false,
+  "dirty_default": true,
+  "allowed_keys": [
+    "op",
+    "operation",
+    "label",
+    "section_anchor",
+    "start_anchor",
+    "end_before_anchor",
+    "required_source_basename",
+    "forbid_source_basename",
+    "expected_range_hash",
+    "expected_normalized_range_hash",
+    "caption_text",
+    "rows",
+    "cols",
+    "cells",
+    "field_name",
+    "confirm_replace",
+    "flat_value_hashes",
+    "non_empty_token_count",
+    "non_empty_token_preview",
+    "warnings",
+    "next_proof_required"
+  ]
+}

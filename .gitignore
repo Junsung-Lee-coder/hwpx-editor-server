@@ -1,0 +1,82 @@
+# Local configuration and environments
+.env*
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Runtime state and generated output
+spool/
+uploads/
+output/
+logs/
+cache/
+backups/
+proofs/
+evidence/
+*.log
+*.db
+*.sqlite
+*.sqlite3
+*.pid
+
+# Documents, payloads, and renders
+*.hwp
+*.hwpx
+*.pdf
+*.doc
+*.docx
+*.ppt
+*.pptx
+*.xls
+*.xlsx
+*.jpg
+*.jpeg
+*.png
+*.bmp
+*.gif
+
+# Local editor and OS files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Credentials, keys, and local overrides
+credentials.json
+service-account.json
+*.pem
+*.key
+config.local.*
+config.override.*
+local.settings.*
+
+# Additional environments, coverage, and build output
+env/
+.coverage
+htmlcov/
+build/
+dist/
+*.egg-info/
+
+# Temporary, staging, archive, and compressed artifacts
+tmp/
+temp/
+staging/
+archives/
+*.tar
+*.zip
+*.gz
+
+# Generated runtime and source-adjacent residue
+runtime/
+queue/
+documents/
+customer/
+projects/
+sessions/
+ocr/
+renders/

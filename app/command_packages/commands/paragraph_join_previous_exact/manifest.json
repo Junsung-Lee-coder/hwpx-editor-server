@@ -1,0 +1,19 @@
+{
+  "op": "paragraph_join_previous_exact",
+  "version": "local-cli/paragraph-join-previous-exact/v1-package",
+  "summary": "Command-bundle package for paragraph_join_previous_exact delegating to the existing server primitive.",
+  "module": "app.command_packages.commands.paragraph_join_previous_exact.run",
+  "read_only": false,
+  "dirty_default": true,
+  "allowed_keys": [
+    "op",
+    "operation",
+    "label",
+    "match",
+    "expected_page",
+    "expected_previous_contains",
+    "delete_back_count",
+    "max_page_after",
+    "confirm_layout"
+  ]
+}

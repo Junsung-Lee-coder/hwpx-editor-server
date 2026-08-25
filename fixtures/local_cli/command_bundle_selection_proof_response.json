@@ -1,0 +1,112 @@
+{
+  "ok": true,
+  "command": "command-bundle",
+  "summary": "command-bundle succeeded: 1/1 step(s)",
+  "dirty": false,
+  "before": {
+    "cursor_summary": "pos 12",
+    "selection_summary": "selected 12 chars",
+    "current_paragraph_preview": "Visit https://example.com/path now"
+  },
+  "after": {
+    "cursor_summary": "pos 12",
+    "selection_summary": "selected 12 chars",
+    "current_paragraph_preview": "Visit https://example.com/path now",
+    "document_is_modified": false
+  },
+  "steps": [
+    {
+      "index": 1,
+      "label": "selection-proof:active-selection",
+      "op": "selection_proof",
+      "ok": true,
+      "dirty": false,
+      "result": {
+        "schema_version": "local-cli/selection-proof/v1-package",
+        "read_only": true,
+        "label": "selection-proof:active-selection",
+        "selection_state": {
+          "has_selection": true,
+          "selection_mode": 1,
+          "selected_pos": {
+            "raw": [true, 0, 12, 14, 0, 12, 25],
+            "has_selection": true,
+            "available": true,
+            "start": {"list_id": 0, "paragraph_index": 12, "offset": 14},
+            "end": {"list_id": 0, "paragraph_index": 12, "offset": 25},
+            "same_paragraph": true
+          },
+          "position_before": [0, 12, 14],
+          "position_after": [0, 12, 14]
+        },
+        "selected_text": {
+          "text": "example.com",
+          "preview": "example.com",
+          "len": 11,
+          "is_null": false,
+          "is_empty": false,
+          "hash": "sha256:fixture-selection",
+          "method": "pyhwpx.get_selected_text(keep_select=True)"
+        },
+        "boundary_context": {
+          "method": "same_paragraph_selected_pos_offsets",
+          "approximation": false,
+          "start_offset": 14,
+          "end_offset": 25,
+          "before_text": "Visit https://",
+          "after_text": "/path now",
+          "before_char": "/",
+          "after_char": "/",
+          "paragraph_context": {
+            "list_id": 0,
+            "paragraph_index": 12,
+            "paragraph_number_1based": 13,
+            "offset": 14,
+            "current_paragraph_preview": "Visit https://example.com/path now",
+            "current_paragraph_text": "Visit https://example.com/path now",
+            "current_paragraph_text_len": 34,
+            "method": "save_position+select_text(current_paragraph)+get_selected_text+restore",
+            "approximation": false,
+            "warnings": []
+          },
+          "line_context": {
+            "page_current": 3,
+            "page_count": 7,
+            "line_index": null,
+            "line_number": null,
+            "offset_in_paragraph": 14,
+            "method": "save_position+MoveLineBegin+MoveSelLineEnd+get_selected_text+restore",
+            "approximation": false,
+            "warnings": [],
+            "current_visual_line_preview": "Visit https://example.com/path now",
+            "current_visual_line_text_len": 34
+          }
+        },
+        "risk_flags": {
+          "empty_selection": false,
+          "multi_paragraph_selection": false,
+          "starts_or_ends_inside_url_like_token": true,
+          "touches_url_or_doi_like_token": true,
+          "leading_or_trailing_whitespace": false,
+          "selection_contains_paragraph_break": false,
+          "selection_in_table_cell": false,
+          "restore_failed": false
+        },
+        "restore_evidence": {
+          "before": {"pos": [0, 12, 14], "selected_pos": [true, 0, 12, 14, 0, 12, 25], "had_selection": true},
+          "after_selected_text_read": {"pos": [0, 12, 14], "selected_pos": [true, 0, 12, 14, 0, 12, 25], "had_selection": true},
+          "restore_after_selected_text_read": {"restored": true, "strategy": "select_text(saved_selected_pos)"},
+          "final_restore": {"restored": true, "strategy": "select_text(saved_selected_pos)"},
+          "after": {"pos": [0, 12, 14], "selected_pos": [true, 0, 12, 14, 0, 12, 25], "had_selection": true},
+          "document_modified_before": false,
+          "document_modified_after": false
+        },
+        "proof_evidence": {
+          "location_before": {"cursor_summary": "pos 12", "selection_summary": "selected 12 chars"},
+          "location_after": {"cursor_summary": "pos 12", "selection_summary": "selected 12 chars"}
+        },
+        "warnings": []
+      }
+    }
+  ]
+}

@@ -1,0 +1,29 @@
+{
+  "op": "cell_row_fit_exact",
+  "version": "local-cli/cell-row-fit-exact/v1-package",
+  "summary": "Command-bundle package for cell_row_fit_exact delegating to the existing server primitive.",
+  "module": "app.command_packages.commands.cell_row_fit_exact.run",
+  "read_only": false,
+  "dirty_default": true,
+  "allowed_keys": [
+    "op",
+    "operation",
+    "label",
+    "section_anchor",
+    "page_from",
+    "page_to",
+    "around",
+    "target_id",
+    "expected_hash",
+    "expected_page",
+    "row_height_percent",
+    "row_height_hu",
+    "row_height_mm",
+    "resize_up_steps",
+    "resize_down_steps",
+    "line_spacing",
+    "char_height_percent",
+    "confirm_layout",
+    "max_controls"
+  ]
+}

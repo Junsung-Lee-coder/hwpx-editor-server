@@ -1,0 +1,20 @@
+{
+  "op": "paragraph_delete_exact",
+  "version": "local-cli/paragraph-delete-exact/v1-package",
+  "summary": "Command-bundle package for paragraph_delete_exact delegating to the existing guarded server primitive.",
+  "module": "app.command_packages.commands.paragraph_delete_exact.run",
+  "read_only": false,
+  "dirty_default": true,
+  "allowed_keys": [
+    "op",
+    "operation",
+    "label",
+    "match",
+    "expected_page",
+    "occurrence_on_page",
+    "expected_previous_contains",
+    "expected_next_contains",
+    "confirm_remove",
+    "max_page_after"
+  ]
+}

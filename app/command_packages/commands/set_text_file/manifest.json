@@ -1,0 +1,16 @@
+{
+  "op": "set_text_file",
+  "version": "local-cli/set-text-file/v1-package",
+  "summary": "Command-bundle package for set_text_file delegating to the existing server primitive.",
+  "module": "app.command_packages.commands.set_text_file.run",
+  "read_only": false,
+  "dirty_default": true,
+  "allowed_keys": [
+    "op",
+    "operation",
+    "label",
+    "text",
+    "format",
+    "option"
+  ]
+}

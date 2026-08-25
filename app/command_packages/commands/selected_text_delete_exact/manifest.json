@@ -1,0 +1,19 @@
+{
+  "op": "selected_text_delete_exact",
+  "version": "local-cli/selected-text-delete-exact/v1",
+  "module": "app.command_packages.commands.selected_text_delete_exact.run",
+  "read_only": false,
+  "dirty_default": true,
+  "allowed_keys": [
+    "op",
+    "operation",
+    "label",
+    "expected_text",
+    "expected_hash",
+    "expected_normalized_hash",
+    "confirm_cleanup",
+    "source_text_deleted",
+    "native_table_proof_ref",
+    "native_table_proof_hash"
+  ]
+}

@@ -1,0 +1,21 @@
+{
+  "op": "table_cell_structure_exact",
+  "version": "local-cli/table-cell-structure-exact/v1-package",
+  "summary": "Command-bundle package for table_cell_structure_exact delegating to the existing server primitive.",
+  "module": "app.command_packages.commands.table_cell_structure_exact.run",
+  "read_only": true,
+  "dirty_default": false,
+  "allowed_keys": [
+    "op",
+    "operation",
+    "label",
+    "section_anchor",
+    "page_from",
+    "page_to",
+    "around",
+    "target_id",
+    "expected_hash",
+    "expected_page",
+    "max_controls"
+  ]
+}

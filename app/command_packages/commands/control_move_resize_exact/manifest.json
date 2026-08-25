@@ -1,0 +1,25 @@
+{
+  "op": "control_move_resize_exact",
+  "version": "local-cli/control-move-resize-exact/v1-package",
+  "summary": "Command-bundle package for control_move_resize_exact delegating to the existing server primitive.",
+  "module": "app.command_packages.commands.control_move_resize_exact.run",
+  "read_only": false,
+  "dirty_default": true,
+  "allowed_keys": [
+    "op",
+    "operation",
+    "label",
+    "section_anchor",
+    "page_from",
+    "page_to",
+    "around",
+    "target_id",
+    "expected_hash",
+    "expected_page",
+    "scale_percent",
+    "move_dx_mm",
+    "move_dy_mm",
+    "confirm_layout",
+    "max_controls"
+  ]
+}

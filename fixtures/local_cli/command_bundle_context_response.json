@@ -1,0 +1,204 @@
+{
+  "ok": true,
+  "command": "command-bundle",
+  "summary": "command-bundle succeeded: 1/1 step(s)",
+  "dirty": false,
+  "before": {
+    "cursor_summary": "pos 12",
+    "selection_summary": "none",
+    "current_paragraph_preview": "Before paragraph"
+  },
+  "after": {
+    "cursor_summary": "pos 12",
+    "selection_summary": "none",
+    "current_paragraph_preview": "Current paragraph",
+    "caret_in_table_cell": false,
+    "document_is_modified": false
+  },
+  "steps": [
+    {
+      "index": 1,
+      "label": "context:edit-position",
+      "op": "context",
+      "ok": true,
+      "dirty": false,
+      "before": {
+        "pos": 12
+      },
+      "after": {
+        "pos": 12
+      },
+      "result": {
+        "schema_version": "local-cli/context/v1-package",
+        "label": "context:edit-position",
+        "read_only": true,
+        "location": {
+          "cursor_summary": "pos 12",
+          "selection_summary": "none",
+          "current_paragraph_preview": "Current paragraph",
+          "caret_in_table_cell": false,
+          "document_is_modified": false
+        },
+        "page": {
+          "current": 3,
+          "method": "KeyIndicator[3]",
+          "page_count": 7,
+          "evidence": {
+            "page": 3,
+            "method": "KeyIndicator[3]"
+          }
+        },
+        "current_cursor": {
+          "pos": [
+            0,
+            12,
+            5
+          ],
+          "field_name": null,
+          "selection_mode": 0,
+          "is_cell": false,
+          "cell_addr": null,
+          "cell_ref": null,
+          "has_selection": false
+        },
+        "block_context": {
+          "inside_table": false,
+          "current_block_type": "paragraph",
+          "cell": null,
+          "field_name": null,
+          "list_id": 0,
+          "paragraph_index": 12,
+          "offset": 5
+        },
+        "paragraph_context": {
+          "list_id": 0,
+          "paragraph_index": 12,
+          "paragraph_number_1based": 13,
+          "offset": 5,
+          "current_paragraph_preview": "Current paragraph exact",
+          "previous_paragraph_preview": "Previous paragraph",
+          "next_paragraph_preview": "Next paragraph",
+          "method": "save_position+select_text(current_paragraph)+get_selected_text+restore",
+          "approximation": false,
+          "warnings": [],
+          "current_paragraph_text": "Current paragraph exact",
+          "current_paragraph_text_len": 23,
+          "probe_restore": {
+            "restored": true,
+            "strategy": "set_pos(saved_pos)"
+          }
+        },
+        "line_context": {
+          "page_current": 3,
+          "page_count": 7,
+          "line_index": null,
+          "line_number": null,
+          "offset_in_paragraph": 5,
+          "method": "save_position+MoveLineBegin+MoveSelLineEnd+get_selected_text+restore",
+          "approximation": false,
+          "warnings": [],
+          "current_visual_line_preview": "Current visual line",
+          "current_visual_line_text": "Current visual line",
+          "current_visual_line_text_len": 19,
+          "probe_restore": {
+            "restored": true,
+            "strategy": "set_pos(saved_pos)"
+          }
+        },
+        "nearby_text": {
+          "method": "best_effort_adjacent_paragraphs",
+          "approximation": true,
+          "before": "Previous paragraph",
+          "current": "Current paragraph",
+          "after": "Next paragraph",
+          "cursor_pos": [
+            0,
+            12,
+            5
+          ]
+        },
+        "style_summary": {
+          "character": {
+            "font_size_pt": 10.0,
+            "height_raw": 1000,
+            "face_name": "함초롬바탕",
+            "bold": 0
+          },
+          "paragraph": {
+            "align": 0,
+            "left_margin": 0,
+            "indent": 0,
+            "line_spacing": 160
+          },
+          "raw_available": {
+            "char_shape": true,
+            "para_shape": true
+          }
+        },
+        "nearby_objects": {
+          "current_selected_ctrl": {
+            "available": false,
+            "control": null
+          },
+          "parent_ctrl": {
+            "available": false,
+            "control": null
+          },
+          "selected_control": {
+            "available": false,
+            "control": null
+          },
+          "inventory_scope": "current selection/parent only; no broad control scan"
+        },
+        "structure_signals": {
+          "cur_field_state": 0,
+          "selection_mode": 0,
+          "has_selection": false,
+          "inside_table": false,
+          "cell_addr": null,
+          "page_count": 7
+        },
+        "document": {
+          "name": "fixture.hwpx",
+          "path": "/tmp/fixture.hwpx",
+          "working_copy_id": "session-fixture",
+          "is_modified": false
+        },
+        "warnings": [
+          "nearby_text is a best-effort adjacent-paragraph window, not an exact visual line window"
+        ],
+        "selection_text_probes": {
+          "read_only": true,
+          "mutation": null,
+          "paragraph": {
+            "available": true,
+            "method": "save_position+select_text(current_paragraph)+get_selected_text+restore",
+            "approximation": false,
+            "text_preview": "Current paragraph exact",
+            "text_len": 23,
+            "restore": {
+              "restored": true,
+              "strategy": "set_pos(saved_pos)"
+            },
+            "warnings": []
+          },
+          "visual_line": {
+            "available": true,
+            "method": "save_position+MoveLineBegin+MoveSelLineEnd+get_selected_text+restore",
+            "approximation": false,
+            "text_preview": "Current visual line",
+            "text_len": 19,
+            "restore": {
+              "restored": true,
+              "strategy": "set_pos(saved_pos)"
+            },
+            "warnings": []
+          }
+        }
+      }
+    }
+  ],
+  "cursor_summary": "pos 12",
+  "selection_summary": "none",
+  "current_paragraph_preview": "Current paragraph"
+}

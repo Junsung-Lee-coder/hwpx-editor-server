@@ -1,0 +1,31 @@
+{
+  "op": "native_table_insert",
+  "version": "local-cli/native-table-insert/v1-package",
+  "summary": "Command-bundle package for native_table_insert using Hancom/pyhwpx native table creation and field-fill APIs.",
+  "module": "app.command_packages.commands.native_table_insert.run",
+  "read_only": false,
+  "dirty_default": true,
+  "allowed_keys": [
+    "op",
+    "operation",
+    "label",
+    "rows",
+    "cols",
+    "cells",
+    "field_name",
+    "confirm_native_table",
+    "split_by_column",
+    "split_column_index",
+    "split_group_index",
+    "split_group_count",
+    "split_group_value",
+    "split_group_hash",
+    "source_text_deleted",
+    "old_plain_text_removal",
+    "flat_value_hashes",
+    "non_empty_token_count",
+    "non_empty_token_preview",
+    "warnings",
+    "next_proof_required"
+  ]
+}

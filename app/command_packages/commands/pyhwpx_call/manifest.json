@@ -1,0 +1,16 @@
+{
+  "op": "pyhwpx_call",
+  "version": "local-cli/pyhwpx-call/v1-package",
+  "summary": "Command-bundle package for pyhwpx_call delegating to the existing server primitive.",
+  "module": "app.command_packages.commands.pyhwpx_call.run",
+  "read_only": true,
+  "dirty_default": false,
+  "allowed_keys": [
+    "op",
+    "operation",
+    "label",
+    "method_path",
+    "args",
+    "kwargs"
+  ]
+}
