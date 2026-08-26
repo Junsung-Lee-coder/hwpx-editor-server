@@ -80,3 +80,12 @@ projects/
 sessions/
 ocr/
 renders/
+
+# Root-level manifests from an explicit CLI --out-dir .
+/static-inspector-manifest.json
+/static-compare-manifest.json
+/field-fill-plan.json
+/static-render-manifest.json
+/one-control-mutation-manifest.json
+/*.manifest.json
+/manifest.json
