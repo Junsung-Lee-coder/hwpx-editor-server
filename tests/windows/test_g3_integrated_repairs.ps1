@@ -176,7 +176,7 @@ catch {
         install_root = $journalRoot
     }) | Out-Null
     $journalRecord = Read-StableTransactionJournal -Path $journalPath
-    Assert-Equal 'dependency-started' ([string]$journalRecord.value.state) 'H2 journal replacement/readback failed on Windows PowerShell 5.1.'
+    Assert-True ([string]$journalRecord.value.state -eq 'dependency-started') 'H2 journal replacement/readback failed on Windows PowerShell 5.1.'
 
     Write-Output 'G3 integrated PowerShell behavioral repairs: PASS'
 }
