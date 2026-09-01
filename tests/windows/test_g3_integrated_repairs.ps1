@@ -33,6 +33,13 @@ function Write-TextUtf8 {
     [System.IO.File]::WriteAllText($Path, $Text, (New-Object System.Text.UTF8Encoding($false)))
 }
 
+function Write-ScriptUtf8 {
+    param([Parameter(Mandatory = $true)][string]$Path, [Parameter(Mandatory = $true)][string]$Text)
+    # Windows PowerShell 5.1 parses a generated script containing a non-ASCII
+    # temp/profile path as the system code page unless the UTF-8 BOM is present.
+    [System.IO.File]::WriteAllText($Path, $Text, (New-Object System.Text.UTF8Encoding($true)))
+}
+
 function Wait-FileContains {
     param([Parameter(Mandatory = $true)][string]$Path, [Parameter(Mandatory = $true)][string]$Needle, [int]$TimeoutSeconds = 10)
     $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
@@ -76,7 +83,7 @@ try {
     New-Item -ItemType Directory -Force -Path $lockRoot | Out-Null
     $holderOut = Join-Path $testRoot 'holder.out'
     $holderScript = Join-Path $testRoot 'holder.ps1'
-    Write-TextUtf8 -Path $holderScript -Text @"
+    Write-ScriptUtf8 -Path $holderScript -Text @"
 `$ErrorActionPreference = 'Stop'
 Import-Module '$commonPath' -Force
 `$lock = Enter-InstallLifecycleLock -InstallRoot '$lockRoot' -TaskNames @('hwpx-g3-task') -ApiPort 18976 -Role 'g3-holder' -TimeoutSeconds 5
@@ -100,7 +107,7 @@ Exit-InstallLifecycleLock -Lock `$lock
     try {
         $receiptChildOut = Join-Path $testRoot 'receipt-child.out'
         $receiptChild = Join-Path $testRoot 'receipt-child.ps1'
-        Write-TextUtf8 -Path $receiptChild -Text @"
+        Write-ScriptUtf8 -Path $receiptChild -Text @"
 `$ErrorActionPreference = 'Stop'
 Import-Module '$commonPath' -Force
 try {
