@@ -200,7 +200,15 @@ class G3IntegratedRepairTests(unittest.TestCase):
     def test_powershell_source_manifest_uses_canonical_private_names(self) -> None:
         installer = self.read("scripts/install_windows.ps1")
         common = self.read("scripts/windows_install_common.psm1")
-        for name in ("service-account.json", "config.local.", "config.override.", "local.settings."):
+        for name in (
+            "id_rsa",
+            "authorized_keys",
+            "known_hosts",
+            "service-account.json",
+            "config.local.",
+            "config.override.",
+            "local.settings.",
+        ):
             self.assertIn(name, common)
         self.assertIn("Test-ProhibitedPrivateSourceMember", installer)
 

@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from app.atomic_json import atomic_write_json, read_json_object
+from app.atomic_json import atomic_write_json, read_json_object, update_json_object
 from app.config import get_settings
 from app.poppler import PopplerResolutionError, resolve_pdftoppm
 
@@ -19,6 +19,10 @@ READINESS_SCHEMA_VERSION = 'hwpx/runtime-readiness/v2'
 DEFAULT_READINESS_TTL_SECONDS = 120
 DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 15
 MAX_READINESS_ERROR_CHARS = 4096
+
+
+class ReadinessOwnershipError(RuntimeError):
+    """Raised when a superseded worker tries to publish readiness state."""
 
 
 def _bounded_error(value: object) -> str:
@@ -475,9 +479,26 @@ def touch_runtime_readiness_heartbeat(snapshot: dict[str, Any]) -> dict[str, Any
     return updated
 
 
-def write_runtime_readiness_snapshot(snapshot: dict[str, Any]) -> Path:
+def write_runtime_readiness_snapshot(
+    snapshot: dict[str, Any],
+    *,
+    expected_run_id: str | None = None,
+) -> Path:
     path = readiness_artifact_path()
-    atomic_write_json(path, snapshot)
+    if expected_run_id is None:
+        atomic_write_json(path, snapshot)
+    else:
+        if not expected_run_id:
+            raise ValueError('expected_run_id must not be empty')
+
+        def replace_owned(current: dict[str, Any]) -> dict[str, Any]:
+            if current.get('run_id') != expected_run_id:
+                raise ReadinessOwnershipError(
+                    'Runtime readiness is owned by a different worker run.'
+                )
+            return snapshot
+
+        update_json_object(path, replace_owned)
     readback = read_json_object(path)
     if readback != snapshot:
         raise OSError('Runtime readiness JSON readback differed after atomic write.')

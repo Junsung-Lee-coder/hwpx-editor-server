@@ -18,6 +18,7 @@ $script:InstallLockTimeoutSeconds = 120
 $script:DefaultApiPort = 8765
 $script:DefaultTaskPath = '\'
 $script:ProhibitedPrivateBasenames = @(
+    'id_rsa', 'id_dsa', 'id_ecdsa', 'id_ed25519', 'authorized_keys', 'known_hosts',
     'credentials', 'credentials.json', 'secrets', 'secrets.json', 'secret.json',
     'token', 'tokens.json', 'cookie', 'cookies.json', 'private_key', 'private-key',
     'service-account.json', '.env', '.coverage', '.ds_store', 'thumbs.db'
@@ -26,7 +27,7 @@ $script:ProhibitedPrivatePrefixes = @('config.local.', 'config.override.', 'loca
 $script:ProhibitedPrivateStemMarkers = @('credential', 'secret', 'password', 'passwd', 'token', 'cookie')
 $script:ProhibitedRuntimeDirectories = @(
     '.git', '.venv', '.venv313', 'venv', '__pycache__', '.mypy_cache', '.pytest_cache',
-    '.ruff_cache', '.tox', '.vscode', '.idea', 'htmlcov', 'spool', 'receipts', 'fixtures',
+    '.ruff_cache', '.tox', '.vscode', '.idea', 'htmlcov', '.egg-info', 'spool', 'receipts', 'fixtures',
     'uploads', 'output', 'logs', 'cache', 'backups', 'proofs', 'evidence', 'runtime',
     'queue', 'documents', 'customer', 'projects', 'sessions', 'ocr', 'renders', 'env',
     'source-bundle', 'artifacts', 'archives', 'staging', 'temp', 'tmp', 'build', 'dist'

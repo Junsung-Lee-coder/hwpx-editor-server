@@ -79,6 +79,36 @@ class G3ReadinessRuntimeTests(unittest.TestCase):
         self.assertEqual(readback["run_id"], "g3-current")
         self.assertEqual(readback["candidate_generation"], "commit:tree:manifest")
 
+    def test_readiness_owner_cannot_replace_a_newer_run(self) -> None:
+        with TemporaryDirectory() as raw:
+            spool = Path(raw) / "spool"
+            fake_settings = types.SimpleNamespace(spool_root=spool, worker_name="g3-worker")
+            identity = readiness.current_worker_identity()
+            with patch.object(readiness, "settings", fake_settings):
+                readiness.write_runtime_readiness_snapshot(
+                    readiness.build_current_run_not_ready_snapshot(
+                        run_id="g3-old", candidate_generation="commit:tree:manifest", worker_identity=identity
+                    )
+                )
+                readiness.write_runtime_readiness_snapshot(
+                    readiness.build_current_run_not_ready_snapshot(
+                        run_id="g3-new", candidate_generation="commit:tree:manifest", worker_identity=identity
+                    )
+                )
+                stale = readiness.build_runtime_readiness_snapshot(
+                    probe_hwp=False,
+                    run_id="g3-old",
+                    candidate_generation="commit:tree:manifest",
+                    worker_identity=identity,
+                )
+                with self.assertRaises(readiness.ReadinessOwnershipError):
+                    readiness.write_runtime_readiness_snapshot(stale, expected_run_id="g3-old")
+                readback = readiness.load_runtime_readiness_snapshot()
+
+        self.assertIsNotNone(readback)
+        assert readback is not None
+        self.assertEqual(readback["run_id"], "g3-new")
+
 
 if __name__ == "__main__":
     unittest.main()

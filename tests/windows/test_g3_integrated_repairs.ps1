@@ -162,6 +162,14 @@ catch {
     Assert-True ([bool]$manifestResult.ok) 'H5 stable manifest readback did not pass.'
     Assert-True ([string]$manifestResult.manifest_sha256 -eq $manifestHash) 'H5 manifest hash was not bound to the parsed bytes.'
 
+    # H9: the PowerShell source-manifest path must reject the same credential
+    # and local-override names as the portable source-bundle policy.
+    foreach ($privateName in @('id_rsa', 'authorized_keys', 'known_hosts', 'service-account.json', 'config.local.json', 'config.override.toml', 'local.settings.json')) {
+        Assert-True (Test-ProhibitedSourceMember -RelativePath $privateName) "H9 private source member was admitted: $privateName"
+        Assert-True (Test-ProhibitedSourceMember -RelativePath ('nested\' + $privateName)) "H9 nested private source member was admitted: $privateName"
+    }
+    Assert-True (-not (Test-ProhibitedSourceMember -RelativePath 'app\command_packages\foo\manifest.json')) 'H9 nested command-package manifest was incorrectly excluded.'
+
     # H2: a non-destructive stale journal from a killed preflight is discovered
     # on re-entry and removed idempotently under the lifecycle lock.
     $journalRoot = Join-Path $testRoot 'journal-root'

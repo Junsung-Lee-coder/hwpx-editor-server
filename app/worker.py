@@ -41,6 +41,7 @@ from app.readiness import (
     build_runtime_readiness_snapshot,
     current_worker_identity,
     new_readiness_run_id,
+    ReadinessOwnershipError,
     readiness_matches_current_worker,
     resolve_candidate_generation,
     touch_runtime_readiness_heartbeat,
@@ -3273,7 +3274,13 @@ def readiness_heartbeat(
         if current.get('run_id') != run_id or current.get('candidate_generation') != candidate_generation:
             continue
         try:
-            write_runtime_readiness_snapshot(touch_runtime_readiness_heartbeat(current))
+            write_runtime_readiness_snapshot(
+                touch_runtime_readiness_heartbeat(current),
+                expected_run_id=run_id,
+            )
+        except ReadinessOwnershipError:
+            logger.warning('Runtime readiness ownership moved to a newer worker run.')
+            return
         except Exception:
             logger.exception('Unable to refresh runtime readiness heartbeat.')
 
@@ -3296,7 +3303,11 @@ def worker_loop() -> int:
         candidate_generation=candidate_generation,
         worker_identity=worker_identity,
     )
-    write_runtime_readiness_snapshot(readiness_snapshot)
+    try:
+        write_runtime_readiness_snapshot(readiness_snapshot, expected_run_id=run_id)
+    except ReadinessOwnershipError:
+        logger.error('Worker readiness ownership was replaced during the Hancom probe.')
+        return 2
     final_readiness = load_runtime_readiness_snapshot()
     if not bool(readiness_snapshot.get('ready')) or not readiness_matches_current_worker(
         final_readiness,
@@ -3326,8 +3337,13 @@ def worker_loop() -> int:
     logger.info('Worker started. Polling every %s seconds.', settings.poll_interval_seconds)
     while True:
         current_readiness = load_runtime_readiness_snapshot()
-        if isinstance(current_readiness, dict):
-            write_runtime_readiness_snapshot(touch_runtime_readiness_heartbeat(current_readiness))
+        if not readiness_matches_current_worker(
+            current_readiness,
+            candidate_generation=candidate_generation,
+            run_id=run_id,
+        ):
+            logger.error('Worker readiness ownership is no longer current; stopping worker.')
+            return 2
         job = db.claim_next_job(settings.worker_name)
         if job is None:
             time.sleep(settings.poll_interval_seconds)
