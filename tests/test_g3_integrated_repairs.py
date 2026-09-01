@@ -100,6 +100,23 @@ class G3IntegratedRepairTests(unittest.TestCase):
         self.assertLess(runtime_skip, private_marker)
         self.assertIn(r"requests\cookies.py", function)
 
+    def test_verifier_lock_handoff_releases_and_reacquires_without_a_gap(self) -> None:
+        common = self.read("scripts/windows_install_common.psm1")
+        installer = self.read("scripts/install_windows.ps1")
+        self.assertIn("VerifierAdmissionHandoff", common)
+        self.assertIn("SkipVerifierAdmissionHandoff", common)
+        self.assertIn("[string]$Role -ine 'verifier'", common)
+        self.assertIn("Suspend-InstallerLifecycleLockForVerifier", installer)
+        self.assertIn("Resume-InstallerLifecycleLockAfterVerifier", installer)
+        self.assertIn("verifier-handoff-started", installer)
+        suspend = installer.index("Suspend-InstallerLifecycleLockForVerifier")
+        invoke = installer.index("Invoke-InstallerNative -FilePath $powershell", suspend)
+        resume = installer.index("Resume-InstallerLifecycleLockAfterVerifier", invoke)
+        closing = installer.index("Installer closing candidate marker readback", resume)
+        self.assertLess(suspend, invoke)
+        self.assertLess(invoke, resume)
+        self.assertLess(resume, closing)
+
     def test_installer_admits_requested_receipt_after_safe_external_bootstrap(self) -> None:
         text = self.read("scripts/install_windows.ps1")
         try_start = text.index("try {", text.index("$receipt = [ordered]@{"))

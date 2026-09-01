@@ -71,6 +71,10 @@ $receiptPreimageOwnedByRun = $false
 $transactionJournalPath = $null
 $transactionJournalIdentity = $null
 $transactionJournalOwnerRun = $false
+$verifierHandoffLock = $null
+$verifierHandoffActive = $false
+$verifierHandoffRoot = $null
+$verifierHandoffRootIdentity = $null
 $taskNames = @()
 $taskPath = '\'
 $dependencyMutationAttempted = $false
@@ -124,6 +128,8 @@ function Get-InstallerTransactionJournalPayload {
         schema_version = 'hwpx/windows-install-transaction/v1'
         run_id = $runId
         owner_run_id = $runId
+        owner_process_id = [int]$PID
+        owner_process_start_identity = Get-ProcessGenerationIdentity -ProcessId $PID
         state = $State
         phase = [string]$phase
         updated_at_utc = [DateTime]::UtcNow.ToString('o')
@@ -183,6 +189,108 @@ function Remove-InstallTransactionJournal {
     $transactionJournalOwnerRun = $false
 }
 
+function Suspend-InstallerLifecycleLockForVerifier {
+    param(
+        [Parameter(Mandatory = $true)][string]$VerifierRoot
+    )
+    if ($null -eq $script:installRootLock) { throw 'Installer lifecycle lock is missing before verifier handoff.' }
+    $canonicalRoot = Get-CanonicalPath -Path $VerifierRoot -RequireExisting
+    $handoffKey = 'handoff:' + $canonicalRoot.ToLowerInvariant()
+    $locks = @(Get-OptionalPropertyValue -Object $script:installRootLock -Name 'locks')
+    $handoffLocks = @($locks | Where-Object { [string]$_.key -ceq $handoffKey })
+    if ($handoffLocks.Count -ne 1) {
+        throw "Verifier handoff lock is not held for the candidate root: $canonicalRoot"
+    }
+    $remainingLocks = @($locks | Where-Object { [string]$_.key -cne $handoffKey })
+    if ($remainingLocks.Count -eq 0) { throw 'Verifier handoff would release every installer lifecycle lock.' }
+    $script:verifierHandoffLock = $handoffLocks[0]
+    $script:verifierHandoffRoot = $canonicalRoot
+    $script:verifierHandoffRootIdentity = Get-PathObjectIdentity -Path $canonicalRoot -RequireExisting
+    Exit-InstallLifecycleLock -Lock ([pscustomobject]@{ locks = $remainingLocks })
+    $script:installRootLock = $null
+    $script:verifierHandoffActive = $true
+    return $true
+}
+
+function Resume-InstallerLifecycleLockAfterVerifier {
+    param(
+        [Parameter(Mandatory = $true)][string]$VerifierRoot,
+        [Parameter(Mandatory = $true)][string[]]$TaskNames,
+        [Parameter(Mandatory = $true)][int]$ApiPort
+    )
+    if (-not $script:verifierHandoffActive) { return $true }
+    if ($null -eq $script:verifierHandoffLock) { throw 'Verifier handoff lock was lost before lifecycle reacquisition.' }
+    $reacquired = Enter-InstallLifecycleLock -InstallRoot $VerifierRoot -TaskNames $TaskNames -ApiPort $ApiPort -Role 'installer' -SkipVerifierAdmissionHandoff -TimeoutSeconds 120
+    $reacquired.locks = @($script:verifierHandoffLock) + @($reacquired.locks)
+    $script:installRootLock = $reacquired
+    $script:verifierHandoffActive = $false
+    return $true
+}
+
+function Recover-StaleVerifierHandoff {
+    param(
+        [Parameter(Mandatory = $true)][object]$Journal,
+        [Parameter(Mandatory = $true)][object]$Record
+    )
+    $candidate = [string](Get-OptionalPropertyValue -Object $Journal -Name 'candidate_root')
+    $candidateIdentity = [string](Get-OptionalPropertyValue -Object $Journal -Name 'install_root_identity')
+    if ($candidate -cne [string]$install -or -not [bool](Get-OptionalPropertyValue -Object $Journal -Name 'install_root_created_by_run')) {
+        throw 'Stale verifier handoff is not bound to a run-owned fresh install root.'
+    }
+    $backup = [string](Get-OptionalPropertyValue -Object $Journal -Name 'backup_root')
+    if (-not [string]::IsNullOrWhiteSpace($backup)) {
+        throw 'Stale verifier handoff with a PreserveMove backup requires explicit operator recovery.'
+    }
+    if (Test-Path -LiteralPath $install -PathType Container) {
+        if ([string]::IsNullOrWhiteSpace($candidateIdentity)) { throw 'Stale verifier handoff install-root identity is missing.' }
+        Assert-PathObjectIdentity -Path $install -ExpectedIdentity $candidateIdentity | Out-Null
+        $taskNamesFromJournal = @($Journal.task_names | ForEach-Object { [string]$_ })
+        if ($taskNamesFromJournal.Count -ne 2) { throw 'Stale verifier handoff task identity list is incomplete.' }
+        $taskPathFromJournal = Assert-CanonicalScheduledTaskPath -TaskPath ([string]$Journal.task_path)
+        $apiPortFromJournal = 0
+        if (-not [int]::TryParse([string]$Journal.api_port, [ref]$apiPortFromJournal) -or $apiPortFromJournal -lt 1) { throw 'Stale verifier handoff API port is invalid.' }
+        $principal = [Security.Principal.WindowsIdentity]::GetCurrent().Name
+        $python = Join-Path $install '.venv\Scripts\python.exe'
+        if (-not (Test-Path -LiteralPath $python -PathType Leaf)) { throw 'Stale verifier handoff venv executable is missing.' }
+        foreach ($taskNameFromJournal in $taskNamesFromJournal) {
+            $task = Get-ScheduledTaskExact -TaskName $taskNameFromJournal -TaskPath $taskPathFromJournal -AllowMissing
+            if (-not $task) { continue }
+            $expectedArguments = if ($taskNameFromJournal -ceq $taskNamesFromJournal[0]) { '-m app.api_server' } elseif ($taskNameFromJournal -ceq $taskNamesFromJournal[1]) { '-m app.worker' } else { throw "Stale verifier handoff task name is not one of the journaled roles: $taskNameFromJournal" }
+            Assert-RunOwnedTaskIdentity -Identity (Get-ScheduledTaskIdentity -TaskName $taskNameFromJournal -TaskPath $taskPathFromJournal) -ExpectedRoot $install -ExpectedPython $python -ExpectedArguments $expectedArguments -ExpectedPrincipal $principal -ExpectedApiPort $apiPortFromJournal | Out-Null
+            if ([string]$task.State -eq 'Running') {
+                Stop-ScheduledTask -TaskName $taskNameFromJournal -TaskPath $taskPathFromJournal -ErrorAction Stop
+                if (-not (Wait-ScheduledTaskInactive -TaskName $taskNameFromJournal -TaskPath $taskPathFromJournal)) { throw "Stale verifier handoff task remained active: $taskNameFromJournal" }
+            }
+            Unregister-ScheduledTask -TaskName $taskNameFromJournal -TaskPath $taskPathFromJournal -Confirm:$false -ErrorAction Stop
+            if (Get-ScheduledTaskExact -TaskName $taskNameFromJournal -TaskPath $taskPathFromJournal -AllowMissing) { throw "Stale verifier handoff task remained after cleanup: $taskNameFromJournal" }
+        }
+        $released = Stop-InstallProcesses -RootPath $install -PreserveProcessIds @()
+        if (-not $released.ok -or @($released.remaining).Count -gt 0) { throw 'Stale verifier handoff processes were not fully released.' }
+        Assert-PathObjectIdentity -Path $install -ExpectedIdentity $candidateIdentity | Out-Null
+        Remove-Item -LiteralPath $install -Recurse -Force -ErrorAction Stop
+        if (Test-Path -LiteralPath $install) { throw 'Stale verifier handoff install root remained after cleanup.' }
+    }
+    $snapshotPathFromJournal = [string](Get-OptionalPropertyValue -Object $Journal -Name 'snapshot_path')
+    $snapshotShaFromJournal = [string](Get-OptionalPropertyValue -Object $Journal -Name 'snapshot_sha256')
+    $snapshotIdentityFromJournal = [string](Get-OptionalPropertyValue -Object $Journal -Name 'snapshot_identity')
+    $ownerRunFromJournal = [string](Get-OptionalPropertyValue -Object $Journal -Name 'owner_run_id')
+    if ([string]::IsNullOrWhiteSpace($snapshotPathFromJournal) -or [string]::IsNullOrWhiteSpace($snapshotShaFromJournal) -or [string]::IsNullOrWhiteSpace($snapshotIdentityFromJournal) -or [string]::IsNullOrWhiteSpace($ownerRunFromJournal)) {
+        throw 'Stale verifier handoff cannot recover without a sealed snapshot and owner identity.'
+    }
+    Restore-InstallSnapshot -SnapshotPath $snapshotPathFromJournal -ExpectedSnapshotSha256 $snapshotShaFromJournal -ExpectedSnapshotIdentity $snapshotIdentityFromJournal -ExpectedRunId $ownerRunFromJournal -RestoreTasks | Out-Null
+    $recoveredPayload = [ordered]@{
+        schema_version = 'hwpx/windows-install-transaction/v1'
+        owner_run_id = $ownerRunFromJournal
+        state = 'recovered'
+        recovered_by_run_id = $runId
+        recovered_at_utc = [DateTime]::UtcNow.ToString('o')
+        install_root = $install
+    }
+    Write-StableTransactionJournal -Path $Record.path -Value $recoveredPayload | Out-Null
+    Remove-Item -LiteralPath $Record.path -Force -ErrorAction Stop
+    $receipt.recovery.outcome = 'recovered-stale-verifier-handoff'
+}
+
 function Invoke-StaleInstallTransactionRecovery {
     if ([string]::IsNullOrWhiteSpace([string]$install)) { return }
     if ([string]::IsNullOrWhiteSpace([string]$transactionJournalPath)) {
@@ -207,6 +315,18 @@ function Invoke-StaleInstallTransactionRecovery {
         Assert-PathObjectIdentity -Path $record.path -ExpectedIdentity $record.object_identity | Out-Null
         Remove-Item -LiteralPath $record.path -Force -ErrorAction Stop
         $receipt.recovery.outcome = 'discarded-terminal-journal'
+        return
+    }
+    if ($state -eq 'verifier-handoff-started') {
+        $ownerProcessId = 0
+        [void][int]::TryParse([string](Get-OptionalPropertyValue -Object $journal -Name 'owner_process_id'), [ref]$ownerProcessId)
+        $ownerStartIdentity = [string](Get-OptionalPropertyValue -Object $journal -Name 'owner_process_start_identity')
+        $ownerProcessActive = $false
+        if ($ownerProcessId -gt 0 -and -not [string]::IsNullOrWhiteSpace($ownerStartIdentity)) {
+            try { $ownerProcessActive = (Get-ProcessGenerationIdentity -ProcessId $ownerProcessId) -ceq $ownerStartIdentity } catch { $ownerProcessActive = $false }
+        }
+        if ($ownerProcessActive) { throw 'An installer is actively handing off the lifecycle lock to its verifier.' }
+        Recover-StaleVerifierHandoff -Journal $journal -Record $record
         return
     }
     if ($state -in @('preflight-admitted', 'install-started', 'backup-claim-planned', 'backup-claim-created') -and
@@ -1902,8 +2022,19 @@ try {
             if (-not $candidate_manifest.ok -or [string]$candidate_manifest.manifest_sha256 -ne [string]$manifestResult.manifest_sha256) {
                 throw 'Activated install failed source manifest/hash re-verification.'
             }
-            $activationCopy | Add-Member -NotePropertyName candidate_manifest -NotePropertyValue $candidate_manifest
-            $receipt.checks.activation_copy = $activationCopy
+            $receipt.checks.activation_copy = [ordered]@{
+                candidate_root = [string]$activationCopy.candidate_root
+                destination_root = [string]$activationCopy.destination_root
+                file_count = [int]$activationCopy.file_count
+                source_bytes = [int64]$activationCopy.source_bytes
+                destination_bytes = [int64]$activationCopy.destination_bytes
+                candidate_manifest = [ordered]@{
+                    ok = [bool]$candidate_manifest.ok
+                    manifest_sha256 = [string]$candidate_manifest.manifest_sha256
+                    file_count = [int]$candidate_manifest.file_count
+                    mismatch_count = [int]$candidate_manifest.mismatch_count
+                }
+            }
             $candidateInstallCreated = $true
             Write-InstallTransactionJournal -State 'candidate-temp-removing' | Out-Null
             Remove-RunOwnedRoot -Path $candidateRoot -ExpectedPath $candidateRoot -ExpectedObjectIdentity $candidateRootIdentity -OwnedByRun $true | Out-Null
@@ -2051,11 +2182,55 @@ try {
     if ($FixturePath) { $verifyArgs += @('-FixturePath', (Get-CanonicalPath -Path $FixturePath -RequireExisting)) }
     if ($PopplerPath) { $verifyArgs += @('-PopplerPath', (Get-CanonicalPath -Path $PopplerPath -RequireExisting)) }
     $powershell = (Get-Command powershell.exe -ErrorAction Stop).Source
-    $verification = Invoke-InstallerNative -FilePath $powershell -Arguments $verifyArgs -WorkingDirectory $candidateRoot
+    $verifierRoot = Get-CanonicalPath -Path $candidateRoot -RequireExisting
+    $verifierRootIdentity = Get-PathObjectIdentity -Path $verifierRoot -RequireExisting
+    $receipt.verifier_handoff = [ordered]@{
+        active = $true
+        root = $verifierRoot
+        root_identity = $verifierRootIdentity
+        owner_process_id = [int]$PID
+        owner_process_start_identity = Get-ProcessGenerationIdentity -ProcessId $PID
+        verifier_run_id = $verifierRunId
+    }
+    Write-InstallTransactionJournal -State 'verifier-handoff-started' | Out-Null
+    Save-InstallerReceipt | Out-Null
+    Suspend-InstallerLifecycleLockForVerifier -VerifierRoot $verifierRoot | Out-Null
+    $verification = $null
+    $verificationFailure = $null
+    try {
+        $verification = Invoke-InstallerNative -FilePath $powershell -Arguments $verifyArgs -WorkingDirectory $verifierRoot
+    }
+    catch {
+        $verificationFailure = $_.Exception.Message
+    }
+    finally {
+        Resume-InstallerLifecycleLockAfterVerifier -VerifierRoot $verifierRoot -TaskNames @($apiTaskName, $workerTaskName) -ApiPort ([int]$apiPort) | Out-Null
+    }
+    if ($verificationFailure) { throw $verificationFailure }
+    $receipt.verifier_handoff.active = $false
     $receipt.verification = $verification
     if (-not $verification.accepted) { throw "Installed verifier failed with exit code $($verification.exit_code)." }
     if (-not (Test-Path -LiteralPath $verifyReceipt -PathType Leaf)) {
         throw 'Installed verifier did not leave its declared terminal receipt.'
+    }
+    Assert-PathObjectIdentity -Path $verifierRoot -ExpectedIdentity $verifierRootIdentity | Out-Null
+    $closingManifest = Get-SourceManifest -SourceRoot $verifierRoot -ManifestPath (Join-Path $verifierRoot 'source-manifest.json') -ExpectedRepository ([string]$manifestResult.manifest.repository) -ExpectedCommit ([string]$manifestResult.manifest.commit) -ExpectedTree ([string]$manifestResult.manifest.tree) -ExpectedManifestSha256 ([string]$manifestResult.manifest_sha256)
+    if (-not $closingManifest.ok -or [string]$closingManifest.manifest_sha256 -ne [string]$receipt.source_identity.manifest_sha256) {
+        throw 'Installer closing source-manifest readback did not match the verifier handoff generation.'
+    }
+    $closingMarkerCapture = Read-BoundedJsonObject -Path (Join-Path $verifierRoot '.hwpx-install.json') -MaxBytes 4194304
+    $closingMarker = $closingMarkerCapture.value
+    if ([string]$closingMarker.commit -cne [string]$receipt.source_identity.commit -or
+        [string]$closingMarker.tree -cne [string]$receipt.source_identity.tree -or
+        [string]$closingMarker.source_manifest_sha256 -cne [string]$receipt.source_identity.manifest_sha256 -or
+        [string]$closingMarker.candidate_generation -cne [string]$receipt.candidate_generation) {
+        throw 'Installer closing candidate marker readback did not match the verifier handoff generation.'
+    }
+    $receipt.verifier_handoff.closing_root_identity = Get-PathObjectIdentity -Path $verifierRoot -RequireExisting
+    $receipt.verifier_handoff.closing_candidate_generation = [string]$closingMarker.candidate_generation
+    $receipt.verifier_handoff.closing_manifest_sha256 = [string]$closingManifest.manifest_sha256
+    if ([string]$receipt.verifier_handoff.closing_root_identity -cne [string]$verifierRootIdentity) {
+        throw 'Installer closing root identity changed after verifier lock handoff.'
     }
     $verifyReceiptCapture = Read-BoundedJsonObject -Path $verifyReceipt -MaxBytes 4194304
     $verifyReceiptObject = $verifyReceiptCapture.value
@@ -2092,6 +2267,15 @@ try {
 }
 catch {
     $message = $_.Exception.Message
+    if ($script:verifierHandoffActive) {
+        try {
+            Resume-InstallerLifecycleLockAfterVerifier -VerifierRoot $script:verifierHandoffRoot -TaskNames @($taskNames) -ApiPort ([int]$apiPort) | Out-Null
+            if ($receipt.verifier_handoff) { $receipt.verifier_handoff.active = $false }
+        }
+        catch {
+            $message += '; verifier lifecycle lock reacquisition failed: ' + $_.Exception.Message
+        }
+    }
     $receipt.errors = @($receipt.errors) + $message
     if ($dependencyMutationAttempted) {
         $dependencyMutationRetained = $true

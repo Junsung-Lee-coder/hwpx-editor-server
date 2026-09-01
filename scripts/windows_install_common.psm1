@@ -828,6 +828,7 @@ function Enter-MachineLifecycleLock {
         [string[]]$TaskNames = @(),
         [Nullable[int]]$ApiPort,
         [string]$Role = 'installer',
+        [switch]$SkipVerifierAdmissionHandoff,
         [ValidateRange(1, 600)][int]$TimeoutSeconds = $script:InstallLockTimeoutSeconds
     )
     $canonical = Get-CanonicalPath -Path $InstallRoot
@@ -840,6 +841,14 @@ function Enter-MachineLifecycleLock {
         [pscustomobject]@{ key = 'root:' + $canonical.ToLowerInvariant(); purpose = 'InstallRoot'; lock_kind = 'root' },
         [pscustomobject]@{ key = 'role:' + ([string]$Role).ToLowerInvariant(); purpose = 'LifecycleRole'; lock_kind = 'role' }
     )
+    # The installer must release the machine/root locks while its independent
+    # verifier acquires them. A root-scoped handoff mutex remains held by every
+    # non-verifier role across that gap so another writer/installer cannot enter
+    # between the two lock owners. The verifier itself skips this guard because
+    # the parent installer owns it for the duration of the handoff.
+    if (-not $SkipVerifierAdmissionHandoff -and [string]$Role -ine 'verifier') {
+        $requests += [pscustomobject]@{ key = 'handoff:' + $canonical.ToLowerInvariant(); purpose = 'VerifierAdmissionHandoff'; lock_kind = 'root' }
+    }
     foreach ($taskName in @($TaskNames | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })) {
         $requests += [pscustomobject]@{ key = 'task:' + ([string]$taskName).ToLowerInvariant(); purpose = 'ScheduledTask'; lock_kind = 'task' }
     }
@@ -908,9 +917,10 @@ function Enter-InstallLifecycleLock {
         [string[]]$TaskNames = @(),
         [Nullable[int]]$ApiPort,
         [string]$Role = 'installer',
+        [switch]$SkipVerifierAdmissionHandoff,
         [ValidateRange(1, 600)][int]$TimeoutSeconds = $script:InstallLockTimeoutSeconds
     )
-    return Enter-MachineLifecycleLock -InstallRoot $InstallRoot -TaskNames $TaskNames -ApiPort $ApiPort -Role $Role -TimeoutSeconds $TimeoutSeconds
+    return Enter-MachineLifecycleLock -InstallRoot $InstallRoot -TaskNames $TaskNames -ApiPort $ApiPort -Role $Role -SkipVerifierAdmissionHandoff:$SkipVerifierAdmissionHandoff -TimeoutSeconds $TimeoutSeconds
 }
 
 function Exit-InstallLifecycleLock {

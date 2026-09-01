@@ -754,8 +754,9 @@ class WindowsInstallerContractTests(unittest.TestCase):
         text = self.read("install_windows.ps1")
         self.assertIn("$rollbackCandidateQuarantine", text)
         self.assertIn("$rollbackBackupActivated", text)
-        swap = text.index("Move-Item -LiteralPath $backupRoot -Destination $install")
-        restore = text.index("Restore-InstallSnapshot", text.index("catch {"))
+        rollback = text[text.index("# PreserveMove must put") :]
+        swap = rollback.index("Move-Item -LiteralPath $backupRoot -Destination $install")
+        restore = rollback.index("Restore-InstallSnapshot")
         self.assertLess(swap, restore)
         self.assertIn("Stop-InstallProcesses", text[text.index("catch {", text.index("$receipt.status")):])
         self.assertIn("-not $rollbackBackupActivated", text)
