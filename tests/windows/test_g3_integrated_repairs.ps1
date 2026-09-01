@@ -87,13 +87,24 @@ try {
 `$ErrorActionPreference = 'Stop'
 Import-Module '$commonPath' -Force
 `$lock = Enter-InstallLifecycleLock -InstallRoot '$lockRoot' -TaskNames @('hwpx-g3-task') -ApiPort 18976 -Role 'g3-holder' -TimeoutSeconds 5
+`$handoff = @(`$lock.locks | Where-Object { [string]`$_.key -like 'handoff:*' })
+if (`$handoff.Count -ne 1) { throw 'Verifier handoff lock was not part of the non-verifier lifecycle scope.' }
+`$remainingLocks = @(`$lock.locks | Where-Object { [string]`$_.key -notlike 'handoff:*' })
+Exit-InstallLifecycleLock -Lock ([pscustomobject]@{ locks = `$remainingLocks })
 [System.IO.File]::WriteAllText('$holderOut', 'READY')
 Start-Sleep -Seconds 8
-Exit-InstallLifecycleLock -Lock `$lock
+Exit-PathMutex -Lock `$handoff[0]
 "@
     $holder = Start-Process -FilePath $powershell -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $holderScript) -WindowStyle Hidden -PassThru
     $holders += $holder
     Assert-True (Wait-FileContains -Path $holderOut -Needle 'READY') 'H3 lock holder did not acquire the machine lifecycle lock.'
+    $verifierHandoffProbe = $null
+    try {
+        $verifierHandoffProbe = Enter-InstallLifecycleLock -InstallRoot $lockRoot -TaskNames @('hwpx-g3-task') -ApiPort 18976 -Role 'verifier' -TimeoutSeconds 2
+    }
+    catch { }
+    Assert-True ($null -ne $verifierHandoffProbe) 'Verifier-role lifecycle admission deadlocked behind the retained handoff lock.'
+    Exit-InstallLifecycleLock -Lock $verifierHandoffProbe
     $secondFailed = $false
     try {
         Enter-InstallLifecycleLock -InstallRoot $lockRoot -TaskNames @('hwpx-g3-task') -ApiPort 18976 -Role 'g3-contender' -TimeoutSeconds 1 | Out-Null
