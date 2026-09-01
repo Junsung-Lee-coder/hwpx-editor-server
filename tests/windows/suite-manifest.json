@@ -1,0 +1,20 @@
+{
+  "schema_version": "hwpx/windows-powershell-suite-manifest/v1",
+  "suites": [
+    "test_g11_native_capture.ps1",
+    "test_g13_receipt_unicode.ps1",
+    "test_g16_install_ownership.ps1",
+    "test_g18_native_job.ps1",
+    "test_g23_native_helper_repairs.ps1",
+    "test_g3_integrated_repairs.ps1",
+    "test_g6_repairs.ps1",
+    "test_g6_rollback_runtime.ps1",
+    "test_install_windows.ps1",
+    "test_scheduled_task_extra_action.ps1",
+    "test_scheduled_task_identity_equivalence.ps1",
+    "test_venv_process_identity_and_receipt_bound.ps1",
+    "test_verify_windows.ps1",
+    "test_verify_windows_proof_png.ps1",
+    "test_windows_powershell_51_runtime.ps1"
+  ]
+}

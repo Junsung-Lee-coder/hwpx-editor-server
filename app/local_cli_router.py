@@ -36,6 +36,7 @@ class LocalCliDirectionRequest(BaseModel):
 class LocalCliTextRequest(BaseModel):
     text: str
     session_id: str | None = None
+    allow_insert_at_caret: bool = False
 
 
 class LocalCliAnchorInsertRequest(BaseModel):
@@ -91,6 +92,11 @@ class LocalCliCloseRequest(BaseModel):
     session_id: str | None = None
 
 
+class LocalCliCommandReconcileRequest(BaseModel):
+    command_id: str
+    session_id: str | None = None
+
+
 class LocalCliTableRequest(BaseModel):
     cols: int = Field(ge=1)
     rows: int = Field(ge=1)
@@ -128,6 +134,13 @@ def build_local_cli_router(*, settings: Any, interactive_sessions: Any) -> APIRo
     def local_cli_status() -> dict[str, Any]:
         try:
             return service.status()
+        except Exception as exc:
+            raise as_http_error(exc) from exc
+
+    @router.post('/local-cli/command-reconcile')
+    def local_cli_command_reconcile(request: LocalCliCommandReconcileRequest) -> dict[str, Any]:
+        try:
+            return service.reconcile_command(command_id=request.command_id, session_id=request.session_id)
         except Exception as exc:
             raise as_http_error(exc) from exc
 
@@ -199,7 +212,11 @@ def build_local_cli_router(*, settings: Any, interactive_sessions: Any) -> APIRo
     @router.post('/local-cli/type')
     def local_cli_type(request: LocalCliTextRequest) -> dict[str, Any]:
         try:
-            return service.type_text(text=request.text, session_id=request.session_id)
+            return service.type_text(
+                text=request.text,
+                session_id=request.session_id,
+                allow_insert_at_caret=request.allow_insert_at_caret,
+            )
         except Exception as exc:
             raise as_http_error(exc) from exc
 

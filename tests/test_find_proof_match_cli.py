@@ -75,6 +75,7 @@ class FindProofMatchCliTests(unittest.TestCase):
         original_render = cli_main._render_export_proof_manifest
         original_load_state = cli_main.load_state
         original_save_state = cli_main.save_state
+        original_update_state = cli_main.update_state
         calls: dict[str, object] = {}
         state = {
             'base_url': 'http://fixture.local',
@@ -124,12 +125,20 @@ class FindProofMatchCliTests(unittest.TestCase):
                 state.update(new_state)
                 return Path('/tmp/state.json')
 
+            def fake_update_state(updater, path=None, **_kwargs):  # noqa: ANN001
+                updated = updater(dict(state))
+                updated['state_generation'] = int(state.get('state_generation', 0)) + 1
+                state.clear()
+                state.update(updated)
+                return dict(state)
+
             try:
                 cli_main.post_json = fake_post_json
                 cli_main._execute_named_bundle = fake_execute_named_bundle
                 cli_main._render_export_proof_manifest = fake_render
                 cli_main.load_state = fake_load_state
                 cli_main.save_state = fake_save_state
+                cli_main.update_state = fake_update_state
 
                 rc, stdout, stderr = self.run_cli(
                     [
@@ -150,6 +159,7 @@ class FindProofMatchCliTests(unittest.TestCase):
                 cli_main._render_export_proof_manifest = original_render
                 cli_main.load_state = original_load_state
                 cli_main.save_state = original_save_state
+                cli_main.update_state = original_update_state
 
         self.assertEqual(rc, 0, stderr)
         self.assertIn('2. [live:2] second needle', stdout)

@@ -19,6 +19,8 @@
     "cell_margin_hu",
     "cell_margin_mm",
     "vertical_align",
+    "fill_color",
+    "border",
     "confirm_layout",
     "max_controls"
   ]

@@ -49,7 +49,12 @@ from app.models import (
 )
 from app.observation import ensure_viewer_session, latest_frame_metadata_path, latest_frame_path, load_viewer_session
 from app.queue_db import QueueDB
-from app.readiness import build_plain_readiness_failure, load_runtime_readiness_snapshot
+from app.readiness import (
+    build_plain_readiness_failure,
+    load_runtime_readiness_snapshot,
+    readiness_matches_current_worker,
+    resolve_candidate_generation,
+)
 from app.services.job_artifacts import (
     load_job_metadata_json as load_job_artifact_metadata_json,
     read_json_if_exists as _read_json_if_exists,
@@ -78,7 +83,10 @@ ensure_viewer_session()
 
 def require_runtime_readiness_or_503(task_label: str) -> dict[str, Any]:
     snapshot = load_runtime_readiness_snapshot()
-    if not isinstance(snapshot, dict) or not bool(snapshot.get('ready')):
+    if not readiness_matches_current_worker(
+        snapshot,
+        candidate_generation=resolve_candidate_generation(),
+    ):
         raise HTTPException(status_code=503, detail=build_plain_readiness_failure(task_label))
     return snapshot
 
@@ -379,7 +387,16 @@ def runtime_readiness() -> JSONResponse:
     snapshot = load_runtime_readiness_snapshot()
     if snapshot is None:
         return JSONResponse({'ok': False, 'ready': False, 'detail': build_plain_readiness_failure('runtime')}, status_code=503)
-    status_code = 200 if bool(snapshot.get('ready')) else 503
+    current = readiness_matches_current_worker(
+        snapshot,
+        candidate_generation=resolve_candidate_generation(),
+    )
+    status_code = 200 if current else 503
+    if not current:
+        snapshot = dict(snapshot)
+        snapshot['ready'] = False
+        snapshot['status'] = 'not_ready'
+        snapshot['freshness_error'] = 'worker, candidate generation, or heartbeat is stale.'
     return JSONResponse(snapshot, status_code=status_code)
 
 

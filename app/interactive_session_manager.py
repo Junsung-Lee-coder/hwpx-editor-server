@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import hashlib
 import json
+import os
 import re
 import shutil
 import uuid
@@ -9,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from app.config import Settings, get_settings
+from app.atomic_json import atomic_write_json, path_lock
 from app.interactive.operator_status import render_operator_status
 from app.interactive.verify_evidence import build_verify_step_binding, resolve_verify_capture_timing
 from app.logging_utils import configure_logger
@@ -35,6 +38,37 @@ VERIFY_EVIDENCE_HARD_STALE_AGE_MS = 30_000
 VERIFY_EVIDENCE_RETENTION_SCHEMA_VERSION = 'interactive-verify-evidence-retention/v1'
 VERIFY_EVIDENCE_RETENTION_LEDGER_SCHEMA_VERSION = 'interactive-verify-evidence-retention-ledger/v1'
 VERIFY_EVIDENCE_RETENTION_LEDGER_MAX_ENTRIES = 100
+MAX_INTERACTIVE_COMMAND_HISTORY = 100
+MAX_SETTLED_INTERACTIVE_SESSIONS = 100
+MAX_INTERACTIVE_HISTORY_VALUE_CHARS = 2048
+MAX_INTERACTIVE_HISTORY_ITEMS = 100
+MAX_INTERACTIVE_EVENT_FILE_BYTES = 64 * 1024
+MAX_INTERACTIVE_EVENT_FILES = 5
+MAX_INTERACTIVE_STATE_FILE_BYTES = 4 * 1024 * 1024
+_SENSITIVE_HISTORY_KEY_MARKERS = (
+    'text', 'content', 'preview', 'query', 'path', 'filename', 'document',
+    'token', 'secret', 'password', 'cookie', 'credential', 'exception', 'raw',
+)
+_HISTORY_SECRET_PATTERN = re.compile(
+    r'(?i)\b(password|token|secret|cookie|credential)\s*[:=]\s*[^\s,;]+'
+)
+_HISTORY_LOCAL_PATH_PATTERN = re.compile(
+    r'''(?<![\w:/])(?:[A-Za-z]:[\\/]|/(?!/))[^\s"'<>]+'''
+)
+_SAFE_COMMAND_HISTORY_KEYS = frozenset({
+    'state', 'status', 'ok', 'dirty', 'outcome', 'command', 'result_state',
+    'candidate_count', 'match_count', 'selected_candidate_index', 'page',
+    'requested_page', 'dpi', 'width', 'height', 'position', 'embedded',
+    'treat_as_char', 'resolved_target_id', 'operation', 'code', 'reason_code',
+    'failure_code', 'step', 'index', 'count', 'total', 'matched', 'found',
+    'available', 'ready', 'proof_fresh', 'reconciled', 'timed_out', 'sequence',
+    'command_id', 'session_id', 'verification_state', 'capture_state',
+})
+_SAFE_COMMAND_HISTORY_STRING_KEYS = frozenset({
+    'state', 'status', 'outcome', 'command', 'result_state', 'position',
+    'resolved_target_id', 'operation', 'code', 'reason_code', 'failure_code',
+    'step', 'command_id', 'session_id', 'verification_state', 'capture_state',
+})
 
 
 class InteractiveSessionError(RuntimeError):
@@ -51,20 +85,52 @@ def _datetime_to_iso(value: datetime) -> str:
 
 def _json_dump(path: Path, payload: object) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding='utf-8')
+    serialized = json.dumps(payload, ensure_ascii=False, indent=2)
+    if not isinstance(payload, dict):
+        raise InteractiveSessionError('interactive JSON state must be an object')
+    if len(serialized.encode('utf-8')) > MAX_INTERACTIVE_STATE_FILE_BYTES:
+        raise InteractiveSessionError(f'interactive session state exceeds {MAX_INTERACTIVE_STATE_FILE_BYTES} bytes')
+    atomic_write_json(path, payload)
 
 
 def _json_load(path: Path) -> dict[str, Any] | None:
-    if not path.exists():
+    try:
+        if not path.exists() or path.stat().st_size > MAX_INTERACTIVE_STATE_FILE_BYTES:
+            return None
+        payload = json.loads(path.read_text(encoding='utf-8'))
+    except (OSError, UnicodeError, json.JSONDecodeError):
         return None
-    payload = json.loads(path.read_text(encoding='utf-8'))
     return payload if isinstance(payload, dict) else None
 
 
 def _append_jsonl(path: Path, payload: object) -> None:
+    bounded = _bounded_history_value(payload)
+    serialized = json.dumps(bounded, ensure_ascii=False, separators=(',', ':')) + '\n'
+    encoded = serialized.encode('utf-8')
+    if len(encoded) > MAX_INTERACTIVE_EVENT_FILE_BYTES:
+        serialized = json.dumps({
+            'schema_version': 'interactive/event-omitted/v1',
+            'payload_sha256': hashlib.sha256(encoded).hexdigest(),
+            'reason': 'event exceeded bounded serialized size',
+        }, ensure_ascii=True, separators=(',', ':')) + '\n'
+        encoded = serialized.encode('utf-8')
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open('a', encoding='utf-8') as handle:
-        handle.write(json.dumps(payload, ensure_ascii=False) + '\n')
+    # Rotation and append are one transaction.  Without a process lock, two
+    # concurrent command requests can both rotate the same generation and
+    # either lose an event or interleave bytes in a JSONL record.
+    with path_lock(path):
+        current_size = path.stat().st_size if path.exists() else 0
+        if current_size + len(encoded) > MAX_INTERACTIVE_EVENT_FILE_BYTES:
+            path.with_name(f'{path.name}.{MAX_INTERACTIVE_EVENT_FILES}').unlink(missing_ok=True)
+            for index in range(MAX_INTERACTIVE_EVENT_FILES - 1, 0, -1):
+                source = path.with_name(f'{path.name}.{index}')
+                target = path.with_name(f'{path.name}.{index + 1}')
+                if source.exists():
+                    os.replace(source, target)
+            if path.exists():
+                os.replace(path, path.with_name(f'{path.name}.1'))
+        with path.open('ab') as handle:
+            handle.write(encoded)
 
 
 def _parse_iso_datetime(value: Any) -> datetime | None:
@@ -82,6 +148,95 @@ def _parse_iso_datetime(value: Any) -> datetime | None:
     if parsed.tzinfo is None:
         return parsed.replace(tzinfo=timezone.utc)
     return parsed
+
+
+def _sanitize_history_text(value: Any) -> str:
+    text = str(value)
+    text = _HISTORY_SECRET_PATTERN.sub(lambda match: f'{match.group(1)}=<redacted>', text)
+    text = _HISTORY_LOCAL_PATH_PATTERN.sub('<redacted-path>', text)
+    if len(text) > MAX_INTERACTIVE_HISTORY_VALUE_CHARS:
+        return text[:MAX_INTERACTIVE_HISTORY_VALUE_CHARS] + '…'
+    return text
+
+
+def _bounded_history_value(value: Any, *, depth: int = 0) -> Any:
+    """Keep operator command history bounded without retaining raw document text."""
+
+    if depth >= 5:
+        return '<nested value omitted>'
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    if isinstance(value, str):
+        return _sanitize_history_text(value)
+    if isinstance(value, dict):
+        result: dict[str, Any] = {}
+        for index, (key, item) in enumerate(value.items()):
+            if index >= MAX_INTERACTIVE_HISTORY_ITEMS:
+                result['__truncated__'] = True
+                break
+            key_text = str(key)[:MAX_INTERACTIVE_HISTORY_VALUE_CHARS]
+            if any(marker in key_text.casefold() for marker in _SENSITIVE_HISTORY_KEY_MARKERS):
+                result[key_text] = '<redacted>'
+            else:
+                result[key_text] = _bounded_history_value(item, depth=depth + 1)
+        return result
+    if isinstance(value, (list, tuple)):
+        result = [_bounded_history_value(item, depth=depth + 1) for item in value[:MAX_INTERACTIVE_HISTORY_ITEMS]]
+        if len(value) > MAX_INTERACTIVE_HISTORY_ITEMS:
+            result.append('<items omitted>')
+        return result
+    return _bounded_history_value(repr(value), depth=depth + 1)
+
+
+def _opaque_history_marker(value: Any, *, reason: str) -> dict[str, str | bool]:
+    """Retain only a bounded digest when a history field is not safe to keep."""
+
+    try:
+        representation = repr(value)
+    except Exception:
+        representation = type(value).__name__
+    digest = hashlib.sha256(
+        representation[:MAX_INTERACTIVE_HISTORY_VALUE_CHARS].encode('utf-8', errors='replace')
+    ).hexdigest()
+    return {
+        'omitted': True,
+        'reason': reason,
+        'sha256': digest,
+    }
+
+
+def _bounded_command_history_payload(command: str, payload: Any) -> dict[str, Any]:
+    """Apply a command-specific allowlist before durable history storage.
+
+    Interactive command payloads often contain candidate text, document
+    previews, local paths, or API response objects.  History only needs
+    bounded operator state/counters; every other field is represented by a
+    digest so it cannot become a second document store.
+    """
+
+    if not isinstance(payload, dict):
+        return {'omitted_payload': _opaque_history_marker(payload, reason='payload_not_mapping')}
+    bounded: dict[str, Any] = {'command': _sanitize_history_text(command)}
+    for index, (raw_key, value) in enumerate(payload.items()):
+        if index >= MAX_INTERACTIVE_HISTORY_ITEMS:
+            bounded['__truncated__'] = True
+            break
+        key = str(raw_key)[:MAX_INTERACTIVE_HISTORY_VALUE_CHARS]
+        folded = key.casefold()
+        if key not in _SAFE_COMMAND_HISTORY_KEYS:
+            reason = 'sensitive_field' if any(marker in folded for marker in _SENSITIVE_HISTORY_KEY_MARKERS) else 'not_allowlisted'
+            bounded[key] = _opaque_history_marker(value, reason=reason)
+            continue
+        if isinstance(value, str):
+            if key not in _SAFE_COMMAND_HISTORY_STRING_KEYS:
+                bounded[key] = _opaque_history_marker(value, reason='string_field_not_allowlisted')
+            else:
+                bounded[key] = _sanitize_history_text(value)
+        elif value is None or isinstance(value, (bool, int, float)):
+            bounded[key] = value
+        else:
+            bounded[key] = _opaque_history_marker(value, reason='non_scalar_field')
+    return bounded
 
 
 def _timestamp_slug(value: str) -> str:
@@ -120,6 +275,7 @@ class InteractiveSessionManager:
         )
         self.sessions_root.mkdir(parents=True, exist_ok=True)
         self._prune_expired_verify_evidence()
+        self._reap_settled_sessions()
 
     @property
     def sessions_root(self) -> Path:
@@ -145,9 +301,13 @@ class InteractiveSessionManager:
         return self.session_dir(session_id) / 'verify_evidence_retention.json'
 
     @property
+    def retention_ledger_path(self) -> Path:
+        return self.sessions_root / 'retention-ledger.json'
+
+    @property
     def verify_evidence_retention_days(self) -> int:
         try:
-            return max(int(self.settings.retention_days), 1)
+            return max(int(getattr(self.settings, 'retention_days', 7)), 1)
         except (TypeError, ValueError):
             return 7
 
@@ -219,6 +379,68 @@ class InteractiveSessionManager:
                 },
                 'last_swept_at': swept_at,
                 'pruned_entries': entries[-VERIFY_EVIDENCE_RETENTION_LEDGER_MAX_ENTRIES:],
+            },
+        )
+
+    def _merge_retention_ledger_to_central(self, session_id: str) -> None:
+        """Keep bounded expiry history without retaining a whole session dir."""
+
+        per_session = self._load_verify_evidence_retention_ledger(session_id)
+        entries = per_session.get('pruned_entries') if isinstance(per_session.get('pruned_entries'), list) else []
+        if not entries:
+            return
+        central = _json_load(self.retention_ledger_path) or {}
+        existing: list[Any] = central.get('entries') if isinstance(central.get('entries'), list) else []
+        normalized_existing: list[dict[str, Any]] = []
+        seen_keys: set[tuple[str, str, str, str]] = set()
+        for raw_entry in existing:
+            if not isinstance(raw_entry, dict):
+                continue
+            bounded_entry = {
+                key: raw_entry.get(key)
+                for key in (
+                    'session_id', 'step', 'recorded_at', 'pruned_at', 'expired_at',
+                    'reason', 'anchor_field', 'anchor_at',
+                )
+                if raw_entry.get(key) not in (None, '')
+            }
+            entry_key = (
+                str(bounded_entry.get('session_id') or ''),
+                str(bounded_entry.get('step') or ''),
+                str(bounded_entry.get('recorded_at') or ''),
+                str(bounded_entry.get('expired_at') or ''),
+            )
+            if entry_key not in seen_keys:
+                seen_keys.add(entry_key)
+                normalized_existing.append(bounded_entry)
+        for entry in entries:
+            if isinstance(entry, dict):
+                bounded = _bounded_history_value(entry)
+                if isinstance(bounded, dict):
+                    bounded = {
+                        key: bounded.get(key)
+                        for key in (
+                            'step', 'recorded_at', 'pruned_at', 'expired_at',
+                            'reason', 'anchor_field', 'anchor_at',
+                        )
+                        if bounded.get(key) not in (None, '')
+                    }
+                    candidate = {'session_id': session_id, **bounded}
+                    entry_key = (
+                        session_id,
+                        str(candidate.get('step') or ''),
+                        str(candidate.get('recorded_at') or ''),
+                        str(candidate.get('expired_at') or ''),
+                    )
+                    if entry_key not in seen_keys:
+                        seen_keys.add(entry_key)
+                        normalized_existing.append(candidate)
+        _json_dump(
+            self.retention_ledger_path,
+            {
+                'schema_version': VERIFY_EVIDENCE_RETENTION_LEDGER_SCHEMA_VERSION,
+                'entries': normalized_existing[-VERIFY_EVIDENCE_RETENTION_LEDGER_MAX_ENTRIES:],
+                'updated_at': utc_now_iso(),
             },
         )
 
@@ -309,6 +531,58 @@ class InteractiveSessionManager:
                     anchor_field,
                     _datetime_to_iso(expires_at),
                 )
+
+    def _has_reconcilable_runtime(self, session: dict[str, Any]) -> bool:
+        if str(session.get('state') or '') == 'timed_out_pending_reconciliation':
+            return True
+        live_runtime = session.get('live_runtime') if isinstance(session.get('live_runtime'), dict) else {}
+        if bool(live_runtime.get('reconciliation_pending')):
+            return True
+        pending = live_runtime.get('pending_command')
+        if isinstance(pending, dict) and pending.get('command_id') and not pending.get('reconciled'):
+            return True
+        metadata = session.get('metadata') if isinstance(session.get('metadata'), dict) else {}
+        local_cli = metadata.get('local_cli_v1') if isinstance(metadata.get('local_cli_v1'), dict) else {}
+        if bool(local_cli.get('reconciliation_pending')):
+            return True
+        pending_id = local_cli.get('pending_command_id')
+        return bool(pending_id and not local_cli.get('reconciled'))
+
+    def _reap_settled_sessions(self, *, max_settled_sessions: int = MAX_SETTLED_INTERACTIVE_SESSIONS) -> int:
+        """Bound terminal session directories without deleting evidence ledgers."""
+
+        if max_settled_sessions < 0 or not self.sessions_root.exists():
+            return 0
+        active_session_id = self._read_active_session_id()
+        settled: list[tuple[datetime, Path]] = []
+        for session_dir in self.sessions_root.iterdir():
+            if not session_dir.is_dir() or session_dir.is_symlink() or session_dir.name == active_session_id:
+                continue
+            session = _json_load(self.state_path(session_dir.name))
+            if not isinstance(session, dict) or str(session.get('state') or '') not in TERMINAL_SESSION_STATES:
+                continue
+            if self._has_reconcilable_runtime(session):
+                continue
+            anchor = (
+                _parse_iso_datetime(session.get('closed_at'))
+                or _parse_iso_datetime(session.get('updated_at'))
+                or _parse_iso_datetime(session.get('created_at'))
+                or datetime.min.replace(tzinfo=timezone.utc)
+            )
+            settled.append((anchor, session_dir))
+        settled.sort(key=lambda item: (item[0], item[1].name))
+        excess = max(0, len(settled) - max_settled_sessions)
+        reaped = 0
+        for _anchor, session_dir in settled[:excess]:
+            try:
+                if self.verify_evidence_retention_path(session_dir.name).exists():
+                    self._merge_retention_ledger_to_central(session_dir.name)
+                shutil.rmtree(session_dir)
+            except OSError as exc:
+                self.logger.warning('interactive settled session reap failed session=%s error=%s', session_dir.name, exc)
+                continue
+            reaped += 1
+        return reaped
 
     def _read_active_session_id(self) -> str | None:
         payload = _json_load(self.active_session_pointer_path)
@@ -405,7 +679,7 @@ class InteractiveSessionManager:
             return {
                 'code': 'interactive_failure',
                 'command': command,
-                'message': failure_reason,
+                'message': _sanitize_history_text(failure_reason),
                 'detail': None,
                 'updated_at': utc_now_iso(),
             }
@@ -413,14 +687,16 @@ class InteractiveSessionManager:
             return {
                 'code': 'interactive_failure',
                 'command': command,
-                'message': str(failure_reason),
+                'message': _sanitize_history_text(failure_reason),
                 'detail': None,
                 'updated_at': utc_now_iso(),
             }
-        payload = dict(failure_reason)
+        payload = _bounded_history_value(dict(failure_reason))
+        if not isinstance(payload, dict):
+            payload = {}
         payload.setdefault('code', 'interactive_failure')
         payload.setdefault('command', command)
-        payload.setdefault('message', summary or 'Interactive command failed.')
+        payload.setdefault('message', _sanitize_history_text(summary or 'Interactive command failed.'))
         payload['updated_at'] = utc_now_iso()
         return payload
 
@@ -725,6 +1001,7 @@ class InteractiveSessionManager:
         session_id: str | None = None,
     ) -> dict[str, Any]:
         self._prune_expired_verify_evidence()
+        self._reap_settled_sessions()
         active_session_id = self._read_active_session_id()
         if active_session_id:
             existing = self._load_session(active_session_id)
@@ -871,6 +1148,7 @@ class InteractiveSessionManager:
         session = self._require_session(session_id)
         resolved_session_id = str(session['session_id'])
         recorded_at = utc_now_iso()
+        history_payload = _bounded_command_history_payload(command, payload or {})
         session['current_command'] = command
 
         # Preserve the role split in state so later live command handlers can plug in
@@ -911,7 +1189,6 @@ class InteractiveSessionManager:
                     verify_result=verify_result,
                     recorded_at=recorded_at,
                 )
-                payload = verify_result
                 merged.update(verify_result)
                 session['artifacts'] = self._merge_mapping(session.get('artifacts'), step_artifacts)
             merged['state'] = state
@@ -939,12 +1216,12 @@ class InteractiveSessionManager:
             'recorded_at': recorded_at,
             'command': command,
             'state': state,
-            'summary': summary,
-            'payload': payload or {},
+            'summary': _bounded_history_value(summary),
+            'payload': history_payload,
         }
         history = session.get('command_history') if isinstance(session.get('command_history'), list) else []
         history.append(entry)
-        session['command_history'] = history[-100:]
+        session['command_history'] = history[-MAX_INTERACTIVE_COMMAND_HISTORY:]
 
         self._save_session(session)
         self._append_event(resolved_session_id, entry)

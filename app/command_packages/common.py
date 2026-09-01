@@ -352,7 +352,7 @@ def validate_step_for_op(op: str, *, service: Any, index: int, step: dict[str, A
     elif op in {'exact_control_select_proof', 'table_cell_structure_exact'}:
         _validate_scoped_control(step, index, op, error_type)
     elif op == 'cell_format_exact':
-        for key in ('section_anchor', 'around', 'target_id', 'expected_hash', 'vertical_align'):
+        for key in ('section_anchor', 'around', 'target_id', 'expected_hash', 'vertical_align', 'fill_color', 'border'):
             _clean_optional_text(step, index, key, error_type)
         _validate_positive_int_fields(step, index, ('page_from', 'page_to', 'expected_page', 'max_controls'), error_type)
         for key in ('cell_margin_hu', 'cell_margin_mm'):
@@ -365,7 +365,7 @@ def validate_step_for_op(op: str, *, service: Any, index: int, step: dict[str, A
         _validate_page_range(step, index, error_type)
         _require_scope(step, index, op, error_type)
         _require_control_identity(step, index, op, error_type)
-        selectors = [key for key in ('cell_margin_hu', 'cell_margin_mm', 'vertical_align') if step.get(key) is not None]
+        selectors = [key for key in ('cell_margin_hu', 'cell_margin_mm', 'vertical_align', 'fill_color', 'border') if step.get(key) is not None]
         if len(selectors) != 1:
             _raise(error_type, f'command-bundle step {index} cell_format_exact requires exactly one format selector')
         if step.get('cell_margin_hu') is not None and not (0.0 <= float(step.get('cell_margin_hu')) <= 20000.0):
@@ -376,6 +376,13 @@ def validate_step_for_op(op: str, *, service: Any, index: int, step: dict[str, A
             _raise(error_type, f'command-bundle step {index} vertical_align must be top, center, middle, or bottom')
         if step.get('vertical_align') == 'middle':
             step['vertical_align'] = 'center'
+        fill_color = step.get('fill_color')
+        if fill_color is not None:
+            if not isinstance(fill_color, str) or not re.fullmatch(r'#[0-9A-Fa-f]{6}', fill_color):
+                _raise(error_type, f'command-bundle step {index} fill_color must match #RRGGBB')
+            step['fill_color'] = fill_color.upper()
+        if step.get('border') is not None and step.get('border') != 'none':
+            _raise(error_type, f'command-bundle step {index} border must be none')
         if step.get('confirm_layout') is not True:
             _raise(error_type, f'command-bundle step {index} cell_format_exact requires confirm_layout=true')
     elif op == 'table_split_exact':

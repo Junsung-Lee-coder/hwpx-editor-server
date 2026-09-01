@@ -19,6 +19,9 @@ sys.modules.setdefault('fastapi', fastapi_stub)
 runtime_stub = types.ModuleType('app.local_cli_runtime')
 LocalCliRuntimeError = type('LocalCliRuntimeError', (RuntimeError,), {})
 runtime_stub.LocalCliRuntimeError = LocalCliRuntimeError
+# The static helper never exercises timeout construction; alias the
+# dependency-light error class so the service import remains complete.
+setattr(runtime_stub, 'LocalCliRuntimeTimeoutError', LocalCliRuntimeError)
 runtime_stub.LocalCliRuntimeHandle = type('LocalCliRuntimeHandle', (), {})
 for name in (
     'apply_char_style',
@@ -27,6 +30,7 @@ for name in (
     'ensure_session_layout',
     'export_document_pdf',
     'get_local_cli_runtime_manager',
+    'read_command_journal',
     'insert_multiline_text_at_caret_native',
     'insert_text_at_caret',
     'insert_text_at_caret_native',
@@ -40,6 +44,8 @@ sys.modules.setdefault('app.local_cli_runtime', runtime_stub)
 readiness_stub = types.ModuleType('app.readiness')
 readiness_stub.build_plain_readiness_failure = lambda *args, **kwargs: None
 readiness_stub.load_runtime_readiness_snapshot = lambda *args, **kwargs: {}
+setattr(readiness_stub, 'readiness_matches_current_worker', lambda *args, **kwargs: True)
+setattr(readiness_stub, 'resolve_candidate_generation', lambda *args, **kwargs: 'smoke-candidate-generation')
 readiness_stub.utc_now_iso = lambda: '2026-04-27T00:00:00Z'
 sys.modules.setdefault('app.readiness', readiness_stub)
 

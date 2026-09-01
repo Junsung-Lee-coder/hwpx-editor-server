@@ -35,7 +35,18 @@ from app.logging_utils import configure_logger
 from app.native_actions import get_native_capabilities
 from app.observation import ensure_viewer_session, observe_job
 from app.queue_db import QueueDB
-from app.readiness import build_runtime_readiness_snapshot, write_runtime_readiness_snapshot
+from app.readiness import (
+    DEFAULT_HEARTBEAT_INTERVAL_SECONDS,
+    build_current_run_not_ready_snapshot,
+    build_runtime_readiness_snapshot,
+    current_worker_identity,
+    new_readiness_run_id,
+    readiness_matches_current_worker,
+    resolve_candidate_generation,
+    touch_runtime_readiness_heartbeat,
+    write_runtime_readiness_snapshot,
+    load_runtime_readiness_snapshot,
+)
 from app.runtime_state import (
     _load_json_artifact,
     _normalize_workflow_mode,
@@ -3246,12 +3257,67 @@ def handle_job(job: dict) -> None:
             db.mark_failed(job_id, str(exc))
 
 
+def readiness_heartbeat(
+    stop_event: threading.Event,
+    *,
+    run_id: str,
+    candidate_generation: str | None,
+    interval_seconds: float = DEFAULT_HEARTBEAT_INTERVAL_SECONDS,
+) -> None:
+    """Keep the current worker's readiness lease alive during long jobs."""
+
+    while not stop_event.wait(interval_seconds):
+        current = load_runtime_readiness_snapshot()
+        if not isinstance(current, dict):
+            continue
+        if current.get('run_id') != run_id or current.get('candidate_generation') != candidate_generation:
+            continue
+        try:
+            write_runtime_readiness_snapshot(touch_runtime_readiness_heartbeat(current))
+        except Exception:
+            logger.exception('Unable to refresh runtime readiness heartbeat.')
+
+
 def worker_loop() -> int:
-    readiness_snapshot = build_runtime_readiness_snapshot(probe_hwp=True)
+    run_id = new_readiness_run_id()
+    worker_identity = current_worker_identity()
+    candidate_generation = resolve_candidate_generation()
+    # Replace any predecessor PASS before the slow Hancom/COM probe starts.
+    # This prevents an API/verifier restart from accepting a stale worker.
+    probing_snapshot = build_current_run_not_ready_snapshot(
+        run_id=run_id,
+        candidate_generation=candidate_generation,
+        worker_identity=worker_identity,
+    )
+    write_runtime_readiness_snapshot(probing_snapshot)
+    readiness_snapshot = build_runtime_readiness_snapshot(
+        probe_hwp=True,
+        run_id=run_id,
+        candidate_generation=candidate_generation,
+        worker_identity=worker_identity,
+    )
     write_runtime_readiness_snapshot(readiness_snapshot)
-    if not bool(readiness_snapshot.get('ready')):
+    final_readiness = load_runtime_readiness_snapshot()
+    if not bool(readiness_snapshot.get('ready')) or not readiness_matches_current_worker(
+        final_readiness,
+        candidate_generation=candidate_generation,
+        run_id=run_id,
+    ):
         logger.error('Worker readiness failed before polling: %s', readiness_snapshot.get('summary'))
         return 2
+
+    readiness_stop_event = threading.Event()
+    readiness_heartbeat_thread = threading.Thread(
+        target=readiness_heartbeat,
+        kwargs={
+            'stop_event': readiness_stop_event,
+            'run_id': run_id,
+            'candidate_generation': candidate_generation,
+        },
+        name='runtime-readiness-heartbeat',
+        daemon=True,
+    )
+    readiness_heartbeat_thread.start()
 
     recovered = db.recover_stale_running_jobs(settings.job_stale_seconds)
     if recovered:
@@ -3259,6 +3325,9 @@ def worker_loop() -> int:
 
     logger.info('Worker started. Polling every %s seconds.', settings.poll_interval_seconds)
     while True:
+        current_readiness = load_runtime_readiness_snapshot()
+        if isinstance(current_readiness, dict):
+            write_runtime_readiness_snapshot(touch_runtime_readiness_heartbeat(current_readiness))
         job = db.claim_next_job(settings.worker_name)
         if job is None:
             time.sleep(settings.poll_interval_seconds)

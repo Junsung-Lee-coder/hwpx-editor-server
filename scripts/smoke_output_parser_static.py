@@ -29,26 +29,322 @@ from local_cli_v1.output_parser import (  # noqa: E402
     summarize_table_cell_structure,
 )
 
-SELECTED_FIXTURE = ROOT / 'fixtures' / 'local_cli' / 'command_bundle_selected_text_response.json'
-WHERE_FIXTURE = ROOT / 'fixtures' / 'local_cli' / 'command_bundle_where_response.json'
-CONTEXT_FIXTURE = ROOT / 'fixtures' / 'local_cli' / 'command_bundle_context_response.json'
-SELECTION_PROOF_FIXTURE = ROOT / 'fixtures' / 'local_cli' / 'command_bundle_selection_proof_response.json'
+def _sample_selected_response() -> dict[str, object]:
+    return {
+        'ok': True,
+        'command': 'command-bundle',
+        'summary': 'command-bundle succeeded: 3/3 step(s)',
+        'dirty': False,
+        'before': {
+            'cursor_summary': 'pos 12',
+            'selection_summary': 'selected 4 chars',
+            'current_paragraph_preview': 'Before paragraph',
+        },
+        'after': {
+            'cursor_summary': 'pos 12',
+            'selection_summary': 'selected 4 chars',
+            'current_paragraph_preview': 'After paragraph',
+            'document_is_modified': False,
+        },
+        'steps': [
+            {
+                'index': 1,
+                'label': 'where:before-selection-read',
+                'op': 'where',
+                'ok': True,
+                'dirty': False,
+                'result': {
+                    'location': {
+                        'cursor_summary': 'pos 12',
+                        'selection_summary': 'selected 4 chars',
+                        'current_paragraph_preview': 'Before paragraph',
+                        'document_is_modified': False,
+                    }
+                },
+                'future_server_field': 'preserved',
+            },
+            {
+                'index': 2,
+                'label': 'proof:selected-text',
+                'op': 'get_selected_text',
+                'ok': True,
+                'dirty': False,
+                'result': {
+                    'schema_version': 'local-cli/selected-text-proof/v1',
+                    'proof_method': 'pyhwpx.get_selected_text(keep_select=True)+restore_selected_range',
+                    'keep_select_requested': True,
+                    'text_len': 4,
+                    'text_preview': '증빙텍스트',
+                    'text_hash': 'sha256:sample',
+                    'selected_text': '증빙텍스트',
+                    'selected_text_normalized': '증빙텍스트',
+                    'selection_source': 'active-selection',
+                    'used_active_selection': True,
+                    'used_cached_selection': False,
+                    'cached_selection_available': True,
+                    'cached_selected_text_hash': 'sha256:sample',
+                    'selected_text_verified_against_cache': True,
+                    'selected_range_before': [True, 0, 0, 1, 0, 0, 5],
+                    'selected_range_after_read': [True, 0, 0, 1, 0, 0, 5],
+                    'selected_range_restored': [True, 0, 0, 1, 0, 0, 5],
+                    'has_active_selection_before': True,
+                    'has_active_selection_after_read': True,
+                    'has_active_selection_restored': True,
+                    'selection_preserved_after_read': True,
+                    'selection_restored': False,
+                    'fail_closed_conditions': [
+                        'restore failure when keep_select=true and an active pre-proof selection existed',
+                        'empty selected text for selection-required mutations',
+                    ],
+                },
+                'warnings': ['sample step warning'],
+            },
+            {
+                'index': 3,
+                'label': 'where:after-selection-read',
+                'op': 'where',
+                'ok': True,
+                'dirty': False,
+                'result': {
+                    'location': {
+                        'cursor_summary': 'pos 12',
+                        'selection_summary': 'selected 4 chars',
+                        'current_paragraph_preview': 'After paragraph',
+                        'document_is_modified': False,
+                    }
+                },
+            },
+        ],
+        'warnings': ['sample top warning'],
+        'cursor_summary': 'pos 12',
+        'selection_summary': 'selected 4 chars',
+        'current_paragraph_preview': 'After paragraph',
+        'unknown_top_field': {'kept': True},
+    }
 
 
-def _load_selected_fixture() -> dict[str, object]:
-    return json.loads(SELECTED_FIXTURE.read_text(encoding='utf-8'))
+def _sample_where_response() -> dict[str, object]:
+    return {
+        'ok': True,
+        'command': 'command-bundle',
+        'summary': 'command-bundle succeeded: 1/1 step(s)',
+        'dirty': False,
+        'before': {
+            'cursor_summary': 'pos 12',
+            'selection_summary': 'none',
+            'current_paragraph_preview': 'Before paragraph',
+        },
+        'after': {
+            'cursor_summary': 'pos 12',
+            'selection_summary': 'none',
+            'current_paragraph_preview': 'Current paragraph',
+            'caret_in_table_cell': False,
+            'document_is_modified': False,
+        },
+        'steps': [
+            {
+                'index': 1,
+                'label': 'where:current-location',
+                'op': 'where',
+                'ok': True,
+                'dirty': False,
+                'result': {
+                    'location': {
+                        'cursor_summary': 'pos 12',
+                        'selection_summary': 'none',
+                        'current_paragraph_preview': 'Current paragraph',
+                        'caret_in_table_cell': False,
+                        'document_is_modified': False,
+                    }
+                },
+            }
+        ],
+        'cursor_summary': 'pos 12',
+        'selection_summary': 'none',
+        'current_paragraph_preview': 'Current paragraph',
+    }
 
 
-def _load_where_fixture() -> dict[str, object]:
-    return json.loads(WHERE_FIXTURE.read_text(encoding='utf-8'))
+def _sample_context_response() -> dict[str, object]:
+    return {
+        'ok': True,
+        'command': 'command-bundle',
+        'summary': 'command-bundle succeeded: 1/1 step(s)',
+        'dirty': False,
+        'before': {'cursor_summary': 'pos 12', 'selection_summary': 'none'},
+        'after': {
+            'cursor_summary': 'pos 12',
+            'selection_summary': 'none',
+            'current_paragraph_preview': 'Current paragraph',
+            'document_is_modified': False,
+        },
+        'steps': [
+            {
+                'index': 1,
+                'label': 'context:edit-position',
+                'op': 'context',
+                'ok': True,
+                'dirty': False,
+                'result': {
+                    'schema_version': 'local-cli/context/v1-package',
+                    'label': 'context:edit-position',
+                    'read_only': True,
+                    'location': {
+                        'cursor_summary': 'pos 12',
+                        'selection_summary': 'none',
+                        'current_paragraph_preview': 'Current paragraph',
+                        'caret_in_table_cell': False,
+                        'document_is_modified': False,
+                    },
+                    'page': {'current': 3, 'page_count': 7, 'method': 'KeyIndicator[3]'},
+                    'current_cursor': {
+                        'pos': [0, 12, 5],
+                        'field_name': None,
+                        'selection_mode': 0,
+                        'is_cell': False,
+                        'cell_addr': None,
+                        'has_selection': False,
+                    },
+                    'block_context': {
+                        'inside_table': False,
+                        'current_block_type': 'paragraph',
+                        'cell': None,
+                        'list_id': 0,
+                        'paragraph_index': 12,
+                        'offset': 5,
+                    },
+                    'paragraph_context': {
+                        'list_id': 0,
+                        'paragraph_index': 12,
+                        'paragraph_number_1based': 13,
+                        'offset': 5,
+                        'current_paragraph_preview': 'Current paragraph exact',
+                        'method': 'save_position+select_text(current_paragraph)+get_selected_text+restore',
+                        'approximation': False,
+                        'warnings': [],
+                    },
+                    'line_context': {
+                        'page_current': 3,
+                        'page_count': 7,
+                        'line_index': None,
+                        'line_number': None,
+                        'offset_in_paragraph': 5,
+                        'method': 'save_position+MoveLineBegin+MoveSelLineEnd+get_selected_text+restore',
+                        'approximation': False,
+                        'warnings': [],
+                        'current_visual_line_preview': 'Current visual line',
+                    },
+                    'selection_text_probes': {
+                        'visual_line': {'available': True, 'text': 'Current visual line'},
+                    },
+                    'nearby_text': {
+                        'before': 'Previous paragraph',
+                        'current': 'Current paragraph',
+                        'after': 'Next paragraph',
+                    },
+                    'style_summary': {
+                        'character': {'font_size_pt': 10.0},
+                        'paragraph': {},
+                    },
+                },
+            }
+        ],
+    }
 
 
-def _load_context_fixture() -> dict[str, object]:
-    return json.loads(CONTEXT_FIXTURE.read_text(encoding='utf-8'))
+def _sample_selection_proof_response() -> dict[str, object]:
+    return {
+        'ok': True,
+        'command': 'command-bundle',
+        'summary': 'command-bundle succeeded: 1/1 step(s)',
+        'dirty': False,
+        'before': {
+            'cursor_summary': 'pos 12',
+            'selection_summary': 'selected 12 chars',
+            'current_paragraph_preview': 'Visit https://example.com/path now',
+        },
+        'after': {
+            'cursor_summary': 'pos 12',
+            'selection_summary': 'selected 12 chars',
+            'current_paragraph_preview': 'Visit https://example.com/path now',
+            'document_is_modified': False,
+        },
+        'steps': [
+            {
+                'index': 1,
+                'label': 'selection-proof:active-selection',
+                'op': 'selection_proof',
+                'ok': True,
+                'dirty': False,
+                'result': {
+                    'schema_version': 'local-cli/selection-proof/v1-package',
+                    'read_only': True,
+                    'label': 'selection-proof:active-selection',
+                    'selection_state': {
+                        'has_selection': True,
+                        'selection_mode': 1,
+                        'selected_pos': {
+                            'raw': [True, 0, 12, 14, 0, 12, 25],
+                            'has_selection': True,
+                            'available': True,
+                        },
+                        'position_before': [0, 12, 14],
+                        'position_after': [0, 12, 14],
+                    },
+                    'selected_text': {
+                        'text': 'example.com',
+                        'preview': 'example.com',
+                        'len': 11,
+                        'is_null': False,
+                        'is_empty': False,
+                        'hash': 'sha256:sample-selection',
+                        'method': 'pyhwpx.get_selected_text(keep_select=True)',
+                    },
+                    'boundary_context': {
+                        'before_text': 'Visit https://',
+                        'after_text': '/path now',
+                        'before_char': '/',
+                        'after_char': '/',
+                        'paragraph_context': {
+                            'paragraph_number_1based': 13,
+                            'current_paragraph_preview': 'Visit https://example.com/path now',
+                        },
+                        'line_context': {
+                            'current_visual_line_preview': 'Visit https://example.com/path now',
+                        },
+                    },
+                    'risk_flags': {
+                        'empty_selection': False,
+                        'multi_paragraph_selection': False,
+                        'starts_or_ends_inside_url_like_token': True,
+                        'touches_url_or_doi_like_token': True,
+                    },
+                    'restore_evidence': {
+                        'final_restore': {
+                            'restored': True,
+                            'strategy': 'select_text(saved_selected_pos)',
+                        }
+                    },
+                },
+            }
+        ],
+    }
 
 
-def _load_selection_proof_fixture() -> dict[str, object]:
-    return json.loads(SELECTION_PROOF_FIXTURE.read_text(encoding='utf-8'))
+def _load_selected_sample() -> dict[str, object]:
+    return _sample_selected_response()
+
+
+def _load_where_sample() -> dict[str, object]:
+    return _sample_where_response()
+
+
+def _load_context_sample() -> dict[str, object]:
+    return _sample_context_response()
+
+
+def _load_selection_proof_sample() -> dict[str, object]:
+    return _sample_selection_proof_response()
 
 
 def _run_cli(argv: list[str], response: dict[str, object]) -> tuple[int, str, str, dict[str, object]]:
@@ -68,7 +364,7 @@ def _run_cli(argv: list[str], response: dict[str, object]) -> tuple[int, str, st
 
 
 def require_normalized_output() -> None:
-    raw = _load_selected_fixture()
+    raw = _load_selected_sample()
     raw_before = json.dumps(raw, ensure_ascii=False, sort_keys=True)
     normalized = normalize_command_bundle(raw)
     raw_after = json.dumps(raw, ensure_ascii=False, sort_keys=True)
@@ -88,8 +384,8 @@ def require_normalized_output() -> None:
         '1. where:before-selection-read: ok',
         '2. proof:selected-text: ok',
         '   text: 증빙텍스트',
-        '   warning: fixture step warning',
-        'warning: fixture top warning',
+        '   warning: sample step warning',
+        'warning: sample top warning',
         'position: pos 12',
         'selection: selected 4 chars',
         'current: After paragraph',
@@ -99,7 +395,7 @@ def require_normalized_output() -> None:
 
 
 def require_bundle_output_helpers() -> None:
-    raw = _load_where_fixture()
+    raw = _load_where_sample()
     where_payload = format_where_from_bundle(raw)
     if where_payload.get('parser_source') != 'command-bundle:where':
         raise SystemExit(f'where formatter did not mark source: {where_payload!r}')
@@ -110,7 +406,7 @@ def require_bundle_output_helpers() -> None:
         if needle not in where_human:
             raise SystemExit(f'where human formatter missing {needle!r}:\n{where_human}')
 
-    context_raw = _load_context_fixture()
+    context_raw = _load_context_sample()
     context_payload = summarize_context(context_raw)
     if context_payload.get('parser_source') != 'command-bundle:context':
         raise SystemExit(f'context formatter did not mark source: {context_payload!r}')
@@ -142,7 +438,7 @@ def require_bundle_output_helpers() -> None:
     if 'caret' in json.dumps(context_payload, ensure_ascii=False).lower():
         raise SystemExit(f'context JSON formatter used forbidden wording:\n{context_payload!r}')
 
-    selected_raw = _load_selected_fixture()
+    selected_raw = _load_selected_sample()
     selected_payload = summarize_selected_text_proof(selected_raw)
     if selected_payload.get('selected_text_preview') != '증빙텍스트':
         raise SystemExit(f'selected-text summary lost text preview: {selected_payload!r}')
@@ -153,11 +449,11 @@ def require_bundle_output_helpers() -> None:
     if selected_payload.get('selection_source') != 'active-selection' or selected_payload.get('selected_text_verified_against_cache') is not True:
         raise SystemExit(f'selected-text summary lost cache/source proof fields: {selected_payload!r}')
     selected_human = format_selected_text_proof_human(selected_raw)
-    for needle in ('text: 증빙텍스트', 'text hash: sha256:fixture', 'proof method:', 'selection source: active-selection', 'cached proof verified: True', 'selected range:', 'selection restored: False', 'position: pos 12'):
+    for needle in ('text: 증빙텍스트', 'text hash: sha256:sample', 'proof method:', 'selection source: active-selection', 'cached proof verified: True', 'selected range:', 'selection restored: False', 'position: pos 12'):
         if needle not in selected_human:
             raise SystemExit(f'selected-text human formatter missing {needle!r}:\n{selected_human}')
 
-    selection_proof_raw = _load_selection_proof_fixture()
+    selection_proof_raw = _load_selection_proof_sample()
     selection_proof_payload = summarize_selection_proof(selection_proof_raw)
     if selection_proof_payload.get('schema_version') != 'local-output-parser/selection-proof/v1':
         raise SystemExit(f'selection-proof summary schema missing: {selection_proof_payload!r}')
@@ -195,7 +491,7 @@ def require_bundle_output_helpers() -> None:
                             'target_id': 'ctrl/0/gso/no-inst',
                             'page': 19,
                             'type': 'gso',
-                            'proof_hash': 'sha256:fixture',
+                            'proof_hash': 'sha256:sample',
                             'bounds': {'X': 10, 'Y': 20},
                             'text_preview': 'diagram',
                         }
@@ -210,7 +506,7 @@ def require_bundle_output_helpers() -> None:
     if inventory_payload.get('control_count_returned') != 1:
         raise SystemExit(f'inventory summary lost counts: {inventory_payload!r}')
     inventory_human = format_section_control_inventory_human(inventory_raw)
-    for needle in ('read-only: yes', 'ctrl/0/gso/no-inst page=19 type=gso hash=sha256:fixture', 'bounds:'):
+    for needle in ('read-only: yes', 'ctrl/0/gso/no-inst page=19 type=gso hash=sha256:sample', 'bounds:'):
         if needle not in inventory_human:
             raise SystemExit(f'inventory human formatter missing {needle!r}:\n{inventory_human}')
 
@@ -284,8 +580,8 @@ def require_bundle_output_helpers() -> None:
 
 
 def require_cli_json_mode() -> None:
-    raw = _load_selected_fixture()
-    rc, stdout, stderr, captured = _run_cli(['--base-url', 'http://fixture.invalid', 'bundle-run', '--json', 'selected-text-proof'], raw)
+    raw = _load_selected_sample()
+    rc, stdout, stderr, captured = _run_cli(['--base-url', 'http://sample.invalid', 'bundle-run', '--json', 'selected-text-proof'], raw)
     if rc != 0:
         raise SystemExit(f'bundle-run --json failed: stderr={stderr!r}')
     payload = json.loads(stdout)
@@ -299,7 +595,7 @@ def require_cli_json_mode() -> None:
     if set(request_payload) != {'steps', 'session_id'}:
         raise SystemExit(f'bundle-run leaked local metadata to server payload: {request_payload!r}')
 
-    rc, stdout, stderr, _captured = _run_cli(['--base-url', 'http://fixture.invalid', 'bundle-run', 'selected-text-proof'], raw)
+    rc, stdout, stderr, _captured = _run_cli(['--base-url', 'http://sample.invalid', 'bundle-run', 'selected-text-proof'], raw)
     if rc != 0:
         raise SystemExit(f'bundle-run human mode failed: stderr={stderr!r}')
     if 'bundle: selected-text-proof' not in stdout or 'text: 증빙텍스트' not in stdout:
@@ -315,7 +611,7 @@ def require_first_class_bundle_commands() -> None:
         'safe_for_type': True,
         'selection_status': 'active',
     }
-    rc, stdout, stderr, captured = _run_cli(['--base-url', 'http://fixture.invalid', 'select', 'doi.org'], select_active)
+    rc, stdout, stderr, captured = _run_cli(['--base-url', 'http://sample.invalid', 'select', 'doi.org'], select_active)
     if rc != 0:
         raise SystemExit(f'select active command failed: stderr={stderr!r}')
     if captured.get('path') != '/local-cli/select':
@@ -332,7 +628,7 @@ def require_first_class_bundle_commands() -> None:
         'selection_status': 'degraded',
         'warning': 'live Hancom get_selected_pos did not match the selected range after verification',
     }
-    rc, stdout, stderr, _captured = _run_cli(['--base-url', 'http://fixture.invalid', 'select', 'doi.org'], select_degraded)
+    rc, stdout, stderr, _captured = _run_cli(['--base-url', 'http://sample.invalid', 'select', 'doi.org'], select_degraded)
     if rc != 0:
         raise SystemExit(f'select degraded command failed: stderr={stderr!r}')
     if 'selected text: doi.org' in stdout:
@@ -340,8 +636,8 @@ def require_first_class_bundle_commands() -> None:
     if 'cached selected-text proof only: doi.org' not in stdout or 'warning: live Hancom get_selected_pos' not in stdout:
         raise SystemExit(f'select degraded output missed cached-proof warning:\n{stdout}')
 
-    where_raw = _load_where_fixture()
-    rc, stdout, stderr, captured = _run_cli(['--base-url', 'http://fixture.invalid', 'where'], where_raw)
+    where_raw = _load_where_sample()
+    rc, stdout, stderr, captured = _run_cli(['--base-url', 'http://sample.invalid', 'where'], where_raw)
     if rc != 0:
         raise SystemExit(f'where command failed: stderr={stderr!r}')
     if captured.get('path') != '/local-cli/command-bundle':
@@ -353,8 +649,8 @@ def require_first_class_bundle_commands() -> None:
         if needle not in stdout:
             raise SystemExit(f'where output missing {needle!r}:\n{stdout}')
 
-    context_raw = _load_context_fixture()
-    rc, stdout, stderr, captured = _run_cli(['--base-url', 'http://fixture.invalid', 'context'], context_raw)
+    context_raw = _load_context_sample()
+    rc, stdout, stderr, captured = _run_cli(['--base-url', 'http://sample.invalid', 'context'], context_raw)
     if rc != 0:
         raise SystemExit(f'context command failed: stderr={stderr!r}')
     if captured.get('path') != '/local-cli/command-bundle':
@@ -366,7 +662,7 @@ def require_first_class_bundle_commands() -> None:
         if needle not in stdout:
             raise SystemExit(f'context output missing {needle!r}:\n{stdout}')
 
-    rc, stdout, stderr, _captured = _run_cli(['--base-url', 'http://fixture.invalid', 'context', '--json'], context_raw)
+    rc, stdout, stderr, _captured = _run_cli(['--base-url', 'http://sample.invalid', 'context', '--json'], context_raw)
     if rc != 0:
         raise SystemExit(f'context --json failed: stderr={stderr!r}')
     json_payload = json.loads(stdout)
@@ -379,9 +675,9 @@ def require_first_class_bundle_commands() -> None:
     if json_payload.get('selection_text_probes', {}).get('visual_line', {}).get('available') is not True:
         raise SystemExit(f'context --json missed selection text probes: {json_payload!r}')
 
-    selected_raw = _load_selected_fixture()
+    selected_raw = _load_selected_sample()
     rc, stdout, stderr, captured = _run_cli(
-        ['--base-url', 'http://fixture.invalid', 'selected-text-proof', '--clear-selection'],
+        ['--base-url', 'http://sample.invalid', 'selected-text-proof', '--clear-selection'],
         selected_raw,
     )
     if rc != 0:
@@ -392,11 +688,11 @@ def require_first_class_bundle_commands() -> None:
         raise SystemExit(f'selected-text-proof posted wrong ops: {request_payload!r}')
     if steps[1].get('keep_select') is not False:
         raise SystemExit(f'--clear-selection did not flip keep_select: {request_payload!r}')
-    if 'text: 증빙텍스트' not in stdout or 'text hash: sha256:fixture' not in stdout:
+    if 'text: 증빙텍스트' not in stdout or 'text hash: sha256:sample' not in stdout:
         raise SystemExit(f'selected-text-proof output missed parsed proof:\n{stdout}')
 
-    selection_proof_raw = _load_selection_proof_fixture()
-    rc, stdout, stderr, captured = _run_cli(['--base-url', 'http://fixture.invalid', 'selection-proof'], selection_proof_raw)
+    selection_proof_raw = _load_selection_proof_sample()
+    rc, stdout, stderr, captured = _run_cli(['--base-url', 'http://sample.invalid', 'selection-proof'], selection_proof_raw)
     if rc != 0:
         raise SystemExit(f'selection-proof command failed: stderr={stderr!r}')
     request_payload = captured.get('payload') if isinstance(captured.get('payload'), dict) else {}
@@ -405,7 +701,7 @@ def require_first_class_bundle_commands() -> None:
     if 'text: example.com' not in stdout or 'risk flags:' not in stdout:
         raise SystemExit(f'selection-proof output missed parsed proof:\n{stdout}')
 
-    rc, stdout, stderr, _captured = _run_cli(['--base-url', 'http://fixture.invalid', 'selection-proof', '--json'], selection_proof_raw)
+    rc, stdout, stderr, _captured = _run_cli(['--base-url', 'http://sample.invalid', 'selection-proof', '--json'], selection_proof_raw)
     if rc != 0:
         raise SystemExit(f'selection-proof --json failed: stderr={stderr!r}')
     json_payload = json.loads(stdout)
