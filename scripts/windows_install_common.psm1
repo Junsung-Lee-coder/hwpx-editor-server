@@ -1027,7 +1027,10 @@ function Write-StableTransactionJournal {
     }
     $journalLock = Enter-PathMutex -Key ('journal:' + $target.ToLowerInvariant()) -Purpose 'transaction-journal' -LockKind 'lifecycle'
     $temporaryPath = Join-Path $parent ('.journal-' + [Guid]::NewGuid().ToString('N') + '.tmp')
+    $backupPath = Join-Path $parent ('.journal-backup-' + [Guid]::NewGuid().ToString('N') + '.tmp')
+    $backupHoldPath = $backupPath + '.HOLD'
     $stream = $null
+    $readbackValidated = $false
     try {
         $stream = [System.IO.File]::Open($temporaryPath, [IO.FileMode]::CreateNew, [IO.FileAccess]::ReadWrite, [IO.FileShare]::Read)
         $stream.Write($bytes, 0, $bytes.Length)
@@ -1035,7 +1038,11 @@ function Write-StableTransactionJournal {
         $stream.Dispose()
         $stream = $null
         if (Test-Path -LiteralPath $target -PathType Leaf) {
-            [System.IO.File]::Replace($temporaryPath, $target, $null)
+            Assert-NoReparsePath -Path $target | Out-Null
+            # Windows PowerShell/.NET Framework rejects a null backup path;
+            # retain the prior journal explicitly until the new bytes have
+            # been flushed and read back successfully.
+            [System.IO.File]::Replace($temporaryPath, $target, $backupPath)
         }
         else {
             [System.IO.File]::Move($temporaryPath, $target)
@@ -1051,11 +1058,34 @@ function Write-StableTransactionJournal {
         }
         $readback = [System.IO.File]::ReadAllText($target, $encoding)
         if ($readback -cne $payload) { throw "Install transaction journal readback differed: $target" }
+        $readbackValidated = $true
         return Get-CanonicalPath -Path $target -RequireExisting
     }
     finally {
         if ($null -ne $stream) { $stream.Dispose() }
         if (Test-Path -LiteralPath $temporaryPath -PathType Leaf) { Remove-Item -LiteralPath $temporaryPath -Force -ErrorAction SilentlyContinue }
+        if (Test-Path -LiteralPath $backupPath -PathType Leaf) {
+            if ($readbackValidated) {
+                Remove-Item -LiteralPath $backupPath -Force -ErrorAction SilentlyContinue
+            }
+            else {
+                # If replacement or readback failed, restore the last known
+                # good journal and retain uncertain new bytes as HOLD evidence.
+                try {
+                    if (Test-Path -LiteralPath $target -PathType Leaf) {
+                        [System.IO.File]::Replace($backupPath, $target, $backupHoldPath)
+                    }
+                    else {
+                        [System.IO.File]::Move($backupPath, $target)
+                    }
+                }
+                catch {
+                    # Keep the backup at its stable path when restoration is
+                    # uncertain; stale-run recovery must fail closed rather
+                    # than discard the only known-good journal.
+                }
+            }
+        }
         Exit-PathMutex -Lock $journalLock
     }
 }

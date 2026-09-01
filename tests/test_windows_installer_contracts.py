@@ -58,6 +58,15 @@ class WindowsInstallerContractTests(unittest.TestCase):
         receipt_function = text[text.index("function Write-JsonReceipt") : text.index("function Save-InstallSnapshot")]
         self.assertIn("ConvertFrom-Json", receipt_function)
 
+    def test_transaction_journal_replacement_has_explicit_backup_on_windows_ps51(self) -> None:
+        text = self.read("windows_install_common.psm1")
+        journal_function = text[text.index("function Write-StableTransactionJournal") : text.index("function Read-StableTransactionJournal")]
+        self.assertIn("$backupPath = Join-Path $parent ('.journal-backup-'", journal_function)
+        self.assertIn("[System.IO.File]::Replace($temporaryPath, $target, $backupPath)", journal_function)
+        self.assertNotIn("[System.IO.File]::Replace($temporaryPath, $target, $null)", journal_function)
+        self.assertIn("$readbackValidated = $false", journal_function)
+        self.assertIn("retain uncertain new bytes as HOLD evidence", journal_function)
+
     def test_install_snapshot_cleanup_follows_terminal_receipt_readback(self) -> None:
         text = self.read("install_windows.ps1")
         terminal_receipt = text[text.index("function Complete-InstallerTerminalReceipt") : text.index("function Write-InstallerTerminalSummary")]

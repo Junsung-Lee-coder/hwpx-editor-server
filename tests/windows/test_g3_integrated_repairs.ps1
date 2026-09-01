@@ -167,6 +167,16 @@ catch {
     $journalRecord = Read-StableTransactionJournal -Path $journalPath
     Assert-True ($null -ne $journalRecord -and [string]$journalRecord.value.state -eq 'preflight-admitted') 'H2 journal preimage was not durably readable.'
     Assert-True ([string]$journalRecord.value.owner_run_id -ne [Guid]::Empty.ToString()) 'H2 journal owner identity was not retained.'
+    Write-StableTransactionJournal -Path $journalPath -Value ([ordered]@{
+        schema_version = 'hwpx/windows-install-transaction/v1'
+        owner_run_id = 'old-g3-run'
+        run_id = 'old-g3-run'
+        state = 'dependency-started'
+        phase = 'dependency'
+        install_root = $journalRoot
+    }) | Out-Null
+    $journalRecord = Read-StableTransactionJournal -Path $journalPath
+    Assert-Equal 'dependency-started' ([string]$journalRecord.value.state) 'H2 journal replacement/readback failed on Windows PowerShell 5.1.'
 
     Write-Output 'G3 integrated PowerShell behavioral repairs: PASS'
 }
