@@ -1079,7 +1079,10 @@ function Copy-CandidateToInstall {
         $manifestByKey[$relative.ToLowerInvariant()] = $manifestEntry
     }
     $copiedKeys = @{}
-    $records = @()
+    # The venv can contain thousands of files.  Array += copies the complete
+    # PowerShell array on every iteration and turns activation into an
+    # avoidable quadratic operation; keep the verified records in a list.
+    $records = New-Object 'System.Collections.Generic.List[object]'
     foreach ($directory in @(Get-ChildItem -LiteralPath $candidate -Recurse -Directory -Force -ErrorAction Stop)) {
         Assert-NoReparsePath -Path ([string]$directory.FullName) | Out-Null
     }
@@ -1098,7 +1101,7 @@ function Copy-CandidateToInstall {
         $expectedSha256 = if ($null -ne $expected) { [string]$expected.sha256 } else { Get-Sha256Hex -Path ([string]$item.FullName) }
         $destinationPath = Join-Path $destinationRoot $relative
         New-Item -ItemType Directory -Force -Path (Split-Path -Parent $destinationPath) | Out-Null
-        $records += Copy-FileVerified -SourcePath ([string]$item.FullName) -DestinationPath $destinationPath -ExpectedSize $expectedSize -ExpectedSha256 $expectedSha256
+        $records.Add((Copy-FileVerified -SourcePath ([string]$item.FullName) -DestinationPath $destinationPath -ExpectedSize $expectedSize -ExpectedSha256 $expectedSha256)) | Out-Null
     }
     foreach ($key in $manifestByKey.Keys) {
         if (-not $copiedKeys.ContainsKey($key)) { throw "Candidate is missing manifest member: $key" }
@@ -1110,7 +1113,7 @@ function Copy-CandidateToInstall {
         source_bytes = [int64](($records | Measure-Object -Property source_size -Sum).Sum)
         destination_bytes = [int64](($records | Measure-Object -Property destination_size -Sum).Sum)
         destination_sha256 = @($records | ForEach-Object { [string]$_.destination_sha256 })
-        files = @($records)
+        files = $records.ToArray()
     }
 }
 

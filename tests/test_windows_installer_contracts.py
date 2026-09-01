@@ -67,6 +67,14 @@ class WindowsInstallerContractTests(unittest.TestCase):
         self.assertIn("$readbackValidated = $false", journal_function)
         self.assertIn("retain uncertain new bytes as HOLD evidence", journal_function)
 
+    def test_candidate_activation_record_collection_is_linear_for_large_venvs(self) -> None:
+        text = self.read("install_windows.ps1")
+        activation_function = text[text.index("function Copy-CandidateToInstall") : text.index("function Set-EnvSetting")]
+        self.assertIn("System.Collections.Generic.List[object]", activation_function)
+        self.assertIn("$records.Add((Copy-FileVerified", activation_function)
+        self.assertIn("files = $records.ToArray()", activation_function)
+        self.assertNotIn("$records += Copy-FileVerified", activation_function)
+
     def test_install_snapshot_cleanup_follows_terminal_receipt_readback(self) -> None:
         text = self.read("install_windows.ps1")
         terminal_receipt = text[text.index("function Complete-InstallerTerminalReceipt") : text.index("function Write-InstallerTerminalSummary")]
