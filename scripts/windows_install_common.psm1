@@ -2177,6 +2177,18 @@ function Get-SourceManifest {
     foreach ($item in @(Get-ChildItem -LiteralPath $root -Recurse -File -Force -ErrorAction Stop)) {
         $relativeActual = $item.FullName.Substring($root.Length).TrimStart([char]92, [char]47)
         $actualParts = @($relativeActual.Split([char]92))
+        $ignoredRuntimePath = $false
+        foreach ($part in $actualParts) {
+            $partLower = $part.ToLowerInvariant()
+            if ($runtimeDirectoryNames -contains $partLower -or $partLower.StartsWith('.hwpx-install')) {
+                $ignoredRuntimePath = $true
+                break
+            }
+        }
+        # Runtime trees can contain legitimate dependency names such as
+        # requests\cookies.py. Exclude the whole runtime path before applying
+        # private-source markers, while keeping those markers strict for source.
+        if ($ignoredRuntimePath) { continue }
         if (Test-ProhibitedPrivateSourceMember -RelativePath $relativeActual) {
             $mismatches += [pscustomobject]@{ path = $relativeActual; reason = 'private source member is not allowed' }
             continue
@@ -2186,15 +2198,7 @@ function Get-SourceManifest {
             # closure, while nested command manifests remain source code.
             continue
         }
-        $ignoredRuntimePath = $false
-        foreach ($part in $actualParts) {
-            $partLower = $part.ToLowerInvariant()
-            if ($runtimeDirectoryNames -contains $partLower -or $partLower.StartsWith('.hwpx-install')) {
-                $ignoredRuntimePath = $true
-                break
-            }
-        }
-        if ($ignoredRuntimePath -or $item.Name.ToLowerInvariant().StartsWith('.env') -or $item.Name.ToLowerInvariant().StartsWith('.hwpx-install') -or $item.Extension.ToLowerInvariant() -in $runtimeSuffixes) { continue }
+        if ($item.Name.ToLowerInvariant().StartsWith('.env') -or $item.Name.ToLowerInvariant().StartsWith('.hwpx-install') -or $item.Extension.ToLowerInvariant() -in $runtimeSuffixes) { continue }
         if ($actualParts.Count -eq 1 -and $generatedRootManifestNames -contains $item.Name.ToLowerInvariant()) { continue }
         if ($item.FullName -eq $manifestCanonical -or ($archiveName -and $relativeActual.Replace([char]92, '/') -eq $archiveName.Replace([char]92, '/'))) { continue }
         if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {

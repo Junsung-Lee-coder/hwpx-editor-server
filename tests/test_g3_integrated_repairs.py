@@ -91,6 +91,15 @@ class G3IntegratedRepairTests(unittest.TestCase):
         self.assertIn("Assert-PathObjectIdentity", function)
         self.assertNotIn("ReadAllText($manifestFile) | ConvertFrom-Json", function)
 
+    def test_manifest_closure_ignores_runtime_paths_before_private_markers(self) -> None:
+        text = self.read("scripts/windows_install_common.psm1")
+        function = text[text.index("function Get-SourceManifest") : text.index("function Get-ScheduledTaskIdentity")]
+        actual_files = function[function.index("foreach ($item in @(Get-ChildItem -LiteralPath $root -Recurse -File") :]
+        runtime_skip = actual_files.index("if ($ignoredRuntimePath) { continue }")
+        private_marker = actual_files.index("Test-ProhibitedPrivateSourceMember -RelativePath $relativeActual")
+        self.assertLess(runtime_skip, private_marker)
+        self.assertIn(r"requests\cookies.py", function)
+
     def test_installer_admits_requested_receipt_after_safe_external_bootstrap(self) -> None:
         text = self.read("scripts/install_windows.ps1")
         try_start = text.index("try {", text.index("$receipt = [ordered]@{"))
