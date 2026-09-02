@@ -27,6 +27,63 @@ New-Item -ItemType Directory -Force -Path $tempRoot | Out-Null
 try {
     $python = (Get-Command python.exe -ErrorAction Stop).Source
 
+    # Readiness must bind to the exact worker process generation, not the
+    # first compatible process returned by CIM (the venv launcher may appear
+    # before the worker child).
+    $verifierPath = Join-Path $root 'scripts\verify_windows.ps1'
+    $verifierText = Get-Content -LiteralPath $verifierPath -Raw -Encoding UTF8
+    $selectionStart = $verifierText.IndexOf('function Select-VerifierWorkerProcess')
+    $selectionEnd = if ($selectionStart -ge 0) {
+        $verifierText.IndexOf('function Test-VerifierApiListener', $selectionStart)
+    }
+    else { -1 }
+    Assert-True ($selectionStart -ge 0 -and $selectionEnd -gt $selectionStart) 'Verifier worker selection helper was not found.'
+    Invoke-Expression $verifierText.Substring($selectionStart, $selectionEnd - $selectionStart)
+
+    $launcher = [pscustomobject]@{
+        process_id = 13068
+        start_identity = 'win-filetime:launcher'
+    }
+    $worker = [pscustomobject]@{
+        process_id = 19976
+        start_identity = 'win-filetime:worker-current'
+    }
+    $ready = [pscustomobject]@{
+        worker_pid = 19976
+        worker_start_identity = 'win-filetime:worker-current'
+    }
+    $bound = Select-VerifierWorkerProcess -Processes @($launcher, $worker) -Readiness $ready
+    Assert-True ([bool]$bound.ok) 'Launcher-first enumeration did not bind the later readiness worker.'
+    Assert-Equal 19976 ([int]$bound.process.process_id) 'Readiness binding selected the launcher instead of the exact worker PID.'
+    Assert-Equal 'win-filetime:worker-current' ([string]$bound.process.start_identity) 'Readiness binding returned the wrong worker generation.'
+
+    $invalidCases = @(
+        [pscustomobject]@{
+            name = 'missing readiness PID'
+            processes = @($launcher, $worker)
+            readiness = [pscustomobject]@{ worker_pid = 40123; worker_start_identity = 'win-filetime:missing' }
+        },
+        [pscustomobject]@{
+            name = 'duplicate readiness PID'
+            processes = @($launcher, $worker, [pscustomobject]@{ process_id = 19976; start_identity = 'win-filetime:worker-current' })
+            readiness = $ready
+        },
+        [pscustomobject]@{
+            name = 'stale readiness process row'
+            processes = @($launcher, [pscustomobject]@{ process_id = 19976; start_identity = $null })
+            readiness = $ready
+        },
+        [pscustomobject]@{
+            name = 'mismatched readiness generation'
+            processes = @($launcher, $worker)
+            readiness = [pscustomobject]@{ worker_pid = 19976; worker_start_identity = 'win-filetime:worker-old' }
+        }
+    )
+    foreach ($case in $invalidCases) {
+        $rejected = Select-VerifierWorkerProcess -Processes $case.processes -Readiness $case.readiness
+        Assert-True (-not [bool]$rejected.ok) ("Verifier accepted {0}." -f $case.name)
+    }
+
     # Native stderr must not turn a real process exit into -1.
     $nativeFailure = Invoke-NativeChecked `
         -FilePath $python `

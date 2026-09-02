@@ -570,6 +570,85 @@ function Test-VerifierWorker {
     return [pscustomobject]@{ ok = ($processes.Count -gt 0); process_count = $processes.Count; processes = @($processes) }
 }
 
+function Select-VerifierWorkerProcess {
+    [CmdletBinding()]
+    param(
+        [AllowNull()][object[]]$Processes,
+        [Parameter(Mandatory = $true)][object]$Readiness
+    )
+    $readinessPid = 0
+    $readinessPidText = if ($Readiness.PSObject.Properties.Name -contains 'worker_pid') {
+        [string]$Readiness.worker_pid
+    }
+    else { '' }
+    $readinessPidParsed = [int]::TryParse($readinessPidText, [ref]$readinessPid)
+    if (-not $readinessPidParsed -or $readinessPid -le 0) {
+        return [pscustomobject]@{
+            ok = $false
+            reason = 'runtime readiness worker_pid is missing or invalid'
+            readiness_worker_pid = $null
+            process = $null
+        }
+    }
+
+    $matches = @()
+    foreach ($candidate in @($Processes)) {
+        if ($null -eq $candidate) { continue }
+        $candidatePid = 0
+        $candidatePidParsed = [int]::TryParse([string]$candidate.process_id, [ref]$candidatePid)
+        if ($candidatePidParsed -and $candidatePid -eq $readinessPid) {
+            $matches += $candidate
+        }
+    }
+    if ($matches.Count -eq 0) {
+        return [pscustomobject]@{
+            ok = $false
+            reason = 'runtime readiness worker_pid was not present in the enumerated worker process rows'
+            readiness_worker_pid = $readinessPid
+            process = $null
+        }
+    }
+    if ($matches.Count -ne 1) {
+        return [pscustomobject]@{
+            ok = $false
+            reason = 'runtime readiness worker_pid matched multiple enumerated worker process rows'
+            readiness_worker_pid = $readinessPid
+            process = $null
+        }
+    }
+
+    $selected = $matches[0]
+    $readinessStartIdentity = if ($Readiness.PSObject.Properties.Name -contains 'worker_start_identity') {
+        [string]$Readiness.worker_start_identity
+    }
+    else { '' }
+    $selectedStartIdentity = [string]$selected.start_identity
+    if ([string]::IsNullOrWhiteSpace($readinessStartIdentity) -or
+        [string]::IsNullOrWhiteSpace($selectedStartIdentity)) {
+        return [pscustomobject]@{
+            ok = $false
+            reason = 'runtime readiness worker start identity is missing or stale'
+            readiness_worker_pid = $readinessPid
+            process = $null
+        }
+    }
+    if ($selectedStartIdentity -cne $readinessStartIdentity) {
+        return [pscustomobject]@{
+            ok = $false
+            reason = 'runtime readiness worker start identity did not match the selected process generation'
+            readiness_worker_pid = $readinessPid
+            process = $null
+        }
+    }
+    return [pscustomobject]@{
+        ok = $true
+        reason = $null
+        readiness_worker_pid = $readinessPid
+        readiness_worker_start_identity = $readinessStartIdentity
+        process = $selected
+    }
+}
+
 function Test-VerifierApiListener {
     $networkCommand = Get-Command Get-NetTCPConnection -ErrorAction SilentlyContinue
     if (-not $networkCommand) {
@@ -1454,17 +1533,17 @@ try {
         $exitCode = 14
         throw 'Runtime readiness candidate generation did not match the verified install generation.'
     }
-    $workerIdentityRows = @($worker.processes)
-    if ($workerIdentityRows.Count -eq 0 -or [int]$readiness.worker_pid -ne [int]$workerIdentityRows[0].process_id -or
-        [string]$readiness.worker_start_identity -cne [string]$workerIdentityRows[0].start_identity) {
+    $workerBinding = Select-VerifierWorkerProcess -Processes @($worker.processes) -Readiness $readiness
+    if (-not $workerBinding.ok) {
         $exitCode = 15
-        throw 'Runtime readiness worker process generation did not match the current candidate worker.'
+        throw ('Runtime readiness worker process generation did not bind to the current candidate worker: {0}' -f $workerBinding.reason)
     }
+    $boundWorker = $workerBinding.process
     $receipt.checks.readiness_binding = [pscustomobject]@{
         ok = $true
         candidate_generation = [string]$readiness.candidate_generation
-        worker_pid = [int]$readiness.worker_pid
-        worker_start_identity = [string]$readiness.worker_start_identity
+        worker_pid = [int]$boundWorker.process_id
+        worker_start_identity = [string]$boundWorker.start_identity
         run_id = [string]$readiness.run_id
         expires_at = [string]$readiness.expires_at
         heartbeat = $readiness.heartbeat
