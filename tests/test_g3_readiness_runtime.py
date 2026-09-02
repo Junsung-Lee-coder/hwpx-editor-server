@@ -109,6 +109,18 @@ class G3ReadinessRuntimeTests(unittest.TestCase):
         assert readback is not None
         self.assertEqual(readback["run_id"], "g3-new")
 
+    def test_windows_process_generation_check_never_uses_os_kill_zero(self) -> None:
+        with patch.object(readiness.os, "name", "nt"), patch.object(
+            readiness, "_process_start_identity", return_value="win-filetime:abc"
+        ), patch.object(
+            readiness.os,
+            "kill",
+            side_effect=AssertionError("os.kill(pid, 0) is destructive on Windows"),
+        ):
+            self.assertTrue(
+                readiness._process_generation_alive(123, "win-filetime:abc")
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

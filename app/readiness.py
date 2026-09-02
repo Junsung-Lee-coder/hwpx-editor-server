@@ -148,6 +148,12 @@ def _parse_utc(value: object) -> datetime | None:
 def _process_generation_alive(process_id: int, expected_start_identity: str) -> bool:
     if process_id <= 0 or not expected_start_identity:
         return False
+    # Windows os.kill(pid, 0) is not a POSIX-style existence probe: it can
+    # terminate the target or deliver a console control signal. The Windows
+    # start-time token is already the authoritative liveness check.
+    if os.name == 'nt':
+        actual = _process_start_identity(process_id)
+        return actual is not None and actual == expected_start_identity
     try:
         os.kill(process_id, 0)
     except (OSError, ProcessLookupError, PermissionError):
