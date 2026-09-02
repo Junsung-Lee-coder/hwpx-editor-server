@@ -1618,10 +1618,12 @@ try {
     $closingWorker = Test-VerifierWorker
     $closingReadinessReady = $closingReadiness -and [bool]$closingReadiness.ready
     $closingWorkerRows = @($closingWorker.processes)
+    $closingWorkerBinding = Select-VerifierWorkerProcess -Processes $closingWorkerRows -Readiness $closingReadiness
+    $receipt.checks.closing_readiness_binding = $closingWorkerBinding
     if (-not $closingReadinessReady -or [string]$closingReadiness.candidate_generation -cne [string]$receipt.candidate_generation -or
-        $closingWorkerRows.Count -eq 0 -or [int]$closingReadiness.worker_pid -ne [int]$closingWorkerRows[0].process_id -or
-        [string]$closingReadiness.worker_start_identity -cne [string]$closingWorkerRows[0].start_identity) {
-        throw 'Final runtime readiness readback did not match the current candidate worker generation.'
+        -not $closingWorkerBinding.ok) {
+        $bindingReason = if ($closingWorkerBinding) { [string]$closingWorkerBinding.reason } else { 'worker binding result was unavailable' }
+        throw ('Final runtime readiness readback did not match the current candidate worker generation: {0}' -f $bindingReason)
     }
     # Repeat the root and manifest readback after the last API/worker probe and
     # immediately before setting the terminal PASS state.
@@ -1643,6 +1645,7 @@ try {
         marker = $terminalMarker
         readiness = $closingReadiness
         worker = $closingWorker
+        readiness_binding = $closingWorkerBinding
     }
     $receipt.status = if ($advisoryPassed) { 'PASS' } else { 'PASS_WITH_ADVISORY_TEST_DEBT' }
     $receipt.failure_class = $null

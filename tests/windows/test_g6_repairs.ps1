@@ -57,6 +57,16 @@ try {
     Assert-Equal 19976 ([int]$bound.process.process_id) 'Readiness binding selected the launcher instead of the exact worker PID.'
     Assert-Equal 'win-filetime:worker-current' ([string]$bound.process.start_identity) 'Readiness binding returned the wrong worker generation.'
 
+    # The terminal verifier readback must use the same readiness-bound
+    # selection, rather than assuming the first CIM row is the worker.
+    $closingStart = $verifierText.IndexOf('$closingReadiness = Wait-VerifierHealth')
+    $closingEnd = $verifierText.IndexOf('$receipt.status = if ($advisoryPassed)', $closingStart)
+    Assert-True ($closingStart -ge 0 -and $closingEnd -gt $closingStart) 'Verifier terminal readiness block was not found.'
+    $closingText = $verifierText.Substring($closingStart, $closingEnd - $closingStart)
+    Assert-True ($closingText -match 'Select-VerifierWorkerProcess') 'Verifier terminal readiness does not reuse exact worker selection.'
+    Assert-True ($closingText -match '-Readiness\s+\$closingReadiness') 'Verifier terminal readiness is not bound to the closing readiness payload.'
+    Assert-True ($closingText -notmatch '\$closingWorkerRows\[0\]') 'Verifier terminal readiness still trusts the first worker row.'
+
     $invalidCases = @(
         [pscustomobject]@{
             name = 'missing readiness PID'
