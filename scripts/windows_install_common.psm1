@@ -1976,7 +1976,8 @@ function Get-SourceManifest {
         [string]$ExpectedRepository,
         [string]$ExpectedCommit,
         [string]$ExpectedTree,
-        [string]$ExpectedManifestSha256
+        [string]$ExpectedManifestSha256,
+        [AllowNull()][object]$ExpectedRuntimeEnvContract
     )
 
     Assert-NoReparsePath -Path $SourceRoot | Out-Null
@@ -2086,6 +2087,74 @@ function Get-SourceManifest {
         ($identitySource -eq 'git' -and ($null -ne $independentGit -or $externalIdentityCount -eq 3)) -or
         ($identitySource -eq 'asserted-gitless' -and $externalIdentityCount -eq 3)
     )
+    $runtimeEnvContractApplied = $false
+    $runtimeEnvContract = $null
+    $runtimeEnvExpectedPath = $null
+    $runtimeEnvExpectedSize = -1
+    $runtimeEnvExpectedSha256 = $null
+    $runtimeEnvObserved = $false
+    if ($null -ne $ExpectedRuntimeEnvContract) {
+        $runtimeEnvContract = $ExpectedRuntimeEnvContract
+        $contractProperties = @($runtimeEnvContract.PSObject.Properties.Name)
+        foreach ($requiredContractProperty in @(
+            'schema_version', 'provenance', 'source', 'path', 'install_root',
+            'install_root_identity', 'size', 'sha256', 'source_manifest_sha256',
+            'candidate_generation', 'created_at_utc'
+        )) {
+            if ($contractProperties -notcontains $requiredContractProperty) {
+                throw "Runtime .env provenance contract is missing '$requiredContractProperty'."
+            }
+        }
+        if ([string]$runtimeEnvContract.schema_version -cne 'hwpx/installer-runtime-env/v1') {
+            throw 'Runtime .env provenance contract schema is unsupported.'
+        }
+        $runtimeEnvExpectedPath = Assert-WindowsSafeSourceRelativePath -RelativePath ([string]$runtimeEnvContract.path)
+        if ($runtimeEnvExpectedPath -ine '.env') {
+            throw 'Runtime .env provenance contract must bind the exact root-relative .env path.'
+        }
+        if ([string]::IsNullOrWhiteSpace([string]$runtimeEnvContract.install_root)) {
+            throw 'Runtime .env provenance contract install root is missing.'
+        }
+        $contractRoot = Get-CanonicalPath -Path ([string]$runtimeEnvContract.install_root) -RequireExisting
+        if ($contractRoot -cne $root) {
+            throw 'Runtime .env provenance contract is bound to a different install root.'
+        }
+        $actualRootIdentity = Get-PathObjectIdentity -Path $root -RequireExisting
+        if ([string]$runtimeEnvContract.install_root_identity -cne [string]$actualRootIdentity) {
+            throw 'Runtime .env provenance contract install-root identity changed.'
+        }
+        $parsedRuntimeEnvSize = -1
+        if (-not [int64]::TryParse([string]$runtimeEnvContract.size, [ref]$parsedRuntimeEnvSize) -or
+            $parsedRuntimeEnvSize -lt 0 -or $parsedRuntimeEnvSize -gt $script:MaxManifestBytes) {
+            throw 'Runtime .env provenance contract size is invalid or exceeds the bounded limit.'
+        }
+        $runtimeEnvExpectedSize = $parsedRuntimeEnvSize
+        $runtimeEnvExpectedSha256 = [string]$runtimeEnvContract.sha256
+        if ($runtimeEnvExpectedSha256 -notmatch '^[0-9a-fA-F]{64}$') {
+            throw 'Runtime .env provenance contract SHA-256 is invalid.'
+        }
+        if ([string]$runtimeEnvContract.source_manifest_sha256 -cne [string]$manifestHash) {
+            throw 'Runtime .env provenance contract does not match the verified source manifest bytes.'
+        }
+        $expectedCandidateGeneration = '{0}:{1}:{2}' -f $manifest.commit, $manifest.tree, $manifestHash
+        if ([string]$runtimeEnvContract.candidate_generation -cne $expectedCandidateGeneration) {
+            throw 'Runtime .env provenance contract does not match the verified candidate generation.'
+        }
+        if ([string]::IsNullOrWhiteSpace([string]$runtimeEnvContract.created_at_utc)) {
+            throw 'Runtime .env provenance contract creation time is missing.'
+        }
+        $runtimeEnvProvenance = [string]$runtimeEnvContract.provenance
+        $runtimeEnvSource = [string]$runtimeEnvContract.source
+        if ($runtimeEnvProvenance -notin @('installer-generated', 'installer-preserved')) {
+            throw 'Runtime .env provenance contract provenance is unsupported.'
+        }
+        if (($runtimeEnvProvenance -eq 'installer-generated' -and $runtimeEnvSource -cne 'config.example') -or
+            ($runtimeEnvProvenance -eq 'installer-preserved' -and $runtimeEnvSource -notin @('existing-install', 'candidate'))) {
+            throw 'Runtime .env provenance contract source does not match its provenance.'
+        }
+        $runtimeEnvExpectedSha256 = $runtimeEnvExpectedSha256.ToLowerInvariant()
+        $runtimeEnvContractApplied = $true
+    }
     $declaredFileCount = -1
     if (-not ($manifest.PSObject.Properties.Name -contains 'files') -or $null -eq $manifest.files -or -not ($manifest.PSObject.Properties.Name -contains 'file_count') -or -not [int]::TryParse([string]$manifest.file_count, [ref]$declaredFileCount) -or $declaredFileCount -lt 0) {
         throw 'Source manifest must contain a non-negative integer file_count and a files list.'
@@ -2200,6 +2269,31 @@ function Get-SourceManifest {
         # requests\cookies.py. Exclude the whole runtime path before applying
         # private-source markers, while keeping those markers strict for source.
         if ($ignoredRuntimePath) { continue }
+        if ($runtimeEnvContractApplied -and $relativeActual -ieq $runtimeEnvExpectedPath) {
+            $runtimeEnvObserved = $true
+            if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                $mismatches += [pscustomobject]@{ path = $relativeActual; reason = 'runtime .env reparse-point is not allowed' }
+                continue
+            }
+            try {
+                $actualRuntimeEnvSize = [int64]$item.Length
+                $actualRuntimeEnvSha256 = Get-Sha256Hex -Path $item.FullName
+                if ($actualRuntimeEnvSize -ne $runtimeEnvExpectedSize -or $actualRuntimeEnvSha256 -cne $runtimeEnvExpectedSha256) {
+                    $mismatches += [pscustomobject]@{
+                        path = $relativeActual
+                        reason = 'installer-generated runtime .env provenance hash-or-size mismatch'
+                        expected_sha256 = $runtimeEnvExpectedSha256
+                        actual_sha256 = $actualRuntimeEnvSha256
+                        expected_size = $runtimeEnvExpectedSize
+                        actual_size = $actualRuntimeEnvSize
+                    }
+                }
+            }
+            catch {
+                $mismatches += [pscustomobject]@{ path = $relativeActual; reason = $_.Exception.Message }
+            }
+            continue
+        }
         if (Test-ProhibitedPrivateSourceMember -RelativePath $relativeActual) {
             $mismatches += [pscustomobject]@{ path = $relativeActual; reason = 'private source member is not allowed' }
             continue
@@ -2221,6 +2315,9 @@ function Get-SourceManifest {
             $mismatches += [pscustomobject]@{ path = $relativeActual; reason = 'unlisted source member' }
         }
     }
+    if ($runtimeEnvContractApplied -and -not $runtimeEnvObserved) {
+        $mismatches += [pscustomobject]@{ path = $runtimeEnvExpectedPath; reason = 'installer-generated runtime .env is missing' }
+    }
     if ($declaredFileCount -ne $entries.Count) {
         $mismatches += [pscustomobject]@{ path = '<manifest>'; reason = 'file-count-mismatch'; expected = $declaredFileCount; actual = $entries.Count }
     }
@@ -2240,6 +2337,8 @@ function Get-SourceManifest {
         file_count = $entries.Count
         mismatch_count = $mismatches.Count
         mismatches = @($mismatches)
+        runtime_env_contract_applied = [bool]$runtimeEnvContractApplied
+        runtime_env_contract = $runtimeEnvContract
     }
 }
 

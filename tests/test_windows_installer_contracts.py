@@ -132,6 +132,37 @@ class WindowsInstallerContractTests(unittest.TestCase):
         self.assertIn("HEAD^{tree}", manifest)
         self.assertIn("independent", manifest.lower())
 
+    def test_generated_runtime_env_requires_marker_bound_post_custody_contract(self) -> None:
+        common = self.read("windows_install_common.psm1")
+        installer = self.read("install_windows.ps1")
+        verifier = self.read("verify_windows.ps1")
+        for token in (
+            "ExpectedRuntimeEnvContract",
+            "runtime_env_contract_applied",
+            "installer-generated",
+            "source_manifest_sha256",
+            "install_root_identity",
+            "runtime .env",
+        ):
+            with self.subTest(token=token):
+                self.assertIn(token, common)
+        for token in (
+            "function Set-InstallerRuntimeEnvProvenance",
+            "Set-InstallerRuntimeEnvProvenance -InstallRoot",
+            "runtime_env",
+            "config.example",
+        ):
+            with self.subTest(token=token):
+                self.assertIn(token, installer)
+        for token in (
+            "ExpectedRuntimeEnvContract",
+            "runtime_env",
+            "Get-SourceManifest -SourceRoot $install",
+        ):
+            with self.subTest(token=token):
+                self.assertIn(token, verifier)
+        self.assertIn("Test-ProhibitedPrivateSourceMember", common)
+
     def test_native_receipt_preimage_is_hash_bound_and_current_run_owned(self) -> None:
         text = self.read("install_windows.ps1")
         preimage = text[text.index("function Preserve-ReceiptPreimage") : text.index("function New-RunPathClaim")]
@@ -338,7 +369,8 @@ class WindowsInstallerContractTests(unittest.TestCase):
             "$snapshot = [System.Text.Encoding]::UTF8.GetString($bytes) | ConvertFrom-Json",
             common,
         )
-        self.assertIn("$markerPayload = [IO.File]::ReadAllText($marker) | ConvertFrom-Json", installer)
+        self.assertIn("$installedMarkerCapture = Read-BoundedJsonObject -Path $marker", installer)
+        self.assertNotIn("$markerPayload = [IO.File]::ReadAllText($marker) | ConvertFrom-Json", installer)
 
     def test_legacy_launcher_uses_common_checked_native_helper_and_template(self) -> None:
         text = self.read("writer_v1.ps1")
@@ -894,6 +926,7 @@ class WindowsInstallerContractTests(unittest.TestCase):
             "test_g6_repairs.ps1",
             "test_g11_native_capture.ps1",
             "test_g23_native_helper_repairs.ps1",
+            "test_g5_runtime_env_contract.ps1",
         }
         suite_manifest = (ROOT / "tests" / "windows" / "suite-manifest.json").read_text(encoding="utf-8")
         for suite in expected_suites:

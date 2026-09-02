@@ -1441,6 +1441,86 @@ function Assert-BackupOwnership {
     return $actual
 }
 
+function Set-InstallerRuntimeEnvProvenance {
+    param(
+        [Parameter(Mandatory = $true)][string]$InstallRoot,
+        [Parameter(Mandatory = $true)][object]$ManifestResult,
+        [Parameter(Mandatory = $true)][object]$ConfigResult
+    )
+    $root = Get-CanonicalPath -Path $InstallRoot -RequireExisting
+    $markerPath = Join-Path $root '.hwpx-install.json'
+    $markerCapture = Read-BoundedJsonObject -Path $markerPath -MaxBytes 65536
+    $markerPayload = $markerCapture.value
+    $candidateGeneration = '{0}:{1}:{2}' -f $ManifestResult.manifest.commit, $ManifestResult.manifest.tree, $ManifestResult.manifest_sha256
+    if ([string]$markerPayload.schema_version -cne 'hwpx/windows-install-marker/v1' -or
+        [string]$markerPayload.repository -cne [string]$ManifestResult.manifest.repository -or
+        [string]$markerPayload.commit -cne [string]$ManifestResult.manifest.commit -or
+        [string]$markerPayload.tree -cne [string]$ManifestResult.manifest.tree -or
+        [string]$markerPayload.source_manifest_sha256 -cne [string]$ManifestResult.manifest_sha256 -or
+        [string]$markerPayload.candidate_generation -cne $candidateGeneration) {
+        throw 'Installer runtime .env provenance cannot extend a marker with a different source generation.'
+    }
+    $envPath = Get-CanonicalPath -Path ([string]$ConfigResult.env_path) -RequireExisting
+    if (-not (Test-CanonicalPathWithinRoot -Path $envPath -Root $root)) {
+        throw 'Installer runtime .env provenance path escaped the install root.'
+    }
+    $relativeEnvPath = [string]$envPath.Substring($root.Length).TrimStart([char]92, [char]47)
+    $relativeEnvPath = Assert-WindowsSafeSourceRelativePath -RelativePath $relativeEnvPath
+    if ($relativeEnvPath -ine '.env') {
+        throw 'Installer runtime .env provenance must bind the exact root-relative .env path.'
+    }
+    $envItem = Get-Item -LiteralPath $envPath -Force -ErrorAction Stop
+    if ($envItem.PSIsContainer -or ($envItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw 'Installer runtime .env provenance requires a regular non-reparse file.'
+    }
+    $actualEnvSize = [int64]$envItem.Length
+    $actualEnvSha256 = Get-Sha256Hex -Path $envPath
+    if ($actualEnvSize -ne [int64]$ConfigResult.env_size_after -or
+        $actualEnvSha256 -cne ([string]$ConfigResult.env_sha256_after).ToLowerInvariant()) {
+        throw 'Installer runtime .env provenance did not match the config write readback.'
+    }
+    $configSource = [string]$ConfigResult.source
+    $provenance = $null
+    if ($configSource -eq 'config.example') {
+        $provenance = 'installer-generated'
+    }
+    elseif ($configSource -in @('existing-install', 'candidate')) {
+        $provenance = 'installer-preserved'
+    }
+    else {
+        throw "Installer runtime .env provenance source is unsupported: $configSource"
+    }
+    $runtimeEnv = [ordered]@{
+        schema_version = 'hwpx/installer-runtime-env/v1'
+        provenance = $provenance
+        source = $configSource
+        path = '.env'
+        install_root = $root
+        install_root_identity = Get-PathObjectIdentity -Path $root -RequireExisting
+        size = $actualEnvSize
+        sha256 = $actualEnvSha256
+        source_manifest_sha256 = [string]$ManifestResult.manifest_sha256
+        candidate_generation = $candidateGeneration
+        created_at_utc = [DateTime]::UtcNow.ToString('o')
+    }
+    $markerPayload | Add-Member -MemberType NoteProperty -Name 'runtime_env' -Value ([pscustomobject]$runtimeEnv) -Force
+    Write-JsonReceipt -Path $markerPath -Value $markerPayload | Out-Null
+    $readback = Read-BoundedJsonObject -Path $markerPath -MaxBytes 65536
+    if ($null -eq $readback.value.runtime_env) {
+        throw 'Installer runtime .env provenance marker readback was missing.'
+    }
+    foreach ($field in @('schema_version', 'provenance', 'source', 'path', 'install_root', 'install_root_identity', 'size', 'sha256', 'source_manifest_sha256', 'candidate_generation')) {
+        if ([string]$readback.value.runtime_env.$field -cne [string]$runtimeEnv.$field) {
+            throw "Installer runtime .env provenance marker readback differed for $field."
+        }
+    }
+    return [pscustomobject]@{
+        marker_path = $markerPath
+        marker_sha256 = [string]$readback.sha256
+        contract = $readback.value.runtime_env
+    }
+}
+
 function Ensure-CandidateConfig {
     param(
         [Parameter(Mandatory = $true)][string]$CandidateRoot,
@@ -1743,13 +1823,20 @@ try {
         $markerCompatible = $false
         $installManifestCompatible = $false
         if ($marker) {
+            $installedMarkerPayload = $null
             try {
+                $installedMarkerCapture = Read-BoundedJsonObject -Path $marker -MaxBytes 65536
+                $installedMarkerPayload = $installedMarkerCapture.value
+                $installedRuntimeEnvContract = $null
+                if ($installedMarkerPayload.PSObject.Properties.Name -contains 'runtime_env') {
+                    $installedRuntimeEnvContract = $installedMarkerPayload.runtime_env
+                }
                 $installedManifestPath = Join-Path $install 'source-manifest.json'
                 if (Test-Path -LiteralPath $installedManifestPath -PathType Leaf) {
-                    $installedManifest = Get-SourceManifest -SourceRoot $install -ManifestPath $installedManifestPath -ExpectedRepository ([string]$manifestResult.manifest.repository) -ExpectedCommit ([string]$manifestResult.manifest.commit) -ExpectedTree ([string]$manifestResult.manifest.tree) -ExpectedManifestSha256 ([string]$manifestResult.manifest_sha256)
+                    $installedManifest = Get-SourceManifest -SourceRoot $install -ManifestPath $installedManifestPath -ExpectedRepository ([string]$manifestResult.manifest.repository) -ExpectedCommit ([string]$manifestResult.manifest.commit) -ExpectedTree ([string]$manifestResult.manifest.tree) -ExpectedManifestSha256 ([string]$manifestResult.manifest_sha256) -ExpectedRuntimeEnvContract $installedRuntimeEnvContract
                     $installManifestCompatible = $installedManifest.ok -and [string]$installedManifest.manifest_sha256 -eq (Get-Sha256Hex -Path $manifestPath)
                 }
-                $markerPayload = [IO.File]::ReadAllText($marker) | ConvertFrom-Json
+                $markerPayload = $installedMarkerPayload
                 $markerCompatible = (
                     [string]$markerPayload.repository -eq [string]$manifestResult.manifest.repository -and
                     [string]$markerPayload.commit -eq [string]$manifestResult.manifest.commit -and
@@ -2096,6 +2183,8 @@ try {
     $configCreated = -not [bool]$configResult.candidate_env_existed_before
     $configPath = [string]$configResult.env_path
     $configCreatedSha256 = if ($configCreated -and (Test-Path -LiteralPath $configPath -PathType Leaf)) { Get-Sha256Hex -Path $configPath } else { $null }
+    $runtimeEnvProvenance = Set-InstallerRuntimeEnvProvenance -InstallRoot $candidateRoot -ManifestResult $manifestResult -ConfigResult $configResult
+    $receipt.checks.runtime_env_provenance = $runtimeEnvProvenance
 
     $phase = 'activation'
     $venvPython = Join-Path $candidateRoot '.venv\Scripts\python.exe'
@@ -2214,12 +2303,17 @@ try {
         throw 'Installed verifier did not leave its declared terminal receipt.'
     }
     Assert-PathObjectIdentity -Path $verifierRoot -ExpectedIdentity $verifierRootIdentity | Out-Null
-    $closingManifest = Get-SourceManifest -SourceRoot $verifierRoot -ManifestPath (Join-Path $verifierRoot 'source-manifest.json') -ExpectedRepository ([string]$manifestResult.manifest.repository) -ExpectedCommit ([string]$manifestResult.manifest.commit) -ExpectedTree ([string]$manifestResult.manifest.tree) -ExpectedManifestSha256 ([string]$manifestResult.manifest_sha256)
+    $closingMarkerPath = Join-Path $verifierRoot '.hwpx-install.json'
+    $closingMarkerCapture = Read-BoundedJsonObject -Path $closingMarkerPath -MaxBytes 4194304
+    $closingMarker = $closingMarkerCapture.value
+    $closingRuntimeEnvContract = $null
+    if ($closingMarker.PSObject.Properties.Name -contains 'runtime_env') {
+        $closingRuntimeEnvContract = $closingMarker.runtime_env
+    }
+    $closingManifest = Get-SourceManifest -SourceRoot $verifierRoot -ManifestPath (Join-Path $verifierRoot 'source-manifest.json') -ExpectedRepository ([string]$manifestResult.manifest.repository) -ExpectedCommit ([string]$manifestResult.manifest.commit) -ExpectedTree ([string]$manifestResult.manifest.tree) -ExpectedManifestSha256 ([string]$manifestResult.manifest_sha256) -ExpectedRuntimeEnvContract $closingRuntimeEnvContract
     if (-not $closingManifest.ok -or [string]$closingManifest.manifest_sha256 -ne [string]$receipt.source_identity.manifest_sha256) {
         throw 'Installer closing source-manifest readback did not match the verifier handoff generation.'
     }
-    $closingMarkerCapture = Read-BoundedJsonObject -Path (Join-Path $verifierRoot '.hwpx-install.json') -MaxBytes 4194304
-    $closingMarker = $closingMarkerCapture.value
     if ([string]$closingMarker.commit -cne [string]$receipt.source_identity.commit -or
         [string]$closingMarker.tree -cne [string]$receipt.source_identity.tree -or
         [string]$closingMarker.source_manifest_sha256 -cne [string]$receipt.source_identity.manifest_sha256 -or

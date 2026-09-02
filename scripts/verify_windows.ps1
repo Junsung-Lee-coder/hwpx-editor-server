@@ -312,13 +312,27 @@ function Test-VerifierCandidateMarker {
         $markerPayload = ConvertFrom-Json -InputObject ([string]$markerCapture.text)
         $markerManifestSha256 = [string]$markerPayload.source_manifest_sha256
         $markerCandidateGeneration = [string]$markerPayload.candidate_generation
+        $markerRuntimeEnvContractOk = $true
+        if ([bool]$ManifestResult.runtime_env_contract_applied) {
+            $markerRuntimeEnvContractOk = $false
+            if ($markerPayload.PSObject.Properties.Name -contains 'runtime_env' -and $null -ne $ManifestResult.runtime_env_contract) {
+                $markerRuntimeEnvContractOk = $true
+                foreach ($field in @('schema_version', 'provenance', 'source', 'path', 'install_root', 'install_root_identity', 'size', 'sha256', 'source_manifest_sha256', 'candidate_generation')) {
+                    if ([string]$markerPayload.runtime_env.$field -cne [string]$ManifestResult.runtime_env_contract.$field) {
+                        $markerRuntimeEnvContractOk = $false
+                        break
+                    }
+                }
+            }
+        }
         $markerIdentityOk = (
             [string]$markerPayload.schema_version -ceq 'hwpx/windows-install-marker/v1' -and
             [string]$markerPayload.repository -ceq [string]$ManifestResult.manifest.repository -and
             [string]$markerPayload.commit -ceq [string]$ManifestResult.manifest.commit -and
             [string]$markerPayload.tree -ceq [string]$ManifestResult.manifest.tree -and
             $markerManifestSha256 -ceq [string]$ManifestResult.manifest_sha256 -and
-            $markerCandidateGeneration -ceq $candidateGeneration
+            $markerCandidateGeneration -ceq $candidateGeneration -and
+            $markerRuntimeEnvContractOk
         )
         $markerSha256 = Get-Sha256Hex -Path $markerPath
         return [pscustomobject]@{
@@ -333,6 +347,7 @@ function Test-VerifierCandidateMarker {
             source_manifest_sha256 = $markerManifestSha256
             candidate_generation = $markerCandidateGeneration
             expected_candidate_generation = $candidateGeneration
+            runtime_env_contract_ok = $markerRuntimeEnvContractOk
             reason = if ($markerIdentityOk) { $null } else { 'installed candidate marker does not match the verified source manifest' }
         }
     }
@@ -1322,6 +1337,14 @@ try {
 
     $exitCode = 11
     Invoke-VerifierDependencyCheck -PythonPath $python | Out-Null
+    $runtimeEnvContract = $null
+    $runtimeEnvMarkerPath = Join-Path $install '.hwpx-install.json'
+    if (Test-Path -LiteralPath $runtimeEnvMarkerPath -PathType Leaf) {
+        $runtimeEnvMarkerCapture = Read-BoundedJsonObject -Path $runtimeEnvMarkerPath -MaxBytes 65536
+        if ($runtimeEnvMarkerCapture.value.PSObject.Properties.Name -contains 'runtime_env') {
+            $runtimeEnvContract = $runtimeEnvMarkerCapture.value.runtime_env
+        }
+    }
 
     $configuredManifest = [Environment]::GetEnvironmentVariable('HWP_SOURCE_MANIFEST')
     if ([string]::IsNullOrWhiteSpace($configuredManifest)) { $configuredManifest = Get-ConfiguredEnvValue -EnvPath (Join-Path $install '.env') -Name 'HWP_SOURCE_MANIFEST' }
@@ -1332,7 +1355,7 @@ try {
     else { $null }
     if ($manifestPath) {
         $exitCode = 11
-        $manifest = Get-SourceManifest -SourceRoot $install -ManifestPath $manifestPath -ExpectedRepository $ExpectedRepository -ExpectedCommit $ExpectedCommit -ExpectedTree $ExpectedTree -ExpectedManifestSha256 $ExpectedManifestSha256
+        $manifest = Get-SourceManifest -SourceRoot $install -ManifestPath $manifestPath -ExpectedRepository $ExpectedRepository -ExpectedCommit $ExpectedCommit -ExpectedTree $ExpectedTree -ExpectedManifestSha256 $ExpectedManifestSha256 -ExpectedRuntimeEnvContract $runtimeEnvContract
         $receipt.checks.source_manifest = $manifest
         if (-not $manifest.ok) { $exitCode = 11; throw 'Source manifest verification failed.' }
         if (-not [bool]$manifest.identity_binding.verified) {
@@ -1505,7 +1528,7 @@ try {
     if ([string]$closingRootIdentity -cne [string]$verifierRootIdentity) {
         throw 'InstallRoot object identity changed before verifier terminal receipt publication.'
     }
-    $closingManifest = Get-SourceManifest -SourceRoot $install -ManifestPath $manifestPath -ExpectedRepository ([string]$receipt.source_identity.repository) -ExpectedCommit ([string]$receipt.source_identity.commit) -ExpectedTree ([string]$receipt.source_identity.tree) -ExpectedManifestSha256 ([string]$receipt.source_identity.manifest_sha256)
+    $closingManifest = Get-SourceManifest -SourceRoot $install -ManifestPath $manifestPath -ExpectedRepository ([string]$receipt.source_identity.repository) -ExpectedCommit ([string]$receipt.source_identity.commit) -ExpectedTree ([string]$receipt.source_identity.tree) -ExpectedManifestSha256 ([string]$receipt.source_identity.manifest_sha256) -ExpectedRuntimeEnvContract $runtimeEnvContract
     $closingGeneration = '{0}:{1}:{2}' -f $closingManifest.manifest.commit, $closingManifest.manifest.tree, $closingManifest.manifest_sha256
     if (-not $closingManifest.ok -or $closingGeneration -cne [string]$receipt.candidate_generation) {
         throw 'Verified install generation changed before verifier terminal receipt publication.'
@@ -1527,7 +1550,7 @@ try {
     if ([string]$terminalRootIdentity -cne [string]$verifierRootIdentity) {
         throw 'InstallRoot object identity changed at terminal verifier admission.'
     }
-    $terminalManifest = Get-SourceManifest -SourceRoot $install -ManifestPath $manifestPath -ExpectedRepository ([string]$receipt.source_identity.repository) -ExpectedCommit ([string]$receipt.source_identity.commit) -ExpectedTree ([string]$receipt.source_identity.tree) -ExpectedManifestSha256 ([string]$receipt.source_identity.manifest_sha256)
+    $terminalManifest = Get-SourceManifest -SourceRoot $install -ManifestPath $manifestPath -ExpectedRepository ([string]$receipt.source_identity.repository) -ExpectedCommit ([string]$receipt.source_identity.commit) -ExpectedTree ([string]$receipt.source_identity.tree) -ExpectedManifestSha256 ([string]$receipt.source_identity.manifest_sha256) -ExpectedRuntimeEnvContract $runtimeEnvContract
     $terminalGeneration = '{0}:{1}:{2}' -f $terminalManifest.manifest.commit, $terminalManifest.manifest.tree, $terminalManifest.manifest_sha256
     if (-not $terminalManifest.ok -or $terminalGeneration -cne [string]$receipt.candidate_generation) {
         throw 'Verified install generation changed at terminal verifier admission.'

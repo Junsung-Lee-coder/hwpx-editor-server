@@ -64,6 +64,27 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $source 'scri
 
 All three repository/commit/tree values are required together for a Git-less receiver. Missing, partial, malformed, conflicting, or mismatched values fail closed in preflight. A Git checkout still performs its independent Git repository/commit/tree readback; supplying the external values adds a second binding rather than weakening that check.
 
+## Generated runtime configuration provenance
+
+The source archive and source manifest never contain `.env`; a source-bundled or
+unlisted `.env` remains a private-member mismatch. After source custody and
+candidate activation have passed, the installer writes the runtime `.env` and
+adds `runtime_env` to the installed `.hwpx-install.json` marker. This is the
+only handoff that can make the installed-tree verifier permit that one file.
+
+The marker contract uses schema `hwpx/installer-runtime-env/v1` and binds all
+of the following: `provenance` (`installer-generated` for `config.example`, or
+`installer-preserved` for a preserved existing value), `source`, the exact
+root-relative `path` `.env`, the canonical `install_root` and filesystem object
+identity, the runtime file `size` and SHA-256, the verified
+`source_manifest_sha256`, the full `candidate_generation`, and a creation time.
+The verifier reads this contract from the marker; there is no command-line
+switch that can bless an arbitrary `.env`. Any missing, relocated, reparse,
+changed, oversized, source-included, or hash-mismatched runtime file fails
+closed. Existing installations must carry the same marker-bound contract to be
+reused; otherwise use `-ExistingInstallDisposition PreserveMove` so the
+installer can establish a fresh contract after controlled activation.
+
 If Poppler is not already available, the default `CheckOnly` mode fails closed before creating the venv or changing scheduled tasks. An explicit user-scope installation may be requested:
 
 ```powershell

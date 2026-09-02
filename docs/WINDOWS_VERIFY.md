@@ -26,6 +26,9 @@ Omit `-ApiPort` to resolve the port from the installation `.env`; when no `.env`
 The verifier checks:
 
 - installed Python identity and source manifest per-file hashes;
+- installer-generated runtime `.env` provenance from the marker-bound
+  `hwpx/installer-runtime-env/v1` contract; only the exact root-relative file
+  with the recorded root identity, size, and SHA-256 is permitted;
 - both scheduled task identities, action executables, working directories, principals, logon triggers, run levels, settings, and identity hashes;
 - the worker process and loopback listener identities against the exact installed venv/root and module;
 - Poppler resolution, including explicit path, current `PATH`, and validated WinGet roots;
@@ -72,3 +75,11 @@ The temporary managed copy and proof files are removed after their hashes and di
 - `FAIL_PREFLIGHT`, `FAIL_TASK`, `FAIL_API`, `FAIL_WORKER`, `FAIL_RENDERER`, `FAIL_PUBLICATION`, and `FAIL_NATIVE_E2E` identify the first failing gate and bound the next diagnostic step.
 
 Never edit a receipt to change a verdict. Re-run the verifier after correcting the reported condition and write a new receipt path.
+
+The verifier does not accept `.env` as a source-manifest member. When an
+installer-created runtime `.env` is present, it reads `runtime_env` from
+`.hwpx-install.json` and passes that explicit provenance to the source-manifest
+checker. The contract is tied to the independently verified source-manifest
+bytes and candidate generation, so a missing marker contract, source-bundled
+`.env`, unexpected location, root identity change, or content change remains a
+failure rather than a private-file exception.

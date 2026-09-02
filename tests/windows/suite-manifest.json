@@ -7,6 +7,7 @@
     "test_g18_native_job.ps1",
     "test_g23_native_helper_repairs.ps1",
     "test_g3_integrated_repairs.ps1",
+    "test_g5_runtime_env_contract.ps1",
     "test_g6_repairs.ps1",
     "test_g6_rollback_runtime.ps1",
     "test_install_windows.ps1",
