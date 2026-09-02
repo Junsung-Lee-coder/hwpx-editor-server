@@ -71,6 +71,53 @@ try {
 
     $verifierPath = Join-Path $root 'scripts\verify_windows.ps1'
     $verifierText = Get-Content -LiteralPath $verifierPath -Raw -Encoding UTF8
+    # Regression: execute the production Python-check initializer under the
+    # actual Windows PowerShell 5.1 property-assignment semantics.  A plain
+    # source-token assertion would miss the PSCustomObject contract failure.
+    $initializerStart = $verifierText.LastIndexOf('    $python = Resolve-VerifierPython')
+    $initializerEnd = $verifierText.IndexOf('    $exitCode = 11', $initializerStart)
+    if ($initializerStart -lt 0 -or $initializerEnd -le $initializerStart) {
+        throw 'Verifier Python-check initializer fragment was not found.'
+    }
+    $initializer = $verifierText.Substring($initializerStart, $initializerEnd - $initializerStart).Trim()
+    if (-not $initializer.Contains('$receipt.checks.python.runtime_identity =')) {
+        throw 'Verifier runtime-identity assignment was not found in the initializer fragment.'
+    }
+    $runtimeHarness = @'
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+$receipt = [ordered]@{ checks = [ordered]@{} }
+function Resolve-VerifierPython { return 'C:\candidate\.venv\Scripts\python.exe' }
+function Invoke-VerifierCommand {
+    param([string]$Name, [string]$FilePath, [object[]]$Arguments)
+    return [pscustomobject]@{
+        accepted = $true
+        exit_code = 0
+        stdout = 'Python 3.13.5'
+        stderr = ''
+        stdout_truncated = $false
+    }
+}
+function Get-VerifierPythonRuntimeIdentity {
+    param([Parameter(Mandatory = $true)][string]$PythonPath)
+    return [pscustomobject]@{
+        implementation = 'cpython'
+        major = 3
+        minor = 13
+        micro = 5
+        pointer_bits = 64
+        machine = 'AMD64'
+    }
+}
+'@
+    $runtimeHarness += "`r`n" + $initializer + "`r`n`$receipt.checks.python.runtime_identity | ConvertTo-Json -Compress"
+    $runtimeOutput = @(Invoke-Expression $runtimeHarness)
+    if ($runtimeOutput.Count -eq 0) { throw 'Verifier runtime-identity initializer produced no result.' }
+    $runtimeIdentity = ConvertFrom-Json -InputObject ([string]$runtimeOutput[-1])
+    if ([string]$runtimeIdentity.implementation -cne 'cpython') { throw 'Verifier runtime-identity initializer did not preserve implementation.' }
+    if ([int]$runtimeIdentity.major -ne 3 -or [int]$runtimeIdentity.minor -ne 13) { throw 'Verifier runtime-identity initializer did not preserve Python version.' }
+    if ([int]$runtimeIdentity.pointer_bits -ne 64 -or [string]$runtimeIdentity.machine -cne 'AMD64') { throw 'Verifier runtime-identity initializer did not preserve ABI identity.' }
+    Write-Output 'VERIFIER_RUNTIME_IDENTITY=PASS'
     $fixtureRootFunctionStart = $verifierText.IndexOf('function New-VerifierFixtureTempRoot')
     $fixtureRootFunctionEnd = $verifierText.IndexOf('function Invoke-FixtureSequence', $fixtureRootFunctionStart)
     if ($fixtureRootFunctionStart -lt 0 -or $fixtureRootFunctionEnd -le $fixtureRootFunctionStart) {

@@ -1311,7 +1311,11 @@ try {
     }
     $python = Resolve-VerifierPython
     $identity = Invoke-VerifierCommand -Name 'python_identity' -FilePath $python -Arguments @('--version')
-    $receipt.checks.python = [pscustomobject]@{ ok = ($identity.accepted -and $identity.exit_code -eq 0); result = $identity }
+    $receipt.checks.python = [pscustomobject]@{
+        ok = ($identity.accepted -and $identity.exit_code -eq 0)
+        result = $identity
+        runtime_identity = $null
+    }
     if ($identity.exit_code -ne 0) { $exitCode = 11; throw 'Installed Python identity verification failed.' }
     if (-not $identity.accepted) { $exitCode = 11; throw 'Installed Python identity command capture was not accepted.' }
     $receipt.checks.python.runtime_identity = Get-VerifierPythonRuntimeIdentity -PythonPath $python
