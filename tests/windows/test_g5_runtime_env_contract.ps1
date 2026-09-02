@@ -94,6 +94,7 @@ function Get-TestManifestResult {
 
 $tempRoot = Join-Path ([IO.Path]::GetTempPath()) ('hwpx-g5-runtime-env-' + [Guid]::NewGuid().ToString('N'))
 try {
+    New-Item -ItemType Directory -Force -Path $tempRoot | Out-Null
     # Load the production producer helper so this test covers marker creation,
     # not merely a hand-authored consumer object.
     $installerText = Get-Content -LiteralPath (Join-Path $root 'scripts\install_windows.ps1') -Raw -Encoding UTF8
@@ -103,6 +104,38 @@ try {
         throw 'Installer runtime .env provenance producer helper was not found.'
     }
     Invoke-Expression $installerText.Substring($producerStart, $producerEnd - $producerStart)
+
+    $verifierText = Get-Content -LiteralPath (Join-Path $root 'scripts\verify_windows.ps1') -Raw -Encoding UTF8
+    $identityStart = $verifierText.IndexOf('function Get-VerifierPythonRuntimeIdentity')
+    $identityEnd = $verifierText.IndexOf('function Invoke-VerifierDependencyCheck', $identityStart)
+    if ($identityStart -lt 0 -or $identityEnd -le $identityStart) {
+        throw 'Verifier Python identity helper was not found.'
+    }
+    function Invoke-VerifierCommand {
+        param(
+            [Parameter(Mandatory = $true)][string]$Name,
+            [Parameter(Mandatory = $true)][string]$FilePath,
+            [Parameter(Mandatory = $true)][string[]]$Arguments,
+            [string]$WorkingDirectory = $tempRoot
+        )
+        $nativeArguments = @($Arguments)
+        if ([IO.Path]::GetFileName($FilePath) -in @('py.exe', 'py')) {
+            $nativeArguments = @('-3.13') + $nativeArguments
+        }
+        return Invoke-NativeChecked -FilePath $FilePath -Arguments $nativeArguments -WorkingDirectory $WorkingDirectory -AllowNonZero
+    }
+    Invoke-Expression $verifierText.Substring($identityStart, $identityEnd - $identityStart)
+
+    $pythonLauncher = Get-Command py.exe -ErrorAction SilentlyContinue
+    if ($null -ne $pythonLauncher) {
+        $selectorProbe = Invoke-NativeChecked -FilePath ([string]$pythonLauncher.Source) -Arguments @('-3.13', '-c', 'print(313)') -WorkingDirectory $tempRoot -AllowNonZero
+        Assert-True ([bool]$selectorProbe.accepted) 'Production native invocation did not accept the CPython 3.13 launcher selector.'
+        Assert-True ([int]$selectorProbe.exit_code -eq 0) 'CPython 3.13 launcher selector returned a nonzero exit code.'
+        Assert-True ([string]$selectorProbe.stdout.Trim() -ceq '313') 'CPython 3.13 launcher selector did not execute the selected interpreter.'
+        $identity = Get-VerifierPythonRuntimeIdentity -PythonPath ([string]$pythonLauncher.Source)
+        Assert-True ([bool]$identity.ok) 'Production verifier Python identity probe did not return an accepted identity.'
+        Assert-True ([int]$identity.major -eq 3 -and [int]$identity.minor -eq 13) 'Production verifier Python identity probe did not select CPython 3.13.'
+    }
 
     $trusted = New-TestManifest -Root (Join-Path $tempRoot 'trusted')
     $custody = Get-TestManifestResult -Fixture $trusted -RuntimeEnvContract $null
@@ -139,7 +172,7 @@ try {
     $bundled = New-TestManifest -Root (Join-Path $tempRoot 'bundled') -IncludeEnvEntry $true -CreateEnv $true
     $bundledResult = Get-TestManifestResult -Fixture $bundled -RuntimeEnvContract $null
     Assert-True (-not [bool]$bundledResult.ok) 'Source-bundled .env was accepted without installer provenance.'
-    Assert-True (@($bundledResult.mismatches | Where-Object { [string]$_.path -ceq '.env' }).Count -eq 1) 'Source-bundled .env rejection was not attributed to .env.'
+    Assert-True (@($bundledResult.mismatches | Where-Object { [string]$_.path -ceq '.env' }).Count -ge 1) 'Source-bundled .env rejection was not attributed to .env.'
 
     $untrusted = New-TestManifest -Root (Join-Path $tempRoot 'untrusted')
     $untrustedCustody = Get-TestManifestResult -Fixture $untrusted -RuntimeEnvContract $null

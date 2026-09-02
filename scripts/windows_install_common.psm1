@@ -1318,6 +1318,12 @@ function ConvertTo-NativeCommandLineArgument {
     param([AllowNull()][object]$Value)
 
     $text = if ($null -eq $Value) { '' } else { [string]$Value }
+    # The Windows Python launcher recognizes version selectors only when they
+    # remain command-line switches. Quoting -3.13 makes py.exe forward it to
+    # the selected interpreter as an invalid option. Keep the exception
+    # narrowly scoped; every other argument still uses the full safe quoting
+    # algorithm below.
+    if ($text -match '^-[0-9]+\.[0-9]+$') { return $text }
     $builder = New-Object System.Text.StringBuilder
     [void]$builder.Append([char]34)
     $backslashes = 0
