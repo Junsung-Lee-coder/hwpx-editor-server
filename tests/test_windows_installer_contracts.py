@@ -924,6 +924,7 @@ class WindowsInstallerContractTests(unittest.TestCase):
             "test_install_windows.ps1",
             "test_g6_rollback_runtime.ps1",
             "test_g6_repairs.ps1",
+            "test_g7_marker_idempotency.ps1",
             "test_g11_native_capture.ps1",
             "test_g23_native_helper_repairs.ps1",
             "test_g5_runtime_env_contract.ps1",

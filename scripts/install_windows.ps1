@@ -1445,12 +1445,15 @@ function Set-InstallerRuntimeEnvProvenance {
     param(
         [Parameter(Mandatory = $true)][string]$InstallRoot,
         [Parameter(Mandatory = $true)][object]$ManifestResult,
-        [Parameter(Mandatory = $true)][object]$ConfigResult
+        [Parameter(Mandatory = $true)][object]$ConfigResult,
+        [switch]$PreserveExistingMarkerBytes
     )
     $root = Get-CanonicalPath -Path $InstallRoot -RequireExisting
     $markerPath = Join-Path $root '.hwpx-install.json'
     $markerCapture = Read-BoundedJsonObject -Path $markerPath -MaxBytes 65536
     $markerPayload = $markerCapture.value
+    $markerSha256Before = [string]$markerCapture.sha256
+    $markerIdentityBefore = [string]$markerCapture.object_identity
     $candidateGeneration = '{0}:{1}:{2}' -f $ManifestResult.manifest.commit, $ManifestResult.manifest.tree, $ManifestResult.manifest_sha256
     if ([string]$markerPayload.schema_version -cne 'hwpx/windows-install-marker/v1' -or
         [string]$markerPayload.repository -cne [string]$ManifestResult.manifest.repository -or
@@ -1479,6 +1482,63 @@ function Set-InstallerRuntimeEnvProvenance {
         $actualEnvSha256 -cne ([string]$ConfigResult.env_sha256_after).ToLowerInvariant()) {
         throw 'Installer runtime .env provenance did not match the config write readback.'
     }
+
+    # A valid existing runtime-env contract is already the authoritative
+    # provenance for a reused install. Re-serializing it would change the
+    # source/provenance fields (candidate vs config.example) and its creation
+    # time, even though the candidate and .env bytes are unchanged.
+    $runtimeEnvPropertyPresent = $markerPayload.PSObject.Properties.Name -contains 'runtime_env'
+    if ($runtimeEnvPropertyPresent -and $null -ne $markerPayload.runtime_env) {
+        $existingRuntimeEnv = $markerPayload.runtime_env
+        foreach ($field in @(
+            'schema_version', 'provenance', 'source', 'path', 'install_root',
+            'install_root_identity', 'size', 'sha256', 'source_manifest_sha256',
+            'candidate_generation', 'created_at_utc'
+        )) {
+            if ($existingRuntimeEnv.PSObject.Properties.Name -notcontains $field) {
+                throw "Existing runtime .env provenance contract is missing '$field'."
+            }
+        }
+        if ([string]$existingRuntimeEnv.schema_version -cne 'hwpx/installer-runtime-env/v1' -or
+            [string]$existingRuntimeEnv.path -ine '.env' -or
+            [string]$existingRuntimeEnv.install_root -cne $root -or
+            [string]$existingRuntimeEnv.install_root_identity -cne (Get-PathObjectIdentity -Path $root -RequireExisting) -or
+            [string]$existingRuntimeEnv.size -cne [string]$actualEnvSize -or
+            [string]$existingRuntimeEnv.sha256 -cne $actualEnvSha256 -or
+            [string]$existingRuntimeEnv.source_manifest_sha256 -cne [string]$ManifestResult.manifest_sha256 -or
+            [string]$existingRuntimeEnv.candidate_generation -cne $candidateGeneration -or
+            [string]::IsNullOrWhiteSpace([string]$existingRuntimeEnv.created_at_utc)) {
+            throw 'Existing runtime .env provenance contract does not match the current install preimage.'
+        }
+        $existingProvenance = [string]$existingRuntimeEnv.provenance
+        $existingSource = [string]$existingRuntimeEnv.source
+        if ($existingProvenance -notin @('installer-generated', 'installer-preserved') -or
+            (($existingProvenance -eq 'installer-generated') -and $existingSource -cne 'config.example') -or
+            (($existingProvenance -eq 'installer-preserved') -and $existingSource -notin @('existing-install', 'candidate'))) {
+            throw 'Existing runtime .env provenance contract has an invalid source/provenance pair.'
+        }
+
+        # Read back the same bytes and object identity before returning. This
+        # proves that the no-write reuse path did not merely skip a call while
+        # another writer changed the marker underneath it.
+        Assert-PathObjectIdentity -Path $markerPath -ExpectedIdentity $markerIdentityBefore | Out-Null
+        $preservedReadback = Read-BoundedJsonObject -Path $markerPath -MaxBytes 65536
+        if ([string]$preservedReadback.sha256 -cne $markerSha256Before) {
+            throw 'Installer reused marker bytes changed during preserved marker readback.'
+        }
+        return [pscustomobject]@{
+            marker_path = $markerPath
+            marker_sha256 = [string]$preservedReadback.sha256
+            original_marker_sha256 = $markerSha256Before
+            bytes_preserved = $true
+            marker_rewritten = $false
+            contract = $preservedReadback.value.runtime_env
+        }
+    }
+    if ($PreserveExistingMarkerBytes) {
+        throw 'Reused install marker is missing its runtime .env provenance contract.'
+    }
+
     $configSource = [string]$ConfigResult.source
     $provenance = $null
     if ($configSource -eq 'config.example') {
@@ -1517,6 +1577,9 @@ function Set-InstallerRuntimeEnvProvenance {
     return [pscustomobject]@{
         marker_path = $markerPath
         marker_sha256 = [string]$readback.sha256
+        original_marker_sha256 = $markerSha256Before
+        bytes_preserved = $false
+        marker_rewritten = $true
         contract = $readback.value.runtime_env
     }
 }
@@ -1837,11 +1900,16 @@ try {
                     $installManifestCompatible = $installedManifest.ok -and [string]$installedManifest.manifest_sha256 -eq (Get-Sha256Hex -Path $manifestPath)
                 }
                 $markerPayload = $installedMarkerPayload
+                $expectedMarkerGeneration = '{0}:{1}:{2}' -f $manifestResult.manifest.commit, $manifestResult.manifest.tree, (Get-Sha256Hex -Path $manifestPath)
+                $markerRuntimeEnvPresent = $markerPayload.PSObject.Properties.Name -contains 'runtime_env' -and $null -ne $markerPayload.runtime_env
                 $markerCompatible = (
+                    [string]$markerPayload.schema_version -ceq 'hwpx/windows-install-marker/v1' -and
                     [string]$markerPayload.repository -eq [string]$manifestResult.manifest.repository -and
                     [string]$markerPayload.commit -eq [string]$manifestResult.manifest.commit -and
                     [string]$markerPayload.tree -eq [string]$manifestResult.manifest.tree -and
-                    [string]$markerPayload.source_manifest_sha256 -eq (Get-Sha256Hex -Path $manifestPath) -and
+                    [string]$markerPayload.source_manifest_sha256 -eq [string]$manifestResult.manifest_sha256 -and
+                    [string]$markerPayload.candidate_generation -ceq $expectedMarkerGeneration -and
+                    $markerRuntimeEnvPresent -and
                     $installManifestCompatible -and
                     (Test-Path -LiteralPath (Join-Path $install '.venv\Scripts\python.exe') -PathType Leaf) -and
                     (Test-Path -LiteralPath (Join-Path $install 'requirements-windows.lock') -PathType Leaf)
@@ -2183,7 +2251,7 @@ try {
     $configCreated = -not [bool]$configResult.candidate_env_existed_before
     $configPath = [string]$configResult.env_path
     $configCreatedSha256 = if ($configCreated -and (Test-Path -LiteralPath $configPath -PathType Leaf)) { Get-Sha256Hex -Path $configPath } else { $null }
-    $runtimeEnvProvenance = Set-InstallerRuntimeEnvProvenance -InstallRoot $candidateRoot -ManifestResult $manifestResult -ConfigResult $configResult
+    $runtimeEnvProvenance = Set-InstallerRuntimeEnvProvenance -InstallRoot $candidateRoot -ManifestResult $manifestResult -ConfigResult $configResult -PreserveExistingMarkerBytes:$reused
     $receipt.checks.runtime_env_provenance = $runtimeEnvProvenance
 
     $phase = 'activation'

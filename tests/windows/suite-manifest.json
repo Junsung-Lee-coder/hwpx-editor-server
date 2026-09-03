@@ -10,6 +10,7 @@
     "test_g5_runtime_env_contract.ps1",
     "test_g6_repairs.ps1",
     "test_g6_rollback_runtime.ps1",
+    "test_g7_marker_idempotency.ps1",
     "test_install_windows.ps1",
     "test_scheduled_task_extra_action.ps1",
     "test_scheduled_task_identity_equivalence.ps1",
