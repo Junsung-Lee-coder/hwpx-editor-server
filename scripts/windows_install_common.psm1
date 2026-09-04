@@ -3141,12 +3141,25 @@ function Get-VenvInterpreterMetadata {
         if ([string]::IsNullOrWhiteSpace($home) -or [string]::IsNullOrWhiteSpace($version)) { return $null }
         $canonicalHome = Get-CanonicalPath -Path $home -RequireExisting
         $baseLeaf = [IO.Path]::GetFileName($python)
-        $baseExecutable = Get-CanonicalPath -Path (Join-Path $canonicalHome $baseLeaf) -RequireExisting
+        $baseNames = @($baseLeaf)
+        $versionMatch = [regex]::Match($version.Trim(), '(?<![0-9])([0-9]+)\.([0-9]+)(?![0-9])')
+        if ($versionMatch.Success) {
+            $versionedLeaf = 'python{0}.{1}.exe' -f $versionMatch.Groups[1].Value, $versionMatch.Groups[2].Value
+            if ($baseNames -notcontains $versionedLeaf) { $baseNames += $versionedLeaf }
+        }
+        $baseExecutables = @()
+        foreach ($baseName in $baseNames) {
+            $baseCandidate = Join-Path $canonicalHome $baseName
+            if (-not (Test-Path -LiteralPath $baseCandidate -PathType Leaf)) { continue }
+            try { $baseExecutables += Get-CanonicalPath -Path $baseCandidate -RequireExisting } catch { }
+        }
+        if ($baseExecutables.Count -eq 0) { return $null }
         if (-not (Test-CanonicalPathWithinRoot -Path $python -Root $root)) { return $null }
         return [pscustomobject]@{
             config_path = Get-CanonicalPath -Path $configPath -RequireExisting
             home = $canonicalHome
-            base_executable = $baseExecutable
+            base_executable = [string]$baseExecutables[0]
+            base_executables = @($baseExecutables)
             version = $version.Trim()
             version_key = Get-InterpreterVersionKey -Value $version
         }
@@ -3263,7 +3276,12 @@ function Test-CanonicalProcessIdentity {
                 # Accept that relationship only when pyvenv.cfg binds the exact
                 # candidate venv to the reported executable and version.
                 $venv = Get-VenvInterpreterMetadata -RootPath $root -ExpectedPythonPath $expectedPython
-                if ($null -eq $venv -or $canonicalExecutable -ne $venv.base_executable) { return $false }
+                if ($null -eq $venv) { return $false }
+                $baseExecutableMatched = $false
+                foreach ($baseExecutable in @($venv.base_executables)) {
+                    if ([string]$baseExecutable -ceq $canonicalExecutable) { $baseExecutableMatched = $true; break }
+                }
+                if (-not $baseExecutableMatched) { return $false }
                 $expectedVersionKey = if (-not [string]::IsNullOrWhiteSpace($ExpectedInterpreterVersion)) {
                     Get-InterpreterVersionKey -Value $ExpectedInterpreterVersion
                 }

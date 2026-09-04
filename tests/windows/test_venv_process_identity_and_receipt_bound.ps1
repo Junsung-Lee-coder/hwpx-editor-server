@@ -97,6 +97,44 @@ try {
         -ExpectedInterpreterVersion $expectedInterpreterVersion
     if (-not $legitimate) { throw 'A legitimate venv/base-interpreter process was rejected.' }
 
+    # Windows Store/Python installations may report the versioned base image
+    # (for example python3.13.exe) rather than the venv launcher name. Keep the
+    # venv home bound to a directory that contains only that versioned image so
+    # this acceptance check fails unless the alternate basename is admitted.
+    $alternateHome = Join-Path $tempRoot 'alternate-python-home'
+    $alternatePython = Join-Path $alternateHome ('python' + $expectedInterpreterVersion + '.exe')
+    New-Item -ItemType Directory -Force -Path $alternateHome | Out-Null
+    Copy-Item -LiteralPath $basePython -Destination $alternatePython -Force
+    [System.IO.File]::WriteAllText(
+        $venvConfig,
+        "home = $alternateHome`r`nversion = $expectedInterpreterVersion`r`ninclude-system-site-packages = false`r`n",
+        (New-Object System.Text.UTF8Encoding($false))
+    )
+    $alternateProcess = [pscustomobject]@{
+        ProcessId = $processId + 2
+        Name = 'python.exe'
+        ExecutablePath = $alternatePython
+        ExecutableVersion = $baseVersionText
+        CommandLine = ('"{0}" -m app.api_server' -f $venvPython)
+    }
+    $alternateListener = [pscustomobject]@{
+        OwningProcess = $alternateProcess.ProcessId
+        LocalAddress = '127.0.0.1'
+        LocalPort = $apiPort
+        State = 'Listen'
+    }
+    $alternateLegitimate = Test-CanonicalProcessIdentity `
+        -Process $alternateProcess `
+        -RootPath $candidateRoot `
+        -ExpectedPythonPath $venvPython `
+        -ModuleNames @('app.api_server') `
+        -ExpectedArguments '-m app.api_server' `
+        -ExpectedTaskIdentity $taskIdentity `
+        -ExpectedListener $alternateListener `
+        -ExpectedListenerPort $apiPort `
+        -ExpectedInterpreterVersion $expectedInterpreterVersion
+    if (-not $alternateLegitimate) { throw 'A versioned Windows base-interpreter process was rejected.' }
+
     $foreignListener = [pscustomobject]@{
         OwningProcess = $processId + 1
         LocalAddress = '127.0.0.1'
