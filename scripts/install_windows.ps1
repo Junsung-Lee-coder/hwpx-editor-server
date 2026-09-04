@@ -410,7 +410,7 @@ function Invoke-StaleInstallTransactionRecovery {
         Recover-StaleVerifierHandoff -Journal $journal -Record $record
         return
     }
-    if ($state -in @('preflight-admitted', 'install-started', 'backup-claim-planned', 'backup-claim-created') -and
+    if ($state -in @('preflight-admitted', 'source-manifest-sealed', 'install-started', 'backup-claim-planned', 'backup-claim-created') -and
         [string]::IsNullOrWhiteSpace([string]$journal.snapshot_path) -and
         [string]::IsNullOrWhiteSpace([string]$journal.candidate_root)) {
         # No destructive transition was admitted; the previous process only
@@ -420,6 +420,13 @@ function Invoke-StaleInstallTransactionRecovery {
             $staleClaimIdentity = [string](Get-OptionalPropertyValue -Object $journal -Name 'backup_claim_identity')
             if ([string]::IsNullOrWhiteSpace($staleClaimIdentity)) { throw 'Stale transaction claim has no sealed object identity.' }
             Remove-RunPathClaim -ClaimPath $staleClaim -ExpectedObjectIdentity $staleClaimIdentity
+        }
+        $staleGeneratedManifestPath = [string](Get-OptionalPropertyValue -Object $journal -Name 'generated_manifest_path')
+        $staleGeneratedManifestIdentity = [string](Get-OptionalPropertyValue -Object $journal -Name 'generated_manifest_identity')
+        $staleGeneratedManifestSha256 = [string](Get-OptionalPropertyValue -Object $journal -Name 'generated_manifest_sha256')
+        $staleGeneratedManifestOwned = [bool](Get-OptionalPropertyValue -Object $journal -Name 'generated_manifest_owned_by_run')
+        if ($staleGeneratedManifestOwned -and $staleGeneratedManifestPath) {
+            Remove-GeneratedSourceManifest -Path $staleGeneratedManifestPath -ExpectedIdentity $staleGeneratedManifestIdentity -ExpectedSha256 $staleGeneratedManifestSha256 -OwnedByRun:$staleGeneratedManifestOwned | Out-Null
         }
         Assert-PathObjectIdentity -Path $record.path -ExpectedIdentity $record.object_identity | Out-Null
         Remove-PathIdentityExact -Path $record.path -ExpectedObjectIdentity $record.object_identity | Out-Null
@@ -1941,6 +1948,11 @@ try {
         file_count = [int]$manifestResult.file_count
     }
     $receipt.candidate_generation = '{0}:{1}:{2}' -f $manifestResult.manifest.commit, $manifestResult.manifest.tree, $manifestResult.manifest_sha256
+    # A generated Git fallback manifest is a run-owned temporary input. Seal
+    # its path/hash/identity in the journal immediately after authentication so
+    # a hard kill before candidate creation still leaves deterministic cleanup
+    # evidence for the next installer invocation.
+    Write-InstallTransactionJournal -State 'source-manifest-sealed' | Out-Null
 
     $apiPort = Resolve-ApiPort -InstallRoot $install -RequestedApiPort $requestedApiPort
     $receipt.api_port = $apiPort

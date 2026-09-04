@@ -228,26 +228,30 @@ namespace HwpxInstallNative {
                 string actualIdentity = GetIdentity(handle);
                 if (actualIdentity != expectedIdentity)
                     throw new IOException("Path identity changed before identity-bound move: " + source);
-                if (GetPathIdentity(source) != actualIdentity)
+                uint sourceAttributes = GetFileAttributes(source);
+                if (sourceAttributes == 0xFFFFFFFF)
                     throw new IOException("Source pathname no longer names the identity-bound object: " + source);
                 uint destinationAttributes = GetFileAttributes(destination);
                 if (destinationAttributes != 0xFFFFFFFF)
                     throw new IOException("Identity-bound move destination already exists: " + destination);
                 int nameOffset = IntPtr.Size == 8 ? 20 : 12;
                 byte[] nameBytes = System.Text.Encoding.Unicode.GetBytes(destination);
-                IntPtr renameBuffer = Marshal.AllocHGlobal(nameOffset + nameBytes.Length);
+                int renameBufferSize = nameOffset + nameBytes.Length + 2;
+                IntPtr renameBuffer = Marshal.AllocHGlobal(renameBufferSize);
                 try {
-                    for (int index = 0; index < nameOffset + nameBytes.Length; index++) Marshal.WriteByte(renameBuffer, index, 0);
+                    for (int index = 0; index < renameBufferSize; index++) Marshal.WriteByte(renameBuffer, index, 0);
                     Marshal.WriteByte(renameBuffer, 0, 0);
                     Marshal.WriteIntPtr(renameBuffer, IntPtr.Size == 8 ? 8 : 4, IntPtr.Zero);
                     Marshal.WriteInt32(renameBuffer, IntPtr.Size == 8 ? 16 : 8, nameBytes.Length);
                     Marshal.Copy(nameBytes, 0, IntPtr.Add(renameBuffer, nameOffset), nameBytes.Length);
-                    if (!SetFileInformationByHandle(handle, FileRenameInfo, renameBuffer, (uint)(nameOffset + nameBytes.Length)))
+                    if (!SetFileInformationByHandle(handle, FileRenameInfo, renameBuffer, (uint)renameBufferSize))
                         throw new Win32Exception(Marshal.GetLastWin32Error(), "SetFileInformationByHandle rename failed");
                 }
                 finally { Marshal.FreeHGlobal(renameBuffer); }
-                if (GetPathIdentity(destination) != actualIdentity)
-                    throw new IOException("Identity-bound move destination readback did not match: " + destination);
+                if (GetFileAttributes(destination) == 0xFFFFFFFF)
+                    throw new IOException("Identity-bound move destination was not visible after rename: " + destination);
+                if (GetIdentity(handle) != actualIdentity)
+                    throw new IOException("Identity-bound move handle identity changed during rename: " + source);
             }
             finally { CloseHandle(handle); }
         }
@@ -2551,7 +2555,15 @@ function Get-SourceManifest {
             }
             continue
         }
-        if ($item.Name.ToLowerInvariant().StartsWith('.env') -or $item.Name.ToLowerInvariant().StartsWith('.hwpx-install') -or $item.Extension.ToLowerInvariant() -in $runtimeSuffixes) { continue }
+        $runtimeEnvMarker = $item.Name.ToLowerInvariant().StartsWith('.env')
+        if ($runtimeEnvMarker) {
+            $mismatches += [pscustomobject]@{
+                path = $relativeActual
+                reason = if ($runtimeEnvContractApplied) { 'runtime .env is outside the bound provenance path' } else { 'runtime .env requires explicit installer provenance' }
+            }
+            continue
+        }
+        if ($item.Name.ToLowerInvariant().StartsWith('.hwpx-install') -or $item.Extension.ToLowerInvariant() -in $runtimeSuffixes) { continue }
         if ($actualParts.Count -eq 1 -and $generatedRootManifestNames -contains $item.Name.ToLowerInvariant()) { continue }
         if ($item.FullName -eq $manifestCanonical -or ($archiveName -and $relativeActual.Replace([char]92, '/') -eq $archiveName.Replace([char]92, '/'))) { continue }
         if (Test-ProhibitedPrivateSourceMember -RelativePath $relativeActual) {
