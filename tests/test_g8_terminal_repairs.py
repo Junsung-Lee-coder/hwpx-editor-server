@@ -253,6 +253,82 @@ class G8TerminalPopplerRedTests(unittest.TestCase):
                     platform="win32",
                 )
 
+    def test_winget_budget_exhaustion_is_explicit_not_nondeterministic_truncation(self) -> None:
+        poppler = __import__("app.poppler", fromlist=["_iter_winget_candidates"])
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            (root / "a").mkdir()
+            (root / "b").mkdir()
+            with self.assertRaisesRegex(Exception, "budget|bounded|deterministic|entry"):
+                list(
+                    poppler._iter_winget_candidates(
+                        [root],
+                        platform="win32",
+                        max_entries=1,
+                    )
+                )
+
+
+class G8TerminalInstallerContractRedTests(unittest.TestCase):
+    def _read(self, name: str) -> str:
+        return (ROOT / "scripts" / name).read_text(encoding="utf-8")
+
+    def test_snapshot_restore_uses_exact_no_clobber_registration(self) -> None:
+        common = self._read("windows_install_common.psm1")
+        restore = common[common.index("function Restore-InstallSnapshot") :]
+        self.assertIn("Register-ScheduledTaskExactNoClobber", restore)
+        self.assertNotIn("Register-ScheduledTask -TaskName $taskName -TaskPath $taskPath -Xml ([string]$task.xml) -Force", restore)
+
+    def test_preserve_move_stops_queued_tasks_before_unregister(self) -> None:
+        installer = self._read("install_windows.ps1")
+        admission = installer[installer.index("function Restore-PreMoveTaskAdmission") : installer.index("function New-PythonInvocation")]
+        preserve = installer[installer.index("Write-InstallTransactionJournal -State 'task-disable-started'") : installer.index("Write-InstallTransactionJournal -State 'tasks-disabled'")]
+        common = self._read("windows_install_common.psm1")
+        self.assertIn("@('Running', 'Queued')", admission)
+        self.assertIn("@('Running', 'Queued')", preserve)
+        self.assertIn("Stop-ScheduledTaskExactAndWait", preserve)
+        self.assertIn("if ($state -notin @('Running', 'Queued'))", common)
+
+    def test_fresh_install_recovery_passes_run_owned_install_root_to_cleanup(self) -> None:
+        installer = self._read("install_windows.ps1")
+        recovery = installer[installer.index("function Invoke-StaleInstallTransactionRecovery") : installer.index("function Save-InstallerReceipt")]
+        self.assertIn("if ($installExists -and $installCreatedByRun -and -not $backupExists)", recovery)
+        self.assertIn("$restoreCandidate = $install", recovery)
+
+    def test_port_preflight_enumerates_all_listener_addresses(self) -> None:
+        installer = self._read("install_windows.ps1")
+        port = installer[installer.index("function Assert-PortAvailable") : installer.index("function Assert-TaskCompatibility")]
+        self.assertIn("Get-NetTCPConnection -LocalPort $Port -State Listen", port)
+        self.assertNotIn("-LocalAddress '127.0.0.1'", port)
+        self.assertIn("local_address", port)
+
+    def test_generated_fallback_manifest_is_run_owned_and_cleanup_bound(self) -> None:
+        installer = self._read("install_windows.ps1")
+        self.assertIn("generatedSourceManifestPath", installer)
+        self.assertIn("generatedSourceManifestSha256", installer)
+        self.assertIn("generatedSourceManifestIdentity", installer)
+        self.assertIn("Remove-GeneratedSourceManifest", installer)
+        self.assertIn("generated_manifest_path", installer)
+
+    def test_module_bootstrap_failure_has_a_minimal_receipt_path(self) -> None:
+        installer = self._read("install_windows.ps1")
+        bootstrap_end = installer.index("$source = $null")
+        bootstrap = installer[:bootstrap_end]
+        self.assertIn("bootstrapReceiptPath", bootstrap)
+        self.assertIn("Import-Module", bootstrap)
+        self.assertIn("catch", bootstrap)
+        self.assertIn("FAIL_BOOTSTRAP", bootstrap)
+
+    def test_destructive_path_mutations_use_handle_bound_identity_operations(self) -> None:
+        common = self._read("windows_install_common.psm1")
+        installer = self._read("install_windows.ps1")
+        self.assertIn("DeletePathIfIdentity", common)
+        self.assertIn("MovePathIfIdentity", common)
+        self.assertIn("function Remove-PathIdentityExact", common)
+        self.assertIn("function Move-PathIdentityExact", common)
+        self.assertIn("Remove-PathIdentityExact", installer)
+        self.assertIn("Move-PathIdentityExact", installer)
+
 
 class G8TerminalCliCasRedTests(unittest.TestCase):
     def test_expected_generation_rejects_boolean(self) -> None:

@@ -197,30 +197,30 @@ def _iter_winget_candidates(
     """Yield supported binaries from bounded, non-reparse traversal."""
 
     if max_depth < 0 or max_entries <= 0 or max_seconds <= 0:
-        return
+        raise PopplerResolutionError("WinGet discovery budget is invalid")
     names = {name.casefold() for name in _candidate_names(platform)}
     deadline = time.monotonic() + float(max_seconds)
     visited_entries = 0
     for root in sorted((_normalise_path(item) for item in roots), key=lambda p: str(p).casefold()):
         if time.monotonic() >= deadline:
-            return
+            raise PopplerResolutionError("WinGet discovery exceeded its deterministic time budget")
         if not root.exists() or not root.is_dir() or _has_reparse_component(root):
             continue
         pending: list[tuple[Path, int]] = [(root, 0)]
         while pending:
             if time.monotonic() >= deadline or visited_entries >= max_entries:
-                return
+                raise PopplerResolutionError("WinGet discovery exceeded its deterministic entry/time budget")
             current, depth = pending.pop()
             try:
                 with os.scandir(current) as scanner:
                     children: list[os.DirEntry[str]] = []
                     for entry in scanner:
-                        if time.monotonic() >= deadline or visited_entries >= max_entries:
-                            return
+                        if time.monotonic() >= deadline:
+                            raise PopplerResolutionError("WinGet discovery exceeded its deterministic time budget")
                         visited_entries += 1
+                        if visited_entries > max_entries:
+                            raise PopplerResolutionError("WinGet discovery exceeded its deterministic entry budget")
                         children.append(entry)
-                        if len(children) >= max_entries:
-                            break
             except OSError:
                 continue
             children.sort(key=lambda entry: entry.name.casefold())

@@ -23,7 +23,7 @@ from app.local_cli_runtime import (
 )
 from app.local_cli_router import build_local_cli_router
 from app.local_cli_service import LocalCliMutationError, LocalCliService, LocalCliServiceError
-from app.poppler import _iter_winget_candidates
+from app.poppler import PopplerResolutionError, _iter_winget_candidates
 from local_cli_v1 import main as cli_main
 from local_cli_v1.proof_packet import ProofPacketError, build_proof_packet
 from local_cli_v1 import state as cli_state
@@ -516,7 +516,8 @@ class BoundedTraversalRepairTests(unittest.TestCase):
             late = root / 'z-last' / 'pdftoppm.exe'
             late.parent.mkdir()
             late.write_bytes(b'exe')
-            self.assertNotIn(late, list(_iter_winget_candidates([root], platform='win32', max_entries=5)))
+            with self.assertRaisesRegex(PopplerResolutionError, 'budget|bounded|deterministic|entry'):
+                list(_iter_winget_candidates([root], platform='win32', max_entries=5))
             self.assertIn(late, list(_iter_winget_candidates([root], platform='win32', max_entries=20)))
 
     def test_winget_traversal_does_not_yield_symlinked_candidate(self) -> None:

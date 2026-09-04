@@ -31,7 +31,7 @@ class G17WindowsInstallerRepairTests(unittest.TestCase):
 
     def test_preserve_move_captures_backup_identity_before_post_move_fault(self) -> None:
         text = (ROOT / "scripts" / "install_windows.ps1").read_text(encoding="utf-8")
-        move = text.index("[System.IO.Directory]::Move($install, $backupRoot)")
+        move = text.index("Move-PathIdentityExact -Source $install -Destination $backupRoot")
         fault = text.index("after-existing-root-compatibility", move)
         post_move = text[move:fault]
 

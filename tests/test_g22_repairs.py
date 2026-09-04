@@ -840,8 +840,8 @@ class G22WindowsContractRepairTests(unittest.TestCase):
     def test_fresh_rollback_removes_tasks_before_candidate_root(self) -> None:
         common = self._read("windows_install_common.psm1")
         restore = common[common.index("function Restore-InstallSnapshot") :]
-        self.assertLess(restore.index("Register-ScheduledTask"), restore.index("Remove-Item -LiteralPath $CandidateRoot"))
-        self.assertIn("Unregister-ScheduledTask", restore[: restore.index("Remove-Item -LiteralPath $CandidateRoot")])
+        self.assertLess(restore.index("Register-ScheduledTask"), restore.index("Remove-PathIdentityExact -Path $CandidateRoot"))
+        self.assertIn("Unregister-ScheduledTask", restore[: restore.index("Remove-PathIdentityExact -Path $CandidateRoot")])
 
     def test_fresh_activation_has_after_registration_fault_injection(self) -> None:
         installer = self._read("install_windows.ps1")

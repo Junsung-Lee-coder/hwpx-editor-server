@@ -97,6 +97,17 @@ class G19ExternalIdentityBindingTests(unittest.TestCase):
         self.assertIn("--porcelain=v1", identity_function)
         self.assertIn("dirty", identity_function.lower())
 
+    def test_source_manifest_skips_runtime_env_before_private_source_marker(self) -> None:
+        common = self.read("windows_install_common.psm1")
+        manifest_function = common[
+            common.index("function Get-SourceManifest") : common.index(
+                "function Resolve-WindowsPrincipalIdentity"
+            )
+        ]
+        env_marker = "item.Name.ToLowerInvariant().StartsWith('.env')"
+        private_marker = "Test-ProhibitedPrivateSourceMember -RelativePath $relativeActual"
+        self.assertLess(manifest_function.index(env_marker), manifest_function.index(private_marker))
+
     def test_verifier_requires_the_same_independent_binding_for_gitless_receivers(self) -> None:
         verifier = self.read("verify_windows.ps1")
         for token in (

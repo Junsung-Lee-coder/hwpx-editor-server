@@ -18,11 +18,50 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$commonPath = Join-Path $PSScriptRoot 'windows_install_common.psm1'
-Import-Module $commonPath -Force
+$bootstrapReceiptPath = $null
+try
+{
+    # Module import and path bootstrap happen before the normal receipt-aware
+    # transaction scope exists. Keep a private, bounded bootstrap receipt so a
+    # missing/corrupt common module is still observable without trusting the
+    # caller's unadmitted ReceiptPath.
+    $bootstrapReceiptPath = [IO.Path]::Combine(
+        [IO.Path]::GetTempPath(),
+        ('hwpx-install-bootstrap-' + [Guid]::NewGuid().ToString('N') + '.json')
+    )
+    $commonPath = Join-Path $PSScriptRoot 'windows_install_common.psm1'
+    Import-Module $commonPath -Force
+}
+catch {
+    $bootstrapError = [string]$_.Exception.Message
+    if ($bootstrapError.Length -gt 4096) { $bootstrapError = $bootstrapError.Substring(0, 4096) }
+    $bootstrapReceipt = [ordered]@{
+        schema_version = 'hwpx/windows-install/v1'
+        status = 'FAIL_BOOTSTRAP'
+        failure_class = 'FAIL_BOOTSTRAP'
+        status_code = 99
+        phase = 'bootstrap'
+        error = $bootstrapError
+        receipt_path = $bootstrapReceiptPath
+    }
+    try
+    {
+        [IO.File]::WriteAllText(
+            $bootstrapReceiptPath,
+            ($bootstrapReceipt | ConvertTo-Json -Depth 4),
+            (New-Object Text.UTF8Encoding($false))
+        )
+    }
+    catch { }
+    throw
+}
 
 $source = $null
 $install = $null
+$script:generatedSourceManifestPath = $null
+$script:generatedSourceManifestSha256 = $null
+$script:generatedSourceManifestIdentity = $null
+$script:generatedSourceManifestOwnedByRun = $false
 $requestedApiPort = $ApiPort
 $installInputPath = [System.IO.Path]::GetFullPath([Environment]::ExpandEnvironmentVariables($InstallRoot))
 $installRootExistedAtStart = Test-Path -LiteralPath $installInputPath -PathType Container
@@ -62,6 +101,7 @@ $candidateInstallCreated = $false
 $configCreated = $false
 $configPath = $null
 $configCreatedSha256 = $null
+$configCreatedIdentity = $null
 $installRootLock = $null
 $receiptPreimageBackupPath = $null
 $receiptPreimageBackupIdentity = $null
@@ -149,6 +189,10 @@ function Get-InstallerTransactionJournalPayload {
         snapshot_path = [string]$snapshotPath
         snapshot_sha256 = [string]$snapshotSha256
         snapshot_identity = [string]$snapshotIdentity
+        generated_manifest_path = [string]$script:generatedSourceManifestPath
+        generated_manifest_sha256 = [string]$script:generatedSourceManifestSha256
+        generated_manifest_identity = [string]$script:generatedSourceManifestIdentity
+        generated_manifest_owned_by_run = [bool]$script:generatedSourceManifestOwnedByRun
         task_names = @($taskNames)
         task_path = [string]$taskPath
         api_port = $apiPort
@@ -181,7 +225,7 @@ function Remove-InstallTransactionJournal {
     if (-not $transactionJournalOwnerRun) { throw 'Refusing to remove a transaction journal without current-run ownership.' }
     if (Test-Path -LiteralPath $transactionJournalPath -PathType Leaf) {
         Assert-PathObjectIdentity -Path $transactionJournalPath -ExpectedIdentity $transactionJournalIdentity | Out-Null
-        Remove-Item -LiteralPath $transactionJournalPath -Force -ErrorAction Stop
+        Remove-PathIdentityExact -Path $transactionJournalPath -ExpectedObjectIdentity $transactionJournalIdentity | Out-Null
         if (Test-Path -LiteralPath $transactionJournalPath) { throw 'Transaction journal remained after terminal cleanup.' }
     }
     $transactionJournalPath = $null
@@ -265,7 +309,7 @@ function Recover-StaleVerifierHandoff {
         $released = Stop-InstallProcesses -RootPath $install -PreserveProcessIds @()
         if (-not $released.ok -or @($released.remaining).Count -gt 0) { throw 'Stale verifier handoff processes were not fully released.' }
         Assert-PathObjectIdentity -Path $install -ExpectedIdentity $candidateIdentity | Out-Null
-        Remove-Item -LiteralPath $install -Recurse -Force -ErrorAction Stop
+        Remove-PathIdentityExact -Path $install -ExpectedObjectIdentity $candidateIdentity | Out-Null
         if (Test-Path -LiteralPath $install) { throw 'Stale verifier handoff install root remained after cleanup.' }
     }
     $snapshotPathFromJournal = [string](Get-OptionalPropertyValue -Object $Journal -Name 'snapshot_path')
@@ -285,7 +329,8 @@ function Recover-StaleVerifierHandoff {
         install_root = $install
     }
     Write-StableTransactionJournal -Path $Record.path -Value $recoveredPayload | Out-Null
-    Remove-Item -LiteralPath $Record.path -Force -ErrorAction Stop
+    $recoveredJournalIdentity = Get-PathObjectIdentity -Path $Record.path -RequireExisting
+    Remove-PathIdentityExact -Path $Record.path -ExpectedObjectIdentity $recoveredJournalIdentity | Out-Null
     $receipt.recovery.outcome = 'recovered-stale-verifier-handoff'
 }
 
@@ -309,11 +354,49 @@ function Invoke-StaleInstallTransactionRecovery {
     if ([string]::IsNullOrWhiteSpace($owner) -or $owner -eq $runId) {
         throw 'Transaction journal owner identity is missing or collides with the current run.'
     }
-    if ($state -in @('completed', 'terminal-committing', 'recovered')) {
+    if ($state -in @('completed', 'recovered')) {
         Assert-PathObjectIdentity -Path $record.path -ExpectedIdentity $record.object_identity | Out-Null
-        Remove-Item -LiteralPath $record.path -Force -ErrorAction Stop
+        Remove-PathIdentityExact -Path $record.path -ExpectedObjectIdentity $record.object_identity | Out-Null
         $receipt.recovery.outcome = 'discarded-terminal-journal'
         return
+    }
+    if ($state -eq 'terminal-committing') {
+        # terminal-committing is a recoverable intent, not proof that the
+        # receipt or its cleanup was durable. Reconcile it only when the
+        # journal-bound receipt has a valid terminal readback; otherwise let
+        # the normal snapshot rollback path adjudicate the interrupted run.
+        $terminalReceiptPath = [string](Get-OptionalPropertyValue -Object $journal -Name 'receipt_path')
+        $terminalReceiptValid = $false
+        if (-not [string]::IsNullOrWhiteSpace($terminalReceiptPath) -and (Test-Path -LiteralPath $terminalReceiptPath -PathType Leaf)) {
+            try {
+                $terminalCapture = Read-BoundedJsonObject -Path $terminalReceiptPath -MaxBytes 4194304
+                $terminalValue = $terminalCapture.value
+                $terminalStatus = [string](Get-OptionalPropertyValue -Object $terminalValue -Name 'status')
+                $terminalReceiptValid = (
+                    [string](Get-OptionalPropertyValue -Object $terminalValue -Name 'schema_version') -ceq 'hwpx/windows-install/v1' -and
+                    [string](Get-OptionalPropertyValue -Object $terminalValue -Name 'run_id') -ceq $owner -and
+                    $terminalStatus -match '^(PASS|PASS_RUNTIME_ONLY|FAIL_|ROLLED_BACK)' -and
+                    [int](Get-OptionalPropertyValue -Object $terminalValue -Name 'status_code') -ge 0
+                )
+            }
+            catch { $terminalReceiptValid = $false }
+        }
+        if ($terminalReceiptValid) {
+            $generatedPath = [string](Get-OptionalPropertyValue -Object $journal -Name 'generated_manifest_path')
+            $generatedIdentity = [string](Get-OptionalPropertyValue -Object $journal -Name 'generated_manifest_identity')
+            $generatedSha256 = [string](Get-OptionalPropertyValue -Object $journal -Name 'generated_manifest_sha256')
+            $generatedOwned = [bool](Get-OptionalPropertyValue -Object $journal -Name 'generated_manifest_owned_by_run')
+            if ($generatedOwned -and $generatedPath) {
+                Remove-GeneratedSourceManifest -Path $generatedPath -ExpectedIdentity $generatedIdentity -ExpectedSha256 $generatedSha256 -OwnedByRun:$generatedOwned
+            }
+            Assert-PathObjectIdentity -Path $record.path -ExpectedIdentity $record.object_identity | Out-Null
+            Remove-PathIdentityExact -Path $record.path -ExpectedObjectIdentity $record.object_identity | Out-Null
+            $receipt.recovery.outcome = 'reconciled-terminal-journal'
+            return
+        }
+        # No trustworthy terminal receipt exists. Continue through the stale
+        # snapshot recovery below, which removes run-owned candidate state and
+        # restores the sealed predecessor instead of discarding evidence.
     }
     if ($state -eq 'verifier-handoff-started') {
         $ownerProcessId = 0
@@ -339,7 +422,7 @@ function Invoke-StaleInstallTransactionRecovery {
             Remove-RunPathClaim -ClaimPath $staleClaim -ExpectedObjectIdentity $staleClaimIdentity
         }
         Assert-PathObjectIdentity -Path $record.path -ExpectedIdentity $record.object_identity | Out-Null
-        Remove-Item -LiteralPath $record.path -Force -ErrorAction Stop
+        Remove-PathIdentityExact -Path $record.path -ExpectedObjectIdentity $record.object_identity | Out-Null
         $receipt.recovery.outcome = 'discarded-non-destructive-stale-run'
         return
     }
@@ -369,7 +452,7 @@ function Invoke-StaleInstallTransactionRecovery {
         Assert-PathObjectIdentity -Path $install -ExpectedIdentity $installIdentity | Out-Null
         Stop-InstallProcesses -RootPath $install -PreserveProcessIds @() | Out-Null
         Assert-PathObjectIdentity -Path $install -ExpectedIdentity $installIdentity | Out-Null
-        Remove-Item -LiteralPath $install -Recurse -Force -ErrorAction Stop
+        Remove-PathIdentityExact -Path $install -ExpectedObjectIdentity $installIdentity | Out-Null
         $installExists = $false
     }
     if ($backupExists) {
@@ -385,11 +468,12 @@ function Invoke-StaleInstallTransactionRecovery {
         Assert-PathObjectIdentity -Path $recoveryQuarantine -ExpectedIdentity $candidateIdentity | Out-Null
         $candidate = $recoveryQuarantine
         $candidateExists = $true
-        $candidateIdentity = Get-PathObjectIdentity -Path $recoveryQuarantine -RequireExisting
+        $candidateIdentity = Get-PathObjectIdentity -Path $candidate -RequireExisting
     }
     if (-not $installExists -and $backupExists) {
-        [System.IO.Directory]::Move($backup, $install)
+        Move-PathIdentityExact -Source $backup -Destination $install -ExpectedObjectIdentity $backupIdentity | Out-Null
         $installExists = $true
+        $backupExists = $false
     }
     elseif ($installExists -and $backupExists -and ($candidateExists -or $state -eq 'candidate-temp-removing') -and (($candidate -eq $install) -or $state -eq 'candidate-temp-removing')) {
         if ($state -eq 'candidate-temp-removing' -and $installCreatedByRun -and -not [string]::IsNullOrWhiteSpace($installIdentity)) {
@@ -399,18 +483,45 @@ function Invoke-StaleInstallTransactionRecovery {
         $activeCandidateIdentity = if ($state -eq 'candidate-temp-removing') { $installIdentity } else { $candidateIdentity }
         Assert-PathObjectIdentity -Path $install -ExpectedIdentity $activeCandidateIdentity | Out-Null
         $quarantine = $recoveryQuarantine
-        [System.IO.Directory]::Move($install, $quarantine)
-        [System.IO.Directory]::Move($backup, $install)
+        Move-PathIdentityExact -Source $install -Destination $quarantine -ExpectedObjectIdentity $activeCandidateIdentity | Out-Null
+        $installExists = $false
+        Move-PathIdentityExact -Source $backup -Destination $install -ExpectedObjectIdentity $backupIdentity | Out-Null
+        $backupExists = $false
+        $installExists = $true
         $candidate = $quarantine
         $candidateExists = $true
         $candidateIdentity = Get-PathObjectIdentity -Path $candidate -RequireExisting
     }
-    $restoreCandidate = if ($candidateExists -and $candidate -ne $install) { $candidate } else { $null }
-    $restoreCandidateIdentity = if ($restoreCandidate) { $candidateIdentity } else { $null }
+    $restoreCandidate = $null
+    $restoreCandidateIdentity = $null
+    if ($installExists -and $installCreatedByRun -and -not $backupExists) {
+        # Fresh installs have no predecessor backup. The active install path
+        # is still a run-owned candidate and must be passed to task/root
+        # cleanup after a hard kill in any later journal state.
+        $restoreCandidate = $install
+        $restoreCandidateIdentity = $installIdentity
+    }
+    elseif ($candidateExists -and $candidate -ne $install) {
+        $restoreCandidate = $candidate
+        $restoreCandidateIdentity = $candidateIdentity
+    }
+    $secondaryCandidate = if ($candidateExists -and $candidate -ne $restoreCandidate) { $candidate } else { $null }
+    $secondaryCandidateIdentity = if ($secondaryCandidate) { $candidateIdentity } else { $null }
     Restore-InstallSnapshot -SnapshotPath $journalSnapshot -ExpectedSnapshotSha256 $journalSnapshotSha -ExpectedSnapshotIdentity $journalSnapshotIdentity -ExpectedRunId $owner -CandidateRoot $restoreCandidate -ExpectedCandidateRootIdentity $restoreCandidateIdentity -CandidateRootOwnedByRun:$([bool]$restoreCandidate) -RestoreTasks | Out-Null
     if ($restoreCandidate -and (Test-Path -LiteralPath $restoreCandidate -PathType Container)) {
         Assert-PathObjectIdentity -Path $restoreCandidate -ExpectedIdentity $restoreCandidateIdentity | Out-Null
-        Remove-Item -LiteralPath $restoreCandidate -Recurse -Force -ErrorAction Stop
+        Remove-PathIdentityExact -Path $restoreCandidate -ExpectedObjectIdentity $restoreCandidateIdentity | Out-Null
+    }
+    if ($secondaryCandidate -and (Test-Path -LiteralPath $secondaryCandidate -PathType Container)) {
+        Assert-PathObjectIdentity -Path $secondaryCandidate -ExpectedIdentity $secondaryCandidateIdentity | Out-Null
+        Remove-PathIdentityExact -Path $secondaryCandidate -ExpectedObjectIdentity $secondaryCandidateIdentity | Out-Null
+    }
+    $staleGeneratedManifestPath = [string](Get-OptionalPropertyValue -Object $journal -Name 'generated_manifest_path')
+    $staleGeneratedManifestIdentity = [string](Get-OptionalPropertyValue -Object $journal -Name 'generated_manifest_identity')
+    $staleGeneratedManifestSha256 = [string](Get-OptionalPropertyValue -Object $journal -Name 'generated_manifest_sha256')
+    $staleGeneratedManifestOwned = [bool](Get-OptionalPropertyValue -Object $journal -Name 'generated_manifest_owned_by_run')
+    if ($staleGeneratedManifestOwned -and $staleGeneratedManifestPath) {
+        Remove-GeneratedSourceManifest -Path $staleGeneratedManifestPath -ExpectedIdentity $staleGeneratedManifestIdentity -ExpectedSha256 $staleGeneratedManifestSha256 -OwnedByRun:$staleGeneratedManifestOwned | Out-Null
     }
     $staleClaim = [string](Get-OptionalPropertyValue -Object $journal -Name 'backup_claim_path')
     if (-not [string]::IsNullOrWhiteSpace($staleClaim) -and (Test-Path -LiteralPath $staleClaim -PathType Leaf)) {
@@ -420,7 +531,8 @@ function Invoke-StaleInstallTransactionRecovery {
     }
     $recoveredPayload = [ordered]@{ schema_version = 'hwpx/windows-install-transaction/v1'; owner_run_id = $owner; state = 'recovered'; recovered_by_run_id = $runId; recovered_at_utc = [DateTime]::UtcNow.ToString('o'); install_root = $install }
     Write-StableTransactionJournal -Path $record.path -Value $recoveredPayload | Out-Null
-    Remove-Item -LiteralPath $record.path -Force -ErrorAction Stop
+    $recoveredJournalIdentity = Get-PathObjectIdentity -Path $record.path -RequireExisting
+    Remove-PathIdentityExact -Path $record.path -ExpectedObjectIdentity $recoveredJournalIdentity | Out-Null
     $receipt.recovery.outcome = 'recovered-and-cleaned'
 }
 
@@ -464,6 +576,43 @@ function Save-InstallerReceipt {
     }
 }
 
+function Remove-GeneratedSourceManifest {
+    param(
+        [string]$Path = $script:generatedSourceManifestPath,
+        [string]$ExpectedIdentity = $script:generatedSourceManifestIdentity,
+        [string]$ExpectedSha256 = $script:generatedSourceManifestSha256,
+        [bool]$OwnedByRun = $script:generatedSourceManifestOwnedByRun
+    )
+    if (-not $OwnedByRun -or [string]::IsNullOrWhiteSpace($Path)) { return $false }
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        if ($Path -eq $script:generatedSourceManifestPath) {
+            $script:generatedSourceManifestPath = $null
+            $script:generatedSourceManifestSha256 = $null
+            $script:generatedSourceManifestIdentity = $null
+            $script:generatedSourceManifestOwnedByRun = $false
+        }
+        return $true
+    }
+    if ([string]::IsNullOrWhiteSpace($ExpectedIdentity) -or [string]::IsNullOrWhiteSpace($ExpectedSha256)) {
+        throw "Generated source manifest cleanup lacks a sealed identity or SHA-256: $Path"
+    }
+    Assert-NoReparsePath -Path $Path | Out-Null
+    Assert-PathObjectIdentity -Path $Path -ExpectedIdentity $ExpectedIdentity | Out-Null
+    if ((Get-Sha256Hex -Path $Path) -cne $ExpectedSha256) {
+        throw "Generated source manifest bytes changed before cleanup: $Path"
+    }
+    Assert-PathObjectIdentity -Path $Path -ExpectedIdentity $ExpectedIdentity | Out-Null
+    Remove-PathIdentityExact -Path $Path -ExpectedObjectIdentity $ExpectedIdentity | Out-Null
+    if (Test-Path -LiteralPath $Path) { throw "Generated source manifest remained after cleanup: $Path" }
+    if ($Path -eq $script:generatedSourceManifestPath) {
+        $script:generatedSourceManifestPath = $null
+        $script:generatedSourceManifestSha256 = $null
+        $script:generatedSourceManifestIdentity = $null
+        $script:generatedSourceManifestOwnedByRun = $false
+    }
+    return $true
+}
+
 function Complete-InstallerTerminalReceipt {
     param([bool]$RemoveSnapshot)
     if ($snapshotPath) {
@@ -493,7 +642,7 @@ function Complete-InstallerTerminalReceipt {
                 throw 'Rollback snapshot identity changed before terminal cleanup.'
             }
             Assert-PathObjectIdentity -Path $receipt.snapshot_path -ExpectedIdentity $snapshotIdentity | Out-Null
-            Remove-Item -LiteralPath $receipt.snapshot_path -Force -ErrorAction Stop
+            Remove-PathIdentityExact -Path $receipt.snapshot_path -ExpectedObjectIdentity $snapshotIdentity | Out-Null
             if (Test-Path -LiteralPath $receipt.snapshot_path -PathType Leaf) {
                 throw 'Rollback snapshot remained after terminal receipt readback cleanup.'
             }
@@ -512,6 +661,24 @@ function Complete-InstallerTerminalReceipt {
         catch {
             $cleanupErrors += Limit-Text -Value $_.Exception.Message -MaxChars 4096
             $receipt.receipt_preimage.cleanup_error = $cleanupErrors[-1]
+        }
+    }
+    if ($script:generatedSourceManifestOwnedByRun -and $script:generatedSourceManifestPath) {
+        $generatedCleanupPath = $script:generatedSourceManifestPath
+        try {
+            Remove-GeneratedSourceManifest | Out-Null
+            $receipt.generated_source_manifest_cleanup = [ordered]@{
+                path = $generatedCleanupPath
+                removed = $true
+            }
+        }
+        catch {
+            $cleanupErrors += Limit-Text -Value $_.Exception.Message -MaxChars 4096
+            $receipt.generated_source_manifest_cleanup = [ordered]@{
+                path = $generatedCleanupPath
+                removed = $false
+                error = $cleanupErrors[-1]
+            }
         }
     }
     if ($cleanupErrors.Count -gt 0) {
@@ -643,9 +810,8 @@ function Restore-PreMoveTaskAdmission {
         $expectedDisabled = $DisabledTaskIdentity[$taskName]
         $original = $OriginalTaskIdentity[$taskName]
         if ($null -eq $original) { continue }
-        if ([string]$original.state -eq 'Queued') {
-            throw "Queued scheduled task state cannot be restored exactly during admission rollback: $taskName"
-        }
+        $originalWasActive = [string]$original.state -in @('Running', 'Queued')
+        $originalWasQueued = [string]$original.state -eq 'Queued'
         $current = Get-ScheduledTaskIdentity -TaskName ([string]$taskName) -TaskPath $TaskPath
         if (-not [bool]$current.exists) {
             if ([string]::IsNullOrWhiteSpace([string]$original.xml)) {
@@ -678,6 +844,9 @@ function Restore-PreMoveTaskAdmission {
         }
         elseif (-not (Wait-ScheduledTaskInactive -TaskName ([string]$taskName) -TaskPath $TaskPath)) {
             throw "Pre-snapshot scheduled task remained active during admission restore: $taskName"
+        }
+        if ($originalWasQueued) {
+            throw "Queued scheduled task state cannot be restored exactly during admission rollback: $taskName"
         }
         $restored = Get-ScheduledTaskIdentity -TaskName ([string]$taskName) -TaskPath $TaskPath
         if ([string]$restored.xml -cne [string]$original.xml -or [bool]$restored.enabled -ne [bool]$original.enabled) {
@@ -883,6 +1052,10 @@ function New-GitSourceManifest {
         files = $files
     }
     Write-JsonReceipt -Path $manifestPath -Value $manifest | Out-Null
+    $script:generatedSourceManifestPath = Get-CanonicalPath -Path $manifestPath -RequireExisting
+    $script:generatedSourceManifestSha256 = Get-Sha256Hex -Path $script:generatedSourceManifestPath
+    $script:generatedSourceManifestIdentity = Get-PathObjectIdentity -Path $script:generatedSourceManifestPath -RequireExisting
+    $script:generatedSourceManifestOwnedByRun = $true
     return $manifestPath
 }
 
@@ -936,7 +1109,7 @@ function Assert-PortAvailable {
     $networkCommand = Get-Command Get-NetTCPConnection -ErrorAction SilentlyContinue
     if (-not $networkCommand) { throw 'Get-NetTCPConnection is unavailable; refusing to assume the loopback port is available.' }
     $lookupErrors = @()
-    $listeners = @(Get-NetTCPConnection -LocalAddress '127.0.0.1' -LocalPort $Port -State Listen -ErrorAction SilentlyContinue -ErrorVariable +lookupErrors)
+    $listeners = @(Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue -ErrorVariable +lookupErrors)
     $unexpectedLookupErrors = @($lookupErrors | Where-Object { [string]$_.CategoryInfo.Category -ne 'ObjectNotFound' })
     if ($unexpectedLookupErrors.Count -gt 0) {
         throw "Unable to inspect loopback port $Port; refusing to assume it is available: $($unexpectedLookupErrors[0].Exception.Message)"
@@ -956,9 +1129,11 @@ function Assert-PortAvailable {
         foreach ($owner in $owners) {
             $process = Get-CimInstance Win32_Process -Filter "ProcessId = $owner" -ErrorAction SilentlyContinue
             $commandLine = if ($process) { Limit-Text -Value $process.CommandLine -MaxChars 4096 } else { '' }
-            $listener = $listeners | Where-Object { [int]$_.OwningProcess -eq [int]$owner } | Select-Object -First 1
+            $ownerListeners = @($listeners | Where-Object { [int]$_.OwningProcess -eq [int]$owner })
+            $listener = $ownerListeners | Select-Object -First 1
+            $listenerAddressesCompatible = @($ownerListeners | Where-Object { [string]$_.LocalAddress -cne '127.0.0.1' }).Count -eq 0
             $taskIdentity = if (-not [string]::IsNullOrWhiteSpace($ExpectedTaskName)) { Get-ScheduledTaskIdentity -TaskName $ExpectedTaskName -TaskPath $ExpectedTaskPath } else { $null }
-            $candidateIdentity = if ($process) {
+            $candidateIdentity = if ($process -and $listenerAddressesCompatible) {
                 Test-CanonicalProcessIdentity -Process $process -RootPath $ExpectedRoot -ExpectedPythonPath (Join-Path $ExpectedRoot '.venv\Scripts\python.exe') -ExpectedArguments '-m app.api_server' -ExpectedTaskIdentity $taskIdentity -ExpectedListener $listener -ExpectedListenerPort $Port -ExpectedApiPort $Port -ModuleNames @('app.api_server')
             }
             else { $false }
@@ -1288,9 +1463,11 @@ function Preserve-ReceiptPreimage {
     $sourceSize = [int64]$sourceItem.Length
     $sourceHash = Get-Sha256Hex -Path $sourceCanonical
     $destination = Join-Path ([System.IO.Path]::GetTempPath()) ('hwpx-install-receipt-preimage-' + $runId + '.json')
+    $destinationIdentity = $null
     try {
         Copy-FileVerified -SourcePath $sourceCanonical -DestinationPath $destination -ExpectedSize $sourceSize -ExpectedSha256 $sourceHash | Out-Null
         $destinationCanonical = Get-CanonicalPath -Path $destination -RequireExisting
+        $destinationIdentity = Get-PathObjectIdentity -Path $destinationCanonical -RequireExisting
         $destinationItem = Get-Item -LiteralPath $destinationCanonical -Force -ErrorAction Stop
         if ([int64]$destinationItem.Length -ne $sourceSize -or (Get-Sha256Hex -Path $destinationCanonical) -cne $sourceHash) {
             throw 'Receipt preimage backup did not match the sealed source bytes.'
@@ -1303,8 +1480,8 @@ function Preserve-ReceiptPreimage {
         return $destinationCanonical
     }
     catch {
-        if (Test-Path -LiteralPath $destination -PathType Leaf) {
-            Remove-Item -LiteralPath $destination -Force -ErrorAction SilentlyContinue
+        if ($destinationIdentity -and (Test-Path -LiteralPath $destination -PathType Leaf)) {
+            try { Remove-PathIdentityExact -Path $destination -ExpectedObjectIdentity $destinationIdentity | Out-Null } catch { }
         }
         throw
     }
@@ -1326,7 +1503,7 @@ function Remove-ReceiptPreimageBackup {
     if ([int64]$item.Length -ne [int64]$receiptPreimageBackupSize -or (Get-Sha256Hex -Path $receiptPreimageBackupPath) -cne [string]$receiptPreimageBackupSha256) {
         throw "Receipt preimage backup identity changed before cleanup: $receiptPreimageBackupPath"
     }
-    Remove-Item -LiteralPath $receiptPreimageBackupPath -Force -ErrorAction Stop
+    Remove-PathIdentityExact -Path $receiptPreimageBackupPath -ExpectedObjectIdentity $receiptPreimageBackupIdentity | Out-Null
     if (Test-Path -LiteralPath $receiptPreimageBackupPath) {
         throw "Receipt preimage backup remained after terminal cleanup: $receiptPreimageBackupPath"
     }
@@ -1402,7 +1579,7 @@ function Remove-RunOwnedRoot {
     # Revalidate immediately before the recursive mutation. A replacement at
     # the checked pathname must fail closed rather than being deleted.
     Assert-PathObjectIdentity -Path $Path -ExpectedIdentity $ExpectedObjectIdentity | Out-Null
-    Remove-Item -LiteralPath $Path -Recurse -Force -ErrorAction Stop
+    Remove-PathIdentityExact -Path $Path -ExpectedObjectIdentity $ExpectedObjectIdentity | Out-Null
     if (Test-Path -LiteralPath $Path) { throw "Run-owned root remained after cleanup: $Path" }
     return $true
 }
@@ -1955,12 +2132,10 @@ try {
                     Write-InstallTransactionJournal -State 'task-disable-started' | Out-Null
                     Disable-ScheduledTask -TaskName $taskName -TaskPath $taskPath -ErrorAction Stop | Out-Null
                     $preMoveTaskAdmissionIdentity[$taskName] = Get-ScheduledTaskIdentity -TaskName $taskName -TaskPath $taskPath
-                    if ([string]$existingTask.State -eq 'Running') {
+                    $admissionIdentity = $preMoveTaskAdmissionIdentity[$taskName]
+                    if ([string]$admissionIdentity.state -in @('Running', 'Queued')) {
                         Write-InstallTransactionJournal -State 'task-stop-started' | Out-Null
-                        Stop-ScheduledTask -TaskName $taskName -TaskPath $taskPath -ErrorAction Stop
-                        if (-not (Wait-ScheduledTaskInactive -TaskName $taskName -TaskPath $taskPath)) {
-                            throw "Existing scheduled task remained active before PreserveMove: $taskName"
-                        }
+                        Stop-ScheduledTaskExactAndWait -TaskName $taskName -TaskPath $taskPath -ExpectedIdentity $admissionIdentity | Out-Null
                     }
                 }
                 Write-InstallTransactionJournal -State 'tasks-disabled' | Out-Null
@@ -2021,7 +2196,7 @@ try {
             # cannot turn the backup into a nested, unowned directory.
             # Legacy contract: Move-Item -LiteralPath $install -Destination $backupRoot
             Write-InstallTransactionJournal -State 'predecessor-move-started' | Out-Null
-            [System.IO.Directory]::Move($install, $backupRoot)
+            Move-PathIdentityExact -Source $install -Destination $backupRoot -ExpectedObjectIdentity $preMoveRootIdentity | Out-Null
             $rootMovedToBackup = $true
             $backupRootOwnedByRun = $true
             $backupRootIdentity = Get-PathObjectIdentity -Path $backupRoot -RequireExisting
@@ -2239,6 +2414,7 @@ try {
     $configCreated = -not [bool]$configResult.candidate_env_existed_before
     $configPath = [string]$configResult.env_path
     $configCreatedSha256 = if ($configCreated -and (Test-Path -LiteralPath $configPath -PathType Leaf)) { Get-Sha256Hex -Path $configPath } else { $null }
+    $configCreatedIdentity = if ($configCreated -and (Test-Path -LiteralPath $configPath -PathType Leaf)) { Get-PathObjectIdentity -Path $configPath -RequireExisting } else { $null }
     $runtimeEnvProvenance = Set-InstallerRuntimeEnvProvenance -InstallRoot $candidateRoot -ManifestResult $manifestResult -ConfigResult $configResult -PreserveExistingMarkerBytes:$reused
     $receipt.checks.runtime_env_provenance = $runtimeEnvProvenance
 
@@ -2519,11 +2695,9 @@ catch {
                         }
                         Assert-RunOwnedTaskIdentity -Identity (Get-ScheduledTaskIdentity -TaskName $taskName -TaskPath $taskPathForRollback) -ExpectedRoot $taskExpectedRoot -ExpectedPython $taskExpectedPython -ExpectedArguments $taskExpectedArguments -ExpectedPrincipal $interactive.name -ExpectedApiPort $apiPort | Out-Null
                     }
-                    if ($currentTask -and [string]$currentTask.State -eq 'Running') {
-                        Stop-ScheduledTask -TaskName $taskName -TaskPath $taskPathForRollback -ErrorAction Stop
-                        if (-not (Wait-ScheduledTaskInactive -TaskName $taskName -TaskPath $taskPathForRollback)) {
-                            throw "Candidate scheduled task remained active before rollback root swap: $taskName"
-                        }
+                    if ($currentTask -and [string]$currentTask.State -in @('Running', 'Queued')) {
+                        $currentTaskIdentity = Get-ScheduledTaskIdentity -TaskName $taskName -TaskPath $taskPathForRollback
+                        Stop-ScheduledTaskExactAndWait -TaskName $taskName -TaskPath $taskPathForRollback -ExpectedIdentity $currentTaskIdentity | Out-Null
                     }
                     if ($currentTask) {
                         Unregister-ScheduledTask -TaskName $taskName -TaskPath $taskPathForRollback -Confirm:$false -ErrorAction Stop
@@ -2544,7 +2718,7 @@ catch {
                 $rollbackQuarantineClaimPath = New-RunPathClaim -Path $rollbackCandidateQuarantine
                 $rollbackQuarantineClaimIdentity = Get-PathObjectIdentity -Path $rollbackQuarantineClaimPath -RequireExisting
                 # Legacy contract: Move-Item -LiteralPath $install -Destination $rollbackCandidateQuarantine
-                [System.IO.Directory]::Move($install, $rollbackCandidateQuarantine)
+                Move-PathIdentityExact -Source $install -Destination $rollbackCandidateQuarantine -ExpectedObjectIdentity $installRootIdentity | Out-Null
                 $rollbackCandidateQuarantineOwnedByRun = $true
                 $rollbackCandidateQuarantineIdentity = Get-PathObjectIdentity -Path $rollbackCandidateQuarantine -RequireExisting
                 if (-not (Test-Path -LiteralPath $rollbackCandidateQuarantine -PathType Container) -or (Test-Path -LiteralPath $install -PathType Container)) {
@@ -2557,11 +2731,11 @@ catch {
             try {
                 # Legacy contract: Move-Item -LiteralPath $backupRoot -Destination $install
                 Assert-BackupOwnership -BackupPath $backupRoot -ExpectedPath $backupRoot -ExpectedInventory $backupInventory -ExpectedObjectIdentity $backupRootIdentity -OwnedByRun $backupRootOwnedByRun | Out-Null
-                [System.IO.Directory]::Move($backupRoot, $install)
+                Move-PathIdentityExact -Source $backupRoot -Destination $install -ExpectedObjectIdentity $backupRootIdentity | Out-Null
             }
             catch {
                 if ($rollbackCandidateQuarantineOwnedByRun -and $rollbackCandidateQuarantine -and (Test-Path -LiteralPath $rollbackCandidateQuarantine) -and -not (Test-Path -LiteralPath $install)) {
-                    [System.IO.Directory]::Move($rollbackCandidateQuarantine, $install)
+                    Move-PathIdentityExact -Source $rollbackCandidateQuarantine -Destination $install -ExpectedObjectIdentity $rollbackCandidateQuarantineIdentity | Out-Null
                 }
                 throw
             }
@@ -2648,7 +2822,10 @@ catch {
             if ([string]::IsNullOrWhiteSpace($configCreatedSha256) -or (Get-Sha256Hex -Path $configPath) -ne $configCreatedSha256) {
                 throw "Created config preimage changed before rollback cleanup: $configPath"
             }
-            Remove-Item -LiteralPath $configPath -Force
+            if ([string]::IsNullOrWhiteSpace($configCreatedIdentity)) {
+                throw "Created config object identity was not sealed before rollback cleanup: $configPath"
+            }
+            Remove-PathIdentityExact -Path $configPath -ExpectedObjectIdentity $configCreatedIdentity | Out-Null
             if (Test-Path -LiteralPath $configPath) { throw "Created config remained after rollback cleanup: $configPath" }
             $receipt.rollback.config_removed = $true
         }
@@ -2662,7 +2839,7 @@ catch {
         try {
             Assert-BackupOwnership -BackupPath $backupRoot -ExpectedPath $backupRoot -ExpectedInventory $backupInventory -ExpectedObjectIdentity $backupRootIdentity -OwnedByRun $backupRootOwnedByRun | Out-Null
             # Legacy contract: Move-Item -LiteralPath $backupRoot -Destination $install
-            [System.IO.Directory]::Move($backupRoot, $install)
+            Move-PathIdentityExact -Source $backupRoot -Destination $install -ExpectedObjectIdentity $backupRootIdentity | Out-Null
             if (-not (Test-Path -LiteralPath $install -PathType Container) -or (Test-Path -LiteralPath $backupRoot -PathType Container)) {
                 throw 'Fallback backup restoration did not preserve the exact root boundary.'
             }

@@ -70,6 +70,7 @@ if ($null -eq ('HwpxInstallNative.Identity' -as [type])) {
     Add-Type -TypeDefinition @'
 using System;
 using System.ComponentModel;
+using System.IO;
 using System.Runtime.InteropServices;
 
 namespace HwpxInstallNative {
@@ -108,6 +109,149 @@ namespace HwpxInstallNative {
         [DllImport("kernel32.dll", SetLastError = true)]
         private static extern bool CloseHandle(IntPtr handle);
 
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool SetFileInformationByHandle(
+            IntPtr handle, int informationClass, IntPtr fileInformation, uint bufferSize);
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern uint GetFileAttributes(string name);
+
+        private const uint DELETE_ACCESS = 0x00010000;
+        private const uint FILE_ATTRIBUTE_DIRECTORY = 0x00000010;
+        private const uint FILE_ATTRIBUTE_REPARSE_POINT = 0x00000400;
+        private const int FileRenameInfo = 3;
+        private const int FileDispositionInfo = 4;
+        private const int FileDispositionInfoEx = 21;
+        private const uint FILE_DISPOSITION_FLAG_DELETE = 0x00000001;
+        private const uint FILE_DISPOSITION_FLAG_POSIX_SEMANTICS = 0x00000002;
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct FILE_DISPOSITION_INFO {
+            public byte DeleteFile;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct FILE_DISPOSITION_INFO_EX {
+            public uint Flags;
+        }
+
+        private static string GetIdentity(IntPtr handle) {
+            BY_HANDLE_FILE_INFORMATION info;
+            if (!GetFileInformationByHandle(handle, out info))
+                throw new Win32Exception(Marshal.GetLastWin32Error(), "GetFileInformationByHandle failed");
+            ulong index = ((ulong)info.FileIndexHigh << 32) | info.FileIndexLow;
+            return info.VolumeSerialNumber.ToString("X8") + ":" + index.ToString("X16");
+        }
+
+        private static IntPtr OpenMutationHandle(string path) {
+            IntPtr handle = CreateFile(
+                path, GENERIC_READ | DELETE_ACCESS,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                IntPtr.Zero, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, IntPtr.Zero);
+            if (handle == INVALID_HANDLE_VALUE)
+                throw new Win32Exception(Marshal.GetLastWin32Error(), "CreateFile failed for identity-bound mutation");
+            return handle;
+        }
+
+        private static void MarkDeleted(IntPtr handle) {
+            FILE_DISPOSITION_INFO_EX extended = new FILE_DISPOSITION_INFO_EX();
+            extended.Flags = FILE_DISPOSITION_FLAG_DELETE | FILE_DISPOSITION_FLAG_POSIX_SEMANTICS;
+            IntPtr extendedBuffer = Marshal.AllocHGlobal(Marshal.SizeOf(typeof(FILE_DISPOSITION_INFO_EX)));
+            try {
+                Marshal.StructureToPtr(extended, extendedBuffer, false);
+                if (SetFileInformationByHandle(
+                    handle, FileDispositionInfoEx, extendedBuffer,
+                    (uint)Marshal.SizeOf(typeof(FILE_DISPOSITION_INFO_EX)))) return;
+            }
+            finally { Marshal.FreeHGlobal(extendedBuffer); }
+
+            FILE_DISPOSITION_INFO legacy = new FILE_DISPOSITION_INFO();
+            legacy.DeleteFile = 1;
+            IntPtr legacyBuffer = Marshal.AllocHGlobal(Marshal.SizeOf(typeof(FILE_DISPOSITION_INFO)));
+            try {
+                Marshal.StructureToPtr(legacy, legacyBuffer, false);
+                if (!SetFileInformationByHandle(
+                    handle, FileDispositionInfo, legacyBuffer,
+                    (uint)Marshal.SizeOf(typeof(FILE_DISPOSITION_INFO))) )
+                    throw new Win32Exception(Marshal.GetLastWin32Error(), "SetFileInformationByHandle delete failed");
+            }
+            finally { Marshal.FreeHGlobal(legacyBuffer); }
+        }
+
+        private static void DeletePathContents(string path) {
+            string[] children = System.IO.Directory.GetFileSystemEntries(path);
+            foreach (string child in children) {
+                uint attributes = GetFileAttributes(child);
+                if (attributes == 0xFFFFFFFF)
+                    throw new Win32Exception(Marshal.GetLastWin32Error(), "GetFileAttributes failed during identity-bound delete");
+                if ((attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0)
+                    throw new IOException("Reparse point encountered during identity-bound delete: " + child);
+                IntPtr childHandle = OpenMutationHandle(child);
+                try {
+                    string childIdentity = GetIdentity(childHandle);
+                    if ((attributes & FILE_ATTRIBUTE_DIRECTORY) != 0) {
+                        DeletePathContents(child);
+                    }
+                    MarkDeleted(childHandle);
+                    // Read the identity once more while the child handle is
+                    // still held; a replacement cannot be silently deleted.
+                    if (GetIdentity(childHandle) != childIdentity)
+                        throw new IOException("Child identity changed during identity-bound delete: " + child);
+                }
+                finally { CloseHandle(childHandle); }
+            }
+        }
+
+        public static void DeletePathIfIdentity(string path, string expectedIdentity) {
+            IntPtr handle = OpenMutationHandle(path);
+            try {
+                string actualIdentity = GetIdentity(handle);
+                if (actualIdentity != expectedIdentity)
+                    throw new IOException("Path identity changed before identity-bound delete: " + path);
+                uint attributes = GetFileAttributes(path);
+                if (attributes == 0xFFFFFFFF)
+                    throw new Win32Exception(Marshal.GetLastWin32Error(), "GetFileAttributes failed before identity-bound delete");
+                if ((attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0)
+                    throw new IOException("Reparse point is not allowed for identity-bound delete: " + path);
+                if ((attributes & FILE_ATTRIBUTE_DIRECTORY) != 0)
+                    DeletePathContents(path);
+                MarkDeleted(handle);
+                if (GetIdentity(handle) != actualIdentity)
+                    throw new IOException("Path identity changed during identity-bound delete: " + path);
+            }
+            finally { CloseHandle(handle); }
+        }
+
+        public static void MovePathIfIdentity(string source, string expectedIdentity, string destination) {
+            IntPtr handle = OpenMutationHandle(source);
+            try {
+                string actualIdentity = GetIdentity(handle);
+                if (actualIdentity != expectedIdentity)
+                    throw new IOException("Path identity changed before identity-bound move: " + source);
+                if (GetPathIdentity(source) != actualIdentity)
+                    throw new IOException("Source pathname no longer names the identity-bound object: " + source);
+                uint destinationAttributes = GetFileAttributes(destination);
+                if (destinationAttributes != 0xFFFFFFFF)
+                    throw new IOException("Identity-bound move destination already exists: " + destination);
+                int nameOffset = IntPtr.Size == 8 ? 20 : 12;
+                byte[] nameBytes = System.Text.Encoding.Unicode.GetBytes(destination);
+                IntPtr renameBuffer = Marshal.AllocHGlobal(nameOffset + nameBytes.Length);
+                try {
+                    for (int index = 0; index < nameOffset + nameBytes.Length; index++) Marshal.WriteByte(renameBuffer, index, 0);
+                    Marshal.WriteByte(renameBuffer, 0, 0);
+                    Marshal.WriteIntPtr(renameBuffer, IntPtr.Size == 8 ? 8 : 4, IntPtr.Zero);
+                    Marshal.WriteInt32(renameBuffer, IntPtr.Size == 8 ? 16 : 8, nameBytes.Length);
+                    Marshal.Copy(nameBytes, 0, IntPtr.Add(renameBuffer, nameOffset), nameBytes.Length);
+                    if (!SetFileInformationByHandle(handle, FileRenameInfo, renameBuffer, (uint)(nameOffset + nameBytes.Length)))
+                        throw new Win32Exception(Marshal.GetLastWin32Error(), "SetFileInformationByHandle rename failed");
+                }
+                finally { Marshal.FreeHGlobal(renameBuffer); }
+                if (GetPathIdentity(destination) != actualIdentity)
+                    throw new IOException("Identity-bound move destination readback did not match: " + destination);
+            }
+            finally { CloseHandle(handle); }
+        }
+
         public static string GetPathIdentity(string path) {
             IntPtr handle = CreateFile(
                 path, GENERIC_READ,
@@ -116,11 +260,7 @@ namespace HwpxInstallNative {
             if (handle == INVALID_HANDLE_VALUE)
                 throw new Win32Exception(Marshal.GetLastWin32Error(), "CreateFile failed for path identity");
             try {
-                BY_HANDLE_FILE_INFORMATION info;
-                if (!GetFileInformationByHandle(handle, out info))
-                    throw new Win32Exception(Marshal.GetLastWin32Error(), "GetFileInformationByHandle failed");
-                ulong index = ((ulong)info.FileIndexHigh << 32) | info.FileIndexLow;
-                return info.VolumeSerialNumber.ToString("X8") + ":" + index.ToString("X16");
+                return GetIdentity(handle);
             }
             finally {
                 CloseHandle(handle);
@@ -1171,6 +1311,52 @@ function Assert-NoReparseSourcePath {
         }
     }
     return $current
+}
+
+function Remove-PathIdentityExact {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$ExpectedObjectIdentity
+    )
+    $canonical = Assert-NoReparsePath -Path $Path
+    if (-not (Test-Path -LiteralPath $canonical)) { return $false }
+    if ([string]::IsNullOrWhiteSpace($ExpectedObjectIdentity)) {
+        throw "Identity-bound deletion requires an expected object identity: $canonical"
+    }
+    [HwpxInstallNative.Identity]::DeletePathIfIdentity($canonical, $ExpectedObjectIdentity)
+    if (Test-Path -LiteralPath $canonical) {
+        throw "Identity-bound deletion did not remove the path: $canonical"
+    }
+    return $true
+}
+
+function Move-PathIdentityExact {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$Source,
+        [Parameter(Mandatory = $true)][string]$Destination,
+        [Parameter(Mandatory = $true)][string]$ExpectedObjectIdentity
+    )
+    $sourceCanonical = Assert-NoReparsePath -Path $Source
+    $destinationCanonical = Assert-NoReparsePath -Path $Destination
+    if (-not (Test-Path -LiteralPath $sourceCanonical)) {
+        throw "Identity-bound move source does not exist: $sourceCanonical"
+    }
+    if (Test-Path -LiteralPath $destinationCanonical) {
+        throw "Identity-bound move destination already exists: $destinationCanonical"
+    }
+    if ([string]::IsNullOrWhiteSpace($ExpectedObjectIdentity)) {
+        throw "Identity-bound move requires an expected object identity: $sourceCanonical"
+    }
+    [HwpxInstallNative.Identity]::MovePathIfIdentity($sourceCanonical, $ExpectedObjectIdentity, $destinationCanonical)
+    if (-not (Test-Path -LiteralPath $destinationCanonical)) {
+        throw "Identity-bound move destination was not created: $destinationCanonical"
+    }
+    if (Test-Path -LiteralPath $sourceCanonical) {
+        throw "Identity-bound move source remained after mutation: $sourceCanonical"
+    }
+    return $destinationCanonical
 }
 
 function Get-Sha256Hex {
@@ -2365,6 +2551,9 @@ function Get-SourceManifest {
             }
             continue
         }
+        if ($item.Name.ToLowerInvariant().StartsWith('.env') -or $item.Name.ToLowerInvariant().StartsWith('.hwpx-install') -or $item.Extension.ToLowerInvariant() -in $runtimeSuffixes) { continue }
+        if ($actualParts.Count -eq 1 -and $generatedRootManifestNames -contains $item.Name.ToLowerInvariant()) { continue }
+        if ($item.FullName -eq $manifestCanonical -or ($archiveName -and $relativeActual.Replace([char]92, '/') -eq $archiveName.Replace([char]92, '/'))) { continue }
         if (Test-ProhibitedPrivateSourceMember -RelativePath $relativeActual) {
             $mismatches += [pscustomobject]@{ path = $relativeActual; reason = 'private source member is not allowed' }
             continue
@@ -2374,9 +2563,6 @@ function Get-SourceManifest {
             # closure, while nested command manifests remain source code.
             continue
         }
-        if ($item.Name.ToLowerInvariant().StartsWith('.env') -or $item.Name.ToLowerInvariant().StartsWith('.hwpx-install') -or $item.Extension.ToLowerInvariant() -in $runtimeSuffixes) { continue }
-        if ($actualParts.Count -eq 1 -and $generatedRootManifestNames -contains $item.Name.ToLowerInvariant()) { continue }
-        if ($item.FullName -eq $manifestCanonical -or ($archiveName -and $relativeActual.Replace([char]92, '/') -eq $archiveName.Replace([char]92, '/'))) { continue }
         if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
             $mismatches += [pscustomobject]@{ path = $relativeActual; reason = 'reparse-point source member is not allowed' }
             continue
@@ -3969,9 +4155,26 @@ function Restore-InstallSnapshot {
             $taskName = Assert-SafeScheduledTaskName -TaskName ([string]$task.task_name)
             $taskPath = Assert-CanonicalScheduledTaskPath -TaskPath ([string]$task.task_path)
             if ($task.exists -and $task.xml) {
-                Register-ScheduledTask -TaskName $taskName -TaskPath $taskPath -Xml ([string]$task.xml) -Force -ErrorAction Stop | Out-Null
+                $currentBeforeRestore = Get-ScheduledTaskIdentity -TaskName $taskName -TaskPath $taskPath
+                $expectedCurrentIdentity = $null
+                if ([bool]$currentBeforeRestore.exists) {
+                    $candidateBinding = $false
+                    if ($CandidateRoot -and $CandidateRootOwnedByRun -and (Test-Path -LiteralPath $CandidateRoot -PathType Container)) {
+                        try {
+                            $candidateRootCanonical = Get-CanonicalPath -Path $CandidateRoot -RequireExisting
+                            $candidatePython = Join-Path $candidateRootCanonical '.venv\Scripts\python.exe'
+                            $candidateBinding = Test-CanonicalTaskActionBinding -Identity $currentBeforeRestore -ExpectedRoot $candidateRootCanonical -ExpectedPythonPath $candidatePython
+                        }
+                        catch { $candidateBinding = $false }
+                    }
+                    $snapshotBinding = Test-ScheduledTaskIdentityExact -Actual $currentBeforeRestore -Expected $task
+                    if (-not $snapshotBinding -and -not $candidateBinding) {
+                        throw "Refusing to overwrite an unverified scheduled task during rollback: $taskName"
+                    }
+                    $expectedCurrentIdentity = $currentBeforeRestore
+                }
+                $restoredIdentity = Register-ScheduledTaskExactNoClobber -TaskName $taskName -TaskPath $taskPath -Xml ([string]$task.xml) -ExpectedCurrentIdentity $expectedCurrentIdentity
                 $restoredTask = Get-ScheduledTaskExact -TaskName $taskName -TaskPath $taskPath
-                $restoredIdentity = Get-ScheduledTaskIdentity -TaskName $taskName -TaskPath $taskPath
                 if ([string]$task.task_identity_hash -ne [string]$restoredIdentity.task_identity_hash) {
                     throw "Rollback task identity hash did not match the snapshot: $taskName"
                 }
@@ -4034,7 +4237,7 @@ function Restore-InstallSnapshot {
     if ($CandidateRoot -and (Test-Path -LiteralPath $CandidateRoot) -and (-not $KeepCandidateRoot) -and $CandidateRootOwnedByRun -and $PSCmdlet.ShouldProcess($CandidateRoot, 'Remove candidate install root')) {
         if ([string]::IsNullOrWhiteSpace($ExpectedCandidateRootIdentity)) { throw "Candidate root stable object identity is missing: $CandidateRoot" }
         Assert-PathObjectIdentity -Path $CandidateRoot -ExpectedIdentity $ExpectedCandidateRootIdentity | Out-Null
-        Remove-Item -LiteralPath $CandidateRoot -Recurse -Force
+        Remove-PathIdentityExact -Path $CandidateRoot -ExpectedObjectIdentity $ExpectedCandidateRootIdentity | Out-Null
         if (Test-Path -LiteralPath $CandidateRoot) { throw "Candidate install root remained after rollback cleanup: $CandidateRoot" }
     }
     $processReleaseAfterTasks = if ($CandidateRoot) {
@@ -4055,4 +4258,4 @@ function Restore-InstallSnapshot {
     }
 }
 
-Export-ModuleMember -Function Test-ProhibitedPrivateSourceMember, Test-ProhibitedSourceMember, Get-CanonicalPath, Get-PathObjectIdentity, Assert-PathObjectIdentity, Enter-InstallRootLock, Enter-MachineLifecycleLock, Enter-InstallLifecycleLock, Add-MachineLifecycleLockScope, Exit-InstallLifecycleLock, Exit-PathMutex, Enter-ReceiptPathLock, Assert-ReceiptPathAdmission, Get-InstallTransactionJournalPath, Write-StableTransactionJournal, Read-StableTransactionJournal, Assert-NoReparsePath, Assert-NoReparseSourcePath, Assert-WindowsSafeSourceRelativePath, Get-Sha256Hex, Get-TextSha256, Get-OptionalPropertyValue, Copy-FileVerified, Test-NonEmptyFile, Invoke-NativeChecked, Get-SourceManifest, Get-ScheduledTaskIdentity, Get-ScheduledTaskExact, Test-ScheduledTaskIdentityExact, Stop-ScheduledTaskExactAndWait, Register-ScheduledTaskExactNoClobber, Assert-SafeScheduledTaskName, Assert-CanonicalScheduledTaskPath, Test-CanonicalTaskSettings, Test-CanonicalPathWithinRoot, Test-CommandLineModuleToken, Test-CommandLinePathToken, Test-CanonicalTaskActionBinding, Test-CanonicalProcessIdentity, Get-InstallProcessSnapshot, Get-ProcessGenerationIdentity, Stop-InstallProcesses, Wait-ScheduledTaskInactive, Wait-ScheduledTaskRunning, Resolve-WindowsPrincipalIdentity, Test-WindowsPrincipalEquivalent, Test-ScheduledTaskLogonTypeEquivalent, Test-ScheduledTaskRunLevelEquivalent, Write-JsonReceipt, Save-InstallSnapshot, Read-VerifiedInstallSnapshot, Restore-InstallSnapshot, Limit-Text, Read-BoundedText, Read-BoundedJsonObject, Get-ConfiguredEnvValue, Get-ConfiguredApiPort, Resolve-ApiPort
+Export-ModuleMember -Function Test-ProhibitedPrivateSourceMember, Test-ProhibitedSourceMember, Get-CanonicalPath, Get-PathObjectIdentity, Assert-PathObjectIdentity, Enter-InstallRootLock, Enter-MachineLifecycleLock, Enter-InstallLifecycleLock, Add-MachineLifecycleLockScope, Exit-InstallLifecycleLock, Exit-PathMutex, Enter-ReceiptPathLock, Assert-ReceiptPathAdmission, Get-InstallTransactionJournalPath, Write-StableTransactionJournal, Read-StableTransactionJournal, Assert-NoReparsePath, Assert-NoReparseSourcePath, Assert-WindowsSafeSourceRelativePath, Remove-PathIdentityExact, Move-PathIdentityExact, Get-Sha256Hex, Get-TextSha256, Get-OptionalPropertyValue, Copy-FileVerified, Test-NonEmptyFile, Invoke-NativeChecked, Get-SourceManifest, Get-ScheduledTaskIdentity, Get-ScheduledTaskExact, Test-ScheduledTaskIdentityExact, Stop-ScheduledTaskExactAndWait, Register-ScheduledTaskExactNoClobber, Assert-SafeScheduledTaskName, Assert-CanonicalScheduledTaskPath, Test-CanonicalTaskSettings, Test-CanonicalPathWithinRoot, Test-CommandLineModuleToken, Test-CommandLinePathToken, Test-CanonicalTaskActionBinding, Test-CanonicalProcessIdentity, Get-InstallProcessSnapshot, Get-ProcessGenerationIdentity, Stop-InstallProcesses, Wait-ScheduledTaskInactive, Wait-ScheduledTaskRunning, Resolve-WindowsPrincipalIdentity, Test-WindowsPrincipalEquivalent, Test-ScheduledTaskLogonTypeEquivalent, Test-ScheduledTaskRunLevelEquivalent, Write-JsonReceipt, Save-InstallSnapshot, Read-VerifiedInstallSnapshot, Restore-InstallSnapshot, Limit-Text, Read-BoundedText, Read-BoundedJsonObject, Get-ConfiguredEnvValue, Get-ConfiguredApiPort, Resolve-ApiPort

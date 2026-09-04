@@ -21,7 +21,7 @@ class G18PowerShellContractTests(unittest.TestCase):
         self.assertLess(snapshot_seal, task_unregister)
         self.assertLess(task_unregister, inventory)
         self.assertLess(inventory, root_identity)
-        self.assertIn('object_identity', source[inventory:source.index('[System.IO.Directory]::Move', inventory)])
+        self.assertIn('object_identity', source[inventory:source.index('Move-PathIdentityExact -Source $install -Destination $backupRoot', inventory)])
 
     def test_preserve_move_disables_task_admission_before_process_quiescence(self) -> None:
         source = (ROOT / 'scripts' / 'install_windows.ps1').read_text(encoding='utf-8')

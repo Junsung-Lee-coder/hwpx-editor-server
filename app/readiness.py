@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import inspect
+import math
 import os
 import sys
 import traceback
@@ -198,16 +200,29 @@ def _construct_probe_hwp(Hwp: Any) -> tuple[Any, str]:
         ({'visible': True}, 'Hwp(visible=True)'),
         ({}, 'Hwp()'),
     )
-    last_type_error: TypeError | None = None
+    # A TypeError from a native COM constructor is not proof that only the
+    # signature was wrong: pyhwpx may already have launched HWP before its
+    # Python wrapper raises.  Inspect a Python-visible signature first and make
+    # one construction attempt.  For opaque extension/COM callables, choose
+    # the safest supported form and fail closed instead of retrying a possibly
+    # leaked native process.
+    try:
+        signature = inspect.signature(Hwp)
+    except (TypeError, ValueError):
+        signature = None
+    if signature is None:
+        kwargs, label = constructor_attempts[0]
+        return Hwp(**kwargs), label
+    parameters = signature.parameters
+    accepts_arbitrary_keywords = any(
+        parameter.kind is inspect.Parameter.VAR_KEYWORD
+        for parameter in parameters.values()
+    )
     for kwargs, label in constructor_attempts:
-        try:
-            return Hwp(**kwargs), label
-        except TypeError as exc:
-            last_type_error = exc
+        if not accepts_arbitrary_keywords and any(key not in parameters for key in kwargs):
             continue
-    if last_type_error is not None:
-        raise last_type_error
-    raise RuntimeError('Failed to construct pyhwpx Hwp instance.')
+        return Hwp(**kwargs), label
+    raise RuntimeError('pyhwpx Hwp constructor exposes no supported signature.')
 
 
 def _probe_hwp_automation() -> dict[str, Any]:
@@ -438,11 +453,13 @@ def readiness_matches_current_worker(
         return False
     if snapshot.get('schema_version') != READINESS_SCHEMA_VERSION:
         return False
-    if snapshot.get('ok') is not True:
+    if type(snapshot.get('ok')) is not bool or snapshot.get('ok') is not True:
         return False
-    if snapshot.get('status') != 'ready' or not bool(snapshot.get('ready')):
+    if not isinstance(snapshot.get('status'), str) or snapshot.get('status') != 'ready':
         return False
-    if snapshot.get('phase') != 'probe_complete':
+    if type(snapshot.get('ready')) is not bool or snapshot.get('ready') is not True:
+        return False
+    if not isinstance(snapshot.get('phase'), str) or snapshot.get('phase') != 'probe_complete':
         return False
     if snapshot.get('errors') not in ([], None):
         return False
@@ -450,7 +467,9 @@ def readiness_matches_current_worker(
     if not isinstance(checks, dict):
         return False
     required_checks = ('platform', 'candidate_generation', 'pdf_renderer', 'pythoncom_import', 'pyhwpx_import')
-    if bool(snapshot.get('probe_hwp')):
+    if type(snapshot.get('probe_hwp')) is not bool:
+        return False
+    if snapshot.get('probe_hwp') is True:
         required_checks += ('hancom_automation',)
     for check_name in required_checks:
         check = checks.get(check_name)
@@ -462,11 +481,13 @@ def readiness_matches_current_worker(
     actual_generation = snapshot.get('candidate_generation')
     if not expected_generation or actual_generation != expected_generation:
         return False
-    try:
-        worker_pid = int(snapshot.get('worker_pid') or 0)
-    except (TypeError, ValueError):
+    worker_pid_value = snapshot.get('worker_pid')
+    if type(worker_pid_value) is not int:
         return False
+    worker_pid = worker_pid_value
     worker_start_identity = str(snapshot.get('worker_start_identity') or '')
+    if not isinstance(snapshot.get('worker_start_identity'), str) or not worker_start_identity:
+        return False
     if not _process_generation_alive(worker_pid, worker_start_identity):
         return False
     expires_at = _parse_utc(snapshot.get('expires_at'))
@@ -476,13 +497,15 @@ def readiness_matches_current_worker(
     if expires_at is None or heartbeat_at is None or expires_at <= now:
         return False
     freshness_window = snapshot.get('freshness_window_seconds', snapshot.get('ttl_seconds', DEFAULT_READINESS_TTL_SECONDS))
-    try:
-        freshness_window = float(freshness_window)
-    except (TypeError, ValueError):
+    if isinstance(freshness_window, bool) or not isinstance(freshness_window, (int, float)):
+        return False
+    freshness_window = float(freshness_window)
+    if not math.isfinite(freshness_window):
         return False
     if freshness_window <= 0 or heartbeat_at > now or (now - heartbeat_at).total_seconds() > freshness_window:
         return False
-    return bool(snapshot.get('run_id'))
+    run_id_value = snapshot.get('run_id')
+    return isinstance(run_id_value, str) and bool(run_id_value.strip())
 
 
 def touch_runtime_readiness_heartbeat(snapshot: dict[str, Any]) -> dict[str, Any]:

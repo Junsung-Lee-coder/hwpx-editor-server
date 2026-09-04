@@ -80,7 +80,7 @@ class WindowsInstallerContractTests(unittest.TestCase):
         terminal_receipt = text[text.index("function Complete-InstallerTerminalReceipt") : text.index("function Write-InstallerTerminalSummary")]
         receipt_write = terminal_receipt.index("Save-InstallerReceipt")
         snapshot_cleanup = terminal_receipt.index("snapshot_cleanup")
-        remove_snapshot = terminal_receipt.index("Remove-Item -LiteralPath $receipt.snapshot_path", receipt_write)
+        remove_snapshot = terminal_receipt.index("Remove-PathIdentityExact -Path $receipt.snapshot_path", receipt_write)
         self.assertLess(snapshot_cleanup, receipt_write)
         self.assertLess(receipt_write, remove_snapshot)
         self.assertIn("terminal_readback", terminal_receipt[snapshot_cleanup:receipt_write])
@@ -803,10 +803,10 @@ class WindowsInstallerContractTests(unittest.TestCase):
         installer = self.read("install_windows.ps1")
         common = self.read("windows_install_common.psm1")
         self.assertTrue("function Wait-ScheduledTaskInactive" in common)
-        self.assertTrue("Wait-ScheduledTaskInactive -TaskName $taskName" in installer)
+        self.assertTrue("Stop-ScheduledTaskExactAndWait -TaskName $taskName" in installer)
         preserve = installer[installer.index("$reused = $false") : installer.index("$requirements = $null")]
         self.assertLess(
-            preserve.index("Wait-ScheduledTaskInactive -TaskName $taskName"),
+            preserve.index("Stop-ScheduledTaskExactAndWait -TaskName $taskName"),
             preserve.index("Move-Item -LiteralPath $install -Destination $backupRoot"),
         )
 

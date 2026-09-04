@@ -184,7 +184,7 @@ class G8WindowsContractTests(unittest.TestCase):
 
     def test_fresh_root_preimage_is_captured_before_default_receipt_write(self) -> None:
         text = self.read("install_windows.ps1")
-        try_body = text[text.index("try {"):]
+        try_body = text[text.index("try {\n    Assert-NoReparsePath -Path $SourceRoot"):]
         root_probe = try_body.index("$rootExisted")
         setup_start = try_body.index("$source =")
         first_receipt = try_body.index("Save-InstallerReceipt", setup_start)
