@@ -3134,9 +3134,11 @@ function Get-VenvInterpreterMetadata {
         if ($capture.truncated) { return $null }
         $home = $null
         $version = $null
+        $configuredExecutable = $null
         foreach ($line in @([string]$capture.text -split "`r?`n")) {
             if ([string]$line -match '^\s*home\s*=\s*(.*?)\s*$') { $home = [string]$matches[1] }
             elseif ([string]$line -match '^\s*version\s*=\s*(.*?)\s*$') { $version = [string]$matches[1] }
+            elseif ([string]$line -match '^\s*executable\s*=\s*(.*?)\s*$') { $configuredExecutable = [string]$matches[1] }
         }
         if ([string]::IsNullOrWhiteSpace($home) -or [string]::IsNullOrWhiteSpace($version)) { return $null }
         $canonicalHome = Get-CanonicalPath -Path $home -RequireExisting
@@ -3149,10 +3151,26 @@ function Get-VenvInterpreterMetadata {
             if ($baseNames -notcontains $versionedBaseName) { $baseNames += $versionedBaseName }
         }
         $baseExecutables = @()
+        if (-not [string]::IsNullOrWhiteSpace($configuredExecutable)) {
+            try {
+                $configuredCanonical = Get-CanonicalPath -Path $configuredExecutable -RequireExisting
+                $configuredLeaf = [IO.Path]::GetFileName($configuredCanonical)
+                if ($configuredLeaf -ieq $baseLeaf -or $configuredLeaf -ieq $versionedBaseName) {
+                    $baseExecutables += $configuredCanonical
+                }
+            }
+            catch { }
+        }
         foreach ($baseName in $baseNames) {
             $baseCandidate = Join-Path $canonicalHome $baseName
             if (-not (Test-Path -LiteralPath $baseCandidate -PathType Leaf)) { continue }
-            try { $baseExecutables += Get-CanonicalPath -Path $baseCandidate -RequireExisting } catch { }
+            try {
+                $candidateCanonical = Get-CanonicalPath -Path $baseCandidate -RequireExisting
+                if (@($baseExecutables | Where-Object { [string]$_ -ceq $candidateCanonical }).Count -eq 0) {
+                    $baseExecutables += $candidateCanonical
+                }
+            }
+            catch { }
         }
         # Some Windows Store installations deny ordinary metadata access to
         # the package image even though CIM reports that image as the running
@@ -3167,6 +3185,7 @@ function Get-VenvInterpreterMetadata {
             base_executable = [string]$baseExecutables[0]
             base_executables = @($baseExecutables)
             versioned_base_name = $versionedBaseName
+            configured_executable = [string]$configuredExecutable
             version = $version.Trim()
             version_key = Get-InterpreterVersionKey -Value $version
         }

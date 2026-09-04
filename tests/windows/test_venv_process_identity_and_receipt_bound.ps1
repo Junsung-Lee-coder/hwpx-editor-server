@@ -135,6 +135,44 @@ try {
         -ExpectedInterpreterVersion $expectedInterpreterVersion
     if (-not $alternateLegitimate) { throw 'A versioned Windows base-interpreter process was rejected.' }
 
+    # Python also records an explicit base executable in pyvenv.cfg. Honor
+    # that binding when the configured home is not the directory containing
+    # the process image (a layout used by packaged Windows distributions).
+    $declaredHome = Join-Path $tempRoot 'declared-python-home'
+    $configuredHome = Join-Path $tempRoot 'configured-python-image'
+    $configuredPython = Join-Path $configuredHome ('python' + $expectedInterpreterVersion + '.exe')
+    New-Item -ItemType Directory -Force -Path $declaredHome, $configuredHome | Out-Null
+    Copy-Item -LiteralPath $basePython -Destination $configuredPython -Force
+    [System.IO.File]::WriteAllText(
+        $venvConfig,
+        "home = $declaredHome`r`nversion = $expectedInterpreterVersion`r`nexecutable = $configuredPython`r`ninclude-system-site-packages = false`r`n",
+        (New-Object System.Text.UTF8Encoding($false))
+    )
+    $configuredProcess = [pscustomobject]@{
+        ProcessId = $processId + 3
+        Name = 'python.exe'
+        ExecutablePath = $configuredPython
+        ExecutableVersion = $baseVersionText
+        CommandLine = ('"{0}" -m app.api_server' -f $venvPython)
+    }
+    $configuredListener = [pscustomobject]@{
+        OwningProcess = $configuredProcess.ProcessId
+        LocalAddress = '127.0.0.1'
+        LocalPort = $apiPort
+        State = 'Listen'
+    }
+    $configuredLegitimate = Test-CanonicalProcessIdentity `
+        -Process $configuredProcess `
+        -RootPath $candidateRoot `
+        -ExpectedPythonPath $venvPython `
+        -ModuleNames @('app.api_server') `
+        -ExpectedArguments '-m app.api_server' `
+        -ExpectedTaskIdentity $taskIdentity `
+        -ExpectedListener $configuredListener `
+        -ExpectedListenerPort $apiPort `
+        -ExpectedInterpreterVersion $expectedInterpreterVersion
+    if (-not $configuredLegitimate) { throw 'An explicit pyvenv.cfg executable binding was rejected.' }
+
     $foreignListener = [pscustomobject]@{
         OwningProcess = $processId + 1
         LocalAddress = '127.0.0.1'
