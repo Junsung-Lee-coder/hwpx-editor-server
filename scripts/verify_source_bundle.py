@@ -8,7 +8,7 @@ import stat
 import tempfile
 import zipfile
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import Any, BinaryIO
 
 try:
     from scripts.source_bundle_policy import is_prohibited_member
@@ -152,18 +152,134 @@ def _validate_input_file(path: Path, label: str) -> Path:
             raise SourceBundleVerificationError(f"{label} path contains a symlink or reparse point: {current}")
         parent = current.parent
         if parent == current:
-            return lexical.resolve()
+            return lexical
         current = parent
 
 
-def _load_manifest(path: Path) -> dict[str, Any]:
+def _file_identity(stat_result: os.stat_result) -> tuple[int, int, int, int, int]:
+    return (
+        int(getattr(stat_result, 'st_dev', 0)),
+        int(getattr(stat_result, 'st_ino', 0)),
+        int(getattr(stat_result, 'st_size', 0)),
+        int(getattr(stat_result, 'st_mtime_ns', 0)),
+        int(getattr(stat_result, 'st_mode', 0)),
+    )
+
+
+def _open_no_follow_descriptor(path: Path) -> int:
+    """Open a regular input without following a Windows reparse leaf."""
+
+    if os.name != 'nt':
+        flags = os.O_RDONLY | getattr(os, 'O_CLOEXEC', 0)
+        flags |= getattr(os, 'O_BINARY', 0) | getattr(os, 'O_NOFOLLOW', 0)
+        return os.open(path, flags)
+
+    # Windows has no portable O_NOFOLLOW.  OPEN_REPARSE_POINT makes the
+    # CreateFileW handle refer to the leaf itself rather than its target.
+    # The later fstat/lstat identity checks then reject the reparse object and
+    # detect a pathname replacement while the handle remains open.
+    import ctypes
+    import msvcrt
+
+    kernel32 = ctypes.WinDLL('kernel32', use_last_error=True)
+    kernel32.CreateFileW.argtypes = [
+        ctypes.c_wchar_p, ctypes.c_uint32, ctypes.c_uint32, ctypes.c_void_p,
+        ctypes.c_uint32, ctypes.c_uint32, ctypes.c_void_p,
+    ]
+    kernel32.CreateFileW.restype = ctypes.c_void_p
+    kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+    kernel32.CloseHandle.restype = ctypes.c_int
+    FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000
+    handle = kernel32.CreateFileW(
+        str(path),
+        0x80000000,  # GENERIC_READ
+        0x00000007,  # FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE
+        None,
+        3,  # OPEN_EXISTING
+        0x00000080 | FILE_FLAG_OPEN_REPARSE_POINT,  # FILE_ATTRIBUTE_NORMAL
+        None,
+    )
+    invalid_handle = ctypes.c_void_p(-1).value
+    if handle is None or handle == invalid_handle:
+        error = ctypes.get_last_error()
+        raise OSError(error, f'could not open input without following reparse points: {path}')
+    handle_value = int(handle)
     try:
-        if path.stat().st_size > MAX_MANIFEST_BYTES:
-            raise SourceBundleVerificationError(
-                f"source manifest exceeds the bounded size limit of {MAX_MANIFEST_BYTES} bytes"
-            )
-        with path.open("rb") as handle:
-            payload = handle.read(MAX_MANIFEST_BYTES + 1)
+        return msvcrt.open_osfhandle(handle_value, os.O_RDONLY | getattr(os, 'O_BINARY', 0))
+    except BaseException:
+        kernel32.CloseHandle(ctypes.c_void_p(handle_value))
+        raise
+
+
+class _VerifiedInput:
+    def __init__(self, path: Path, label: str):
+        self.path = _validate_input_file(path, label)
+        self.label = label
+        self.handle: BinaryIO | None = None
+        self.identity: tuple[int, int, int, int, int] | None = None
+
+    def __enter__(self) -> '_VerifiedInput':
+        try:
+            descriptor = _open_no_follow_descriptor(self.path)
+        except OSError as exc:
+            raise SourceBundleVerificationError(f"could not open {self.label}: {self.path}") from exc
+        try:
+            self.handle = os.fdopen(descriptor, 'rb', closefd=True)
+            descriptor = -1
+            opened = os.fstat(self.handle.fileno())
+            if not stat.S_ISREG(opened.st_mode):
+                raise SourceBundleVerificationError(f"{self.label} is not a regular file: {self.path}")
+            self.identity = _file_identity(opened)
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+        return self
+
+    def __exit__(self, exc_type: object, exc_value: object, traceback: object) -> None:
+        try:
+            if self.handle is not None and self.identity is not None:
+                current = os.fstat(self.handle.fileno())
+                if _file_identity(current) != self.identity:
+                    raise SourceBundleVerificationError(f"{self.label} changed while being verified: {self.path}")
+                try:
+                    path_stat = os.lstat(self.path)
+                except OSError as exc:
+                    raise SourceBundleVerificationError(f"{self.label} disappeared while being verified: {self.path}") from exc
+                if _file_identity(path_stat) != self.identity:
+                    raise SourceBundleVerificationError(f"{self.label} path identity changed while being verified: {self.path}")
+        finally:
+            if self.handle is not None:
+                self.handle.close()
+                self.handle = None
+
+    def _require_handle(self) -> BinaryIO:
+        if self.handle is None:
+            raise SourceBundleVerificationError(f"{self.label} handle is closed: {self.path}")
+        return self.handle
+
+    def read_bounded(self, limit: int) -> bytes:
+        handle = self._require_handle()
+        handle.seek(0)
+        raw = handle.read(limit + 1)
+        handle.seek(0)
+        return raw
+
+    def sha256(self) -> str:
+        handle = self._require_handle()
+        handle.seek(0)
+        digest = hashlib.sha256()
+        for chunk in iter(lambda: handle.read(1024 * 1024), b''):
+            digest.update(chunk)
+        handle.seek(0)
+        return digest.hexdigest()
+
+
+def _open_verified_input(path: Path, label: str) -> _VerifiedInput:
+    return _VerifiedInput(path, label)
+
+
+def _parse_manifest_bytes(payload: bytes, path: Path) -> dict[str, Any]:
+    try:
         if len(payload) > MAX_MANIFEST_BYTES:
             raise SourceBundleVerificationError(
                 f"source manifest exceeds the bounded size limit of {MAX_MANIFEST_BYTES} bytes"
@@ -192,11 +308,20 @@ def _load_manifest(path: Path) -> dict[str, Any]:
     identity_verified = raw.get("identity_verified")
     if not isinstance(identity_source, str) or identity_source not in {"git", "asserted-gitless"} or not isinstance(identity_verified, bool):
         raise SourceBundleVerificationError("source manifest contains invalid identity provenance")
-    if identity_verified and (identity_source != "git" or not _is_git_oid(raw["commit"]) or not _is_git_oid(raw["tree"])):
-        raise SourceBundleVerificationError("verified Git identity requires valid commit/tree object ids")
+    if not _is_git_oid(raw["commit"]) or not _is_git_oid(raw["tree"]):
+        raise SourceBundleVerificationError("source manifest commit/tree must be valid Git object ids")
+    if identity_verified and identity_source != "git":
+        raise SourceBundleVerificationError("verified Git identity requires Git provenance")
     if identity_source == "git" and not identity_verified:
         raise SourceBundleVerificationError("Git identity must be marked verified")
     return raw
+
+
+def _load_manifest(path: Path) -> dict[str, Any]:
+    """Compatibility wrapper that still uses the one-handle parser path."""
+    with _open_verified_input(path, "manifest") as source:
+        payload = source.read_bounded(MAX_MANIFEST_BYTES)
+        return _parse_manifest_bytes(payload, source.path)
 
 
 def _validate_identity_binding(
@@ -219,6 +344,13 @@ def _validate_identity_binding(
         raise SourceBundleVerificationError("expected manifest sha256 is invalid")
     if expected_archive_sha256 is not None and not _is_sha256_hex(expected_archive_sha256):
         raise SourceBundleVerificationError("expected archive sha256 is invalid")
+    if supplied_count == 3 and (
+        not isinstance(expected_repository, str)
+        or not expected_repository.strip()
+        or not _is_git_oid(expected_commit)
+        or not _is_git_oid(expected_tree)
+    ):
+        raise SourceBundleVerificationError("independent source identity contains invalid Git object ids")
     if expected_manifest_sha256 is not None and expected_manifest_sha256.casefold() != actual_manifest_sha256:
         raise SourceBundleVerificationError(
             f"manifest sha256 mismatch: expected {expected_manifest_sha256}, got {actual_manifest_sha256}"
@@ -338,7 +470,7 @@ def _validate_extracted_path(destination: Path, name: str) -> Path:
     return path
 
 
-def verify_source_bundle(
+def _verify_source_bundle_open(
     *,
     archive_path: Path,
     manifest_path: Path,
@@ -348,22 +480,29 @@ def verify_source_bundle(
     expected_tree: str | None = None,
     expected_manifest_sha256: str | None = None,
     expected_archive_sha256: str | None = None,
+    archive_input: _VerifiedInput,
+    manifest_input: _VerifiedInput,
 ) -> dict[str, Any]:
-    archive_path = _validate_input_file(Path(archive_path), "archive")
-    manifest_path = _validate_input_file(Path(manifest_path), "manifest")
-    archive_bytes = archive_path.stat().st_size
+    archive_path = archive_input.path
+    manifest_path = manifest_input.path
+    if archive_input.identity is None:
+        raise SourceBundleVerificationError("archive identity was not captured")
+    archive_bytes = int(archive_input.identity[2])
     if archive_bytes > MAX_ARCHIVE_BYTES:
         raise SourceBundleVerificationError(
             f"archive exceeds the bounded size limit of {MAX_ARCHIVE_BYTES} bytes"
         )
     destination = Path(os.path.abspath(os.fspath(Path(destination).expanduser())))
     _validate_destination_path(destination)
-    manifest = _load_manifest(manifest_path)
-    actual_manifest_sha = _sha256_file(manifest_path)[1]
+    manifest_bytes = manifest_input.read_bounded(MAX_MANIFEST_BYTES)
+    manifest = _parse_manifest_bytes(manifest_bytes, manifest_path)
+    actual_manifest_sha = _sha256_bytes(manifest_bytes)
+    actual_archive_sha = archive_input.sha256()
     # Check ZIP resource bounds before trusting any producer identity fields.
     # A malformed/untrusted archive must fail on its own safety predicate,
     # rather than being masked by a missing external identity binding.
-    with zipfile.ZipFile(archive_path, "r") as resource_check:
+    archive_handle = archive_input._require_handle()
+    with zipfile.ZipFile(archive_handle, "r") as resource_check:
         _validate_archive_resources(resource_check.infolist())
     identity_binding = _validate_identity_binding(
         manifest,
@@ -375,7 +514,6 @@ def verify_source_bundle(
         expected_archive_sha256=expected_archive_sha256,
     )
     expected_archive_sha = str(manifest.get("archive_sha256") or "")
-    actual_archive_sha = _sha256_file(archive_path)[1]
     if manifest.get('identity_source') == 'asserted-gitless' and not expected_archive_sha256:
         raise SourceBundleVerificationError(
             'asserted-gitless source identity requires an independent archive SHA-256 binding'
@@ -419,7 +557,8 @@ def verify_source_bundle(
     unsafe_members: list[str] = []
     duplicate_members: list[str] = []
     actual_by_key: dict[str, zipfile.ZipInfo] = {}
-    with zipfile.ZipFile(archive_path, "r") as handle:
+    archive_handle.seek(0)
+    with zipfile.ZipFile(archive_handle, "r") as handle:
         infos = handle.infolist()
         total_uncompressed, total_compressed, maximum_ratio = _validate_archive_resources(infos)
         for info in infos:
@@ -478,6 +617,8 @@ def verify_source_bundle(
                     )
             if extracted_bytes != total_uncompressed:
                 raise SourceBundleVerificationError("archive extraction byte total differs from ZIP metadata")
+            if archive_input.sha256() != actual_archive_sha:
+                raise SourceBundleVerificationError("archive bytes changed during verification")
             if destination.exists():
                 destination.rmdir()
             os.replace(staging, destination)
@@ -518,6 +659,34 @@ def verify_source_bundle(
         "destination": str(destination),
         "manifest_path": str(manifest_path),
     }
+
+
+def verify_source_bundle(
+    *,
+    archive_path: Path,
+    manifest_path: Path,
+    destination: Path,
+    expected_repository: str | None = None,
+    expected_commit: str | None = None,
+    expected_tree: str | None = None,
+    expected_manifest_sha256: str | None = None,
+    expected_archive_sha256: str | None = None,
+) -> dict[str, Any]:
+    """Verify and extract inputs while each source remains bound to one handle."""
+    with _open_verified_input(Path(manifest_path), "manifest") as manifest_input:
+        with _open_verified_input(Path(archive_path), "archive") as archive_input:
+            return _verify_source_bundle_open(
+                archive_path=Path(archive_path),
+                manifest_path=Path(manifest_path),
+                destination=destination,
+                expected_repository=expected_repository,
+                expected_commit=expected_commit,
+                expected_tree=expected_tree,
+                expected_manifest_sha256=expected_manifest_sha256,
+                expected_archive_sha256=expected_archive_sha256,
+                archive_input=archive_input,
+                manifest_input=manifest_input,
+            )
 
 
 def _parser() -> argparse.ArgumentParser:

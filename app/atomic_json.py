@@ -12,17 +12,71 @@ from typing import Any, Callable, Iterator
 
 
 _LOCKS_GUARD = threading.Lock()
-_LOCKS: dict[str, threading.RLock] = {}
+_LOCKS: dict[str, tuple[threading.RLock, int]] = {}
 
 
-def _thread_lock(path: Path) -> threading.RLock:
-    key = str(path.expanduser().resolve())
+@contextmanager
+def _thread_lock(path: Path) -> Iterator[None]:
+    """Hold a ref-counted in-process lock without leaking registry entries."""
+
+    key = os.path.normcase(os.path.abspath(os.fspath(path.expanduser())))
     with _LOCKS_GUARD:
-        lock = _LOCKS.get(key)
-        if lock is None:
+        entry = _LOCKS.get(key)
+        if entry is None:
             lock = threading.RLock()
-            _LOCKS[key] = lock
-        return lock
+            _LOCKS[key] = (lock, 1)
+        else:
+            lock, users = entry
+            _LOCKS[key] = (lock, users + 1)
+    try:
+        with lock:
+            yield
+    finally:
+        with _LOCKS_GUARD:
+            current = _LOCKS.get(key)
+            if current is not None and current[0] is lock:
+                if current[1] <= 1:
+                    _LOCKS.pop(key, None)
+                else:
+                    _LOCKS[key] = (lock, current[1] - 1)
+
+
+def _encode_json_object(payload: dict[str, Any], *, context: str) -> bytes:
+    """Return a strict JSON representation before any filesystem mutation."""
+
+    if not isinstance(payload, dict):
+        raise ValueError(f'JSON payload must be an object: {context}')
+    try:
+        encoded = (
+            json.dumps(
+                payload,
+                ensure_ascii=False,
+                indent=2,
+                sort_keys=True,
+                allow_nan=False,
+            )
+            + '\n'
+        ).encode('utf-8')
+        readback = json.loads(encoded.decode('utf-8'))
+    except (TypeError, ValueError, UnicodeError) as exc:
+        raise ValueError(f'JSON payload is not strictly round-trippable: {context}') from exc
+    if not isinstance(readback, dict) or readback != payload:
+        raise ValueError(f'JSON payload changed during strict round-trip: {context}')
+    return encoded
+
+
+def _ensure_lock_byte(handle: Any) -> None:
+    """Ensure the Windows byte-range lock has one stable byte to lock."""
+
+    handle.seek(0, os.SEEK_END)
+    if handle.tell() == 0:
+        handle.write(b'0')
+        handle.flush()
+        try:
+            os.fsync(handle.fileno())
+        except OSError:
+            pass
+    handle.seek(0)
 
 
 @contextmanager
@@ -37,10 +91,7 @@ def path_lock(path: Path) -> Iterator[None]:
             if os.name == 'nt':
                 import msvcrt
 
-                handle.seek(0)
-                handle.write(b'0')
-                handle.flush()
-                handle.seek(0)
+                _ensure_lock_byte(handle)
                 msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
             else:
                 import fcntl
@@ -67,8 +118,8 @@ def atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
     """Atomically replace *path* and verify the exact JSON object read back."""
 
     destination = Path(path)
+    encoded = _encode_json_object(payload, context=str(destination))
     destination.parent.mkdir(parents=True, exist_ok=True)
-    encoded = (json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + '\n').encode('utf-8')
     temporary_path: Path | None = None
     with path_lock(destination):
         try:
@@ -161,7 +212,7 @@ def update_json_object(
         updated = updater(dict(current))
         if not isinstance(updated, dict):
             raise ValueError(f'JSON updater must return an object: {destination}')
-        encoded = (json.dumps(updated, ensure_ascii=False, indent=2, sort_keys=True) + '\n').encode('utf-8')
+        encoded = _encode_json_object(updated, context=str(destination))
         temporary_path: Path | None = None
         try:
             with tempfile.NamedTemporaryFile(

@@ -96,10 +96,11 @@ def new_readiness_run_id() -> str:
 
 def resolve_candidate_generation() -> str | None:
     configured = os.environ.get('HWP_CANDIDATE_GENERATION')
+    expected_from_environment = None
     if configured:
         value = configured.strip()
         if value and len(value) <= 256 and '\x00' not in value:
-            return value
+            expected_from_environment = value
 
     configured_manifest = getattr(settings, 'source_manifest', None)
     candidates = []
@@ -127,7 +128,14 @@ def resolve_candidate_generation() -> str | None:
             import hashlib
 
             manifest_sha = hashlib.sha256(raw).hexdigest()
-            return f'{commit.lower()}:{tree.lower()}:{manifest_sha}'
+            derived = f'{commit.lower()}:{tree.lower()}:{manifest_sha}'
+            # Environment configuration is an assertion supplied by the
+            # installer, not an authority that can replace the bytes on disk.
+            # Refuse a mismatch instead of allowing a forged generation to
+            # become the worker's identity.
+            if expected_from_environment is not None and expected_from_environment != derived:
+                return None
+            return derived
         except (OSError, UnicodeError, ValueError, AttributeError):
             continue
     return None
@@ -430,8 +438,24 @@ def readiness_matches_current_worker(
         return False
     if snapshot.get('schema_version') != READINESS_SCHEMA_VERSION:
         return False
+    if snapshot.get('ok') is not True:
+        return False
     if snapshot.get('status') != 'ready' or not bool(snapshot.get('ready')):
         return False
+    if snapshot.get('phase') != 'probe_complete':
+        return False
+    if snapshot.get('errors') not in ([], None):
+        return False
+    checks = snapshot.get('checks')
+    if not isinstance(checks, dict):
+        return False
+    required_checks = ('platform', 'candidate_generation', 'pdf_renderer', 'pythoncom_import', 'pyhwpx_import')
+    if bool(snapshot.get('probe_hwp')):
+        required_checks += ('hancom_automation',)
+    for check_name in required_checks:
+        check = checks.get(check_name)
+        if not isinstance(check, dict) or check.get('ok') is not True:
+            return False
     if run_id is not None and snapshot.get('run_id') != run_id:
         return False
     expected_generation = candidate_generation or resolve_candidate_generation()

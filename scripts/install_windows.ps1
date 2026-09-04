@@ -256,11 +256,9 @@ function Recover-StaleVerifierHandoff {
             $task = Get-ScheduledTaskExact -TaskName $taskNameFromJournal -TaskPath $taskPathFromJournal -AllowMissing
             if (-not $task) { continue }
             $expectedArguments = if ($taskNameFromJournal -ceq $taskNamesFromJournal[0]) { '-m app.api_server' } elseif ($taskNameFromJournal -ceq $taskNamesFromJournal[1]) { '-m app.worker' } else { throw "Stale verifier handoff task name is not one of the journaled roles: $taskNameFromJournal" }
-            Assert-RunOwnedTaskIdentity -Identity (Get-ScheduledTaskIdentity -TaskName $taskNameFromJournal -TaskPath $taskPathFromJournal) -ExpectedRoot $install -ExpectedPython $python -ExpectedArguments $expectedArguments -ExpectedPrincipal $principal -ExpectedApiPort $apiPortFromJournal | Out-Null
-            if ([string]$task.State -eq 'Running') {
-                Stop-ScheduledTask -TaskName $taskNameFromJournal -TaskPath $taskPathFromJournal -ErrorAction Stop
-                if (-not (Wait-ScheduledTaskInactive -TaskName $taskNameFromJournal -TaskPath $taskPathFromJournal)) { throw "Stale verifier handoff task remained active: $taskNameFromJournal" }
-            }
+            $handoffTaskIdentity = Get-ScheduledTaskIdentity -TaskName $taskNameFromJournal -TaskPath $taskPathFromJournal
+            Assert-RunOwnedTaskIdentity -Identity $handoffTaskIdentity -ExpectedRoot $install -ExpectedPython $python -ExpectedArguments $expectedArguments -ExpectedPrincipal $principal -ExpectedApiPort $apiPortFromJournal | Out-Null
+            Stop-ScheduledTaskExactAndWait -TaskName $taskNameFromJournal -TaskPath $taskPathFromJournal -ExpectedIdentity $handoffTaskIdentity | Out-Null
             Unregister-ScheduledTask -TaskName $taskNameFromJournal -TaskPath $taskPathFromJournal -Confirm:$false -ErrorAction Stop
             if (Get-ScheduledTaskExact -TaskName $taskNameFromJournal -TaskPath $taskPathFromJournal -AllowMissing) { throw "Stale verifier handoff task remained after cleanup: $taskNameFromJournal" }
         }
@@ -645,16 +643,19 @@ function Restore-PreMoveTaskAdmission {
         $expectedDisabled = $DisabledTaskIdentity[$taskName]
         $original = $OriginalTaskIdentity[$taskName]
         if ($null -eq $original) { continue }
+        if ([string]$original.state -eq 'Queued') {
+            throw "Queued scheduled task state cannot be restored exactly during admission rollback: $taskName"
+        }
         $current = Get-ScheduledTaskIdentity -TaskName ([string]$taskName) -TaskPath $TaskPath
         if (-not [bool]$current.exists) {
             if ([string]::IsNullOrWhiteSpace([string]$original.xml)) {
                 throw "Pre-snapshot scheduled task XML is missing during admission restore: $taskName"
             }
-            Register-ScheduledTask -TaskName ([string]$taskName) -TaskPath $TaskPath -Xml ([string]$original.xml) -Force -ErrorAction Stop | Out-Null
+            Register-ScheduledTaskExactNoClobber -TaskName ([string]$taskName) -TaskPath $TaskPath -Xml ([string]$original.xml) | Out-Null
             $current = Get-ScheduledTaskIdentity -TaskName ([string]$taskName) -TaskPath $TaskPath
         }
         elseif ($null -ne $expectedDisabled) {
-            if ([string]$current.task_identity_hash -cne [string]$expectedDisabled.task_identity_hash -or [string]$current.xml -cne [string]$expectedDisabled.xml) {
+            if (-not (Test-ScheduledTaskIdentityExact -Actual $current -Expected $expectedDisabled)) {
                 throw "Pre-snapshot scheduled task identity changed before admission restore: $taskName"
             }
         }
@@ -662,34 +663,21 @@ function Restore-PreMoveTaskAdmission {
             # Disable/stop may have failed before the post-disable identity was
             # captured.  Prove ownership using the immutable action/principal
             # coordinates before restoring its exact original XML/state.
-            if ([string]$current.task_path -cne [string]$original.task_path -or
-                [string]$current.execute -cne [string]$original.execute -or
-                [string]$current.arguments -cne [string]$original.arguments -or
-                [string]$current.working_directory -cne [string]$original.working_directory -or
-                [string]$current.principal -cne [string]$original.principal) {
+            if (-not (Test-ScheduledTaskIdentityExact -Actual $current -Expected $original)) {
                 throw "Pre-snapshot scheduled task ownership changed before admission restore: $taskName"
             }
         }
-        $currentTask = Get-ScheduledTaskExact -TaskName ([string]$taskName) -TaskPath $TaskPath
-        if ([string]$currentTask.State -eq 'Running') {
-            Stop-ScheduledTask -TaskName ([string]$taskName) -TaskPath $TaskPath -ErrorAction Stop
-            if (-not (Wait-ScheduledTaskInactive -TaskName ([string]$taskName) -TaskPath $TaskPath)) {
-                throw "Pre-snapshot scheduled task remained active during admission restore: $taskName"
-            }
-        }
+        $current = Stop-ScheduledTaskExactAndWait -TaskName ([string]$taskName) -TaskPath $TaskPath -ExpectedIdentity $current
         # Re-register the sealed XML instead of approximating Enabled through
         # Enable/Disable cmdlets; this restores every omitted/default field too.
-        Register-ScheduledTask -TaskName ([string]$taskName) -TaskPath $TaskPath -Xml ([string]$original.xml) -Force -ErrorAction Stop | Out-Null
+        $restoredBeforeState = Register-ScheduledTaskExactNoClobber -TaskName ([string]$taskName) -TaskPath $TaskPath -Xml ([string]$original.xml) -ExpectedCurrentIdentity $current
         $currentTask = Get-ScheduledTaskExact -TaskName ([string]$taskName) -TaskPath $TaskPath
         if ([string]$original.state -eq 'Running') {
             Start-ScheduledTask -TaskName ([string]$taskName) -TaskPath $TaskPath -ErrorAction Stop
-            $deadline = (Get-Date).AddSeconds(10)
-            do {
-                $currentState = [string](Get-ScheduledTaskExact -TaskName ([string]$taskName) -TaskPath $TaskPath).State
-                if ($currentState -eq 'Running') { break }
-                Start-Sleep -Milliseconds 100
-            } while ((Get-Date) -lt $deadline)
-            if ($currentState -ne 'Running') { throw "Pre-snapshot scheduled task did not return to Running: $taskName" }
+            if (-not (Wait-ScheduledTaskRunning -TaskName ([string]$taskName) -TaskPath $TaskPath)) { throw "Pre-snapshot scheduled task did not return to Running: $taskName" }
+        }
+        elseif (-not (Wait-ScheduledTaskInactive -TaskName ([string]$taskName) -TaskPath $TaskPath)) {
+            throw "Pre-snapshot scheduled task remained active during admission restore: $taskName"
         }
         $restored = Get-ScheduledTaskIdentity -TaskName ([string]$taskName) -TaskPath $TaskPath
         if ([string]$restored.xml -cne [string]$original.xml -or [bool]$restored.enabled -ne [bool]$original.enabled) {

@@ -683,12 +683,20 @@ function Get-CanonicalPath {
     $expanded = [Environment]::ExpandEnvironmentVariables($Path)
     $full = [System.IO.Path]::GetFullPath($expanded)
     $trimChars = [char[]]@([char]92, [char]47)
+    $pathRoot = [System.IO.Path]::GetPathRoot($full)
     if (Test-Path -LiteralPath $full) {
         $resolved = Resolve-Path -LiteralPath $full -ErrorAction Stop
-        return $resolved.Path.TrimEnd($trimChars)
+        $resolvedPath = [string]$resolved.Path
+        if (-not [string]::IsNullOrWhiteSpace($pathRoot) -and $resolvedPath.Length -le $pathRoot.Length) {
+            return $pathRoot
+        }
+        return $resolvedPath.TrimEnd($trimChars)
     }
     if ($RequireExisting) {
         throw "Path does not exist: $full"
+    }
+    if (-not [string]::IsNullOrWhiteSpace($pathRoot) -and $full.Length -le $pathRoot.Length) {
+        return $pathRoot
     }
     return $full.TrimEnd($trimChars)
 }
@@ -1949,6 +1957,19 @@ function Get-IndependentGitIdentity {
     $gitRoot = Get-CanonicalPath -Path $rootValue -RequireExisting
     $expectedRoot = Get-CanonicalPath -Path $SourceRoot -RequireExisting
     if ($gitRoot -cne $expectedRoot) { return $null }
+    $statusProbe = Invoke-NativeChecked -FilePath $git.Source -Arguments @(
+        '-C', $expectedRoot, 'status', '--porcelain=v1', '-z', '--untracked-files=all'
+    ) -WorkingDirectory $expectedRoot -AllowNonZero
+    if ($statusProbe.exit_code -ne 0) {
+        throw "Independent Git checkout status could not be read: $expectedRoot"
+    }
+    $dirtyRecords = @(
+        ([string]$statusProbe.stdout -split [char]0) |
+            Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) }
+    )
+    if ($dirtyRecords.Count -gt 0) {
+        throw "Independent Git checkout is not clean: $expectedRoot"
+    }
     $remoteProbe = Invoke-NativeChecked -FilePath $git.Source -Arguments @('-C', $expectedRoot, 'config', '--get', 'remote.origin.url') -WorkingDirectory $expectedRoot -AllowNonZero
     $commitProbe = Invoke-NativeChecked -FilePath $git.Source -Arguments @('-C', $expectedRoot, 'rev-parse', '--verify', 'HEAD') -WorkingDirectory $expectedRoot -AllowNonZero
     $treeProbe = Invoke-NativeChecked -FilePath $git.Source -Arguments @('-C', $expectedRoot, 'rev-parse', '--verify', 'HEAD^{tree}') -WorkingDirectory $expectedRoot -AllowNonZero
@@ -1971,6 +1992,36 @@ function Get-IndependentGitIdentity {
         repository = ConvertTo-RepositoryIdentity -Value $remoteValue
         commit = $commit.ToLowerInvariant()
         tree = $tree.ToLowerInvariant()
+    }
+}
+
+function Get-GitSourceMemberIdentity {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$SourceRoot,
+        [Parameter(Mandatory = $true)][string]$RelativePath,
+        [Parameter(Mandatory = $true)][string]$Commit
+    )
+    $git = Get-Command git.exe -ErrorAction SilentlyContinue
+    if ($null -eq $git) { throw 'Git is required to bind a checkout source member to its tree blob.' }
+    $relativePosix = $RelativePath.Replace([char]92, [char]47)
+    $treeSpec = '{0}:{1}' -f $Commit, $relativePosix
+    $expectedProbe = Invoke-NativeChecked -FilePath $git.Source -Arguments @('-C', $SourceRoot, 'rev-parse', '--verify', $treeSpec) -WorkingDirectory $SourceRoot -AllowNonZero
+    $expectedBlob = ([string]$expectedProbe.stdout).Trim().ToLowerInvariant()
+    if ($expectedProbe.exit_code -ne 0 -or $expectedBlob -notmatch '^[0-9a-f]{40}$') {
+        throw "Git tree blob could not be read for admitted source member: $RelativePath"
+    }
+    $candidate = Assert-NoReparseSourcePath -Root (Get-CanonicalPath -Path $SourceRoot -RequireExisting) -RelativePath $RelativePath
+    $actualProbe = Invoke-NativeChecked -FilePath $git.Source -Arguments @('-C', $SourceRoot, 'hash-object', '--no-filters', '--', $candidate) -WorkingDirectory $SourceRoot -AllowNonZero
+    $actualBlob = ([string]$actualProbe.stdout).Trim().ToLowerInvariant()
+    if ($actualProbe.exit_code -ne 0 -or $actualBlob -notmatch '^[0-9a-f]{40}$') {
+        throw "Git could not hash admitted source member bytes: $RelativePath"
+    }
+    return [pscustomobject]@{
+        relative_path = $relativePosix
+        expected_blob = $expectedBlob
+        actual_blob = $actualBlob
+        matched = ($expectedBlob -ceq $actualBlob)
     }
 }
 
@@ -2072,6 +2123,9 @@ function Get-SourceManifest {
         $independentGit = Get-IndependentGitIdentity -SourceRoot $root
         if ($null -eq $independentGit -and $externalIdentityCount -ne 3) {
             throw 'Git source identity requires an independent Git checkout or a complete external identity binding.'
+        }
+        if ($null -eq $independentGit -and [string]::IsNullOrWhiteSpace($ExpectedManifestSha256)) {
+            throw 'Git source identity without an independent checkout requires an externally supplied manifest SHA-256.'
         }
         if ($null -ne $independentGit) {
             if ((ConvertTo-RepositoryIdentity -Value ([string]$manifest.repository)) -cne [string]$independentGit.repository -or [string]$manifest.commit -cne [string]$independentGit.commit -or [string]$manifest.tree -cne [string]$independentGit.tree) {
@@ -2238,6 +2292,17 @@ function Get-SourceManifest {
                     actual_sha256 = $actualHash
                     expected_size = $entrySize
                     actual_size = $actualSize
+                }
+            }
+            if ($null -ne $independentGit) {
+                $gitMember = Get-GitSourceMemberIdentity -SourceRoot $root -RelativePath $relativeWindows -Commit ([string]$independentGit.commit)
+                if (-not $gitMember.matched) {
+                    $mismatches += [pscustomobject]@{
+                        path = $relative
+                        reason = 'source bytes do not match the independently read Git tree blob'
+                        expected_git_blob = $gitMember.expected_blob
+                        actual_git_blob = $gitMember.actual_blob
+                    }
                 }
             }
         }
@@ -2475,7 +2540,10 @@ function Test-CanonicalTaskSettings {
         if ($null -eq $enabledProperty -or -not [bool]$enabledProperty.Value) { return $false }
         foreach ($settingName in @('DisallowStartIfOnBatteries', 'StopIfGoingOnBatteries', 'RunOnlyIfNetworkAvailable', 'Hidden')) {
             $value = [string](Get-OptionalPropertyValue -Object $settings -Name $settingName)
-            if (-not [string]::IsNullOrWhiteSpace($value) -and $value -ine 'false') { return $false }
+            if ($settingName -in @('DisallowStartIfOnBatteries', 'StopIfGoingOnBatteries')) {
+                if ($value -ine 'false') { return $false }
+            }
+            elseif (-not [string]::IsNullOrWhiteSpace($value) -and $value -ine 'false') { return $false }
         }
         $multipleInstances = [string](Get-OptionalPropertyValue -Object $settings -Name 'MultipleInstancesPolicy')
         if (-not [string]::IsNullOrWhiteSpace($multipleInstances) -and $multipleInstances -ine 'IgnoreNew') { return $false }
@@ -3303,6 +3371,93 @@ function Wait-ScheduledTaskInactive {
     return $false
 }
 
+function Test-ScheduledTaskIdentityExact {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][object]$Actual,
+        [Parameter(Mandatory = $true)][object]$Expected
+    )
+    if (-not [bool](Get-OptionalPropertyValue -Object $Actual -Name 'exists') -or
+        -not [bool](Get-OptionalPropertyValue -Object $Expected -Name 'exists')) { return $false }
+    return (
+        [string](Get-OptionalPropertyValue -Object $Actual -Name 'task_name') -ceq [string](Get-OptionalPropertyValue -Object $Expected -Name 'task_name') -and
+        [string](Get-OptionalPropertyValue -Object $Actual -Name 'task_path') -ceq [string](Get-OptionalPropertyValue -Object $Expected -Name 'task_path') -and
+        [string](Get-OptionalPropertyValue -Object $Actual -Name 'task_identity_hash') -ceq [string](Get-OptionalPropertyValue -Object $Expected -Name 'task_identity_hash') -and
+        [string](Get-OptionalPropertyValue -Object $Actual -Name 'xml') -cne $null -and
+        [string](Get-OptionalPropertyValue -Object $Actual -Name 'xml') -ceq [string](Get-OptionalPropertyValue -Object $Expected -Name 'xml')
+    )
+}
+
+function Stop-ScheduledTaskExactAndWait {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$TaskName,
+        [string]$TaskPath = $script:DefaultTaskPath,
+        [object]$ExpectedIdentity
+    )
+    $current = Get-ScheduledTaskIdentity -TaskName $TaskName -TaskPath $TaskPath
+    if (-not [bool]$current.exists) {
+        if ($null -ne $ExpectedIdentity) { throw "Scheduled task disappeared before quiescence: $TaskName" }
+        return $current
+    }
+    if ($null -ne $ExpectedIdentity -and -not (Test-ScheduledTaskIdentityExact -Actual $current -Expected $ExpectedIdentity)) {
+        throw "Scheduled task identity changed before quiescence: $TaskName"
+    }
+    $task = Get-ScheduledTaskExact -TaskName $TaskName -TaskPath $TaskPath
+    if ([string]$task.State -in @('Running', 'Queued')) {
+        Stop-ScheduledTask -TaskName $TaskName -TaskPath $TaskPath -ErrorAction Stop
+        if (-not (Wait-ScheduledTaskInactive -TaskName $TaskName -TaskPath $TaskPath)) {
+            throw "Scheduled task remained active after stop request: $TaskName"
+        }
+    }
+    $after = Get-ScheduledTaskIdentity -TaskName $TaskName -TaskPath $TaskPath
+    if (-not [bool]$after.exists) { throw "Scheduled task disappeared during quiescence: $TaskName" }
+    if ($null -ne $ExpectedIdentity -and -not (Test-ScheduledTaskIdentityExact -Actual $after -Expected $ExpectedIdentity)) {
+        throw "Scheduled task identity changed during quiescence: $TaskName"
+    }
+    return $after
+}
+
+function Register-ScheduledTaskExactNoClobber {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$TaskName,
+        [string]$TaskPath = $script:DefaultTaskPath,
+        [Parameter(Mandatory = $true)][string]$Xml,
+        [object]$ExpectedCurrentIdentity,
+        [switch]$SkipQuiescence
+    )
+    if ([string]::IsNullOrWhiteSpace($Xml)) { throw "Scheduled task XML is missing: $TaskName" }
+    $current = Get-ScheduledTaskIdentity -TaskName $TaskName -TaskPath $TaskPath
+    if ([bool]$current.exists) {
+        if ($null -eq $ExpectedCurrentIdentity -or -not (Test-ScheduledTaskIdentityExact -Actual $current -Expected $ExpectedCurrentIdentity)) {
+            throw "Refusing to overwrite a raced scheduled task definition: $TaskName"
+        }
+        if (-not $SkipQuiescence -or [string]$current.state -eq 'Queued') {
+            Stop-ScheduledTaskExactAndWait -TaskName $TaskName -TaskPath $TaskPath -ExpectedIdentity $ExpectedCurrentIdentity | Out-Null
+        }
+        $beforeUnregister = Get-ScheduledTaskIdentity -TaskName $TaskName -TaskPath $TaskPath
+        if (-not (Test-ScheduledTaskIdentityExact -Actual $beforeUnregister -Expected $ExpectedCurrentIdentity)) {
+            throw "Scheduled task identity changed before exact unregister: $TaskName"
+        }
+        Unregister-ScheduledTask -TaskName $TaskName -TaskPath $TaskPath -Confirm:$false -ErrorAction Stop
+        if (Get-ScheduledTaskExact -TaskName $TaskName -TaskPath $TaskPath -AllowMissing) {
+            throw "Scheduled task remained after exact unregister: $TaskName"
+        }
+    }
+    else {
+        if ($null -ne $ExpectedCurrentIdentity) { throw "Scheduled task disappeared before exact restore: $TaskName" }
+    }
+    # No -Force: a concurrent registration is a collision, not permission to
+    # clobber another client's definition.
+    Register-ScheduledTask -TaskName $TaskName -TaskPath $TaskPath -Xml $Xml -ErrorAction Stop | Out-Null
+    $restored = Get-ScheduledTaskIdentity -TaskName $TaskName -TaskPath $TaskPath
+    if (-not [bool]$restored.exists -or [string]$restored.xml -cne $Xml) {
+        throw "Scheduled task XML readback did not match the exact restore: $TaskName"
+    }
+    return $restored
+}
+
 function Wait-ScheduledTaskRunning {
     [CmdletBinding()]
     param(
@@ -3900,4 +4055,4 @@ function Restore-InstallSnapshot {
     }
 }
 
-Export-ModuleMember -Function Test-ProhibitedPrivateSourceMember, Test-ProhibitedSourceMember, Get-CanonicalPath, Get-PathObjectIdentity, Assert-PathObjectIdentity, Enter-InstallRootLock, Enter-MachineLifecycleLock, Enter-InstallLifecycleLock, Add-MachineLifecycleLockScope, Exit-InstallLifecycleLock, Exit-PathMutex, Enter-ReceiptPathLock, Assert-ReceiptPathAdmission, Get-InstallTransactionJournalPath, Write-StableTransactionJournal, Read-StableTransactionJournal, Assert-NoReparsePath, Assert-NoReparseSourcePath, Assert-WindowsSafeSourceRelativePath, Get-Sha256Hex, Get-TextSha256, Get-OptionalPropertyValue, Copy-FileVerified, Test-NonEmptyFile, Invoke-NativeChecked, Get-SourceManifest, Get-ScheduledTaskIdentity, Get-ScheduledTaskExact, Assert-SafeScheduledTaskName, Assert-CanonicalScheduledTaskPath, Test-CanonicalTaskSettings, Test-CanonicalPathWithinRoot, Test-CommandLineModuleToken, Test-CommandLinePathToken, Test-CanonicalTaskActionBinding, Test-CanonicalProcessIdentity, Get-InstallProcessSnapshot, Get-ProcessGenerationIdentity, Stop-InstallProcesses, Wait-ScheduledTaskInactive, Wait-ScheduledTaskRunning, Resolve-WindowsPrincipalIdentity, Test-WindowsPrincipalEquivalent, Test-ScheduledTaskLogonTypeEquivalent, Test-ScheduledTaskRunLevelEquivalent, Write-JsonReceipt, Save-InstallSnapshot, Read-VerifiedInstallSnapshot, Restore-InstallSnapshot, Limit-Text, Read-BoundedText, Read-BoundedJsonObject, Get-ConfiguredEnvValue, Get-ConfiguredApiPort, Resolve-ApiPort
+Export-ModuleMember -Function Test-ProhibitedPrivateSourceMember, Test-ProhibitedSourceMember, Get-CanonicalPath, Get-PathObjectIdentity, Assert-PathObjectIdentity, Enter-InstallRootLock, Enter-MachineLifecycleLock, Enter-InstallLifecycleLock, Add-MachineLifecycleLockScope, Exit-InstallLifecycleLock, Exit-PathMutex, Enter-ReceiptPathLock, Assert-ReceiptPathAdmission, Get-InstallTransactionJournalPath, Write-StableTransactionJournal, Read-StableTransactionJournal, Assert-NoReparsePath, Assert-NoReparseSourcePath, Assert-WindowsSafeSourceRelativePath, Get-Sha256Hex, Get-TextSha256, Get-OptionalPropertyValue, Copy-FileVerified, Test-NonEmptyFile, Invoke-NativeChecked, Get-SourceManifest, Get-ScheduledTaskIdentity, Get-ScheduledTaskExact, Test-ScheduledTaskIdentityExact, Stop-ScheduledTaskExactAndWait, Register-ScheduledTaskExactNoClobber, Assert-SafeScheduledTaskName, Assert-CanonicalScheduledTaskPath, Test-CanonicalTaskSettings, Test-CanonicalPathWithinRoot, Test-CommandLineModuleToken, Test-CommandLinePathToken, Test-CanonicalTaskActionBinding, Test-CanonicalProcessIdentity, Get-InstallProcessSnapshot, Get-ProcessGenerationIdentity, Stop-InstallProcesses, Wait-ScheduledTaskInactive, Wait-ScheduledTaskRunning, Resolve-WindowsPrincipalIdentity, Test-WindowsPrincipalEquivalent, Test-ScheduledTaskLogonTypeEquivalent, Test-ScheduledTaskRunLevelEquivalent, Write-JsonReceipt, Save-InstallSnapshot, Read-VerifiedInstallSnapshot, Restore-InstallSnapshot, Limit-Text, Read-BoundedText, Read-BoundedJsonObject, Get-ConfiguredEnvValue, Get-ConfiguredApiPort, Resolve-ApiPort

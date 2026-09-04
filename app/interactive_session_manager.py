@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import hashlib
+import copy
+from contextlib import nullcontext
 import json
 import os
 import re
@@ -16,7 +18,11 @@ from app.interactive.operator_status import render_operator_status
 from app.interactive.verify_evidence import build_verify_step_binding, resolve_verify_capture_timing
 from app.logging_utils import configure_logger
 from app.observation import ensure_viewer_session, latest_frame_metadata_path, latest_frame_path, load_viewer_session
-from app.readiness import build_plain_readiness_failure, load_runtime_readiness_snapshot
+from app.readiness import (
+    build_plain_readiness_failure,
+    load_runtime_readiness_snapshot,
+    readiness_matches_current_worker,
+)
 
 COMMAND_SEQUENCE = (
     'open',
@@ -254,6 +260,33 @@ def _existing_file(value: Any) -> Path | None:
     return None
 
 
+def _sha256_file(path: Path) -> tuple[int, str]:
+    digest = hashlib.sha256()
+    size = 0
+    try:
+        with path.open('rb') as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b''):
+                size += len(chunk)
+                digest.update(chunk)
+    except OSError as exc:
+        raise InteractiveSessionError(f'Interactive evidence file could not be read: {path}') from exc
+    return size, digest.hexdigest()
+
+
+def _canonical_payload_sha256(payload: dict[str, Any]) -> str:
+    try:
+        encoded = json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(',', ':'),
+            allow_nan=False,
+        ).encode('utf-8')
+    except (TypeError, ValueError, UnicodeError) as exc:
+        raise InteractiveSessionError('Interactive evidence metadata is not strictly serializable.') from exc
+    return hashlib.sha256(encoded).hexdigest()
+
+
 def _api_base_url(settings: Settings) -> str:
     return f'http://{settings.api_host}:{settings.api_port}'
 
@@ -303,6 +336,39 @@ class InteractiveSessionManager:
     @property
     def retention_ledger_path(self) -> Path:
         return self.sessions_root / 'retention-ledger.json'
+
+    def _session_mutation_lock(self, session_id: str):
+        """Serialize one session's state, events, and projections."""
+
+        # A few focused unit tests construct a lightweight manager double with
+        # ``object.__new__`` and replace persistence methods.  There is no
+        # filesystem-backed manager state to lock in that deliberately
+        # in-memory shape; real instances always initialize ``settings``.
+        if not hasattr(self, 'settings'):
+            return nullcontext()
+        return path_lock(self.state_path(session_id).with_name('.session-mutation'))
+
+    def _active_mutation_lock(self):
+        """Serialize active-session admission across manager processes."""
+
+        return path_lock(self.sessions_root / '.active-session-mutation')
+
+    def _strict_generation(self, value: Any, *, default: int = 0) -> int:
+        if value is None:
+            value = default
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise InteractiveSessionError('Interactive session state generation is invalid.')
+        return int(value)
+
+    def _write_operator_status(self, session_id: str, text: str) -> None:
+        path = self.operator_status_path(session_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_name(f'.{path.name}.{uuid.uuid4().hex}.tmp')
+        try:
+            temporary.write_text(text + '\n', encoding='utf-8', newline='\n')
+            os.replace(temporary, path)
+        finally:
+            temporary.unlink(missing_ok=True)
 
     @property
     def verify_evidence_retention_days(self) -> int:
@@ -638,11 +704,20 @@ class InteractiveSessionManager:
                 'worker_name': self.settings.worker_name,
                 'checked_at': utc_now_iso(),
             }
+        admitted = readiness_matches_current_worker(snapshot)
         return {
-            'ok': bool(snapshot.get('ok', True)),
-            'ready': bool(snapshot.get('ready')),
-            'status': str(snapshot.get('status') or ('ready' if snapshot.get('ready') else 'not_ready')),
-            'summary': str(snapshot.get('summary') or snapshot.get('detail') or ''),
+            'ok': bool(snapshot.get('ok', True)) and admitted,
+            'ready': bool(snapshot.get('ready')) and admitted,
+            'status': (
+                str(snapshot.get('status') or 'ready')
+                if admitted
+                else 'not_ready'
+            ),
+            'summary': (
+                str(snapshot.get('summary') or snapshot.get('detail') or '')
+                if admitted
+                else 'Runtime readiness admission failed; the worker lease or candidate binding is not current.'
+            ),
             'worker_name': str(snapshot.get('worker_name') or self.settings.worker_name),
             'artifact_path': snapshot.get('artifact_path'),
             'checked_at': snapshot.get('checked_at') or snapshot.get('updated_at') or utc_now_iso(),
@@ -701,7 +776,10 @@ class InteractiveSessionManager:
         return payload
 
     def _step_evidence_dir(self, session_id: str, step_name: str, recorded_at: str) -> Path:
-        return self.session_dir(session_id) / 'verify_evidence' / step_name / _timestamp_slug(recorded_at)
+        return self.session_dir(session_id) / 'verify_evidence' / step_name / self._require_verify_evidence_token(
+            recorded_at,
+            label='recorded_at',
+        )
 
     def _require_verify_evidence_token(self, value: str, *, label: str) -> str:
         token = str(value or '').strip()
@@ -743,7 +821,14 @@ class InteractiveSessionManager:
                 f'Frozen verify evidence not found: session={safe_session_id} step={safe_step_name} recorded_at={evidence_slug}'
             )
 
+        if metadata_path.is_symlink():
+            raise InteractiveSessionError('Frozen verify evidence metadata is a symlink.')
         payload = _json_load(metadata_path) or {}
+        metadata_hash = payload.get('metadata_sha256')
+        if not isinstance(metadata_hash, str) or metadata_hash != _canonical_payload_sha256(
+            {key: value for key, value in payload.items() if key != 'metadata_sha256'}
+        ):
+            raise InteractiveSessionError('Frozen verify evidence metadata hash did not match readback bytes.')
         session = self._load_session(safe_session_id) or {}
         retention = dict(payload.get('retention')) if isinstance(payload.get('retention'), dict) else {}
         if isinstance(session, dict) and session:
@@ -753,6 +838,14 @@ class InteractiveSessionManager:
             payload['retention'] = retention
         frame_payload = payload.get('frame') if isinstance(payload.get('frame'), dict) else {}
         frame_path = _existing_file(frame_payload.get('step_bound_frame_path'))
+        if frame_path is not None:
+            if frame_path.is_symlink() or frame_path.parent != evidence_dir:
+                raise InteractiveSessionError('Frozen verify evidence frame escaped its step-bound directory.')
+            frame_size, frame_sha256 = _sha256_file(frame_path)
+            if frame_size != int(frame_payload.get('step_bound_frame_size_bytes') or -1) or frame_sha256 != str(
+                frame_payload.get('step_bound_frame_sha256') or ''
+            ):
+                raise InteractiveSessionError('Frozen verify evidence frame hash did not match readback bytes.')
         urls = self.build_verify_evidence_urls(
             session_id=safe_session_id,
             step_name=safe_step_name,
@@ -812,12 +905,13 @@ class InteractiveSessionManager:
 
         source_image_path = self._resolve_verify_frame_image_source(gui_payload, frame_payload)
         source_metadata_path = self._resolve_verify_frame_metadata_source(gui_payload)
-        evidence_dir = self._step_evidence_dir(str(session['session_id']), step_name, recorded_at)
+        evidence_slug = f'{_timestamp_slug(recorded_at)}-{uuid.uuid4().hex}'
+        evidence_dir = self._step_evidence_dir(str(session['session_id']), step_name, evidence_slug)
         evidence_dir.mkdir(parents=True, exist_ok=True)
         evidence_urls = self.build_verify_evidence_urls(
             session_id=str(session['session_id']),
             step_name=step_name,
-            recorded_at=recorded_at,
+            recorded_at=evidence_slug,
         )
         retention = self._build_verify_evidence_retention_policy(session)
 
@@ -826,6 +920,9 @@ class InteractiveSessionManager:
             suffix = source_image_path.suffix or '.png'
             bound_frame_path = evidence_dir / f'{step_name}-frame{suffix}'
             shutil.copyfile(source_image_path, bound_frame_path)
+            frame_size, frame_sha256 = _sha256_file(bound_frame_path)
+        else:
+            frame_size, frame_sha256 = 0, None
 
         captured_at = frame_payload.get('captured_at')
         recorded_at_dt = _parse_iso_datetime(recorded_at)
@@ -858,6 +955,9 @@ class InteractiveSessionManager:
             frame_payload['step_bound_frame_path'] = str(bound_frame_path)
             frame_payload['step_bound_frame_url'] = evidence_urls['frame_url']
         frame_payload['step_bound_frame_metadata_url'] = evidence_urls['metadata_url']
+        if bound_frame_path is not None:
+            frame_payload['step_bound_frame_size_bytes'] = frame_size
+            frame_payload['step_bound_frame_sha256'] = frame_sha256
 
         if bound_frame_path is not None:
             primary_image.update(
@@ -884,6 +984,7 @@ class InteractiveSessionManager:
             'session_id': session.get('session_id'),
             'step': step_name,
             'recorded_at': recorded_at,
+            'artifact_id': evidence_slug,
             'retention': retention,
             'binding': binding,
             'frame': frame_payload,
@@ -897,6 +998,7 @@ class InteractiveSessionManager:
                 step_binding_payload['source_frame_metadata_error'] = f'failed_to_read:{source_metadata_path}'
 
         step_metadata_path = evidence_dir / f'{step_name}-frame.json'
+        step_binding_payload['metadata_sha256'] = _canonical_payload_sha256(step_binding_payload)
         _json_dump(step_metadata_path, step_binding_payload)
 
         artifacts.update(
@@ -940,7 +1042,21 @@ class InteractiveSessionManager:
             merged.update(update)
         return merged
 
-    def _save_session(self, session: dict[str, Any]) -> dict[str, Any]:
+    def _save_session_locked(
+        self,
+        session: dict[str, Any],
+        *,
+        current: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        current_generation = self._strict_generation(
+            current.get('state_generation') if isinstance(current, dict) else None,
+        )
+        if isinstance(current, dict) and 'state_generation' in session:
+            requested_generation = self._strict_generation(session.get('state_generation'))
+            if requested_generation != current_generation:
+                raise InteractiveSessionError(
+                    'Interactive session state changed while the command was being prepared.'
+                )
         now_iso = utc_now_iso()
         session['updated_at'] = now_iso
         session['readiness'] = self._runtime_status()
@@ -955,9 +1071,39 @@ class InteractiveSessionManager:
         session['command_progress'] = progress
         session['operator_status_lines'] = lines
         session['operator_status_text'] = text
+        session['state_generation'] = current_generation + 1
         _json_dump(self.state_path(str(session['session_id'])), session)
-        self.operator_status_path(str(session['session_id'])).write_text(text + '\n', encoding='utf-8')
+        self._write_operator_status(str(session['session_id']), text)
         return session
+
+    def _save_session(self, session: dict[str, Any]) -> dict[str, Any]:
+        session_id = str(session.get('session_id') or '').strip()
+        if not session_id:
+            raise InteractiveSessionError('Interactive session is missing session_id.')
+        with self._session_mutation_lock(session_id):
+            current = self._load_session(session_id)
+            if not isinstance(current, dict):
+                current = None
+            return self._save_session_locked(session, current=current)
+
+    def _session_transaction(
+        self,
+        session_id: str,
+        mutator: Any,
+        *,
+        event: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        with self._session_mutation_lock(session_id):
+            current = self._load_session(session_id)
+            if not isinstance(current, dict):
+                raise InteractiveSessionError(f'Interactive session not found: {session_id}')
+            updated = mutator(copy.deepcopy(current))
+            if not isinstance(updated, dict):
+                raise InteractiveSessionError('Interactive session mutation must return an object.')
+            persisted = self._save_session_locked(updated, current=current)
+            if event is not None:
+                self._append_event(session_id, event)
+            return persisted
 
     def _append_event(self, session_id: str, payload: dict[str, Any]) -> None:
         event = dict(payload)
@@ -1002,19 +1148,9 @@ class InteractiveSessionManager:
     ) -> dict[str, Any]:
         self._prune_expired_verify_evidence()
         self._reap_settled_sessions()
-        active_session_id = self._read_active_session_id()
-        if active_session_id:
-            existing = self._load_session(active_session_id)
-            if isinstance(existing, dict) and existing.get('state') not in TERMINAL_SESSION_STATES:
-                raise InteractiveSessionError(
-                    f'Interactive session already open: {active_session_id}. Close it before opening a new session.'
-                )
-
         session_id = str(session_id or uuid.uuid4().hex).strip()
         if not session_id:
             raise InteractiveSessionError('Interactive session id must not be empty.')
-        if self.state_path(session_id).exists():
-            raise InteractiveSessionError(f'Interactive session already exists: {session_id}')
         now = utc_now_iso()
         session = {
             'session_id': session_id,
@@ -1078,18 +1214,29 @@ class InteractiveSessionManager:
             },
             'metadata': dict(metadata or {}),
         }
-        self._save_session(session)
-        self._write_active_session_id(session_id)
-        self._append_event(
-            session_id,
-            {
-                'kind': 'session_opened',
-                'command': 'open',
-                'state': 'succeeded',
-                'summary': 'Interactive session opened.',
-                'source_path': str(source_path),
-            },
-        )
+        with self._active_mutation_lock():
+            active_session_id = self._read_active_session_id()
+            if active_session_id:
+                existing = self._load_session(active_session_id)
+                if isinstance(existing, dict) and existing.get('state') not in TERMINAL_SESSION_STATES:
+                    raise InteractiveSessionError(
+                        f'Interactive session already open: {active_session_id}. Close it before opening a new session.'
+                    )
+            with self._session_mutation_lock(session_id):
+                if self.state_path(session_id).exists():
+                    raise InteractiveSessionError(f'Interactive session already exists: {session_id}')
+                session = self._save_session_locked(session, current=None)
+                self._append_event(
+                    session_id,
+                    {
+                        'kind': 'session_opened',
+                        'command': 'open',
+                        'state': 'succeeded',
+                        'summary': 'Interactive session opened.',
+                        'source_path': str(source_path),
+                    },
+                )
+            self._write_active_session_id(session_id)
         self._log_operator_event(session, command='open', state='succeeded', summary='Interactive session opened.')
         return session
 
@@ -1103,22 +1250,26 @@ class InteractiveSessionManager:
         artifacts: dict[str, Any] | None = None,
         session_state: str | None = None,
     ) -> dict[str, Any]:
-        session = self._require_session(session_id)
-        if isinstance(active_target, dict) and active_target:
-            session['active_target'] = active_target
-        if isinstance(metadata, dict) and metadata:
-            session['metadata'] = self._merge_mapping(session.get('metadata'), metadata)
-        if isinstance(artifacts, dict) and artifacts:
-            session['artifacts'] = self._merge_mapping(session.get('artifacts'), artifacts)
-        if isinstance(live_runtime, dict) and live_runtime:
-            session['live_runtime'] = self._merge_mapping(session.get('live_runtime'), live_runtime)
-        if session_state is not None:
-            session['state'] = session_state
-        return self._save_session(session)
+        resolved_session_id = str(self._require_session(session_id)['session_id'])
+
+        def mutate(session: dict[str, Any]) -> dict[str, Any]:
+            if isinstance(active_target, dict) and active_target:
+                session['active_target'] = active_target
+            if isinstance(metadata, dict) and metadata:
+                session['metadata'] = self._merge_mapping(session.get('metadata'), metadata)
+            if isinstance(artifacts, dict) and artifacts:
+                session['artifacts'] = self._merge_mapping(session.get('artifacts'), artifacts)
+            if isinstance(live_runtime, dict) and live_runtime:
+                session['live_runtime'] = self._merge_mapping(session.get('live_runtime'), live_runtime)
+            if session_state is not None:
+                session['state'] = session_state
+            return session
+
+        return self._session_transaction(resolved_session_id, mutate)
 
     def get_status(self, session_id: str | None = None) -> dict[str, Any]:
-        session = self._require_session(session_id)
-        return self._save_session(session)
+        resolved_session_id = str(self._require_session(session_id)['session_id'])
+        return self._session_transaction(resolved_session_id, lambda session: session)
 
     def record_command(
         self,
@@ -1145,91 +1296,106 @@ class InteractiveSessionManager:
         artifacts: dict[str, Any] | None = None,
         session_state: str | None = None,
     ) -> dict[str, Any]:
-        session = self._require_session(session_id)
-        resolved_session_id = str(session['session_id'])
-        recorded_at = utc_now_iso()
         history_payload = _bounded_command_history_payload(command, payload or {})
-        session['current_command'] = command
-
-        # Preserve the role split in state so later live command handlers can plug in
-        # without collapsing candidate search, cursor entry, verification, and undo into one blob.
-        if isinstance(find_result, dict) and find_result:
-            session['find_result'] = find_result
-        if isinstance(choose_result, dict) and choose_result:
-            session['choose_result'] = choose_result
-        if isinstance(selected_candidate, dict) and selected_candidate:
-            session['selected_candidate'] = selected_candidate
-        if isinstance(active_target, dict) and active_target:
-            session['active_target'] = active_target
-        if isinstance(runtime_preparation, dict) and runtime_preparation:
-            session['runtime_preparation'] = self._merge_mapping(session.get('runtime_preparation'), runtime_preparation)
-        if isinstance(lock_status, dict) and lock_status:
-            session['lock_status'] = lock_status
-        if isinstance(apply_result, dict) and apply_result:
-            session['apply_result'] = apply_result
-        if isinstance(undo_result, dict) and undo_result:
-            session['undo_result'] = undo_result
-        if isinstance(metadata, dict) and metadata:
-            session['metadata'] = self._merge_mapping(session.get('metadata'), metadata)
-        if isinstance(live_runtime, dict) and live_runtime:
-            session['live_runtime'] = self._merge_mapping(session.get('live_runtime'), live_runtime)
-        if isinstance(artifacts, dict) and artifacts:
-            session['artifacts'] = self._merge_mapping(session.get('artifacts'), artifacts)
-
-        session['popup_status'] = self._merge_popup_status(session.get('popup_status'), popup_status)
-
-        if verify_stage in {'pre', 'post'}:
-            target_key = 'verify_pre' if verify_stage == 'pre' else 'verify_post'
-            existing = session.get(target_key) if isinstance(session.get(target_key), dict) else {}
-            merged = dict(existing)
-            if isinstance(verify_result, dict):
-                verify_result, step_artifacts = self._bind_verify_step_gui_evidence(
-                    session,
-                    step_name=f'verify-{verify_stage}',
-                    verify_result=verify_result,
-                    recorded_at=recorded_at,
+        session_hint = self._require_session(session_id)
+        resolved_session_id = str(session_hint['session_id'])
+        active_lock = self._active_mutation_lock() if command == 'close' else nullcontext()
+        with active_lock:
+            with self._session_mutation_lock(resolved_session_id):
+                session = (
+                    self._load_session(resolved_session_id)
+                    if hasattr(self, 'settings')
+                    else session_hint
                 )
-                merged.update(verify_result)
-                session['artifacts'] = self._merge_mapping(session.get('artifacts'), step_artifacts)
-            merged['state'] = state
-            merged.setdefault('summary', summary)
-            merged['updated_at'] = recorded_at
-            session[target_key] = merged
+                if not isinstance(session, dict):
+                    raise InteractiveSessionError(f'Interactive session not found: {resolved_session_id}')
+                recorded_at = utc_now_iso()
+                session['current_command'] = command
 
-        normalized_failure = self._normalize_failure_reason(failure_reason, command=command, summary=summary)
-        if state == 'failed' and normalized_failure is None:
-            normalized_failure = self._normalize_failure_reason({}, command=command, summary=summary)
-        if normalized_failure is not None:
-            session['failure_reason'] = normalized_failure
-            session['state'] = 'failed'
-        elif session_state is not None:
-            session['state'] = session_state
-        elif command == 'close':
-            session['state'] = 'closed'
-        elif session.get('state') not in TERMINAL_SESSION_STATES:
-            session['state'] = 'ready'
+                # Preserve the role split in state so later live command handlers can plug in
+                # without collapsing candidate search, cursor entry, verification, and undo into one blob.
+                if isinstance(find_result, dict) and find_result:
+                    session['find_result'] = find_result
+                if isinstance(choose_result, dict) and choose_result:
+                    session['choose_result'] = choose_result
+                if isinstance(selected_candidate, dict) and selected_candidate:
+                    session['selected_candidate'] = selected_candidate
+                if isinstance(active_target, dict) and active_target:
+                    session['active_target'] = active_target
+                if isinstance(runtime_preparation, dict) and runtime_preparation:
+                    session['runtime_preparation'] = self._merge_mapping(session.get('runtime_preparation'), runtime_preparation)
+                if isinstance(lock_status, dict) and lock_status:
+                    session['lock_status'] = lock_status
+                if isinstance(apply_result, dict) and apply_result:
+                    session['apply_result'] = apply_result
+                if isinstance(undo_result, dict) and undo_result:
+                    session['undo_result'] = undo_result
+                if isinstance(metadata, dict) and metadata:
+                    session['metadata'] = self._merge_mapping(session.get('metadata'), metadata)
+                if isinstance(live_runtime, dict) and live_runtime:
+                    session['live_runtime'] = self._merge_mapping(session.get('live_runtime'), live_runtime)
+                if isinstance(artifacts, dict) and artifacts:
+                    session['artifacts'] = self._merge_mapping(session.get('artifacts'), artifacts)
 
-        if command == 'close':
-            session['closed_at'] = utc_now_iso()
+                session['popup_status'] = self._merge_popup_status(session.get('popup_status'), popup_status)
 
-        entry = {
-            'recorded_at': recorded_at,
-            'command': command,
-            'state': state,
-            'summary': _bounded_history_value(summary),
-            'payload': history_payload,
-        }
-        history = session.get('command_history') if isinstance(session.get('command_history'), list) else []
-        history.append(entry)
-        session['command_history'] = history[-MAX_INTERACTIVE_COMMAND_HISTORY:]
+                if verify_stage in {'pre', 'post'}:
+                    target_key = 'verify_pre' if verify_stage == 'pre' else 'verify_post'
+                    existing = session.get(target_key) if isinstance(session.get(target_key), dict) else {}
+                    merged = dict(existing)
+                    if isinstance(verify_result, dict):
+                        verify_result, step_artifacts = self._bind_verify_step_gui_evidence(
+                            session,
+                            step_name=f'verify-{verify_stage}',
+                            verify_result=verify_result,
+                            recorded_at=recorded_at,
+                        )
+                        merged.update(verify_result)
+                        session['artifacts'] = self._merge_mapping(session.get('artifacts'), step_artifacts)
+                    merged['state'] = state
+                    merged.setdefault('summary', summary)
+                    merged['updated_at'] = recorded_at
+                    session[target_key] = merged
 
-        self._save_session(session)
-        self._append_event(resolved_session_id, entry)
+                normalized_failure = self._normalize_failure_reason(failure_reason, command=command, summary=summary)
+                if state == 'failed' and normalized_failure is None:
+                    normalized_failure = self._normalize_failure_reason({}, command=command, summary=summary)
+                if normalized_failure is not None:
+                    session['failure_reason'] = normalized_failure
+                    session['state'] = 'failed'
+                elif session_state is not None:
+                    session['state'] = session_state
+                elif command == 'close':
+                    session['state'] = 'closed'
+                elif session.get('state') not in TERMINAL_SESSION_STATES:
+                    session['state'] = 'ready'
+
+                if command == 'close':
+                    session['closed_at'] = utc_now_iso()
+
+                entry = {
+                    'recorded_at': recorded_at,
+                    'command': command,
+                    'state': state,
+                    'summary': _bounded_history_value(summary),
+                    'payload': history_payload,
+                }
+                history = session.get('command_history') if isinstance(session.get('command_history'), list) else []
+                history.append(entry)
+                session['command_history'] = history[-MAX_INTERACTIVE_COMMAND_HISTORY:]
+
+                if hasattr(self, 'settings'):
+                    session = self._save_session_locked(session, current=session)
+                else:
+                    # Compatibility callers construct an in-memory manager via
+                    # object.__new__ and replace _save_session with a test seam.
+                    session = self._save_session(session)
+                self._append_event(resolved_session_id, entry)
+
+            if command == 'close':
+                active_session_id = self._read_active_session_id()
+                if active_session_id == resolved_session_id:
+                    self._write_active_session_id(None)
+
         self._log_operator_event(session, command=command, state=state, summary=summary)
-
-        if command == 'close':
-            active_session_id = self._read_active_session_id()
-            if active_session_id == resolved_session_id:
-                self._write_active_session_id(None)
-
         return session

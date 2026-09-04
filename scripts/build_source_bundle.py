@@ -116,6 +116,94 @@ def _sha256_file(path: Path) -> tuple[int, str]:
     return size, digest.hexdigest()
 
 
+def _stable_file_hash(path: Path, label: str) -> tuple[int, str]:
+    """Hash one output object without reopening a replaceable pathname."""
+
+    lexical = _assert_safe_output_path(path, label)
+    flags = os.O_RDONLY | getattr(os, 'O_CLOEXEC', 0) | getattr(os, 'O_BINARY', 0)
+    flags |= getattr(os, 'O_NOFOLLOW', 0)
+    try:
+        descriptor = os.open(lexical, flags)
+    except OSError as exc:
+        raise SourceBundleError(f'{label} could not be opened without following links: {lexical}') from exc
+    try:
+        with os.fdopen(descriptor, 'rb', closefd=True) as handle:
+            descriptor = -1
+            opened = os.fstat(handle.fileno())
+            if not stat.S_ISREG(opened.st_mode):
+                raise SourceBundleError(f'{label} is not a regular file: {lexical}')
+            identity = (
+                int(getattr(opened, 'st_dev', 0)),
+                int(getattr(opened, 'st_ino', 0)),
+                int(getattr(opened, 'st_size', 0)),
+                int(getattr(opened, 'st_mtime_ns', 0)),
+                int(getattr(opened, 'st_mode', 0)),
+            )
+            digest = hashlib.sha256()
+            size = 0
+            for chunk in iter(lambda: handle.read(1024 * 1024), b''):
+                size += len(chunk)
+                digest.update(chunk)
+            current = os.fstat(handle.fileno())
+            current_identity = (
+                int(getattr(current, 'st_dev', 0)),
+                int(getattr(current, 'st_ino', 0)),
+                int(getattr(current, 'st_size', 0)),
+                int(getattr(current, 'st_mtime_ns', 0)),
+                int(getattr(current, 'st_mode', 0)),
+            )
+            if identity != current_identity:
+                raise SourceBundleError(f'{label} changed while being read: {lexical}')
+            try:
+                path_identity = os.lstat(lexical)
+            except OSError as exc:
+                raise SourceBundleError(f'{label} disappeared while being read: {lexical}') from exc
+            lexical_identity = (
+                int(getattr(path_identity, 'st_dev', 0)),
+                int(getattr(path_identity, 'st_ino', 0)),
+                int(getattr(path_identity, 'st_size', 0)),
+                int(getattr(path_identity, 'st_mtime_ns', 0)),
+                int(getattr(path_identity, 'st_mode', 0)),
+            )
+            if identity != lexical_identity:
+                raise SourceBundleError(f'{label} path identity changed while being read: {lexical}')
+            return size, digest.hexdigest()
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+
+def _write_atomic_output(path: Path, data: bytes, label: str) -> None:
+    """Publish output bytes without following a raced output symlink."""
+
+    output = _assert_safe_output_path(path, label)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    _assert_safe_output_path(output, label)
+    temporary_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            prefix=f'.{output.name}.',
+            suffix='.tmp',
+            dir=output.parent,
+            mode='wb',
+            delete=False,
+        ) as temporary:
+            temporary_path = Path(temporary.name)
+            temporary.write(data)
+            temporary.flush()
+            try:
+                os.fsync(temporary.fileno())
+            except OSError:
+                pass
+        _assert_safe_output_path(output, label)
+        os.replace(temporary_path, output)
+        temporary_path = None
+        _assert_safe_output_path(output, label)
+    finally:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
+
+
 def _is_filesystem_reparse_point(path: Path) -> bool:
     if path.is_symlink():
         return True
@@ -136,6 +224,21 @@ def _assert_no_reparse_ancestors(source_root: Path, relative: Path | None = None
         current = current / part
         if _is_filesystem_reparse_point(current):
             raise SourceBundleError(f"source path contains a symlink or reparse ancestor: {current}")
+
+
+def _assert_safe_output_path(path: Path, label: str) -> Path:
+    """Keep output custody lexical; never resolve through a mutable link."""
+
+    output = Path(os.path.abspath(os.fspath(path.expanduser())))
+    current = output
+    while True:
+        if _is_filesystem_reparse_point(current):
+            raise SourceBundleError(f"{label} is a symlink or reparse point: {output}")
+        parent = current.parent
+        if parent == current:
+            break
+        current = parent
+    return output
 
 
 def _is_git_oid(value: object) -> bool:
@@ -391,7 +494,9 @@ def _stage_source_paths(
 
 
 def _write_deterministic_archive(source_root: Path, paths: list[Path], archive_path: Path) -> None:
+    archive_path = _assert_safe_output_path(archive_path, 'source archive output')
     archive_path.parent.mkdir(parents=True, exist_ok=True)
+    _assert_safe_output_path(archive_path, 'source archive output')
     with tempfile.NamedTemporaryFile(prefix=f".{archive_path.name}.", suffix=".tmp", dir=archive_path.parent, delete=False) as temporary:
         temporary_path = Path(temporary.name)
     try:
@@ -411,9 +516,13 @@ def _write_deterministic_archive(source_root: Path, paths: list[Path], archive_p
                 info.extra = b""
                 info.comment = b""
                 handle.writestr(info, data, compresslevel=9 if compress_type == zipfile.ZIP_DEFLATED else None)
+        _assert_safe_output_path(archive_path, 'source archive output')
         os.replace(temporary_path, archive_path)
+        temporary_path = None
+        _assert_safe_output_path(archive_path, 'source archive output')
     finally:
-        temporary_path.unlink(missing_ok=True)
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
 
 
 def build_source_bundle(
@@ -429,8 +538,10 @@ def build_source_bundle(
     lexical_source_root = Path(os.path.abspath(os.fspath(source_root)))
     _assert_no_reparse_ancestors(lexical_source_root)
     source_root = lexical_source_root.resolve()
-    archive_path = Path(archive_path).expanduser().resolve()
-    manifest_path = Path(manifest_path).expanduser().resolve()
+    archive_path = _assert_safe_output_path(Path(archive_path), "source archive output")
+    manifest_path = _assert_safe_output_path(Path(manifest_path), "source manifest output")
+    if archive_path == manifest_path:
+        raise SourceBundleError("source archive and manifest outputs must be different files")
     if not source_root.is_dir():
         raise SourceBundleError(f"source root is not a directory: {source_root}")
     if not isinstance(repository, str) or not repository.strip():
@@ -452,14 +563,14 @@ def build_source_bundle(
         identity_verified = True
     else:
         for field, value in (("commit", commit), ("tree", tree)):
-            if not isinstance(value, str) or not value.strip():
-                raise SourceBundleError(f"source identity field is empty: {field}")
+            if not _is_git_oid(value):
+                raise SourceBundleError(f"source identity field is not a valid Git object id: {field}")
         identity_source = "asserted-gitless"
         identity_verified = False
     stage_root, files = _stage_source_paths(source_root, paths, git_commit=commit if identity_verified else None)
     try:
         _write_deterministic_archive(stage_root, paths, archive_path)
-        archive_size, archive_sha256 = _sha256_file(archive_path)
+        archive_size, archive_sha256 = _stable_file_hash(archive_path, 'source archive output')
         if archive_size > _MAX_ARCHIVE_BYTES:
             raise SourceBundleError(f"source archive exceeds bounded size limit of {_MAX_ARCHIVE_BYTES} bytes")
     finally:
@@ -479,10 +590,10 @@ def build_source_bundle(
         "archive_sha256": archive_sha256,
     }
     manifest_path.parent.mkdir(parents=True, exist_ok=True)
-    manifest_payload = json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+    manifest_payload = json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True, allow_nan=False) + "\n"
     if len(manifest_payload.encode("utf-8")) > _MAX_MANIFEST_BYTES:
         raise SourceBundleError(f"source manifest exceeds bounded size limit of {_MAX_MANIFEST_BYTES} bytes")
-    manifest_path.write_text(manifest_payload, encoding="utf-8", newline="\n")
+    _write_atomic_output(manifest_path, manifest_payload.encode('utf-8'), 'source manifest output')
     return manifest
 
 

@@ -56,20 +56,18 @@ def update_state(
 
     state_path = path or default_state_path()
     if expected_generation is not None:
-        try:
-            expected_generation = int(expected_generation)
-        except (TypeError, ValueError) as exc:
-            raise StatePersistenceError('Expected CLI state generation is invalid.') from exc
+        if isinstance(expected_generation, bool) or not isinstance(expected_generation, int):
+            raise StatePersistenceError('Expected CLI state generation is invalid.')
+        expected_generation = int(expected_generation)
         if expected_generation < 0:
             raise StatePersistenceError('Expected CLI state generation is invalid.')
     expected_session = str(expected_session_id).strip() if expected_session_id is not None else None
 
     def _apply(current: dict[str, Any]) -> dict[str, Any]:
         current_generation_raw = current.get('state_generation', 0)
-        try:
-            current_generation = int(current_generation_raw)
-        except (TypeError, ValueError) as exc:
-            raise StatePersistenceError('CLI state generation is invalid.') from exc
+        if isinstance(current_generation_raw, bool) or not isinstance(current_generation_raw, int):
+            raise StatePersistenceError('CLI state generation is invalid.')
+        current_generation = int(current_generation_raw)
         if current_generation < 0:
             raise StatePersistenceError('CLI state generation is invalid.')
         if expected_generation is not None and current_generation != expected_generation:

@@ -86,6 +86,17 @@ class G19ExternalIdentityBindingTests(unittest.TestCase):
             r"(?:\[string\]\$)?ExpectedTree\s+-notmatch\s+'\^\[0-9a-fA-F\]\{40\}\(\[0-9a-fA-F\]\{24\}\)\?\$'",
         )
 
+    def test_independent_git_identity_rejects_dirty_tracked_checkout(self) -> None:
+        common = self.read("windows_install_common.psm1")
+        identity_function = common[
+            common.index("function Get-IndependentGitIdentity") : common.index(
+                "function Get-GitSourceMemberIdentity"
+            )
+        ]
+        self.assertIn("status", identity_function)
+        self.assertIn("--porcelain=v1", identity_function)
+        self.assertIn("dirty", identity_function.lower())
+
     def test_verifier_requires_the_same_independent_binding_for_gitless_receivers(self) -> None:
         verifier = self.read("verify_windows.ps1")
         for token in (

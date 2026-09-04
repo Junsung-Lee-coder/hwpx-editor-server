@@ -71,24 +71,24 @@ class SourceBundleTests(unittest.TestCase):
                 archive_path=archive,
                 manifest_path=manifest_path,
                 repository="github:Junsung-Lee-coder/hwpx-editor-server",
-                commit="abc123",
-                tree="tree123",
+                commit="a" * 40,
+                tree="b" * 40,
             )
             verified = verifier.verify_source_bundle(
                 archive_path=archive,
                 manifest_path=manifest_path,
                 destination=tmp / "extract",
                 expected_repository="github:Junsung-Lee-coder/hwpx-editor-server",
-                expected_commit="abc123",
-                expected_tree="tree123",
+                expected_commit="a" * 40,
+                expected_tree="b" * 40,
                 expected_manifest_sha256=hashlib.sha256(manifest_path.read_bytes()).hexdigest(),
                 expected_archive_sha256=hashlib.sha256(archive.read_bytes()).hexdigest(),
             )
 
             self.assertEqual(manifest["file_count"], 3)
             self.assertEqual(manifest["repository"], "github:Junsung-Lee-coder/hwpx-editor-server")
-            self.assertEqual(manifest["commit"], "abc123")
-            self.assertEqual(manifest["tree"], "tree123")
+            self.assertEqual(manifest["commit"], "a" * 40)
+            self.assertEqual(manifest["tree"], "b" * 40)
             self.assertRegex(manifest["archive_sha256"], r"^[0-9a-f]{64}$")
             self.assertEqual(verified["mismatch_count"], 0)
             self.assertEqual(verified["unsafe_member_count"], 0)
@@ -106,8 +106,8 @@ class SourceBundleTests(unittest.TestCase):
             first_manifest = tmp / "first.json"
             second_archive = tmp / "second.zip"
             second_manifest = tmp / "second.json"
-            first = builder.build_source_bundle(source_root=source, archive_path=first_archive, manifest_path=first_manifest, repository="r", commit="c", tree="t")
-            second = builder.build_source_bundle(source_root=source, archive_path=second_archive, manifest_path=second_manifest, repository="r", commit="c", tree="t")
+            first = builder.build_source_bundle(source_root=source, archive_path=first_archive, manifest_path=first_manifest, repository="r", commit="c" * 40, tree="d" * 40)
+            second = builder.build_source_bundle(source_root=source, archive_path=second_archive, manifest_path=second_manifest, repository="r", commit="c" * 40, tree="d" * 40)
 
             self.assertEqual(first["files"], second["files"])
             self.assertEqual(first["archive_sha256"], second["archive_sha256"])
@@ -125,7 +125,7 @@ class SourceBundleTests(unittest.TestCase):
             target.write_text("secret", encoding="utf-8")
             (source / "link.txt").symlink_to(target)
             with self.assertRaises(builder.SourceBundleError):
-                builder.build_source_bundle(source_root=source, archive_path=tmp / "source.zip", manifest_path=tmp / "manifest.json", repository="r", commit="c", tree="t")
+                builder.build_source_bundle(source_root=source, archive_path=tmp / "source.zip", manifest_path=tmp / "manifest.json", repository="r", commit="c" * 40, tree="d" * 40)
 
     def test_builder_rejects_symlinked_source_directory(self) -> None:
         builder = load_script("build_source_bundle.py")
@@ -138,7 +138,7 @@ class SourceBundleTests(unittest.TestCase):
             (target / "hidden.py").write_text("print('hidden')\n", encoding="utf-8")
             (source / "linked").symlink_to(target, target_is_directory=True)
             with self.assertRaises(builder.SourceBundleError):
-                builder.build_source_bundle(source_root=source, archive_path=tmp / "source.zip", manifest_path=tmp / "manifest.json", repository="r", commit="c", tree="t")
+                builder.build_source_bundle(source_root=source, archive_path=tmp / "source.zip", manifest_path=tmp / "manifest.json", repository="r", commit="c" * 40, tree="d" * 40)
 
     def test_builder_fails_closed_when_git_metadata_exists_but_git_listing_fails(self) -> None:
         builder = load_script("build_source_bundle.py")
@@ -150,7 +150,7 @@ class SourceBundleTests(unittest.TestCase):
             (source / "main.py").write_text("print('ok')\n", encoding="utf-8")
             with mock.patch.object(builder.subprocess, "run", side_effect=OSError("git unavailable")):
                 with self.assertRaises(builder.SourceBundleError):
-                    builder.build_source_bundle(source_root=source, archive_path=tmp / "source.zip", manifest_path=tmp / "manifest.json", repository="r", commit="c", tree="t")
+                    builder.build_source_bundle(source_root=source, archive_path=tmp / "source.zip", manifest_path=tmp / "manifest.json", repository="r", commit="c" * 40, tree="d" * 40)
 
     def test_builder_excludes_runtime_paths_case_insensitively(self) -> None:
         builder = load_script("build_source_bundle.py")
@@ -167,8 +167,8 @@ class SourceBundleTests(unittest.TestCase):
                 archive_path=tmp / "source.zip",
                 manifest_path=tmp / "manifest.json",
                 repository="r",
-                commit="c",
-                tree="t",
+                commit="c" * 40,
+                tree="d" * 40,
             )
             self.assertEqual([entry["path"] for entry in manifest["files"]], ["main.py"])
 
@@ -185,8 +185,8 @@ class SourceBundleTests(unittest.TestCase):
                 archive_path=tmp / "source.zip",
                 manifest_path=tmp / "manifest.json",
                 repository="r",
-                commit="c",
-                tree="t",
+                commit="c" * 40,
+                tree="d" * 40,
             )
             self.assertEqual([entry["path"] for entry in manifest["files"]], ["main.py"])
 
@@ -208,8 +208,8 @@ class SourceBundleTests(unittest.TestCase):
                 archive_path=archive,
                 manifest_path=manifest_path,
                 repository="r",
-                commit="c",
-                tree="t",
+                commit="c" * 40,
+                tree="d" * 40,
             )
             self.assertEqual([entry["path"] for entry in manifest["files"]], ["main.py"])
             verifier.verify_source_bundle(
@@ -217,8 +217,8 @@ class SourceBundleTests(unittest.TestCase):
                 manifest_path=manifest_path,
                 destination=tmp / "extract",
                 expected_repository="r",
-                expected_commit="c",
-                expected_tree="t",
+                expected_commit="c" * 40,
+                expected_tree="d" * 40,
                 expected_manifest_sha256=hashlib.sha256(manifest_path.read_bytes()).hexdigest(),
                 expected_archive_sha256=hashlib.sha256(archive.read_bytes()).hexdigest(),
             )
@@ -239,16 +239,16 @@ class SourceBundleTests(unittest.TestCase):
                 archive_path=archive,
                 manifest_path=manifest_path,
                 repository="r",
-                commit="c",
-                tree="t",
+                commit="c" * 40,
+                tree="d" * 40,
             )
             verified = verifier.verify_source_bundle(
                 archive_path=archive,
                 manifest_path=manifest_path,
                 destination=tmp / "extract",
                 expected_repository="r",
-                expected_commit="c",
-                expected_tree="t",
+                expected_commit="c" * 40,
+                expected_tree="d" * 40,
                 expected_manifest_sha256=hashlib.sha256(manifest_path.read_bytes()).hexdigest(),
                 expected_archive_sha256=hashlib.sha256(archive.read_bytes()).hexdigest(),
             )
@@ -272,8 +272,8 @@ class SourceBundleTests(unittest.TestCase):
                 archive_path=archive,
                 manifest_path=manifest_path,
                 repository="r",
-                commit="c",
-                tree="t",
+                commit="c" * 40,
+                tree="d" * 40,
             )
             with self.assertRaises(verifier.SourceBundleVerificationError):
                 verifier.verify_source_bundle(
@@ -288,8 +288,179 @@ class SourceBundleTests(unittest.TestCase):
                     destination=tmp / "mismatched-identity",
                     expected_repository="r",
                     expected_commit="wrong",
-                    expected_tree="t",
+                    expected_tree="d" * 40,
                 )
+
+    def test_gitless_manifest_rejects_malformed_commit_and_tree_ids(self) -> None:
+        verifier = load_script("verify_source_bundle.py")
+        manifest = {
+            "schema_version": "hwpx/source-bundle/v1",
+            "repository": "r",
+            "commit": "abc123",
+            "tree": "tree123",
+            "identity_source": "asserted-gitless",
+            "identity_verified": False,
+            "file_count": 0,
+            "files": [],
+            "archive_sha256": "a" * 64,
+        }
+        with self.assertRaisesRegex(verifier.SourceBundleVerificationError, "object ids"):
+            verifier._parse_manifest_bytes(json.dumps(manifest).encode("utf-8"), Path("manifest.json"))
+
+    def test_builder_rejects_output_symlink_created_before_manifest_write(self) -> None:
+        builder = load_script("build_source_bundle.py")
+        with tempfile.TemporaryDirectory() as tmp_raw:
+            tmp = Path(tmp_raw)
+            source = tmp / "source"
+            source.mkdir()
+            (source / "main.py").write_text("print('ok')\n", encoding="utf-8")
+            archive = tmp / "source.zip"
+            manifest_path = tmp / "manifest.json"
+            outside = tmp / "outside.json"
+            outside.write_text("sentinel\n", encoding="utf-8")
+            original = builder._write_deterministic_archive
+
+            def replace_manifest_with_link(*args, **kwargs):
+                original(*args, **kwargs)
+                manifest_path.symlink_to(outside)
+
+            with mock.patch.object(builder, "_write_deterministic_archive", replace_manifest_with_link):
+                with self.assertRaises(builder.SourceBundleError):
+                    builder.build_source_bundle(
+                        source_root=source,
+                        archive_path=archive,
+                        manifest_path=manifest_path,
+                        repository="r",
+                        commit="c" * 40,
+                        tree="d" * 40,
+                    )
+            self.assertEqual(outside.read_text(encoding="utf-8"), "sentinel\n")
+
+    def test_builder_rejects_archive_output_swap_before_hashing(self) -> None:
+        builder = load_script("build_source_bundle.py")
+        with tempfile.TemporaryDirectory() as tmp_raw:
+            tmp = Path(tmp_raw)
+            source = tmp / "source"
+            source.mkdir()
+            (source / "main.py").write_text("print('ok')\n", encoding="utf-8")
+            archive = tmp / "source.zip"
+            manifest_path = tmp / "manifest.json"
+            outside = tmp / "outside.zip"
+            outside.write_bytes(b"sentinel")
+            original = builder._write_deterministic_archive
+
+            def replace_archive_with_link(*args, **kwargs):
+                original(*args, **kwargs)
+                archive.unlink()
+                archive.symlink_to(outside)
+
+            with mock.patch.object(builder, "_write_deterministic_archive", replace_archive_with_link):
+                with self.assertRaises(builder.SourceBundleError):
+                    builder.build_source_bundle(
+                        source_root=source,
+                        archive_path=archive,
+                        manifest_path=manifest_path,
+                        repository="r",
+                        commit="c" * 40,
+                        tree="d" * 40,
+                    )
+            self.assertEqual(outside.read_bytes(), b"sentinel")
+
+    def test_verifier_rejects_manifest_path_replacement_after_parse(self) -> None:
+        builder = load_script("build_source_bundle.py")
+        verifier = load_script("verify_source_bundle.py")
+        with tempfile.TemporaryDirectory() as tmp_raw:
+            tmp = Path(tmp_raw)
+            source = tmp / "source"
+            source.mkdir()
+            (source / "main.py").write_text("print('ok')\n", encoding="utf-8")
+            archive = tmp / "source.zip"
+            manifest_path = tmp / "manifest.json"
+            builder.build_source_bundle(
+                source_root=source,
+                archive_path=archive,
+                manifest_path=manifest_path,
+                repository="r",
+                commit="c" * 40,
+                tree="d" * 40,
+            )
+            original_manifest_sha256 = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
+            original_archive_sha256 = hashlib.sha256(archive.read_bytes()).hexdigest()
+            replacement = tmp / "replacement.json"
+            replacement.write_text('{"forged":true}\n', encoding="utf-8")
+            original_parse = verifier._parse_manifest_bytes
+
+            def parse_then_replace(payload, path):
+                parsed = original_parse(payload, path)
+                manifest_path.unlink()
+                manifest_path.symlink_to(replacement)
+                return parsed
+
+            with mock.patch.object(verifier, "_parse_manifest_bytes", parse_then_replace):
+                with self.assertRaisesRegex(verifier.SourceBundleVerificationError, "manifest.*(identity|changed)"):
+                    verifier.verify_source_bundle(
+                        archive_path=archive,
+                        manifest_path=manifest_path,
+                        destination=tmp / "extract",
+                        expected_repository="r",
+                        expected_commit="c" * 40,
+                        expected_tree="d" * 40,
+                        expected_manifest_sha256=original_manifest_sha256,
+                        expected_archive_sha256=original_archive_sha256,
+                    )
+
+    def test_verifier_rejects_archive_path_replacement_during_extraction(self) -> None:
+        builder = load_script("build_source_bundle.py")
+        verifier = load_script("verify_source_bundle.py")
+        with tempfile.TemporaryDirectory() as tmp_raw:
+            tmp = Path(tmp_raw)
+            source = tmp / "source"
+            source.mkdir()
+            (source / "main.py").write_text("print('ok')\n", encoding="utf-8")
+            archive = tmp / "source.zip"
+            manifest_path = tmp / "manifest.json"
+            builder.build_source_bundle(
+                source_root=source,
+                archive_path=archive,
+                manifest_path=manifest_path,
+                repository="r",
+                commit="c" * 40,
+                tree="d" * 40,
+            )
+            original_manifest_sha256 = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
+            original_archive_sha256 = hashlib.sha256(archive.read_bytes()).hexdigest()
+            replacement = tmp / "replacement.zip"
+            replacement.write_bytes(b"not-the-authenticated-archive")
+            original_resources = verifier._validate_archive_resources
+            swapped = False
+
+            def check_then_replace(infos):
+                nonlocal swapped
+                result = original_resources(infos)
+                if not swapped:
+                    swapped = True
+                    archive.unlink()
+                    archive.symlink_to(replacement)
+                return result
+
+            with mock.patch.object(verifier, "_validate_archive_resources", check_then_replace):
+                with self.assertRaisesRegex(verifier.SourceBundleVerificationError, "archive.*(identity|changed)"):
+                    verifier.verify_source_bundle(
+                        archive_path=archive,
+                        manifest_path=manifest_path,
+                        destination=tmp / "extract",
+                        expected_repository="r",
+                        expected_commit="c" * 40,
+                        expected_tree="d" * 40,
+                        expected_manifest_sha256=original_manifest_sha256,
+                        expected_archive_sha256=original_archive_sha256,
+                    )
+
+    def test_verifier_has_a_native_windows_no_follow_open_path(self) -> None:
+        verifier_source = (ROOT / "scripts" / "verify_source_bundle.py").read_text(encoding="utf-8")
+        self.assertIn("FILE_FLAG_OPEN_REPARSE_POINT", verifier_source)
+        self.assertIn("CreateFileW", verifier_source)
+        self.assertIn("O_NOFOLLOW", verifier_source)
 
     def test_verified_git_manifest_requires_independent_manifest_binding(self) -> None:
         verifier = load_script("verify_source_bundle.py")
@@ -364,8 +535,8 @@ class SourceBundleTests(unittest.TestCase):
                 archive_path=tmp / "new.zip",
                 manifest_path=tmp / "new-manifest.json",
                 repository="r",
-                commit="c",
-                tree="t",
+                commit="c" * 40,
+                tree="d" * 40,
             )
             self.assertEqual([entry["path"] for entry in manifest["files"]], ["main.py"])
 
@@ -379,7 +550,7 @@ class SourceBundleTests(unittest.TestCase):
             archive.write_bytes(b"placeholder")
             (source / "alias.zip").symlink_to(archive)
             with self.assertRaises(builder.SourceBundleError):
-                builder.build_source_bundle(source_root=source, archive_path=archive, manifest_path=tmp / "manifest.json", repository="r", commit="c", tree="t")
+                builder.build_source_bundle(source_root=source, archive_path=archive, manifest_path=tmp / "manifest.json", repository="r", commit="c" * 40, tree="d" * 40)
 
     def test_verifier_rejects_windows_ads_member_path(self) -> None:
         verifier = load_script("verify_source_bundle.py")
@@ -418,7 +589,7 @@ class SourceBundleTests(unittest.TestCase):
             (source / "main.py").write_text("print('ok')\n", encoding="utf-8")
             archive = tmp / "source.zip"
             manifest = tmp / "manifest.json"
-            builder.build_source_bundle(source_root=source, archive_path=archive, manifest_path=manifest, repository="r", commit="c", tree="t")
+            builder.build_source_bundle(source_root=source, archive_path=archive, manifest_path=manifest, repository="r", commit="c" * 40, tree="d" * 40)
             payload = json.loads(manifest.read_text(encoding="utf-8"))
             payload["file_count"] += 1
             manifest.write_text(json.dumps(payload), encoding="utf-8")
@@ -436,7 +607,7 @@ class SourceBundleTests(unittest.TestCase):
             (source / "main.py").write_text("print('ok')\n", encoding="utf-8")
             archive = tmp / "source.zip"
             manifest_path = tmp / "manifest.json"
-            builder.build_source_bundle(source_root=source, archive_path=archive, manifest_path=manifest_path, repository="r", commit="c", tree="t")
+            builder.build_source_bundle(source_root=source, archive_path=archive, manifest_path=manifest_path, repository="r", commit="c" * 40, tree="d" * 40)
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
             manifest.pop("commit")
             manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
@@ -459,8 +630,8 @@ class SourceBundleTests(unittest.TestCase):
                 archive_path=archive,
                 manifest_path=manifest_path,
                 repository="r",
-                commit="c",
-                tree="t",
+                commit="c" * 40,
+                tree="d" * 40,
             )
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
             del manifest["archive_sha256"]
@@ -483,8 +654,8 @@ class SourceBundleTests(unittest.TestCase):
                 archive_path=archive,
                 manifest_path=manifest,
                 repository="r",
-                commit="c",
-                tree="t",
+                commit="c" * 40,
+                tree="d" * 40,
             )
             linked_archive = tmp / "linked-source.zip"
             linked_archive.symlink_to(archive)
@@ -524,7 +695,7 @@ class SourceBundleTests(unittest.TestCase):
             (source / "main.py").write_text("print('ok')\n", encoding="utf-8")
             archive = tmp / "source.zip"
             manifest = tmp / "manifest.json"
-            builder.build_source_bundle(source_root=source, archive_path=archive, manifest_path=manifest, repository="r", commit="c", tree="t")
+            builder.build_source_bundle(source_root=source, archive_path=archive, manifest_path=manifest, repository="r", commit="c" * 40, tree="d" * 40)
             target = tmp / "target"
             target.mkdir()
             destination = tmp / "extract"
@@ -544,7 +715,7 @@ class SourceBundleTests(unittest.TestCase):
             (source / "main.py").write_text("print('ok')\n", encoding="utf-8")
             archive = tmp / "source.zip"
             manifest = tmp / "manifest.json"
-            builder.build_source_bundle(source_root=source, archive_path=archive, manifest_path=manifest, repository="r", commit="c", tree="t")
+            builder.build_source_bundle(source_root=source, archive_path=archive, manifest_path=manifest, repository="r", commit="c" * 40, tree="d" * 40)
             target = tmp / "target"
             target.mkdir()
             linked_parent = tmp / "linked-parent"
@@ -561,7 +732,7 @@ class SourceBundleTests(unittest.TestCase):
             source.mkdir()
             (source / "CON.txt").write_text("device name\n", encoding="utf-8")
             with self.assertRaises(builder.SourceBundleError):
-                builder.build_source_bundle(source_root=source, archive_path=tmp / "source.zip", manifest_path=tmp / "manifest.json", repository="r", commit="c", tree="t")
+                builder.build_source_bundle(source_root=source, archive_path=tmp / "source.zip", manifest_path=tmp / "manifest.json", repository="r", commit="c" * 40, tree="d" * 40)
 
     def test_verifier_rejects_unsafe_archive_member_without_extracting(self) -> None:
         verifier = load_script("verify_source_bundle.py")
@@ -586,7 +757,7 @@ class SourceBundleTests(unittest.TestCase):
             (source / "main.py").write_text("print('ok')\n", encoding="utf-8")
             archive = tmp / "source.zip"
             manifest = tmp / "manifest.json"
-            builder.build_source_bundle(source_root=source, archive_path=archive, manifest_path=manifest, repository="r", commit="c", tree="t")
+            builder.build_source_bundle(source_root=source, archive_path=archive, manifest_path=manifest, repository="r", commit="c" * 40, tree="d" * 40)
             destination = tmp / "extract"
             destination.mkdir()
             sentinel = destination / "sentinel.txt"

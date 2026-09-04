@@ -151,8 +151,8 @@ class G22SourceBundleRepairTests(unittest.TestCase):
                 archive_path=Path(raw) / "source.zip",
                 manifest_path=Path(raw) / "source-manifest.json",
                 repository="r",
-                commit="c",
-                tree="t",
+                commit="c" * 40,
+                tree="d" * 40,
             )
             self.assertEqual([item["path"] for item in manifest["files"]], ["main.py"])
 
@@ -170,16 +170,16 @@ class G22SourceBundleRepairTests(unittest.TestCase):
                 archive_path=archive,
                 manifest_path=manifest_path,
                 repository="r",
-                commit="c",
-                tree="t",
+                commit="c" * 40,
+                tree="d" * 40,
             )
             kwargs = {
                 "archive_path": archive,
                 "manifest_path": manifest_path,
                 "destination": Path(raw) / "extract",
                 "expected_repository": "r",
-                "expected_commit": "c",
-                "expected_tree": "t",
+                "expected_commit": "c" * 40,
+                "expected_tree": "d" * 40,
             }
             with self.assertRaisesRegex(verifier.SourceBundleVerificationError, "archive"):
                 verifier.verify_source_bundle(**kwargs)

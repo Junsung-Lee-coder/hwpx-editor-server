@@ -31,32 +31,38 @@ class G3ReadinessRuntimeTests(unittest.TestCase):
 
     def test_readiness_rejects_stale_heartbeat_and_accepts_current_lease(self) -> None:
         identity = readiness.current_worker_identity()
-        snapshot = readiness.build_runtime_readiness_snapshot(
-            probe_hwp=False,
-            run_id="g3-run",
-            candidate_generation="commit:tree:manifest",
-            worker_identity=identity,
-            ttl_seconds=60,
-        )
-        snapshot["ready"] = True
-        snapshot["status"] = "ready"
-        self.assertTrue(
-            readiness.readiness_matches_current_worker(
-                snapshot,
-                candidate_generation="commit:tree:manifest",
+        fake_pythoncom = types.ModuleType("pythoncom")
+        fake_pyhwpx = types.ModuleType("pyhwpx")
+        setattr(fake_pyhwpx, "Hwp", object)
+        with patch.dict(sys.modules, {"pythoncom": fake_pythoncom, "pyhwpx": fake_pyhwpx}), patch.object(
+            readiness.sys, "platform", "win32"
+        ), patch.object(
+            readiness, "build_pdf_renderer_check", return_value={"ok": True, "source": "test"}
+        ):
+            snapshot = readiness.build_runtime_readiness_snapshot(
+                probe_hwp=False,
                 run_id="g3-run",
+                candidate_generation="a" * 40 + ":" + "b" * 40 + ":" + "c" * 64,
+                worker_identity=identity,
+                ttl_seconds=60,
             )
-        )
+            self.assertTrue(
+                readiness.readiness_matches_current_worker(
+                    snapshot,
+                    candidate_generation=snapshot["candidate_generation"],
+                    run_id="g3-run",
+                )
+            )
 
-        old = (datetime.now(timezone.utc) - timedelta(seconds=61)).isoformat()
-        snapshot["heartbeat"]["last_at"] = old
-        self.assertFalse(
-            readiness.readiness_matches_current_worker(
-                snapshot,
-                candidate_generation="commit:tree:manifest",
-                run_id="g3-run",
+            old = (datetime.now(timezone.utc) - timedelta(seconds=61)).isoformat()
+            snapshot["heartbeat"]["last_at"] = old
+            self.assertFalse(
+                readiness.readiness_matches_current_worker(
+                    snapshot,
+                    candidate_generation=snapshot["candidate_generation"],
+                    run_id="g3-run",
+                )
             )
-        )
 
     def test_current_run_not_ready_snapshot_is_atomic_and_generation_bound(self) -> None:
         with TemporaryDirectory() as raw:

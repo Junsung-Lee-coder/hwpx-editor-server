@@ -106,8 +106,8 @@ class G8SourceBundleRepairTests(unittest.TestCase):
                 archive_path=tmp / "source.zip",
                 manifest_path=tmp / "manifest.json",
                 repository="r",
-                commit="caller-asserted-commit",
-                tree="caller-asserted-tree",
+                commit="c" * 40,
+                tree="d" * 40,
             )
             self.assertEqual(manifest["identity_source"], "asserted-gitless")
             self.assertFalse(manifest["identity_verified"])
@@ -123,8 +123,8 @@ class G8SourceBundleRepairTests(unittest.TestCase):
             manifest = {
                 "schema_version": "hwpx/source-bundle/v1",
                 "repository": "r",
-                "commit": "fabricated",
-                "tree": "fabricated-tree",
+                "commit": "e" * 40,
+                "tree": "f" * 40,
                 "identity_source": "asserted-gitless",
                 "identity_verified": False,
                 "file_count": 1,
@@ -147,8 +147,8 @@ class G8SourceBundleRepairTests(unittest.TestCase):
                     manifest_path=manifest_path,
                     destination=tmp / "extract",
                     expected_repository="r",
-                    expected_commit="fabricated",
-                    expected_tree="fabricated-tree",
+                    expected_commit="e" * 40,
+                    expected_tree="f" * 40,
                 )
 
     def test_verifier_requires_explicit_identity_provenance(self) -> None:

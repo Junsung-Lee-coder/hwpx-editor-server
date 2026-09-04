@@ -3,7 +3,9 @@ from __future__ import annotations
 import os
 import shutil
 import stat
+import subprocess
 import sys
+import tempfile
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -17,6 +19,21 @@ class PopplerResolutionError(RuntimeError):
 MAX_WINGET_TRAVERSAL_DEPTH = 8
 MAX_WINGET_TRAVERSAL_ENTRIES = 4096
 MAX_WINGET_TRAVERSAL_SECONDS = 2.0
+MAX_RENDERER_PROBE_SECONDS = 2.0
+_MINIMAL_RENDER_PROBE_PDF = b"""%PDF-1.4
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [3 0 R] /Count 1 >>
+endobj
+3 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 72 72] >>
+endobj
+trailer
+<< /Root 1 0 R >>
+%%EOF
+"""
 
 
 @dataclass(frozen=True)
@@ -44,9 +61,68 @@ def _is_executable_file(path: Path, *, platform: str) -> bool:
         if _has_reparse_component(path) or not path.is_file():
             return False
         if platform == "win32":
-            return path.suffix.lower() in {".exe", ".cmd", ".bat"} or os.access(path, os.X_OK)
-        return os.access(path, os.X_OK)
+            # Windows command wrappers are not an acceptable renderer binary:
+            # they add another mutable interpreter boundary and can run an
+            # unrelated program.  Only a real PE executable is admitted.
+            if path.suffix.lower() != ".exe":
+                return False
+        elif not os.access(path, os.X_OK):
+            return False
+        return _functional_renderer_probe(path)
     except OSError:
+        return False
+
+
+def _functional_renderer_probe(path: Path) -> bool:
+    """Verify that the selected binary renders a bounded minimal PDF."""
+
+    try:
+        before = path.stat()
+        before_identity = (
+            int(getattr(before, "st_dev", 0)),
+            int(getattr(before, "st_ino", 0)),
+            int(getattr(before, "st_size", 0)),
+            int(getattr(before, "st_mtime_ns", 0)),
+        )
+        with tempfile.TemporaryDirectory(prefix="hwpx-pdftoppm-probe-") as raw_dir:
+            probe_dir = Path(raw_dir)
+            pdf_path = probe_dir / "input.pdf"
+            output_prefix = probe_dir / "render"
+            pdf_path.write_bytes(_MINIMAL_RENDER_PROBE_PDF)
+            completed = subprocess.run(
+                [
+                    str(path),
+                    "-f",
+                    "1",
+                    "-l",
+                    "1",
+                    "-singlefile",
+                    "-png",
+                    str(pdf_path),
+                    str(output_prefix),
+                ],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+                shell=False,
+                timeout=MAX_RENDERER_PROBE_SECONDS,
+            )
+            rendered_path = output_prefix.with_suffix(".png")
+            if completed.returncode != 0 or not rendered_path.is_file() or rendered_path.stat().st_size <= 0:
+                return False
+            with rendered_path.open("rb") as rendered:
+                if rendered.read(8) != b"\x89PNG\r\n\x1a\n":
+                    return False
+        after = path.stat()
+        after_identity = (
+            int(getattr(after, "st_dev", 0)),
+            int(getattr(after, "st_ino", 0)),
+            int(getattr(after, "st_size", 0)),
+            int(getattr(after, "st_mtime_ns", 0)),
+        )
+        return after_identity == before_identity
+    except (OSError, subprocess.SubprocessError):
         return False
 
 

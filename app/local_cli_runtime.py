@@ -1305,6 +1305,74 @@ class LocalCliLiveSession:
         for command in changed:
             self._persist_command(command)
 
+    def _finalize(
+        self,
+        *,
+        hwp: Any,
+        pythoncom: Any,
+        coinitialized: bool,
+        watchdog_stop: Any,
+        watchdog_thread: Any,
+    ) -> None:
+        """Finish a live session without allowing one cleanup failure to strand it."""
+
+        cleanup_errors: list[str] = []
+
+        def attempt(label: str, operation: Callable[[], Any]) -> None:
+            try:
+                operation()
+            except Exception as exc:
+                cleanup_errors.append(f'{label}: {type(exc).__name__}: {str(exc)[:512]}')
+
+        if watchdog_stop is not None:
+            attempt('watchdog_stop', watchdog_stop.set)
+        if watchdog_thread is not None:
+            attempt('watchdog_join', lambda: watchdog_thread.join(timeout=1.0))
+        if hwp is not None:
+            attempt('discard_live_document', lambda: discard_live_document(hwp))
+        attempt('close_hwp_instance', lambda: close_hwp_instance(hwp))
+        if pythoncom is not None and coinitialized:
+            attempt('pythoncom_uninitialize', pythoncom.CoUninitialize)
+
+        terminal_error = self._terminal_error or LocalCliRuntimeError(
+            'The live local CLI session terminated before queued work could run.'
+        )
+        try:
+            with self._state_lock:
+                self._closing = True
+                commands = list(self._commands_by_id.values())
+                for command in commands:
+                    if command.timed_out and command.state == 'timed_out_pending_reconciliation':
+                        command.state = 'failed_after_timeout'
+                    command.completed_event.set()
+                    if not command.future.done():
+                        command.future.set_exception(terminal_error)
+        except Exception as exc:
+            cleanup_errors.append(f'pending_future_resolution: {type(exc).__name__}: {str(exc)[:512]}')
+            commands = list(getattr(self, '_commands_by_id', {}).values())
+
+        for command in commands:
+            attempt(f'persist_command:{command.command_id}', lambda command=command: self._persist_command(command))
+        attempt(
+            'finalization_status',
+            lambda: update_runtime_status(
+                self.log_path,
+                phase='local_cli_session_finalized',
+                detail=self.source_filename,
+                extra={'cleanup_errors': cleanup_errors},
+                append_history=True,
+            ),
+        )
+        # Signal closure before best-effort queue cleanup.  Callers must never be
+        # left waiting for a terminal session because a journal write failed.
+        self._closed.set()
+        attempt(
+            'cancel_pending_commands',
+            lambda: self._cancel_pending_commands(
+                'The live local CLI session terminated before queued work could run.'
+            ),
+        )
+
     def _run(self) -> None:
         pythoncom = None
         coinitialized = False
@@ -1467,32 +1535,13 @@ class LocalCliLiveSession:
             if not self._start_future.done():
                 self._start_future.set_exception(wrapped)
         finally:
-            if watchdog_stop is not None:
-                watchdog_stop.set()
-            if watchdog_thread is not None:
-                watchdog_thread.join(timeout=1.0)
-            if hwp is not None:
-                try:
-                    discard_live_document(hwp)
-                except Exception:
-                    pass
-            close_hwp_instance(hwp)
-            if pythoncom is not None and coinitialized:
-                try:
-                    pythoncom.CoUninitialize()
-                except Exception:
-                    pass
-            with self._state_lock:
-                self._closing = True
-                commands = list(self._commands_by_id.values())
-                for command in commands:
-                    if command.timed_out and command.state == 'timed_out_pending_reconciliation':
-                        command.state = 'failed_after_timeout'
-                    command.completed_event.set()
-            for command in commands:
-                self._persist_command(command)
-            self._closed.set()
-            self._cancel_pending_commands('The live local CLI session terminated before queued work could run.')
+            self._finalize(
+                hwp=hwp,
+                pythoncom=pythoncom,
+                coinitialized=coinitialized,
+                watchdog_stop=watchdog_stop,
+                watchdog_thread=watchdog_thread,
+            )
 
 
 class LocalCliRuntimeManager:

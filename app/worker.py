@@ -3316,6 +3316,16 @@ def worker_loop() -> int:
     ):
         logger.error('Worker readiness failed before polling: %s', readiness_snapshot.get('summary'))
         return 2
+    if not isinstance(candidate_generation, str) or not candidate_generation:
+        logger.error('Worker candidate generation is not bound; refusing to acquire a queue lease.')
+        return 2
+    db.acquire_worker_lease(
+        settings.worker_name,
+        run_id,
+        candidate_generation,
+        int(worker_identity['pid']),
+        str(worker_identity['start_identity']),
+    )
 
     readiness_stop_event = threading.Event()
     readiness_heartbeat_thread = threading.Thread(
@@ -3344,7 +3354,11 @@ def worker_loop() -> int:
         ):
             logger.error('Worker readiness ownership is no longer current; stopping worker.')
             return 2
-        job = db.claim_next_job(settings.worker_name)
+        job = db.claim_next_job(
+            settings.worker_name,
+            run_id=run_id,
+            candidate_generation=candidate_generation,
+        )
         if job is None:
             time.sleep(settings.poll_interval_seconds)
             continue

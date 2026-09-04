@@ -12,14 +12,25 @@ from app.poppler import PopplerResolutionError, resolve_pdftoppm
 class PopplerResolutionTests(unittest.TestCase):
     def _executable(self, directory: Path, name: str) -> Path:
         path = directory / name
-        path.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        path.write_text(
+            "#!/bin/sh\n"
+            "if [ \"$1\" = \"-f\" ]; then\n"
+            "  output=\"\"\n"
+            "  for arg in \"$@\"; do output=\"$arg\"; done\n"
+            "  printf '\\211PNG\\r\\n\\032\\n' > \"${output}.png\"\n"
+            "  exit 0\n"
+            "fi\n"
+            "printf 'pdftoppm version test\\n'\n"
+            "exit 0\n",
+            encoding="utf-8",
+        )
         path.chmod(0o755)
         return path
 
     def test_explicit_path_has_priority_over_path_and_winget(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_raw:
             tmp = Path(tmp_raw)
-            explicit = self._executable(tmp, "explicit-pdftoppm")
+            explicit = self._executable(tmp, "explicit-pdftoppm.exe")
             path_candidate = self._executable(tmp, "path-pdftoppm")
             result = resolve_pdftoppm(
                 explicit=str(explicit),
@@ -31,6 +42,24 @@ class PopplerResolutionTests(unittest.TestCase):
         self.assertEqual(result.path, explicit.resolve())
         self.assertEqual(result.source, "explicit")
         self.assertTrue(result.ok)
+
+    def test_nonfunctional_explicit_renderer_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_raw:
+            tmp = Path(tmp_raw)
+            broken = tmp / "broken-pdftoppm.exe"
+            broken.write_text("#!/bin/sh\nexit 17\n", encoding="utf-8")
+            broken.chmod(0o755)
+            with self.assertRaisesRegex(PopplerResolutionError, "functional|probe|executable"):
+                resolve_pdftoppm(explicit=str(broken), platform="win32")
+
+    def test_renderer_that_only_reports_version_fails_functional_probe(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_raw:
+            tmp = Path(tmp_raw)
+            version_only = tmp / "version-only-pdftoppm.exe"
+            version_only.write_text("#!/bin/sh\nprintf 'pdftoppm version test\\n'\nexit 0\n", encoding="utf-8")
+            version_only.chmod(0o755)
+            with self.assertRaisesRegex(PopplerResolutionError, "functional|render|probe|executable"):
+                resolve_pdftoppm(explicit=version_only, platform="win32")
 
     def test_path_resolution_returns_absolute_executable(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_raw:
