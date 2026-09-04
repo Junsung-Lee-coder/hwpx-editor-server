@@ -346,7 +346,11 @@ class InteractiveSessionManager:
         # in-memory shape; real instances always initialize ``settings``.
         if not hasattr(self, 'settings'):
             return nullcontext()
-        return path_lock(self.state_path(session_id).with_name('.session-mutation'))
+        # Keep the lock outside the session directory so a reaper can remove a
+        # fully settled directory while retaining the same cross-process lock.
+        # A single bounded lock also prevents a session update from racing a
+        # reaper that has already admitted the directory for removal.
+        return path_lock(self.sessions_root / '.session-state-mutation')
 
     def _active_mutation_lock(self):
         """Serialize active-session admission across manager processes."""
@@ -637,40 +641,59 @@ class InteractiveSessionManager:
         return bool(pending_id and not local_cli.get('reconciled'))
 
     def _reap_settled_sessions(self, *, max_settled_sessions: int = MAX_SETTLED_INTERACTIVE_SESSIONS) -> int:
-        """Bound terminal session directories without deleting evidence ledgers."""
+        """Bound terminal session directories without deleting live evidence."""
 
         if max_settled_sessions < 0 or not self.sessions_root.exists():
             return 0
-        active_session_id = self._read_active_session_id()
-        settled: list[tuple[datetime, Path]] = []
-        for session_dir in self.sessions_root.iterdir():
-            if not session_dir.is_dir() or session_dir.is_symlink() or session_dir.name == active_session_id:
-                continue
-            session = _json_load(self.state_path(session_dir.name))
-            if not isinstance(session, dict) or str(session.get('state') or '') not in TERMINAL_SESSION_STATES:
-                continue
-            if self._has_reconcilable_runtime(session):
-                continue
-            anchor = (
-                _parse_iso_datetime(session.get('closed_at'))
-                or _parse_iso_datetime(session.get('updated_at'))
-                or _parse_iso_datetime(session.get('created_at'))
-                or datetime.min.replace(tzinfo=timezone.utc)
-            )
-            settled.append((anchor, session_dir))
-        settled.sort(key=lambda item: (item[0], item[1].name))
-        excess = max(0, len(settled) - max_settled_sessions)
-        reaped = 0
-        for _anchor, session_dir in settled[:excess]:
-            try:
-                if self.verify_evidence_retention_path(session_dir.name).exists():
-                    self._merge_retention_ledger_to_central(session_dir.name)
-                shutil.rmtree(session_dir)
-            except OSError as exc:
-                self.logger.warning('interactive settled session reap failed session=%s error=%s', session_dir.name, exc)
-                continue
-            reaped += 1
-        return reaped
+        # Admission and deletion share both locks with open/close/update.  The
+        # active lock prevents a session from becoming current after the
+        # pointer read; the state lock prevents a late explicit-session command
+        # from writing into a directory while it is being removed.
+        with self._active_mutation_lock():
+            with self._session_mutation_lock('settled-sessions'):
+                active_session_id = self._read_active_session_id()
+                settled: list[tuple[datetime, Path]] = []
+                for session_dir in self.sessions_root.iterdir():
+                    if not session_dir.is_dir() or session_dir.is_symlink() or session_dir.name == active_session_id:
+                        continue
+                    session = _json_load(self.state_path(session_dir.name))
+                    if not isinstance(session, dict) or str(session.get('state') or '') not in TERMINAL_SESSION_STATES:
+                        continue
+                    if self._has_reconcilable_runtime(session):
+                        continue
+                    # The expiry sweep is the only operation authorized to
+                    # remove frozen verify evidence.  Until it has removed all
+                    # evidence (or the session has none), retain this whole
+                    # directory instead of deleting proof at the session cap.
+                    verify_root = session_dir / 'verify_evidence'
+                    if verify_root.is_symlink():
+                        continue
+                    if verify_root.exists():
+                        try:
+                            if any(verify_root.iterdir()):
+                                continue
+                        except OSError:
+                            continue
+                    anchor = (
+                        _parse_iso_datetime(session.get('closed_at'))
+                        or _parse_iso_datetime(session.get('updated_at'))
+                        or _parse_iso_datetime(session.get('created_at'))
+                        or datetime.min.replace(tzinfo=timezone.utc)
+                    )
+                    settled.append((anchor, session_dir))
+                settled.sort(key=lambda item: (item[0], item[1].name))
+                excess = max(0, len(settled) - max_settled_sessions)
+                reaped = 0
+                for _anchor, session_dir in settled[:excess]:
+                    try:
+                        if self.verify_evidence_retention_path(session_dir.name).exists():
+                            self._merge_retention_ledger_to_central(session_dir.name)
+                        shutil.rmtree(session_dir)
+                    except OSError as exc:
+                        self.logger.warning('interactive settled session reap failed session=%s error=%s', session_dir.name, exc)
+                        continue
+                    reaped += 1
+                return reaped
 
     def _read_active_session_id(self) -> str | None:
         payload = _json_load(self.active_session_pointer_path)

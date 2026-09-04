@@ -3,6 +3,8 @@ from __future__ import annotations
 import importlib.util
 import hashlib
 import json
+import os
+import subprocess
 import tempfile
 import unittest
 import zipfile
@@ -408,6 +410,85 @@ class SourceBundleTests(unittest.TestCase):
                         expected_manifest_sha256=original_manifest_sha256,
                         expected_archive_sha256=original_archive_sha256,
                     )
+
+    def test_verifier_rejects_same_inode_manifest_mutation_after_parse(self) -> None:
+        builder = load_script("build_source_bundle.py")
+        verifier = load_script("verify_source_bundle.py")
+        with tempfile.TemporaryDirectory() as tmp_raw:
+            tmp = Path(tmp_raw)
+            source = tmp / "source"
+            source.mkdir()
+            (source / "main.py").write_text("print('ok')\n", encoding="utf-8")
+            archive = tmp / "source.zip"
+            manifest_path = tmp / "manifest.json"
+            builder.build_source_bundle(
+                source_root=source,
+                archive_path=archive,
+                manifest_path=manifest_path,
+                repository="r",
+                commit="c" * 40,
+                tree="d" * 40,
+            )
+            original_manifest_sha256 = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
+            original_archive_sha256 = hashlib.sha256(archive.read_bytes()).hexdigest()
+            original_stat = manifest_path.stat()
+            original_parse = verifier._parse_manifest_bytes
+
+            def parse_then_mutate(payload, path):
+                parsed = original_parse(payload, path)
+                mutated = manifest_path.read_bytes().replace(b'"repository": "r"', b'"repository": "x"', 1)
+                self.assertNotEqual(mutated, manifest_path.read_bytes())
+                manifest_path.write_bytes(mutated)
+                os.utime(manifest_path, ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns))
+                return parsed
+
+            with mock.patch.object(verifier, "_parse_manifest_bytes", parse_then_mutate):
+                with self.assertRaisesRegex(verifier.SourceBundleVerificationError, "manifest.*changed"):
+                    verifier.verify_source_bundle(
+                        archive_path=archive,
+                        manifest_path=manifest_path,
+                        destination=tmp / "extract",
+                        expected_repository="r",
+                        expected_commit="c" * 40,
+                        expected_tree="d" * 40,
+                        expected_manifest_sha256=original_manifest_sha256,
+                        expected_archive_sha256=original_archive_sha256,
+                    )
+
+    @unittest.skipUnless(os.name == "posix", "Git executable-mode probe requires POSIX chmod semantics")
+    def test_builder_binds_git_file_mode_when_core_filemode_is_disabled(self) -> None:
+        builder = load_script("build_source_bundle.py")
+        with tempfile.TemporaryDirectory() as tmp_raw:
+            tmp = Path(tmp_raw)
+            source = tmp / "source"
+            source.mkdir()
+            commands = [
+                ["git", "init", "-q"],
+                ["git", "config", "user.email", "test@example.invalid"],
+                ["git", "config", "user.name", "Source Bundle Test"],
+            ]
+            for command in commands:
+                subprocess.run(command, cwd=source, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            member = source / "main.py"
+            member.write_text("print('ok')\n", encoding="utf-8")
+            member.chmod(0o755)
+            subprocess.run(["git", "add", "main.py"], cwd=source, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            subprocess.run(
+                ["git", "commit", "-qm", "mode"],
+                cwd=source,
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            subprocess.run(["git", "config", "core.filemode", "false"], cwd=source, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            member.chmod(0o644)
+            with self.assertRaisesRegex(builder.SourceBundleError, "mode"):
+                builder.build_source_bundle(
+                    source_root=source,
+                    archive_path=tmp / "source.zip",
+                    manifest_path=tmp / "manifest.json",
+                    repository="r",
+                )
 
     def test_verifier_rejects_archive_path_replacement_during_extraction(self) -> None:
         builder = load_script("build_source_bundle.py")

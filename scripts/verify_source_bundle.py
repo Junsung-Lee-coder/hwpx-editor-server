@@ -50,6 +50,24 @@ def _sha256_bytes(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
+def _sha256_verified_input(source: '_VerifiedInput', limit: int) -> str:
+    """Hash the currently opened bytes while enforcing the input bound."""
+
+    handle = source._require_handle()
+    handle.seek(0)
+    digest = hashlib.sha256()
+    size = 0
+    for chunk in iter(lambda: handle.read(1024 * 1024), b''):
+        size += len(chunk)
+        if size > limit:
+            raise SourceBundleVerificationError(
+                f"{source.label} exceeds the bounded size limit of {limit} bytes: {source.path}"
+            )
+        digest.update(chunk)
+    handle.seek(0)
+    return digest.hexdigest()
+
+
 def _sha256_file(path: Path) -> tuple[int, str]:
     digest = hashlib.sha256()
     size = 0
@@ -497,7 +515,9 @@ def _verify_source_bundle_open(
     manifest_bytes = manifest_input.read_bounded(MAX_MANIFEST_BYTES)
     manifest = _parse_manifest_bytes(manifest_bytes, manifest_path)
     actual_manifest_sha = _sha256_bytes(manifest_bytes)
-    actual_archive_sha = archive_input.sha256()
+    if _sha256_verified_input(manifest_input, MAX_MANIFEST_BYTES) != actual_manifest_sha:
+        raise SourceBundleVerificationError("manifest bytes changed after parsing")
+    actual_archive_sha = _sha256_verified_input(archive_input, MAX_ARCHIVE_BYTES)
     # Check ZIP resource bounds before trusting any producer identity fields.
     # A malformed/untrusted archive must fail on its own safety predicate,
     # rather than being masked by a missing external identity binding.
@@ -617,8 +637,10 @@ def _verify_source_bundle_open(
                     )
             if extracted_bytes != total_uncompressed:
                 raise SourceBundleVerificationError("archive extraction byte total differs from ZIP metadata")
-            if archive_input.sha256() != actual_archive_sha:
+            if _sha256_verified_input(archive_input, MAX_ARCHIVE_BYTES) != actual_archive_sha:
                 raise SourceBundleVerificationError("archive bytes changed during verification")
+            if _sha256_verified_input(manifest_input, MAX_MANIFEST_BYTES) != actual_manifest_sha:
+                raise SourceBundleVerificationError("manifest bytes changed during verification")
             if destination.exists():
                 destination.rmdir()
             os.replace(staging, destination)

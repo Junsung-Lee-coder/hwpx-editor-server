@@ -234,6 +234,36 @@ class G22RetentionLedgerConcurrencyTests(unittest.TestCase):
             central = json.loads(manager.retention_ledger_path.read_text(encoding='utf-8'))
             self.assertEqual({entry['session_id'] for entry in central['entries']}, {'session-a', 'session-b'})
 
+    def test_settled_session_cap_does_not_delete_unexpired_verify_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            manager = object.__new__(InteractiveSessionManager)
+            manager.settings = SimpleNamespace(spool_root=root, retention_days=7)
+            manager.sessions_root.mkdir(parents=True)
+            for session_id in ('session-a', 'session-b'):
+                session_dir = manager.sessions_root / session_id
+                evidence_dir = session_dir / 'verify_evidence' / 'verify-pre' / 'capture-1'
+                evidence_dir.mkdir(parents=True)
+                (evidence_dir / 'frame.png').write_bytes(b'proof')
+                (session_dir / 'session_state.json').write_text(
+                    json.dumps({
+                        'session_id': session_id,
+                        'state': 'closed',
+                        'closed_at': '2099-01-01T00:00:00+00:00',
+                        'updated_at': '2099-01-01T00:00:00+00:00',
+                        'created_at': '2099-01-01T00:00:00+00:00',
+                        'live_runtime': {},
+                        'metadata': {},
+                    }),
+                    encoding='utf-8',
+                )
+
+            reaped = manager._reap_settled_sessions(max_settled_sessions=1)
+
+            self.assertEqual(reaped, 0)
+            self.assertTrue((manager.sessions_root / 'session-a' / 'verify_evidence').is_dir())
+            self.assertTrue((manager.sessions_root / 'session-b' / 'verify_evidence').is_dir())
+
 
 class G22ProofRepairTests(unittest.TestCase):
     def test_proof_packet_refuses_a_symlinked_destination_artifact(self) -> None:

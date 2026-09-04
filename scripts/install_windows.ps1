@@ -997,7 +997,7 @@ function New-GitSourceManifest {
     $tree = Invoke-InstallerNative -FilePath $git.Source -Arguments @('-C', $source, 'rev-parse', 'HEAD^{tree}') -WorkingDirectory $source
     $commitValue = ([string]$commit.stdout).Trim()
     $treeValue = ([string]$tree.stdout).Trim()
-    if ($commitValue -notmatch '^[0-9a-fA-F]{40}$' -or $treeValue -notmatch '^[0-9a-fA-F]{40}$') {
+    if ($commitValue -notmatch '^(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})$' -or $treeValue -notmatch '^(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})$') {
         throw 'Git source identity did not return valid commit/tree object IDs.'
     }
     $status = Invoke-InstallerNative -FilePath $git.Source -Arguments @('-C', $source, 'status', '--porcelain=v1', '--untracked-files=all') -WorkingDirectory $source
@@ -1038,13 +1038,16 @@ function New-GitSourceManifest {
         $candidate = Assert-NoReparseSourcePath -Root $source -RelativePath $relative
         $item = Get-Item -LiteralPath $candidate -ErrorAction Stop
         if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw "Reparse-point tracked source member is not allowed: $raw" }
-        $gitRelative = $relative.Replace('\', '/')
-        $expectedBlob = Invoke-InstallerNative -FilePath $git.Source -Arguments @('-C', $source, 'rev-parse', '--verify', ("{0}:{1}" -f $commitValue, $gitRelative)) -WorkingDirectory $source
-        $actualBlob = Invoke-InstallerNative -FilePath $git.Source -Arguments @('-C', $source, 'hash-object', '--no-filters', '--', $candidate) -WorkingDirectory $source
-        if (([string]$expectedBlob.stdout).Trim() -ne ([string]$actualBlob.stdout).Trim()) {
-            throw "Tracked source bytes do not match Git HEAD: $relative"
+        $gitMember = Get-GitSourceMemberIdentity -SourceRoot $source -RelativePath $relative -Commit $commitValue
+        if (-not $gitMember.matched -or -not $gitMember.mode_matched) {
+            throw "Tracked source bytes or mode do not match Git HEAD: $relative"
         }
-        $files += [ordered]@{ path = $relative.Replace('\', '/'); size = [int64]$item.Length; sha256 = Get-Sha256Hex -Path $candidate }
+        $files += [ordered]@{
+            path = $relative.Replace('\', '/')
+            size = [int64]$item.Length
+            sha256 = Get-Sha256Hex -Path $candidate
+            git_mode = [string]$gitMember.expected_mode
+        }
     }
     $files = @($files | Sort-Object path)
     $manifestPath = Join-Path ([IO.Path]::GetTempPath()) ('hwpx-source-manifest-' + [Guid]::NewGuid().ToString('N') + '.json')

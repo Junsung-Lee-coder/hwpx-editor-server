@@ -329,6 +329,24 @@ class G8TerminalInstallerContractRedTests(unittest.TestCase):
         self.assertIn("Remove-PathIdentityExact", installer)
         self.assertIn("Move-PathIdentityExact", installer)
 
+    def test_git_source_custody_binds_tree_mode_as_well_as_blob(self) -> None:
+        common = self._read("windows_install_common.psm1")
+        installer = self._read("install_windows.ps1")
+        member = common[common.index("function Get-GitSourceMemberIdentity") : common.index("function Get-SourceManifest")]
+        self.assertIn("ls-tree", member)
+        self.assertIn("expected_mode", member)
+        self.assertIn("actual_mode", member)
+        self.assertIn("mode_matched", member)
+        self.assertIn("git_mode", installer)
+
+    def test_powershell_git_oid_contract_uses_exact_sha1_or_sha256_lengths(self) -> None:
+        common = self._read("windows_install_common.psm1")
+        installer = self._read("install_windows.ps1")
+        self.assertNotIn("{40,64}", common)
+        self.assertNotIn("{40,64}", installer)
+        for source in (common, installer):
+            self.assertRegex(source, r"\{40\}.*\{64\}|\{40\}.*\(\[0-9a-fA-F\]\{24\}\)")
+
 
 class G8TerminalCliCasRedTests(unittest.TestCase):
     def test_expected_generation_rejects_boolean(self) -> None:

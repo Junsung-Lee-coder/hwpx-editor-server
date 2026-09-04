@@ -173,6 +173,68 @@ def _stable_file_hash(path: Path, label: str) -> tuple[int, str]:
             os.close(descriptor)
 
 
+def _open_no_follow_descriptor(path: Path) -> int:
+    """Open a source file without following a replaceable reparse leaf."""
+
+    if os.name != 'nt':
+        nofollow = getattr(os, 'O_NOFOLLOW', None)
+        if nofollow is None:
+            raise SourceBundleError('source file cannot be opened without no-follow support')
+        flags = os.O_RDONLY | nofollow | getattr(os, 'O_CLOEXEC', 0)
+        flags |= getattr(os, 'O_BINARY', 0)
+        return os.open(path, flags)
+
+    # Windows has no portable O_NOFOLLOW.  OPEN_REPARSE_POINT makes the
+    # CreateFileW handle refer to the leaf itself; fstat/lstat identity checks
+    # below then reject the reparse object and any pathname replacement.
+    import ctypes
+    import msvcrt
+
+    kernel32 = ctypes.WinDLL('kernel32', use_last_error=True)
+    kernel32.CreateFileW.argtypes = [
+        ctypes.c_wchar_p, ctypes.c_uint32, ctypes.c_uint32, ctypes.c_void_p,
+        ctypes.c_uint32, ctypes.c_uint32, ctypes.c_void_p,
+    ]
+    kernel32.CreateFileW.restype = ctypes.c_void_p
+    kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+    kernel32.CloseHandle.restype = ctypes.c_int
+    handle = kernel32.CreateFileW(
+        str(path),
+        0x80000000,  # GENERIC_READ
+        0x00000007,  # FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE
+        None,
+        3,  # OPEN_EXISTING
+        0x00000080 | 0x00200000,  # FILE_ATTRIBUTE_NORMAL | OPEN_REPARSE_POINT
+        None,
+    )
+    invalid_handle = ctypes.c_void_p(-1).value
+    if handle is None or handle == invalid_handle:
+        error = ctypes.get_last_error()
+        raise OSError(error, f'could not open source without following reparse points: {path}')
+    handle_value = int(handle)
+    try:
+        return msvcrt.open_osfhandle(handle_value, os.O_RDONLY | getattr(os, 'O_BINARY', 0))
+    except BaseException:
+        kernel32.CloseHandle(ctypes.c_void_p(handle_value))
+        raise
+
+
+def _file_identity(stat_result: os.stat_result) -> tuple[int, int, int, int, int]:
+    return (
+        int(getattr(stat_result, 'st_dev', 0)),
+        int(getattr(stat_result, 'st_ino', 0)),
+        int(getattr(stat_result, 'st_size', 0)),
+        int(getattr(stat_result, 'st_mtime_ns', 0)),
+        int(getattr(stat_result, 'st_mode', 0)),
+    )
+
+
+def _git_mode_from_stat(mode: int) -> str:
+    if not stat.S_ISREG(mode):
+        raise SourceBundleError('Git source member is not a regular file')
+    return '100755' if mode & stat.S_IXUSR else '100644'
+
+
 def _write_atomic_output(path: Path, data: bytes, label: str) -> None:
     """Publish output bytes without following a raced output symlink."""
 
@@ -379,15 +441,36 @@ def _git_identity(source_root: Path, tracked_paths: list[Path] | None) -> tuple[
 
 
 def _verify_git_member(source_root: Path, relative: Path, commit: str) -> str:
+    return _git_tree_entry(source_root, relative, commit)[0]
+
+
+def _git_tree_entry(source_root: Path, relative: Path, commit: str) -> tuple[str, str]:
     name = relative.as_posix()
-    expected_blob = _run_git(
-        source_root,
-        ["rev-parse", f"{commit}:{name}"],
-        error=f"Git tree entry is missing for tracked source member: {name}",
-    )
-    if not _is_git_oid(expected_blob):
-        raise SourceBundleError(f"Git tree entry is not a blob for source member: {name}")
-    return expected_blob
+    # Use a byte-preserving command for the NUL-delimited tree record and
+    # reject ambiguous/multiple entries.
+    try:
+        completed = subprocess.run(
+            ["git", "-C", str(source_root), "ls-tree", "-z", commit, "--", name],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+    except (OSError, subprocess.CalledProcessError) as exc:
+        raise SourceBundleError(f"Git tree entry is missing for tracked source member: {name}") from exc
+    records = [record for record in completed.stdout.split(b'\0') if record]
+    if len(records) != 1:
+        raise SourceBundleError(f"Git tree entry is ambiguous for source member: {name}")
+    header, separator, listed_name = records[0].partition(b'\t')
+    if not separator:
+        raise SourceBundleError(f"Git tree entry is malformed for source member: {name}")
+    try:
+        mode, object_type, object_id = header.decode('ascii').split(' ')
+        listed = listed_name.decode('utf-8')
+    except (UnicodeDecodeError, ValueError) as exc:
+        raise SourceBundleError(f"Git tree entry is malformed for source member: {name}") from exc
+    if listed != name or object_type != 'blob' or mode not in {'100644', '100755'} or not _is_git_oid(object_id):
+        raise SourceBundleError(f"Git tree entry is not a regular supported blob for source member: {name}")
+    return object_id.lower(), mode
 
 
 def _walk_source_paths(source_root: Path, *, archive_path: Path, manifest_path: Path) -> list[Path]:
@@ -458,12 +541,26 @@ def _stage_source_paths(
             source_path = source_root / relative
             if not source_path.is_file() or _is_filesystem_reparse_point(source_path):
                 raise SourceBundleError(f"source member is not a stable regular file: {relative.as_posix()}")
+            expected_git_entry = _git_tree_entry(source_root, relative, git_commit) if git_commit is not None else None
             destination_path = stage_root / relative
             destination_path.parent.mkdir(parents=True, exist_ok=True)
             digest = hashlib.sha256()
             size = 0
+            source_identity: tuple[int, int, int, int, int] | None = None
+            source_descriptor = -1
             try:
-                with source_path.open("rb") as source_handle, destination_path.open("xb") as destination_handle:
+                source_descriptor = _open_no_follow_descriptor(source_path)
+                source_handle = os.fdopen(source_descriptor, 'rb', closefd=True)
+                source_descriptor = -1
+                with source_handle, destination_path.open("xb") as destination_handle:
+                    opened = os.fstat(source_handle.fileno())
+                    if not stat.S_ISREG(opened.st_mode) or int(getattr(opened, 'st_file_attributes', 0)) & getattr(stat, 'FILE_ATTRIBUTE_REPARSE_POINT', 0x400):
+                        raise SourceBundleError(f"source member is not a stable regular file: {relative.as_posix()}")
+                    source_identity = _file_identity(opened)
+                    if expected_git_entry is not None and _git_mode_from_stat(opened.st_mode) != expected_git_entry[1]:
+                        raise SourceBundleError(
+                            f"source member mode does not match Git tree {git_commit}: {relative.as_posix()}"
+                        )
                     for chunk in iter(lambda: source_handle.read(1024 * 1024), b""):
                         destination_handle.write(chunk)
                         digest.update(chunk)
@@ -472,8 +569,19 @@ def _stage_source_paths(
                             raise SourceBundleError("source bundle exceeds bounded member or aggregate byte limits")
             except OSError as exc:
                 raise SourceBundleError(f"cannot stage source member: {relative.as_posix()}") from exc
+            finally:
+                if source_descriptor >= 0:
+                    os.close(source_descriptor)
+            if source_identity is None:
+                raise SourceBundleError(f"source member identity was not captured: {relative.as_posix()}")
+            try:
+                current_identity = _file_identity(source_path.lstat())
+            except OSError as exc:
+                raise SourceBundleError(f"source member disappeared while being staged: {relative.as_posix()}") from exc
+            if source_identity != current_identity:
+                raise SourceBundleError(f"source member changed while being staged: {relative.as_posix()}")
             if git_commit is not None:
-                expected_blob = _verify_git_member(source_root, relative, git_commit)
+                expected_blob = expected_git_entry[0]
                 actual_blob = _git_hash_file(destination_path)
                 if expected_blob != actual_blob:
                     raise SourceBundleError(
@@ -483,6 +591,7 @@ def _stage_source_paths(
                 "path": _safe_member_name(relative.as_posix()),
                 "size": size,
                 "sha256": digest.hexdigest(),
+                **({"git_mode": expected_git_entry[1]} if expected_git_entry is not None else {}),
             })
             total_size += size
         return stage_root, metadata

@@ -2173,7 +2173,7 @@ function Get-IndependentGitIdentity {
     }
     $commit = $commitValue
     $tree = $treeValue
-    if ($commit -notmatch '^[0-9a-fA-F]{40}$' -or $tree -notmatch '^[0-9a-fA-F]{40}$') {
+    if ($commit -notmatch '^(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})$' -or $tree -notmatch '^(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})$') {
         throw "Independent Git source identity has invalid commit/tree syntax: $expectedRoot"
     }
     return [pscustomobject]@{
@@ -2195,23 +2195,32 @@ function Get-GitSourceMemberIdentity {
     $git = Get-Command git.exe -ErrorAction SilentlyContinue
     if ($null -eq $git) { throw 'Git is required to bind a checkout source member to its tree blob.' }
     $relativePosix = $RelativePath.Replace([char]92, [char]47)
-    $treeSpec = '{0}:{1}' -f $Commit, $relativePosix
-    $expectedProbe = Invoke-NativeChecked -FilePath $git.Source -Arguments @('-C', $SourceRoot, 'rev-parse', '--verify', $treeSpec) -WorkingDirectory $SourceRoot -AllowNonZero
-    $expectedBlob = ([string]$expectedProbe.stdout).Trim().ToLowerInvariant()
-    if ($expectedProbe.exit_code -ne 0 -or $expectedBlob -notmatch '^[0-9a-f]{40}$') {
-        throw "Git tree blob could not be read for admitted source member: $RelativePath"
+    $treeProbe = Invoke-NativeChecked -FilePath $git.Source -Arguments @('-C', $SourceRoot, 'ls-tree', '-z', $Commit, '--', $relativePosix) -WorkingDirectory $SourceRoot -AllowNonZero
+    $treeRecord = ([string]$treeProbe.stdout).Trim([char[]]@([char]0, [char]13, [char]10))
+    $treeMatch = [regex]::Match($treeRecord, '^(?<mode>100644|100755)\s+(?<type>blob)\s+(?<object>[0-9a-fA-F]{40}(?:[0-9a-fA-F]{24})?)\t(?<path>.*)$')
+    if ($treeProbe.exit_code -ne 0 -or -not $treeMatch.Success -or [string]$treeMatch.Groups['path'].Value -cne $relativePosix) {
+        throw "Git tree blob/mode could not be read for admitted source member: $RelativePath"
     }
+    $expectedBlob = [string]$treeMatch.Groups['object'].Value
+    $expectedMode = [string]$treeMatch.Groups['mode'].Value
     $candidate = Assert-NoReparseSourcePath -Root (Get-CanonicalPath -Path $SourceRoot -RequireExisting) -RelativePath $RelativePath
     $actualProbe = Invoke-NativeChecked -FilePath $git.Source -Arguments @('-C', $SourceRoot, 'hash-object', '--no-filters', '--', $candidate) -WorkingDirectory $SourceRoot -AllowNonZero
     $actualBlob = ([string]$actualProbe.stdout).Trim().ToLowerInvariant()
-    if ($actualProbe.exit_code -ne 0 -or $actualBlob -notmatch '^[0-9a-f]{40}$') {
+    if ($actualProbe.exit_code -ne 0 -or $actualBlob -notmatch '^(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})$') {
         throw "Git could not hash admitted source member bytes: $RelativePath"
     }
+    $indexProbe = Invoke-NativeChecked -FilePath $git.Source -Arguments @('-C', $SourceRoot, 'ls-files', '--stage', '--', $relativePosix) -WorkingDirectory $SourceRoot -AllowNonZero
+    $indexRecord = ([string]$indexProbe.stdout).Trim([char[]]@([char]0, [char]13, [char]10))
+    $indexMatch = [regex]::Match($indexRecord, '^(?<mode>100644|100755)\s+[0-9a-fA-F]{40}(?:[0-9a-fA-F]{24})?\s+\d+\t(?<path>.*)$')
+    $actualMode = if ($indexMatch.Success) { [string]$indexMatch.Groups['mode'].Value } else { '' }
     return [pscustomobject]@{
         relative_path = $relativePosix
-        expected_blob = $expectedBlob
-        actual_blob = $actualBlob
+        expected_blob = $expectedBlob.ToLowerInvariant()
+        actual_blob = $actualBlob.ToLowerInvariant()
+        expected_mode = $expectedMode
+        actual_mode = $actualMode
         matched = ($expectedBlob -ceq $actualBlob)
+        mode_matched = ($indexProbe.exit_code -eq 0 -and $indexMatch.Success -and $actualMode -ceq $expectedMode -and [string]$indexMatch.Groups['path'].Value -ceq $relativePosix)
     }
 }
 
@@ -2492,6 +2501,22 @@ function Get-SourceManifest {
                         reason = 'source bytes do not match the independently read Git tree blob'
                         expected_git_blob = $gitMember.expected_blob
                         actual_git_blob = $gitMember.actual_blob
+                    }
+                }
+                if (-not $gitMember.mode_matched) {
+                    $mismatches += [pscustomobject]@{
+                        path = $relative
+                        reason = 'source mode does not match the independently read Git tree mode'
+                        expected_git_mode = $gitMember.expected_mode
+                        actual_git_mode = $gitMember.actual_mode
+                    }
+                }
+                if ($entry.PSObject.Properties.Name -contains 'git_mode' -and [string]$entry.git_mode -cne [string]$gitMember.expected_mode) {
+                    $mismatches += [pscustomobject]@{
+                        path = $relative
+                        reason = 'manifest Git mode does not match the independently read Git tree mode'
+                        manifest_git_mode = [string]$entry.git_mode
+                        expected_git_mode = $gitMember.expected_mode
                     }
                 }
             }

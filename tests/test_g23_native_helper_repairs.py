@@ -69,9 +69,9 @@ class G23NativeHelperRepairTests(unittest.TestCase):
                 "function Get-SourceManifest"
             )
         ]
-        self.assertEqual(7, identity.count("Invoke-NativeChecked"))
+        self.assertEqual(8, identity.count("Invoke-NativeChecked"))
         self.assertEqual(0, identity.count("@(& $git.Source"))
-        self.assertGreaterEqual(identity.count("-AllowNonZero"), 7)
+        self.assertGreaterEqual(identity.count("-AllowNonZero"), 8)
 
 
 if __name__ == "__main__":
