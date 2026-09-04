@@ -3142,10 +3142,11 @@ function Get-VenvInterpreterMetadata {
         $canonicalHome = Get-CanonicalPath -Path $home -RequireExisting
         $baseLeaf = [IO.Path]::GetFileName($python)
         $baseNames = @($baseLeaf)
+        $versionedBaseName = $null
         $versionMatch = [regex]::Match($version.Trim(), '(?<![0-9])([0-9]+)\.([0-9]+)(?![0-9])')
         if ($versionMatch.Success) {
-            $versionedLeaf = 'python{0}.{1}.exe' -f $versionMatch.Groups[1].Value, $versionMatch.Groups[2].Value
-            if ($baseNames -notcontains $versionedLeaf) { $baseNames += $versionedLeaf }
+            $versionedBaseName = 'python{0}.{1}.exe' -f $versionMatch.Groups[1].Value, $versionMatch.Groups[2].Value
+            if ($baseNames -notcontains $versionedBaseName) { $baseNames += $versionedBaseName }
         }
         $baseExecutables = @()
         foreach ($baseName in $baseNames) {
@@ -3153,13 +3154,19 @@ function Get-VenvInterpreterMetadata {
             if (-not (Test-Path -LiteralPath $baseCandidate -PathType Leaf)) { continue }
             try { $baseExecutables += Get-CanonicalPath -Path $baseCandidate -RequireExisting } catch { }
         }
-        if ($baseExecutables.Count -eq 0) { return $null }
+        # Some Windows Store installations deny ordinary metadata access to
+        # the package image even though CIM reports that image as the running
+        # process executable.  Keep the authenticated home/version binding so
+        # Test-CanonicalProcessIdentity can prove that exact versioned image
+        # without treating an arbitrary external executable as trusted.
+        if ($baseExecutables.Count -eq 0 -and [string]::IsNullOrWhiteSpace($versionedBaseName)) { return $null }
         if (-not (Test-CanonicalPathWithinRoot -Path $python -Root $root)) { return $null }
         return [pscustomobject]@{
             config_path = Get-CanonicalPath -Path $configPath -RequireExisting
             home = $canonicalHome
             base_executable = [string]$baseExecutables[0]
             base_executables = @($baseExecutables)
+            versioned_base_name = $versionedBaseName
             version = $version.Trim()
             version_key = Get-InterpreterVersionKey -Value $version
         }
@@ -3280,6 +3287,19 @@ function Test-CanonicalProcessIdentity {
                 $baseExecutableMatched = $false
                 foreach ($baseExecutable in @($venv.base_executables)) {
                     if ([string]$baseExecutable -ceq $canonicalExecutable) { $baseExecutableMatched = $true; break }
+                }
+                if (-not $baseExecutableMatched) {
+                    try {
+                        $reportedLeaf = [IO.Path]::GetFileName($canonicalExecutable)
+                        $reportedParent = Get-CanonicalPath -Path ([IO.Path]::GetDirectoryName($canonicalExecutable)) -RequireExisting
+                        $versionedBaseName = [string](Get-OptionalPropertyValue -Object $venv -Name 'versioned_base_name')
+                        $baseExecutableMatched = (
+                            -not [string]::IsNullOrWhiteSpace($versionedBaseName) -and
+                            $reportedLeaf -ieq $versionedBaseName -and
+                            $reportedParent -ceq [string]$venv.home
+                        )
+                    }
+                    catch { $baseExecutableMatched = $false }
                 }
                 if (-not $baseExecutableMatched) { return $false }
                 $expectedVersionKey = if (-not [string]::IsNullOrWhiteSpace($ExpectedInterpreterVersion)) {
