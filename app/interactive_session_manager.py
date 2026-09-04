@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from app.config import Settings, get_settings
-from app.atomic_json import atomic_write_json, path_lock
+from app.atomic_json import atomic_write_json, path_lock, update_json_object
 from app.interactive.operator_status import render_operator_status
 from app.interactive.verify_evidence import build_verify_step_binding, resolve_verify_capture_timing
 from app.logging_utils import configure_logger
@@ -433,9 +433,24 @@ class InteractiveSessionManager:
         entries: list[dict[str, Any]],
         swept_at: str,
     ) -> None:
-        _json_dump(
-            self.verify_evidence_retention_path(session_id),
-            {
+        ledger_path = self.verify_evidence_retention_path(session_id)
+
+        def merge(current: dict[str, Any]) -> dict[str, Any]:
+            existing = current.get('pruned_entries') if isinstance(current.get('pruned_entries'), list) else []
+            combined = [item for item in existing + entries if isinstance(item, dict)]
+            deduplicated: list[dict[str, Any]] = []
+            seen: set[tuple[str, str, str]] = set()
+            for item in combined:
+                key = (
+                    str(item.get('step') or ''),
+                    str(item.get('recorded_at') or ''),
+                    str(item.get('expired_at') or ''),
+                )
+                if key in seen:
+                    continue
+                seen.add(key)
+                deduplicated.append(item)
+            return {
                 'schema_version': VERIFY_EVIDENCE_RETENTION_LEDGER_SCHEMA_VERSION,
                 'policy': {
                     'schema_version': VERIFY_EVIDENCE_RETENTION_SCHEMA_VERSION,
@@ -444,7 +459,15 @@ class InteractiveSessionManager:
                     'retention_anchor': 'session_closed_at',
                 },
                 'last_swept_at': swept_at,
-                'pruned_entries': entries[-VERIFY_EVIDENCE_RETENTION_LEDGER_MAX_ENTRIES:],
+                'pruned_entries': deduplicated[-VERIFY_EVIDENCE_RETENTION_LEDGER_MAX_ENTRIES:],
+            }
+
+        update_json_object(
+            ledger_path,
+            merge,
+            default={
+                'schema_version': VERIFY_EVIDENCE_RETENTION_LEDGER_SCHEMA_VERSION,
+                'pruned_entries': [],
             },
         )
 
@@ -455,58 +478,53 @@ class InteractiveSessionManager:
         entries = per_session.get('pruned_entries') if isinstance(per_session.get('pruned_entries'), list) else []
         if not entries:
             return
-        central = _json_load(self.retention_ledger_path) or {}
-        existing: list[Any] = central.get('entries') if isinstance(central.get('entries'), list) else []
-        normalized_existing: list[dict[str, Any]] = []
-        seen_keys: set[tuple[str, str, str, str]] = set()
-        for raw_entry in existing:
-            if not isinstance(raw_entry, dict):
-                continue
-            bounded_entry = {
-                key: raw_entry.get(key)
-                for key in (
-                    'session_id', 'step', 'recorded_at', 'pruned_at', 'expired_at',
-                    'reason', 'anchor_field', 'anchor_at',
-                )
-                if raw_entry.get(key) not in (None, '')
-            }
-            entry_key = (
-                str(bounded_entry.get('session_id') or ''),
-                str(bounded_entry.get('step') or ''),
-                str(bounded_entry.get('recorded_at') or ''),
-                str(bounded_entry.get('expired_at') or ''),
-            )
-            if entry_key not in seen_keys:
-                seen_keys.add(entry_key)
-                normalized_existing.append(bounded_entry)
-        for entry in entries:
-            if isinstance(entry, dict):
-                bounded = _bounded_history_value(entry)
-                if isinstance(bounded, dict):
-                    bounded = {
-                        key: bounded.get(key)
-                        for key in (
-                            'step', 'recorded_at', 'pruned_at', 'expired_at',
-                            'reason', 'anchor_field', 'anchor_at',
-                        )
-                        if bounded.get(key) not in (None, '')
-                    }
-                    candidate = {'session_id': session_id, **bounded}
-                    entry_key = (
-                        session_id,
-                        str(candidate.get('step') or ''),
-                        str(candidate.get('recorded_at') or ''),
-                        str(candidate.get('expired_at') or ''),
+        def merge(central: dict[str, Any]) -> dict[str, Any]:
+            existing = central.get('entries') if isinstance(central.get('entries'), list) else []
+            normalized_existing: list[dict[str, Any]] = []
+            seen_keys: set[tuple[str, str, str, str]] = set()
+
+            def add_entry(raw_entry: Any, *, default_session_id: str | None = None) -> None:
+                if not isinstance(raw_entry, dict):
+                    return
+                bounded = _bounded_history_value(raw_entry)
+                if not isinstance(bounded, dict):
+                    return
+                if default_session_id is not None:
+                    bounded = {'session_id': default_session_id, **bounded}
+                bounded = {
+                    key: bounded.get(key)
+                    for key in (
+                        'session_id', 'step', 'recorded_at', 'pruned_at', 'expired_at',
+                        'reason', 'anchor_field', 'anchor_at',
                     )
-                    if entry_key not in seen_keys:
-                        seen_keys.add(entry_key)
-                        normalized_existing.append(candidate)
-        _json_dump(
-            self.retention_ledger_path,
-            {
+                    if bounded.get(key) not in (None, '')
+                }
+                entry_key = (
+                    str(bounded.get('session_id') or ''),
+                    str(bounded.get('step') or ''),
+                    str(bounded.get('recorded_at') or ''),
+                    str(bounded.get('expired_at') or ''),
+                )
+                if entry_key not in seen_keys:
+                    seen_keys.add(entry_key)
+                    normalized_existing.append(bounded)
+
+            for raw_entry in existing:
+                add_entry(raw_entry)
+            for entry in entries:
+                add_entry(entry, default_session_id=session_id)
+            return {
                 'schema_version': VERIFY_EVIDENCE_RETENTION_LEDGER_SCHEMA_VERSION,
                 'entries': normalized_existing[-VERIFY_EVIDENCE_RETENTION_LEDGER_MAX_ENTRIES:],
                 'updated_at': utc_now_iso(),
+            }
+
+        update_json_object(
+            self.retention_ledger_path,
+            merge,
+            default={
+                'schema_version': VERIFY_EVIDENCE_RETENTION_LEDGER_SCHEMA_VERSION,
+                'entries': [],
             },
         )
 
@@ -530,73 +548,77 @@ class InteractiveSessionManager:
                 continue
 
             session_id = session_dir.name
-            session = _json_load(self.state_path(session_id))
-            if not isinstance(session, dict):
-                continue
-            if str(session.get('state') or '') not in TERMINAL_SESSION_STATES:
-                continue
-
-            anchor_field, anchor_at = self._verify_evidence_retention_anchor(session)
-            if anchor_at is None:
-                continue
-            expires_at = anchor_at + timedelta(days=self.verify_evidence_retention_days)
-            if expires_at > sweep_now:
-                continue
-
-            verify_root = session_dir / 'verify_evidence'
-            if not verify_root.exists():
-                continue
-
-            ledger = self._load_verify_evidence_retention_ledger(session_id)
-            pruned_entries = list(ledger.get('pruned_entries') or [])
-            pruned_count = 0
-            for step_dir in verify_root.iterdir():
-                if not step_dir.is_dir():
+            with self._session_mutation_lock(session_id):
+                # Re-read the session under the same lock used by verify and
+                # close mutations. A stale pre-lock terminal read must never
+                # authorize deletion from a session that became active again.
+                session = _json_load(self.state_path(session_id))
+                if not isinstance(session, dict):
                     continue
-                for artifact_dir in step_dir.iterdir():
-                    if not artifact_dir.is_dir():
+                if str(session.get('state') or '') not in TERMINAL_SESSION_STATES:
+                    continue
+
+                anchor_field, anchor_at = self._verify_evidence_retention_anchor(session)
+                if anchor_at is None:
+                    continue
+                expires_at = anchor_at + timedelta(days=self.verify_evidence_retention_days)
+                if expires_at > sweep_now:
+                    continue
+
+                verify_root = session_dir / 'verify_evidence'
+                if not verify_root.exists():
+                    continue
+
+                ledger = self._load_verify_evidence_retention_ledger(session_id)
+                pruned_entries = list(ledger.get('pruned_entries') or [])
+                pruned_count = 0
+                for step_dir in verify_root.iterdir():
+                    if not step_dir.is_dir():
                         continue
-                    try:
-                        shutil.rmtree(artifact_dir)
-                    except OSError as exc:
-                        self.logger.warning(
-                            'interactive verify evidence prune failed session=%s step=%s recorded_at=%s error=%s',
-                            session_id,
-                            step_dir.name,
-                            artifact_dir.name,
-                            exc,
+                    for artifact_dir in step_dir.iterdir():
+                        if not artifact_dir.is_dir():
+                            continue
+                        try:
+                            shutil.rmtree(artifact_dir)
+                        except OSError as exc:
+                            self.logger.warning(
+                                'interactive verify evidence prune failed session=%s step=%s recorded_at=%s error=%s',
+                                session_id,
+                                step_dir.name,
+                                artifact_dir.name,
+                                exc,
+                            )
+                            continue
+                        pruned_entries.append(
+                            {
+                                'step': step_dir.name,
+                                'recorded_at': artifact_dir.name,
+                                'pruned_at': sweep_started_at,
+                                'expired_at': _datetime_to_iso(expires_at),
+                                'reason': 'terminal_session_expired',
+                                'anchor_field': anchor_field,
+                                'anchor_at': _datetime_to_iso(anchor_at),
+                            }
                         )
-                        continue
-                    pruned_entries.append(
-                        {
-                            'step': step_dir.name,
-                            'recorded_at': artifact_dir.name,
-                            'pruned_at': sweep_started_at,
-                            'expired_at': _datetime_to_iso(expires_at),
-                            'reason': 'terminal_session_expired',
-                            'anchor_field': anchor_field,
-                            'anchor_at': _datetime_to_iso(anchor_at),
-                        }
+                        pruned_count += 1
+                    if step_dir.exists() and not any(step_dir.iterdir()):
+                        step_dir.rmdir()
+                if verify_root.exists() and not any(verify_root.iterdir()):
+                    verify_root.rmdir()
+                if pruned_count:
+                    self._save_verify_evidence_retention_ledger(
+                        session_id,
+                        entries=pruned_entries,
+                        swept_at=sweep_started_at,
                     )
-                    pruned_count += 1
-                if step_dir.exists() and not any(step_dir.iterdir()):
-                    step_dir.rmdir()
-            if verify_root.exists() and not any(verify_root.iterdir()):
-                verify_root.rmdir()
-            if pruned_count:
-                self._save_verify_evidence_retention_ledger(
-                    session_id,
-                    entries=pruned_entries,
-                    swept_at=sweep_started_at,
-                )
-                self.logger.info(
-                    'interactive verify evidence prune session=%s count=%s retention_days=%s anchor=%s expired_at=%s',
-                    session_id,
-                    pruned_count,
-                    self.verify_evidence_retention_days,
-                    anchor_field,
-                    _datetime_to_iso(expires_at),
-                )
+                    self.logger.info(
+                        'interactive verify evidence prune session=%s count=%s retention_days=%s anchor=%s expired_at=%s',
+                        session_id,
+                        pruned_count,
+                        self.verify_evidence_retention_days,
+                        anchor_field,
+                        _datetime_to_iso(expires_at),
+                    )
 
     def _has_reconcilable_runtime(self, session: dict[str, Any]) -> bool:
         if str(session.get('state') or '') == 'timed_out_pending_reconciliation':

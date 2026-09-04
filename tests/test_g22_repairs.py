@@ -11,6 +11,7 @@ import unittest
 from concurrent.futures import Future
 from queue import Queue
 from pathlib import Path
+from types import SimpleNamespace
 
 from app.interactive_session_manager import (
     MAX_INTERACTIVE_EVENT_FILE_BYTES,
@@ -188,6 +189,50 @@ class G22SourceBundleRepairTests(unittest.TestCase):
                 expected_manifest_sha256=hashlib.sha256(manifest_path.read_bytes()).hexdigest(),
                 expected_archive_sha256=hashlib.sha256(archive.read_bytes()).hexdigest(),
             )
+
+
+class G22RetentionLedgerConcurrencyTests(unittest.TestCase):
+    def test_concurrent_session_ledger_merges_preserve_both_expired_entries(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            manager = object.__new__(InteractiveSessionManager)
+            manager.settings = SimpleNamespace(spool_root=root, retention_days=7)
+            manager.sessions_root.mkdir()
+            for session_id in ('session-a', 'session-b'):
+                session_dir = manager.sessions_root / session_id
+                session_dir.mkdir()
+                (session_dir / 'verify_evidence_retention.json').write_text(
+                    json.dumps({
+                        'pruned_entries': [{
+                            'step': 'verify-pre',
+                            'recorded_at': (
+                                '2026-01-01T00:00:01+00:00'
+                                if session_id == 'session-a'
+                                else '2026-01-01T00:00:02+00:00'
+                            ),
+                            'expired_at': '2026-01-02T00:00:00+00:00',
+                        }]
+                    }),
+                    encoding='utf-8',
+                )
+            barrier = threading.Barrier(2)
+            errors: list[BaseException] = []
+
+            def merge(session_id: str) -> None:
+                try:
+                    barrier.wait()
+                    manager._merge_retention_ledger_to_central(session_id)
+                except BaseException as exc:
+                    errors.append(exc)
+
+            threads = [threading.Thread(target=merge, args=(session_id,)) for session_id in ('session-a', 'session-b')]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join()
+            self.assertFalse(errors)
+            central = json.loads(manager.retention_ledger_path.read_text(encoding='utf-8'))
+            self.assertEqual({entry['session_id'] for entry in central['entries']}, {'session-a', 'session-b'})
 
 
 class G22ProofRepairTests(unittest.TestCase):
