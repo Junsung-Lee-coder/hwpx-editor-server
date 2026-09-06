@@ -3140,7 +3140,39 @@ def _worker_runtime_path(value: Any, *, field_name: str) -> Path:
     return (Path.cwd() / path).resolve()
 
 
-def handle_job(job: dict) -> None:
+def claim_job_for_execution(
+    worker_name: str,
+    run_id: str,
+    candidate_generation: str,
+) -> dict | None:
+    """Claim and immediately fence a job before starting native work."""
+    job = db.claim_next_job(
+        worker_name,
+        run_id=run_id,
+        candidate_generation=candidate_generation,
+    )
+    if job is None:
+        return None
+    if db.worker_lease_matches(worker_name, run_id, candidate_generation):
+        return job
+    db.requeue_claimed_job_if_owned(
+        job['job_id'],
+        worker_name=worker_name,
+        run_id=run_id,
+        candidate_generation=candidate_generation,
+        error='Worker lease was replaced before native execution started.',
+    )
+    logger.warning('Worker lease changed after claiming job %s; native execution was not started.', job['job_id'])
+    return None
+
+
+def handle_job(
+    job: dict,
+    *,
+    worker_name: str,
+    run_id: str,
+    candidate_generation: str,
+) -> None:
     """Run one queued job in a child process and translate failures into queue state."""
     job_id = job['job_id']
     task_type = job.get('task_type') or 'convert'
@@ -3167,7 +3199,24 @@ def handle_job(job: dict) -> None:
             )
         raise RuntimeError(f'Unsupported task_type: {task_type}')
 
-    db.touch_heartbeat(job_id)
+    if not db.worker_lease_matches(worker_name, run_id, candidate_generation):
+        db.requeue_claimed_job_if_owned(
+            job_id,
+            worker_name=worker_name,
+            run_id=run_id,
+            candidate_generation=candidate_generation,
+            error='Worker lease was replaced before native execution started.',
+        )
+        logger.warning('Job %s lease was replaced before native execution started.', job_id)
+        return
+    if not db.touch_heartbeat_if_owned(
+        job_id,
+        worker_name=worker_name,
+        run_id=run_id,
+        candidate_generation=candidate_generation,
+    ):
+        logger.warning('Job %s is no longer owned by the claimed worker; native execution was not started.', job_id)
+        return
     logger.info('Processing job %s (%s)', job_id, source_path.name)
 
     try:
@@ -3175,7 +3224,14 @@ def handle_job(job: dict) -> None:
         # while this wrapper owns queue bookkeeping, logs, and bounded recovery decisions.
         retry_used = False
         result = _run_child()
-        db.touch_heartbeat(job_id)
+        if not db.touch_heartbeat_if_owned(
+            job_id,
+            worker_name=worker_name,
+            run_id=run_id,
+            candidate_generation=candidate_generation,
+        ):
+            logger.warning('Job %s claim changed while native execution was running; result was discarded.', job_id)
+            return
 
         if result.stdout:
             logger.info('Job %s stdout: %s', job_id, result.stdout.strip())
@@ -3205,7 +3261,14 @@ def handle_job(job: dict) -> None:
                 append_history=True,
             )
             result = _run_child()
-            db.touch_heartbeat(job_id)
+            if not db.touch_heartbeat_if_owned(
+                job_id,
+                worker_name=worker_name,
+                run_id=run_id,
+                candidate_generation=candidate_generation,
+            ):
+                logger.warning('Job %s claim changed during retry; result was discarded.', job_id)
+                return
             if result.stdout:
                 logger.info('Job %s retry stdout: %s', job_id, result.stdout.strip())
             if result.stderr:
@@ -3213,8 +3276,15 @@ def handle_job(job: dict) -> None:
             error_text = (result.stderr or result.stdout or error_text).strip()
 
         if result.returncode == 0 and output_path.exists():
-            db.mark_succeeded(job_id)
-            logger.info('Job %s succeeded%s', job_id, ' after bounded retry' if retry_used else '')
+            if db.mark_succeeded_if_owned(
+                job_id,
+                worker_name=worker_name,
+                run_id=run_id,
+                candidate_generation=candidate_generation,
+            ):
+                logger.info('Job %s succeeded%s', job_id, ' after bounded retry' if retry_used else '')
+            else:
+                logger.warning('Job %s claim changed before success was recorded.', job_id)
             return
 
         raise RuntimeError(error_text)
@@ -3236,9 +3306,23 @@ def handle_job(job: dict) -> None:
         attempts = int(current['attempts']) if current else 1
         max_attempts = int(current['max_attempts']) if current else settings.max_attempts
         if attempts < max_attempts:
-            db.requeue_job(job_id, message)
+            if not db.requeue_claimed_job_if_owned(
+                job_id,
+                worker_name=worker_name,
+                run_id=run_id,
+                candidate_generation=candidate_generation,
+                error=message,
+            ):
+                logger.warning('Job %s claim changed before timeout recovery was recorded.', job_id)
         else:
-            db.mark_failed(job_id, message)
+            if not db.mark_failed_if_owned(
+                job_id,
+                message,
+                worker_name=worker_name,
+                run_id=run_id,
+                candidate_generation=candidate_generation,
+            ):
+                logger.warning('Job %s claim changed before timeout failure was recorded.', job_id)
 
     except Exception as exc:
         # Generic failures still preserve last-phase evidence before the queue state changes.
@@ -3253,9 +3337,23 @@ def handle_job(job: dict) -> None:
         attempts = int(current['attempts']) if current else 1
         max_attempts = int(current['max_attempts']) if current else settings.max_attempts
         if attempts < max_attempts:
-            db.requeue_job(job_id, str(exc))
+            if not db.requeue_claimed_job_if_owned(
+                job_id,
+                worker_name=worker_name,
+                run_id=run_id,
+                candidate_generation=candidate_generation,
+                error=str(exc),
+            ):
+                logger.warning('Job %s claim changed before failure recovery was recorded.', job_id)
         else:
-            db.mark_failed(job_id, str(exc))
+            if not db.mark_failed_if_owned(
+                job_id,
+                str(exc),
+                worker_name=worker_name,
+                run_id=run_id,
+                candidate_generation=candidate_generation,
+            ):
+                logger.warning('Job %s claim changed before failure was recorded.', job_id)
 
 
 def readiness_heartbeat(
@@ -3354,15 +3452,16 @@ def worker_loop() -> int:
         ):
             logger.error('Worker readiness ownership is no longer current; stopping worker.')
             return 2
-        job = db.claim_next_job(
-            settings.worker_name,
-            run_id=run_id,
-            candidate_generation=candidate_generation,
-        )
+        job = claim_job_for_execution(settings.worker_name, run_id, candidate_generation)
         if job is None:
             time.sleep(settings.poll_interval_seconds)
             continue
-        handle_job(job)
+        handle_job(
+            job,
+            worker_name=settings.worker_name,
+            run_id=run_id,
+            candidate_generation=candidate_generation,
+        )
 
 
 def process_one_command(
