@@ -117,7 +117,11 @@ class Facade:
             raise BackendFailure('SESSION_IDENTITY_MISMATCH', 'Backend session identity did not match the explicit handle.')
         metadata = record.get('metadata')
         local = metadata.get('local_cli_v1') if isinstance(metadata, dict) else None
-        if not isinstance(local, dict) or local.get('opened_via') != 'local_cli_v1':
+        # r16 replaces opened_via with bridge on commands and closed_via on
+        # close. Preserve explicit identity across that backend lifecycle.
+        if not isinstance(local, dict) or not (
+                local.get('opened_via') == 'local_cli_v1' or local.get('bridge') == 'local_cli_v1' or
+                (local.get('closed_via') == 'local_cli_v1' and record.get('state') == 'closed')):
             raise BackendFailure('SESSION_NOT_MANAGED', 'Only server-managed local-CLI working-copy sessions are supported.')
         return value
 
