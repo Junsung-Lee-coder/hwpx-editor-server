@@ -3436,7 +3436,7 @@ function Get-InstallProcessSnapshot {
     $matches = @()
     foreach ($row in $rows) {
         $name = ([string]$row.Name).ToLowerInvariant()
-        if ($name -notin @('python.exe', 'pythonw.exe')) { continue }
+        if (-not [regex]::IsMatch($name, '^python(?:w|[0-9]+(?:\.[0-9]+)?)?\.exe$')) { continue }
         $commandLine = [string]$row.CommandLine
         if (-not (Test-CanonicalProcessIdentity -Process $row -RootPath $canonicalRoot -ExpectedPythonPath $expectedPython)) { continue }
         $isApi = Test-CommandLineModuleToken -CommandLine $commandLine -ModuleName 'app.api_server'

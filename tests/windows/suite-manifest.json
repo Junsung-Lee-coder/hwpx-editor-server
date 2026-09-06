@@ -16,6 +16,7 @@
     "test_scheduled_task_identity_equivalence.ps1",
     "test_store_python_alias_identity.ps1",
     "test_venv_process_identity_and_receipt_bound.ps1",
+    "test_versioned_python_process_snapshot.ps1",
     "test_verify_windows.ps1",
     "test_verify_windows_proof_png.ps1",
     "test_windows_powershell_51_runtime.ps1"

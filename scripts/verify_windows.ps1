@@ -553,7 +553,7 @@ function Test-VerifierWorker {
     $processes = @()
     foreach ($process in @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue)) {
         $name = ([string]$process.Name).ToLowerInvariant()
-        if ($name -notin @('python.exe', 'pythonw.exe')) { continue }
+        if (-not [regex]::IsMatch($name, '^python(?:w|[0-9]+(?:\.[0-9]+)?)?\.exe$')) { continue }
         if (-not (Test-CanonicalProcessIdentity -Process $process -RootPath $install -ExpectedPythonPath $expectedPython -ExpectedArguments '-m app.worker' -ModuleNames @('app.worker'))) { continue }
         $processes += [ordered]@{
             process_id = [int]$process.ProcessId
