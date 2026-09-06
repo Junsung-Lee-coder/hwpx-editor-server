@@ -68,7 +68,10 @@ class CellFormatStep(Closed):
     label: Label = 'mcp:cell-format-exact'
     section_anchor: Text
     target_id: Text
-    expected_hash: Annotated[str, Field(pattern=r'^(sha256:)?[a-f0-9]{64}$')]
+    # Native control inventory proofs are intentionally truncated to 24 hex
+    # characters; retain acceptance of the full-width form for callers that
+    # provide an independently computed proof.
+    expected_hash: Annotated[str, Field(pattern=r'^(sha256:)?(?:[a-f0-9]{24}|[a-f0-9]{64})$')]
     expected_page: int = Field(ge=1, le=10000)
     page_from: int = Field(ge=1, le=10000)
     page_to: int = Field(ge=1, le=10000)

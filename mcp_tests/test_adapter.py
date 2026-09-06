@@ -370,6 +370,26 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(post[2]['session_id'], SID)
             self.assertEqual(post[2]['steps'][0]['op'], op)
 
+    async def test_cell_format_accepts_truncated_native_inventory_proof(self):
+        proof_hash = 'sha256:' + ('a' * 24)
+        request = {
+            'op': 'cell_format_exact',
+            'section_anchor': 'MCP native proof page 1',
+            'target_id': 'ctrl/0/tbl/1',
+            'expected_hash': proof_hash,
+            'expected_page': 1,
+            'page_from': 1,
+            'page_to': 1,
+            'vertical_align': 'center',
+            'confirm_layout': True,
+        }
+        result = await self.sdk_call('hwpx_command', {'session_id': SID, 'request': request})
+
+        self.assertFalse(result.is_error, result)
+        post = [x for x in Backend.calls if x[0] == 'POST'][-1]
+        self.assertEqual(post[1], '/local-cli/command-bundle')
+        self.assertEqual(post[2]['steps'][0]['expected_hash'], proof_hash)
+
     async def test_reconcile_preserves_identifier(self):
         result = await self.sdk_call('hwpx_command', {'session_id': SID,
             'request': {'op': 'command_reconcile', 'command_id': 'cmd-owned'}})
