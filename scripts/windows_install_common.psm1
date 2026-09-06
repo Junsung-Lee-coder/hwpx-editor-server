@@ -3117,6 +3117,41 @@ function Get-InterpreterVersionKey {
     return "{0}.{1}" -f $match.Groups[1].Value, $match.Groups[2].Value
 }
 
+function Get-RegisteredStorePythonImage {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$Home,
+        [Parameter(Mandatory = $true)][string]$ConfiguredExecutable,
+        [Parameter(Mandatory = $true)][string]$VersionKey
+    )
+    try {
+        # Store execution aliases are not the process image reported by CIM.
+        # Bind only an exact current-user, healthy Store package registration;
+        # a matching filename/version or arbitrary WindowsApps prefix is not proof.
+        if ($VersionKey -notmatch '^[0-9]+\.[0-9]+$') { return $null }
+        $aliasRoot = Get-CanonicalPath -Path (Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'Microsoft\WindowsApps') -RequireExisting
+        $homePath = Get-CanonicalPath -Path $Home -RequireExisting
+        if ((Get-CanonicalPath -Path (Split-Path -Parent $homePath) -RequireExisting) -cne $aliasRoot) { return $null }
+        $configured = Get-CanonicalPath -Path $ConfiguredExecutable -RequireExisting
+        if ((Get-CanonicalPath -Path (Split-Path -Parent $configured) -RequireExisting) -cne $homePath) { return $null }
+        $imageName = 'python{0}.exe' -f $VersionKey
+        if ([IO.Path]::GetFileName($configured) -notin @('python.exe', $imageName)) { return $null }
+        $packageName = 'PythonSoftwareFoundation.Python.{0}' -f $VersionKey
+        $family = [IO.Path]::GetFileName($homePath)
+        $packages = @(Get-AppxPackage -Name $packageName -ErrorAction Stop)
+        if ($packages.Count -ne 1) { return $null }
+        $package = $packages[0]
+        if ([string]$package.Name -cne $packageName -or [string]$package.PackageFamilyName -cne $family -or
+            [string]$package.Status -cne 'Ok' -or [string]$package.SignatureKind -cne 'Store') { return $null }
+        $location = Get-CanonicalPath -Path ([string]$package.InstallLocation) -RequireExisting
+        Assert-NoReparsePath -Path $location | Out-Null
+        $image = Join-Path $location $imageName
+        Assert-NoReparsePath -Path $image | Out-Null
+        return Get-CanonicalPath -Path $image -RequireExisting
+    }
+    catch { return $null }
+}
+
 function Get-VenvInterpreterMetadata {
     [CmdletBinding()]
     param(
@@ -3171,6 +3206,12 @@ function Get-VenvInterpreterMetadata {
                 }
             }
             catch { }
+        }
+        if (-not [string]::IsNullOrWhiteSpace($configuredExecutable) -and $versionMatch.Success) {
+            $storeImage = Get-RegisteredStorePythonImage -Home $canonicalHome -ConfiguredExecutable $configuredExecutable -VersionKey (Get-InterpreterVersionKey -Value $version)
+            if (-not [string]::IsNullOrWhiteSpace($storeImage) -and $baseExecutables -cnotcontains $storeImage) {
+                $baseExecutables += $storeImage
+            }
         }
         # Some Windows Store installations deny ordinary metadata access to
         # the package image even though CIM reports that image as the running
