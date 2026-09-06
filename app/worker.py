@@ -1950,10 +1950,13 @@ def configure_hwp_automation(hwp: object) -> dict[str, Any]:
 
 def _instantiate_hwp_without_builtin_register_module(Hwp: Callable[..., object]) -> tuple[object, str]:
     constructor_attempts = (
-        ({'visible': True, 'register_module': False}, 'Hwp(visible=True, register_module=False)'),
-        ({'register_module': False}, 'Hwp(register_module=False)'),
-        ({'visible': True}, 'Hwp(visible=True)'),
-        ({}, 'Hwp()'),
+        (
+            {'new': True, 'visible': True, 'register_module': False},
+            'Hwp(new=True, visible=True, register_module=False)',
+        ),
+        ({'new': True, 'register_module': False}, 'Hwp(new=True, register_module=False)'),
+        ({'new': True, 'visible': True}, 'Hwp(new=True, visible=True)'),
+        ({'new': True}, 'Hwp(new=True)'),
     )
     last_type_error: TypeError | None = None
     for kwargs, label in constructor_attempts:
@@ -1986,28 +1989,19 @@ def close_hwp_instance(hwp: object | None) -> None:
 
 
 def kill_hwp_runtime() -> dict[str, Any]:
-    result: dict[str, Any] = {'platform': sys.platform}
-    if sys.platform != 'win32':
-        return result
-    try:
-        proc = subprocess.run(
-            ['taskkill', '/IM', 'Hwp.exe', '/F'],
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=15,
-        )
-        result.update(
-            {
-                'returncode': proc.returncode,
-                'stdout': (proc.stdout or '').strip().splitlines()[:5],
-                'stderr': (proc.stderr or '').strip().splitlines()[:5],
-            }
-        )
-    except Exception as exc:
-        result['exception'] = repr(exc)
-    time.sleep(2.0)
-    return result
+    """Report that broad native cleanup was intentionally not attempted.
+
+    A process-name-wide ``taskkill`` can terminate an unrelated user's HWP
+    session.  Native cleanup must instead be performed by the owner that has a
+    task-bound process identity; this worker has no such identity at this
+    boundary, so it fails closed and preserves every existing HWP process.
+    """
+
+    return {
+        'platform': sys.platform,
+        'attempted': False,
+        'reason': 'task_owned_process_identity_required',
+    }
 
 
 def perform_native_export_preflight(

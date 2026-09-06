@@ -195,17 +195,19 @@ def _close_probe_hwp(hwp: Any) -> None:
 
 def _construct_probe_hwp(Hwp: Any) -> tuple[Any, str]:
     constructor_attempts = (
-        ({'visible': True, 'register_module': False}, 'Hwp(visible=True, register_module=False)'),
-        ({'register_module': False}, 'Hwp(register_module=False)'),
-        ({'visible': True}, 'Hwp(visible=True)'),
-        ({}, 'Hwp()'),
+        (
+            {'new': True, 'visible': True, 'register_module': False},
+            'Hwp(new=True, visible=True, register_module=False)',
+        ),
+        ({'new': True, 'register_module': False}, 'Hwp(new=True, register_module=False)'),
+        ({'new': True, 'visible': True}, 'Hwp(new=True, visible=True)'),
+        ({'new': True}, 'Hwp(new=True)'),
     )
     # A TypeError from a native COM constructor is not proof that only the
     # signature was wrong: pyhwpx may already have launched HWP before its
     # Python wrapper raises.  Inspect a Python-visible signature first and make
-    # one construction attempt.  For opaque extension/COM callables, choose
-    # the safest supported form and fail closed instead of retrying a possibly
-    # leaked native process.
+    # one construction attempt.  Every candidate explicitly requests a new
+    # native instance so a running unrelated HWP object cannot be adopted.
     try:
         signature = inspect.signature(Hwp)
     except (TypeError, ValueError):
