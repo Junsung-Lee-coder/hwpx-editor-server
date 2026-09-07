@@ -1786,8 +1786,8 @@ def _build_cell_format_exact(argv: Sequence[str]) -> BundleSpec:
         name='cell-format-exact',
         summary='Apply exactly one pre-proven target-cell format change; fail closed on target/hash/page/scope mismatch.',
         where=f'Table target {target_id!r} inside requested section/page scope, expected page {expected_page}.',
-        how='Runs read-only where, then one `cell_format_exact` primitive that enters the exact matching table cell and applies documented pyhwpx cell-margin or native TableVAlign action.',
-        changed='Mutates one target table cell format only if target id, proof_hash, expected page, and page/scope checks all match; server returns pre/post metrics where available.',
+        how='Runs read-only where, then one `cell_format_exact` primitive that enters the exact matching table cell and applies one documented pyhwpx cell-margin call with all four sides explicit in HWPUNIT, or one native TableVAlign action.',
+        changed='Mutates one target table cell format only if target id, proof_hash, expected page, page/scope checks, and fresh valid four-side readback all match; server returns pre/post metrics and fails closed on any missing or mismatched native evidence.',
         steps=(
             _where_step('where:before-cell-format'),
             _step('cell_format_exact', 'mutate:cell-format-exact', **fields),

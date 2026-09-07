@@ -321,7 +321,7 @@ def build_app(settings: Settings | None = None):
                 'hwpx_status': 'Inspect explicit session and reconciliation status. May repair stale backend status; not a rollback claim.',
                 'hwpx_find': 'Find text in the explicit managed copy; may move the live cursor or create proof.',
                 'hwpx_where': 'Read native cursor/location; runs work in the existing serialized backend lane.',
-                'hwpx_command': 'Bounded context/readback/selection, guarded cell alignment, or command reconciliation. No arbitrary COM, Python or shell.',
+                'hwpx_command': 'Bounded context/readback/selection, guarded cell alignment or margin formatting, or command reconciliation. No arbitrary COM, Python or shell.',
                 'hwpx_proof': 'Native frame or one PDF-rendered page. Single-page proof does not establish full-document visual QA.',
                 'hwpx_save': 'Save the managed working copy only; retrieve its download artifact before close.',
                 'hwpx_close': 'Close the explicit managed session and remove its managed artifacts. Download wanted output first.',

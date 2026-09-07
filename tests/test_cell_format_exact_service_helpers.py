@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import unittest
+from types import SimpleNamespace
+from unittest.mock import patch
 
 try:
     from app.local_cli_runtime import LocalCliRuntimeError
@@ -99,6 +101,34 @@ class _MismatchedFillHwp(_FillHwp):
         self.calls.append(('cell_fill', face_color))
         self.current_color = (1, 2, 3) if len(self.calls) == 1 else face_color
         return True
+
+
+class _MarginHwp:
+    def __init__(self, *, result: bool | None = True, raise_after_apply: bool = False) -> None:
+        self.calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
+        self.result = result
+        self.raise_after_apply = raise_after_apply
+        self.margins = {'left': 510, 'right': 510, 'top': 141, 'bottom': 141}
+
+    def set_cell_margin(self, *args: object, **kwargs: object) -> bool | None:
+        self.calls.append((args, kwargs))
+        values = dict(zip(('left', 'right', 'top', 'bottom'), args[:4]))
+        self.margins.update(values)
+        if self.raise_after_apply:
+            raise RuntimeError('simulated failure after mutation')
+        return self.result
+
+
+class _VerticalReadbackHwp:
+    def __init__(self, *, default_result: bool | None = False, value: int = 1) -> None:
+        self.HAction = SimpleNamespace(GetDefault=self._get_default)
+        self.HParameterSet = SimpleNamespace(
+            HShapeObject=SimpleNamespace(HSet=object(), ShapeTableCell=SimpleNamespace(VertAlign=value))
+        )
+        self.default_result = default_result
+
+    def _get_default(self, action_name: str, hset: object) -> bool | None:
+        return self.default_result
 
 
 class _BorderHwp:
@@ -331,13 +361,103 @@ class CellFormatExactServiceHelperTests(unittest.TestCase):
             )
 
     def test_cell_format_exact_rejects_unchanged_cell_margin(self) -> None:
-        with self.assertRaisesRegex(LocalCliRuntimeError, 'changed cell_margin_hu'):
+        with self.assertRaisesRegex(LocalCliRuntimeError, 'usable native four-side cell-margin readback'):
             _require_observed_cell_format_mutation(
                 'set-cell-margin',
                 {'cell_margin_hu': 1200},
                 {'cell_margin_hu': 1200},
                 {},
             )
+
+    def test_uniform_cell_margin_passes_all_four_explicit_values(self) -> None:
+        hwp = _MarginHwp()
+
+        result = self.service._bundle_set_uniform_cell_margin(hwp, 1984)
+
+        self.assertEqual(hwp.calls, [((1984, 1984, 1984, 1984), {'as_': 'hwpunit'})])
+        self.assertEqual(hwp.margins, {'left': 1984, 'right': 1984, 'top': 1984, 'bottom': 1984})
+        self.assertEqual(result['result'], True)
+
+    def test_uniform_cell_margin_does_not_retry_side_effecting_failure(self) -> None:
+        hwp = _MarginHwp(raise_after_apply=True)
+
+        with self.assertRaises(LocalCliMutationError) as raised:
+            self.service._bundle_set_uniform_cell_margin(hwp, 1984)
+
+        self.assertEqual(len(hwp.calls), 1)
+        self.assertTrue(raised.exception.mutation_may_have_persisted)
+
+    def test_uniform_cell_margin_rejects_explicit_false(self) -> None:
+        with self.assertRaises(LocalCliMutationError):
+            self.service._bundle_set_uniform_cell_margin(_MarginHwp(result=False), 1984)
+
+    def test_cell_format_exact_margin_guard_requires_valid_four_side_readback(self) -> None:
+        with self.assertRaisesRegex(LocalCliRuntimeError, 'usable native'):
+            _require_observed_cell_format_mutation(
+                'set-cell-margin',
+                {'cell_margin_hu': {'left': 510, 'right': 510, 'top': 141, 'bottom': 141}},
+                {'cell_margin_hu': {'error': 'getter failed'}},
+                {},
+                expected_cell_margin_hu={'left': 1984, 'right': 1984, 'top': 1984, 'bottom': 1984},
+            )
+
+    def test_cell_format_exact_margin_guard_requires_request_derived_value(self) -> None:
+        with self.assertRaisesRegex(LocalCliRuntimeError, 'requested value'):
+            _require_observed_cell_format_mutation(
+                'set-cell-margin',
+                {'cell_margin_hu': {'left': 510, 'right': 510, 'top': 141, 'bottom': 141}},
+                {'cell_margin_hu': {'left': 1984, 'right': 2, 'top': 0, 'bottom': 0}},
+                {'cell_margin_hu': {'before': {'left': 510, 'right': 510, 'top': 141, 'bottom': 141}, 'after': {'left': 1984, 'right': 2, 'top': 0, 'bottom': 0}}},
+                expected_cell_margin_hu={'left': 1984, 'right': 1984, 'top': 1984, 'bottom': 1984},
+            )
+
+    def test_cell_format_exact_guard_failure_preserves_mutation_truth(self) -> None:
+        with self.assertRaises(LocalCliMutationError) as raised:
+            _require_observed_cell_format_mutation(
+                'set-cell-margin',
+                {'cell_margin_hu': {'left': 510, 'right': 510, 'top': 141, 'bottom': 141}},
+                {'cell_margin_hu': {'left': 1984, 'right': 2, 'top': 0, 'bottom': 0}},
+                {'cell_margin_hu': {'before': {'left': 510, 'right': 510, 'top': 141, 'bottom': 141}, 'after': {'left': 1984, 'right': 2, 'top': 0, 'bottom': 0}}},
+                expected_cell_margin_hu={'left': 1984, 'right': 1984, 'top': 1984, 'bottom': 1984},
+            )
+
+        self.assertTrue(raised.exception.mutation_may_have_persisted)
+        self.assertFalse(raised.exception.rollback['succeeded'])
+
+    def test_table_cell_metrics_marks_invalid_margin_readback_unavailable(self) -> None:
+        self.service._bundle_enter_table_cell_for_ctrl = lambda hwp, ctrl: {'is_cell': True}  # type: ignore[method-assign]
+        self.service._style_parameter_snapshot = lambda *args, **kwargs: {'values': {}}  # type: ignore[method-assign]
+        hwp = SimpleNamespace(
+            get_cell_addr=lambda **kwargs: [0, 0],
+            get_row_height=lambda **kwargs: 1282,
+            get_table_height=lambda **kwargs: 1282,
+            get_cell_margin=lambda **kwargs: {'error': 'getter failed'},
+            get_table_inside_margin=lambda **kwargs: {'left': 0},
+            get_table_outside_margin=lambda **kwargs: {'left': 0},
+        )
+        self.service._bundle_table_cell_vertical_align = lambda hwp: {  # type: ignore[method-assign]
+            'available': True,
+            'value': 1,
+            'name': 'center',
+        }
+
+        with patch('app.local_cli_service._get_pos', return_value=(0, 0, 0)), patch('app.local_cli_service._set_pos'):
+            metrics = self.service._bundle_table_cell_metrics(hwp, object())
+
+        self.assertFalse(metrics['cell_margin_hu_available'])
+        self.assertFalse(metrics['available'])
+
+    def test_vertical_alignment_getter_rejects_invalid_native_enum(self) -> None:
+        result = self.service._bundle_table_cell_vertical_align(_VerticalReadbackHwp(default_result=True, value=9))
+
+        self.assertFalse(result['available'])
+        self.assertIn('enum is invalid', result['error'])
+
+    def test_vertical_alignment_getdefault_failure_is_unavailable(self) -> None:
+        result = self.service._bundle_table_cell_vertical_align(_VerticalReadbackHwp())
+
+        self.assertFalse(result['available'])
+        self.assertIn('GetDefault', result['error'])
 
     def test_apply_cell_border_none_prefers_cellborderfill_parameter_set(self) -> None:
         hwp = _BorderFillHwp()

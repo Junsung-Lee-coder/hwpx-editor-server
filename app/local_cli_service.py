@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import inspect
 import json
 import hashlib
 import math
@@ -94,6 +95,51 @@ def _native_type_action_count(text: str) -> int:
 _LIVE_HEADING_SPLIT_RE = re.compile(r'[·ㆍ•:：\-–—,，/|]')
 _IMAGE_ALLOWED_SUFFIXES = {'.png', '.jpg', '.jpeg', '.bmp'}
 _IMAGE_SAFE_STEM_RE = re.compile(r'[^A-Za-z0-9._() -]+')
+_CELL_MARGIN_KEYS = ('left', 'right', 'top', 'bottom')
+
+
+def _normalize_cell_margin_readback(value: Any) -> dict[str, int | float] | None:
+    if not isinstance(value, Mapping):
+        return None
+    normalized: dict[str, int | float] = {}
+    for key in _CELL_MARGIN_KEYS:
+        raw = value.get(key)
+        if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+            return None
+        numeric = float(raw)
+        if not math.isfinite(numeric) or numeric < 0:
+            return None
+        normalized[key] = int(numeric) if numeric.is_integer() else numeric
+    return normalized
+
+
+def _normalize_vertical_align_readback(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, Mapping) or value.get('available') is not True:
+        return None
+    raw_value = value.get('value')
+    raw_name = value.get('name')
+    names = {0: 'top', 1: 'center', 2: 'bottom'}
+    if isinstance(raw_value, bool) or not isinstance(raw_value, int) or raw_value not in names:
+        return None
+    if raw_name != names[raw_value]:
+        return None
+    return {'value': raw_value, 'name': raw_name}
+
+
+def _valid_cell_addr(value: Any) -> bool:
+    return (
+        isinstance(value, (list, tuple))
+        and len(value) == 2
+        and all(isinstance(item, int) and not isinstance(item, bool) and item >= 0 for item in value)
+    )
+
+
+def _valid_numeric_readback(value: Any) -> bool:
+    return (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(float(value))
+    )
 
 
 def _require_observed_cell_format_mutation(
@@ -103,40 +149,80 @@ def _require_observed_cell_format_mutation(
     changed_metrics: Mapping[str, Any],
     *,
     expected_vertical_align: str | None = None,
+    expected_cell_margin_hu: Mapping[str, Any] | None = None,
 ) -> None:
     """Reject format commands whose target property was not observed changing.
 
     Native action return values alone are not persistence evidence.  The
-    supported format selectors therefore require an exact before/after getter,
-    and vertical alignment also has to match the requested enum name.
+    supported format selectors therefore require an exact, valid before/after
+    getter.  The expected value is derived from the request, never from the
+    observed post-action value.
     """
-    if operation == 'set-cell-margin' and before_metrics.get('cell_margin_hu') == after_metrics.get('cell_margin_hu'):
-        raise LocalCliRuntimeError(
-            'cell_format_exact did not observe changed cell_margin_hu after mutation; '
-            f'before={before_metrics!r}; after={after_metrics!r}'
+    def fail(message: str) -> None:
+        raise LocalCliMutationError(
+            message,
+            mutation_may_have_persisted=True,
+            rollback={'attempted': False, 'succeeded': False},
         )
+
+    if operation == 'set-cell-margin':
+        before_margin = _normalize_cell_margin_readback(before_metrics.get('cell_margin_hu'))
+        after_margin = _normalize_cell_margin_readback(after_metrics.get('cell_margin_hu'))
+        if before_margin is None or after_margin is None:
+            fail(
+                'cell_format_exact has no usable native four-side cell-margin readback; '
+                f'before={before_metrics.get("cell_margin_hu")!r}; after={after_metrics.get("cell_margin_hu")!r}'
+            )
+        if before_margin == after_margin:
+            fail(
+                'cell_format_exact did not observe changed cell_margin_hu after mutation; '
+                f'before={before_margin!r}; after={after_margin!r}'
+            )
+        if expected_cell_margin_hu is not None:
+            expected_margin = _normalize_cell_margin_readback(expected_cell_margin_hu)
+            if expected_margin is None:
+                fail(
+                    f'cell_format_exact expected cell-margin value is invalid: {expected_cell_margin_hu!r}'
+                )
+            if after_margin != expected_margin:
+                fail(
+                    'cell_format_exact cell-margin readback mismatched the requested value; '
+                    f'requested={expected_margin!r}; after={after_margin!r}'
+                )
+        changed_margin = changed_metrics.get('cell_margin_hu')
+        if isinstance(changed_margin, Mapping) and (
+            changed_margin.get('before') != before_metrics.get('cell_margin_hu')
+            or changed_margin.get('after') != after_metrics.get('cell_margin_hu')
+        ):
+            fail(
+                'cell_format_exact cell-margin change record does not match native readback; '
+                f'changed={changed_margin!r}; before={before_margin!r}; after={after_margin!r}'
+            )
+        return
     if operation != 'vertical-align':
         return
 
     before_vertical = before_metrics.get('vertical_align')
     after_vertical = after_metrics.get('vertical_align')
-    if not isinstance(before_vertical, Mapping) or not before_vertical.get('available'):
-        raise LocalCliRuntimeError(
+    normalized_before = _normalize_vertical_align_readback(before_vertical)
+    normalized_after = _normalize_vertical_align_readback(after_vertical)
+    if normalized_before is None:
+        fail(
             'cell_format_exact vertical alignment has no usable native before readback; '
             f'before={before_vertical!r}'
         )
-    if not isinstance(after_vertical, Mapping) or not after_vertical.get('available'):
-        raise LocalCliRuntimeError(
+    if normalized_after is None:
+        fail(
             'cell_format_exact vertical alignment has no usable native after readback; '
             f'after={after_vertical!r}'
         )
-    if before_vertical.get('value') == after_vertical.get('value'):
-        raise LocalCliRuntimeError(
+    if normalized_before['value'] == normalized_after['value']:
+        fail(
             'cell_format_exact did not observe changed vertical alignment after mutation; '
             f'before={before_vertical!r}; after={after_vertical!r}'
         )
-    if expected_vertical_align and after_vertical.get('name') != expected_vertical_align:
-        raise LocalCliRuntimeError(
+    if expected_vertical_align and normalized_after['name'] != expected_vertical_align:
+        fail(
             'cell_format_exact vertical alignment readback mismatched the requested value; '
             f'requested={expected_vertical_align!r}; after={after_vertical!r}'
         )
@@ -4161,7 +4247,16 @@ class LocalCliService:
             metrics['para_line_spacing_type'] = para_values.get('LineSpacingType')
             metrics['vertical_align'] = self._bundle_table_cell_vertical_align(hwp)
             metrics['style_snapshot'] = {'char_shape': char_raw, 'para_shape': para_raw}
-            metrics['available'] = not isinstance(metrics.get('row_height_hu'), dict)
+            metrics['cell_addr_valid'] = _valid_cell_addr(metrics.get('cell_addr'))
+            metrics['row_height_hu_valid'] = _valid_numeric_readback(metrics.get('row_height_hu'))
+            metrics['cell_margin_hu_valid'] = _normalize_cell_margin_readback(metrics.get('cell_margin_hu')) is not None
+            metrics['cell_margin_hu_available'] = bool(metrics['cell_margin_hu_valid'])
+            metrics['vertical_align_available'] = _normalize_vertical_align_readback(metrics.get('vertical_align')) is not None
+            metrics['available'] = (
+                bool(metrics['cell_addr_valid'])
+                and bool(metrics['row_height_hu_valid'])
+                and bool(metrics['cell_margin_hu_valid'])
+            )
             return metrics
         finally:
             if original_pos is not None and len(original_pos) >= 3:
@@ -4181,13 +4276,23 @@ class LocalCliService:
         try:
             parameter_root = getattr(hwp, 'HParameterSet')
             shape = getattr(parameter_root, 'HShapeObject')
-            get_default = getattr(getattr(hwp, 'HAction'), 'GetDefault')
-            get_default('TablePropertyDialog', getattr(shape, 'HSet'))
+            get_default = getattr(getattr(hwp, 'HAction'), 'GetDefault', None)
+            if not callable(get_default):
+                raise LocalCliRuntimeError('TablePropertyDialog GetDefault is unavailable')
+            default_result = get_default('TablePropertyDialog', getattr(shape, 'HSet'))
+            if default_result is not None and not bool(default_result):
+                raise LocalCliRuntimeError('TablePropertyDialog GetDefault returned false')
             cell = getattr(shape, 'ShapeTableCell')
-            value = int(getattr(cell, 'VertAlign'))
+            raw_value = getattr(cell, 'VertAlign')
+            if isinstance(raw_value, bool):
+                raise LocalCliRuntimeError('TablePropertyDialog VertAlign is boolean, not a native enum')
+            value = int(raw_value)
             names = {0: 'top', 1: 'center', 2: 'bottom'}
+            if value not in names:
+                raise LocalCliRuntimeError(f'TablePropertyDialog VertAlign enum is invalid: {value!r}')
             return {
                 'available': True,
+                'refresh_succeeded': True,
                 'value': value,
                 'name': names.get(value),
                 'source': 'HParameterSet.HShapeObject.ShapeTableCell.VertAlign',
@@ -4247,7 +4352,7 @@ class LocalCliService:
         try:
             value = method(**(kwargs or {}))
         except Exception as exc:
-            return {'available': True, 'method': method_name, 'error': f'{type(exc).__name__}: {exc}'}
+            return {'available': False, 'method': method_name, 'error': f'{type(exc).__name__}: {exc}'}
         return {
             'available': True,
             'method': method_name,
@@ -4881,24 +4986,54 @@ class LocalCliService:
                 except Exception:
                     pass
 
-    def _bundle_set_uniform_cell_margin(self, hwp: Any, value_hu: int) -> dict[str, Any]:
+    def _bundle_set_cell_margin_values(self, hwp: Any, margins: Mapping[str, Any]) -> dict[str, Any]:
         method = getattr(hwp, 'set_cell_margin', None)
         if not callable(method):
             raise LocalCliRuntimeError('cell_format_exact requires pyhwpx set_cell_margin')
-        attempts: list[dict[str, Any]] = []
-        variants: list[tuple[str, tuple[Any, ...], dict[str, Any]]] = [
-            ('set_cell_margin(value, as_=hwpunit)', (value_hu,), {'as_': 'hwpunit'}),
-            ('set_cell_margin(left,right,top,bottom, as_=hwpunit)', (value_hu, value_hu, value_hu, value_hu), {'as_': 'hwpunit'}),
-            ('set_cell_margin(keyword margins, as_=hwpunit)', (), {'left': value_hu, 'right': value_hu, 'top': value_hu, 'bottom': value_hu, 'as_': 'hwpunit'}),
-        ]
-        for label, args, kwargs in variants:
+        normalized = _normalize_cell_margin_readback(margins)
+        if normalized is None:
+            raise LocalCliRuntimeError(f'cell_format_exact cell-margin values are invalid: {margins!r}')
+        args = tuple(normalized[key] for key in _CELL_MARGIN_KEYS)
+        kwargs = {'as_': 'hwpunit'}
+        signature = None
+        try:
+            signature = inspect.signature(method)
+        except (TypeError, ValueError):
+            # Some COM proxies do not expose a Python signature.  The pinned
+            # pyhwpx order is still invoked once; never probe alternatives.
+            pass
+        if signature is not None:
             try:
-                raw = method(*args, **kwargs)
-                attempts.append({'method': label, 'result': bool(raw) if raw is not None else None})
-                return {'method': label, 'result': bool(raw) if raw is not None else None, 'attempts': attempts}
-            except Exception as exc:
-                attempts.append({'method': label, 'error': f'{type(exc).__name__}: {exc}'})
-        raise LocalCliRuntimeError(f'cell_format_exact set_cell_margin failed for all documented call forms: {attempts!r}')
+                signature.bind(*args, **kwargs)
+            except TypeError as exc:
+                raise LocalCliRuntimeError(
+                    'cell_format_exact set_cell_margin does not support the documented '
+                    'four-side HWPUNIT call'
+                ) from exc
+        label = 'set_cell_margin(left,right,top,bottom, as_=hwpunit)'
+        try:
+            raw = method(*args, **kwargs)
+        except Exception as exc:
+            raise LocalCliMutationError(
+                f'cell_format_exact set_cell_margin failed after invocation: {type(exc).__name__}: {exc}',
+                mutation_may_have_persisted=True,
+                rollback={'attempted': False, 'succeeded': False},
+            ) from exc
+        result = bool(raw) if raw is not None else None
+        attempt = {'method': label, 'result': result}
+        if raw is not None and not bool(raw):
+            raise LocalCliMutationError(
+                'cell_format_exact set_cell_margin returned false after invocation',
+                mutation_may_have_persisted=False,
+                rollback={'attempted': False, 'succeeded': False},
+            )
+        return {'method': label, 'result': result, 'attempts': [attempt], 'arguments': dict(normalized)}
+
+    def _bundle_set_uniform_cell_margin(self, hwp: Any, value_hu: int) -> dict[str, Any]:
+        return self._bundle_set_cell_margin_values(
+            hwp,
+            {key: value_hu for key in _CELL_MARGIN_KEYS},
+        )
 
     def _bundle_apply_cell_fill_color(self, hwp: Any, fill_color: str) -> dict[str, Any]:
         value = str(fill_color or '').strip().upper()
@@ -5376,12 +5511,38 @@ class LocalCliService:
         before_metrics = self._bundle_table_cell_metrics(hwp, target_ctrl)
         if not before_metrics.get('available'):
             raise LocalCliRuntimeError(f'cell_format_exact cannot read target cell metrics: {before_metrics.get("error")}')
+        requested_margin_hu: int | None = None
+        if step.get('cell_margin_hu') is not None or step.get('cell_margin_mm') is not None:
+            requested_margin_hu = (
+                int(round(float(step.get('cell_margin_hu'))))
+                if step.get('cell_margin_hu') is not None
+                else self._mm_to_hwp_unit(hwp, float(step.get('cell_margin_mm')))
+            )
+            before_margin = _normalize_cell_margin_readback(before_metrics.get('cell_margin_hu'))
+            expected_margin = {key: requested_margin_hu for key in _CELL_MARGIN_KEYS}
+            if before_margin == expected_margin:
+                raise LocalCliRuntimeError(
+                    f'cell_format_exact requested cell margins are already present: {expected_margin!r}'
+                )
+        elif step.get('fill_color') is None and step.get('border') is None:
+            requested_vertical_align = str(step.get('vertical_align') or '').strip()
+            before_vertical = _normalize_vertical_align_readback(before_metrics.get('vertical_align'))
+            if before_vertical is None:
+                raise LocalCliRuntimeError(
+                    'cell_format_exact cannot mutate vertical alignment without a fresh native before readback'
+                )
+            if requested_vertical_align == before_vertical['name']:
+                raise LocalCliRuntimeError(
+                    f'cell_format_exact requested vertical alignment is already present: {requested_vertical_align!r}'
+                )
 
         mutation_original_pos = None
         try:
             mutation_original_pos = _get_pos(hwp)
         except Exception:
             mutation_original_pos = None
+        mutation_attempted = False
+        operation_kind: str | None = None
         try:
             enter = self._bundle_enter_table_cell_for_ctrl(hwp, target_ctrl)
             if not enter.get('is_cell'):
@@ -5392,21 +5553,31 @@ class LocalCliService:
                 try:
                     raw = run('TableCellBlock')
                     raw_results.append({'method': 'TableCellBlock', 'result': bool(raw) if raw is not None else None})
+                    if raw is not None and not bool(raw):
+                        raise LocalCliRuntimeError('cell_format_exact TableCellBlock returned false')
                 except Exception as exc:
+                    if isinstance(exc, LocalCliRuntimeError):
+                        raise
                     raw_results.append({'method': 'TableCellBlock', 'error': f'{type(exc).__name__}: {exc}'})
             if step.get('cell_margin_hu') is not None or step.get('cell_margin_mm') is not None:
-                value_hu = int(round(float(step.get('cell_margin_hu')))) if step.get('cell_margin_hu') is not None else self._mm_to_hwp_unit(hwp, float(step.get('cell_margin_mm')))
+                assert requested_margin_hu is not None
+                value_hu = requested_margin_hu
+                operation_kind = 'set-cell-margin'
+                mutation_attempted = True
                 margin_result = self._bundle_set_uniform_cell_margin(hwp, value_hu)
                 raw_results.append({'method': margin_result.get('method'), 'result': margin_result.get('result'), 'value_hu': value_hu, 'attempts': margin_result.get('attempts')})
                 operation = {
                     'op': 'set-cell-margin',
                     'cell_margin_hu': value_hu,
+                    'requested_margins_hu': {key: value_hu for key in _CELL_MARGIN_KEYS},
                     'cell_margin_mm': self._hwp_unit_to_mm(hwp, value_hu),
                     'raw_results': raw_results,
                     'enter': enter,
                 }
             elif step.get('fill_color') is not None:
+                operation_kind = 'fill-color'
                 fill_result = self._bundle_apply_cell_fill_color(hwp, str(step.get('fill_color')))
+                mutation_attempted = True
                 raw_results.append(fill_result)
                 operation = {
                     'op': 'fill-color',
@@ -5415,7 +5586,9 @@ class LocalCliService:
                     'enter': enter,
                 }
             elif step.get('border') is not None:
+                operation_kind = 'border-none'
                 border_result = self._bundle_apply_cell_border_none(hwp)
+                mutation_attempted = True
                 raw_results.append(border_result)
                 operation = {
                     'op': 'border-none',
@@ -5435,8 +5608,16 @@ class LocalCliService:
                     raise LocalCliRuntimeError('cell_format_exact requires vertical_align top, center, or bottom')
                 if not callable(run):
                     raise LocalCliRuntimeError(f'cell_format_exact requires HAction.Run for {action_name}')
+                operation_kind = 'vertical-align'
+                mutation_attempted = True
                 raw = run(action_name)
                 raw_results.append({'method': action_name, 'result': bool(raw) if raw is not None else None})
+                if raw is not None and not bool(raw):
+                    raise LocalCliMutationError(
+                        f'cell_format_exact {action_name} returned false after invocation',
+                        mutation_may_have_persisted=True,
+                        rollback={'attempted': False, 'succeeded': False},
+                    )
                 operation = {
                     'op': 'vertical-align',
                     'vertical_align': vertical_align,
@@ -5444,9 +5625,23 @@ class LocalCliService:
                     'raw_results': raw_results,
                     'enter': enter,
                 }
-        except LocalCliRuntimeError:
+        except LocalCliMutationError:
+            raise
+        except LocalCliRuntimeError as exc:
+            if mutation_attempted:
+                raise LocalCliMutationError(
+                    f'cell_format_exact {operation_kind or "mutation"} failed after invocation: {type(exc).__name__}: {exc}',
+                    mutation_may_have_persisted=True,
+                    rollback={'attempted': False, 'succeeded': False},
+                ) from exc
             raise
         except Exception as exc:
+            if mutation_attempted:
+                raise LocalCliMutationError(
+                    f'cell_format_exact {operation_kind or "mutation"} failed after invocation: {type(exc).__name__}: {exc}',
+                    mutation_may_have_persisted=True,
+                    rollback={'attempted': False, 'succeeded': False},
+                ) from exc
             raise LocalCliRuntimeError(f'cell_format_exact mutation failed: {type(exc).__name__}: {exc}') from exc
         finally:
             if mutation_original_pos is not None and len(mutation_original_pos) >= 3:
@@ -5455,47 +5650,62 @@ class LocalCliService:
                 except Exception:
                     pass
 
-        after_snapshot = self._bundle_compact_snapshot(hwp)
-        after_metrics = self._bundle_table_cell_metrics(hwp, target_ctrl)
-        changed_metrics = {
-            key: {'before': before_metrics.get(key), 'after': after_metrics.get(key)}
-            for key in sorted(set(before_metrics) | set(after_metrics))
-            if before_metrics.get(key) != after_metrics.get(key)
-        }
-        _require_observed_cell_format_mutation(
-            str(operation.get('op') or ''),
-            before_metrics,
-            after_metrics,
-            changed_metrics,
-            expected_vertical_align=(
-                str(operation.get('vertical_align') or '')
-                if operation.get('op') == 'vertical-align'
-                else None
-            ),
-        )
+        try:
+            after_snapshot = self._bundle_compact_snapshot(hwp)
+            after_metrics = self._bundle_table_cell_metrics(hwp, target_ctrl)
+            changed_metrics = {
+                key: {'before': before_metrics.get(key), 'after': after_metrics.get(key)}
+                for key in sorted(set(before_metrics) | set(after_metrics))
+                if before_metrics.get(key) != after_metrics.get(key)
+            }
+            _require_observed_cell_format_mutation(
+                str(operation.get('op') or ''),
+                before_metrics,
+                after_metrics,
+                changed_metrics,
+                expected_vertical_align=(
+                    str(operation.get('vertical_align') or '')
+                    if operation.get('op') == 'vertical-align'
+                    else None
+                ),
+                expected_cell_margin_hu=(
+                    operation.get('requested_margins_hu')
+                    if operation.get('op') == 'set-cell-margin'
+                    else None
+                ),
+            )
 
-        post_controls, _post_mode = _enumerate_controls_headctrl(hwp, max_controls=int(resolved['max_controls']))
-        if len(post_controls) != len(resolved['controls']):
-            raise LocalCliRuntimeError(f'cell_format_exact control count changed unexpectedly: before={len(resolved["controls"])}, after={len(post_controls)}')
-        post_target_items: list[dict[str, Any]] = []
-        post_original_pos = None
-        try:
-            post_original_pos = _get_pos(hwp)
-        except Exception:
+            post_controls, _post_mode = _enumerate_controls_headctrl(hwp, max_controls=int(resolved['max_controls']))
+            if len(post_controls) != len(resolved['controls']):
+                raise LocalCliRuntimeError(f'cell_format_exact control count changed unexpectedly: before={len(resolved["controls"])}, after={len(post_controls)}')
+            post_target_items: list[dict[str, Any]] = []
             post_original_pos = None
-        try:
-            for index, ctrl in enumerate(post_controls):
-                item, _snapshot, _anchor_pos = self._bundle_control_proof_item(hwp, ctrl, index)
-                if item.get('target_id') == resolved['target_id']:
-                    post_target_items.append(item)
-        finally:
-            if post_original_pos is not None and len(post_original_pos) >= 3:
-                try:
-                    _set_pos(hwp, int(post_original_pos[0]), int(post_original_pos[1]), int(post_original_pos[2]))
-                except Exception:
-                    pass
-        if len(post_target_items) != 1:
-            raise LocalCliRuntimeError(f'cell_format_exact post-mutation target count must be exactly 1, got {len(post_target_items)} for {resolved["target_id"]!r}')
+            try:
+                post_original_pos = _get_pos(hwp)
+            except Exception:
+                post_original_pos = None
+            try:
+                for index, ctrl in enumerate(post_controls):
+                    item, _snapshot, _anchor_pos = self._bundle_control_proof_item(hwp, ctrl, index)
+                    if item.get('target_id') == resolved['target_id']:
+                        post_target_items.append(item)
+            finally:
+                if post_original_pos is not None and len(post_original_pos) >= 3:
+                    try:
+                        _set_pos(hwp, int(post_original_pos[0]), int(post_original_pos[1]), int(post_original_pos[2]))
+                    except Exception:
+                        pass
+            if len(post_target_items) != 1:
+                raise LocalCliRuntimeError(f'cell_format_exact post-mutation target count must be exactly 1, got {len(post_target_items)} for {resolved["target_id"]!r}')
+        except LocalCliMutationError:
+            raise
+        except Exception as exc:
+            raise LocalCliMutationError(
+                f'cell_format_exact {operation_kind or "mutation"} post-mutation readback/proof failed: '
+                f'{type(exc).__name__}: {exc}',
+                mutation_may_have_persisted=True,
+                rollback={'attempted': False, 'succeeded': False},
+            ) from exc
 
         warnings = ['This primitive mutates one target table cell format only; rendered before/after proof is required before accepting the working copy.']
         if operation.get('op') == 'vertical-align':
