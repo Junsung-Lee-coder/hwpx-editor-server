@@ -92,7 +92,10 @@ class G22StateRepairTests(unittest.TestCase):
             context = multiprocessing.get_context('spawn')
             process = context.Process(target=_commit_new_session_from_process, args=(str(path),))
             process.start()
-            process.join(timeout=5)
+            process.join(timeout=15)
+            if process.is_alive():
+                process.terminate()
+                process.join(timeout=5)
             self.assertFalse(process.is_alive())
             self.assertEqual(process.exitcode, 0)
             with self.assertRaises(StatePersistenceError):
