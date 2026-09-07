@@ -1948,7 +1948,7 @@ def configure_hwp_automation(hwp: object) -> dict[str, Any]:
     }
 
 
-def _instantiate_hwp_without_builtin_register_module(Hwp: Callable[..., object]) -> tuple[object, str]:
+def _select_hwp_constructor(Hwp: Callable[..., object]) -> tuple[dict[str, object], str]:
     constructor_attempts = (
         (
             {'new': True, 'visible': True, 'register_module': False},
@@ -1958,16 +1958,25 @@ def _instantiate_hwp_without_builtin_register_module(Hwp: Callable[..., object])
         ({'new': True, 'visible': True}, 'Hwp(new=True, visible=True)'),
         ({'new': True}, 'Hwp(new=True)'),
     )
-    last_type_error: TypeError | None = None
+    try:
+        signature = inspect.signature(Hwp)
+    except (TypeError, ValueError):
+        # Opaque COM callables are invoked exactly once with the safest form.
+        return constructor_attempts[0]
     for kwargs, label in constructor_attempts:
         try:
-            return Hwp(**kwargs), label
-        except TypeError as exc:
-            last_type_error = exc
+            signature.bind(**kwargs)
+        except TypeError:
             continue
-    if last_type_error is not None:
-        raise last_type_error
-    raise RuntimeError('Failed to construct pyhwpx Hwp instance.')
+        return kwargs, label
+    raise RuntimeError('pyhwpx Hwp constructor exposes no supported new-instance signature.')
+
+
+def _instantiate_hwp_without_builtin_register_module(Hwp: Callable[..., object]) -> tuple[object, str]:
+    kwargs, label = _select_hwp_constructor(Hwp)
+    # Do not retry after invocation: a TypeError may have followed native
+    # allocation, leaving an owned COM process that cannot be safely rebound.
+    return Hwp(**kwargs), label
 
 
 def create_visible_hwp_instance(Hwp: Callable[..., object]) -> tuple[object, dict[str, Any]]:

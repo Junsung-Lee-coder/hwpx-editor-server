@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
+import logging
 import os
 import tempfile
 import sys
@@ -115,86 +116,106 @@ class G8TerminalInteractiveStateRedTests(unittest.TestCase):
     def test_concurrent_updates_preserve_every_command_history_entry(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
+            existing_handlers = set(logging.getLogger('hwp.interactive').handlers)
             manager = InteractiveSessionManager(self._settings(root))
-            session = manager.open_session(
-                source_path=root / "document.hwpx",
-                source_filename="document.hwpx",
-                file_size_bytes=1,
-                content_type="application/octet-stream",
-            )
-            session_id = str(session["session_id"])
-            barrier = threading.Barrier(12)
-            errors: list[BaseException] = []
+            owned_handlers = [
+                handler for handler in manager.logger.handlers if handler not in existing_handlers
+            ]
+            try:
+                session = manager.open_session(
+                    source_path=root / "document.hwpx",
+                    source_filename="document.hwpx",
+                    file_size_bytes=1,
+                    content_type="application/octet-stream",
+                )
+                session_id = str(session["session_id"])
+                barrier = threading.Barrier(12)
+                errors: list[BaseException] = []
 
-            def record(index: int) -> None:
-                try:
-                    barrier.wait()
-                    manager.record_command(
-                        f"command-{index}",
-                        session_id=session_id,
-                        summary=f"summary-{index}",
-                    )
-                except BaseException as exc:
-                    errors.append(exc)
+                def record(index: int) -> None:
+                    try:
+                        barrier.wait()
+                        manager.record_command(
+                            f"command-{index}",
+                            session_id=session_id,
+                            summary=f"summary-{index}",
+                        )
+                    except BaseException as exc:
+                        errors.append(exc)
 
-            threads = [threading.Thread(target=record, args=(index,)) for index in range(12)]
-            for thread in threads:
-                thread.start()
-            for thread in threads:
-                thread.join()
-            self.assertFalse(errors)
-            saved = json.loads(manager.state_path(session_id).read_text(encoding="utf-8"))
-            commands = {item["command"] for item in saved["command_history"]}
-            self.assertTrue({f"command-{index}" for index in range(12)}.issubset(commands))
+                threads = [threading.Thread(target=record, args=(index,)) for index in range(12)]
+                for thread in threads:
+                    thread.start()
+                for thread in threads:
+                    thread.join()
+                self.assertFalse(errors)
+                saved = json.loads(manager.state_path(session_id).read_text(encoding="utf-8"))
+                commands = {item["command"] for item in saved["command_history"]}
+                self.assertTrue({f"command-{index}" for index in range(12)}.issubset(commands))
+            finally:
+                for handler in owned_handlers:
+                    handler.flush()
+                    handler.close()
+                    manager.logger.removeHandler(handler)
 
     def test_same_second_verify_captures_have_distinct_step_bound_artifacts_and_hashes(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
+            existing_handlers = set(logging.getLogger('hwp.interactive').handlers)
             manager = InteractiveSessionManager(self._settings(root))
-            session = {
-                "session_id": "session-evidence",
-                "state": "open",
-                "created_at": "2026-01-01T00:00:00+00:00",
-            }
-            source_frame = root / "frame.png"
-            source_frame.write_bytes(b"frame-a")
-            source_metadata = root / "frame.json"
-            source_metadata.write_text('{"captured_at":"2026-01-01T00:00:00+00:00"}\n', encoding="utf-8")
-            verify = {
-                "gui": {
-                    "frame": {"captured_at": "2026-01-01T00:00:00+00:00", "ok": True},
-                    "artifacts": {
-                        "latest_frame_path": str(source_frame),
-                        "latest_frame_metadata_path": str(source_metadata),
-                    },
+            owned_handlers = [
+                handler for handler in manager.logger.handlers if handler not in existing_handlers
+            ]
+            try:
+                session = {
+                    "session_id": "session-evidence",
+                    "state": "open",
+                    "created_at": "2026-01-01T00:00:00+00:00",
                 }
-            }
-            first, _ = manager._bind_verify_step_gui_evidence(
-                session,
-                step_name="verify-pre",
-                verify_result=verify,
-                recorded_at="2026-01-01T00:00:01+00:00",
-            )
-            second, _ = manager._bind_verify_step_gui_evidence(
-                session,
-                step_name="verify-pre",
-                verify_result=verify,
-                recorded_at="2026-01-01T00:00:01+00:00",
-            )
-            first_path = Path(first["gui"]["primary_image"]["path"])
-            second_path = Path(second["gui"]["primary_image"]["path"])
-            self.assertNotEqual(first_path, second_path)
-            self.assertEqual(first_path.read_bytes(), source_frame.read_bytes())
-            self.assertEqual(second_path.read_bytes(), source_frame.read_bytes())
-            first_slug = first["gui"]["artifacts"]["step_bound_evidence_url"].rsplit("/", 1)[-1]
-            self.assertEqual(
-                manager.load_verify_evidence_artifact(
-                    session_id="session-evidence",
+                source_frame = root / "frame.png"
+                source_frame.write_bytes(b"frame-a")
+                source_metadata = root / "frame.json"
+                source_metadata.write_text('{"captured_at":"2026-01-01T00:00:00+00:00"}\n', encoding="utf-8")
+                verify = {
+                    "gui": {
+                        "frame": {"captured_at": "2026-01-01T00:00:00+00:00", "ok": True},
+                        "artifacts": {
+                            "latest_frame_path": str(source_frame),
+                            "latest_frame_metadata_path": str(source_metadata),
+                        },
+                    }
+                }
+                first, _ = manager._bind_verify_step_gui_evidence(
+                    session,
                     step_name="verify-pre",
-                    recorded_at=first_slug,
-                )["frame_path"].read_bytes(),
-                b"frame-a",
-            )
+                    verify_result=verify,
+                    recorded_at="2026-01-01T00:00:01+00:00",
+                )
+                second, _ = manager._bind_verify_step_gui_evidence(
+                    session,
+                    step_name="verify-pre",
+                    verify_result=verify,
+                    recorded_at="2026-01-01T00:00:01+00:00",
+                )
+                first_path = Path(first["gui"]["primary_image"]["path"])
+                second_path = Path(second["gui"]["primary_image"]["path"])
+                self.assertNotEqual(first_path, second_path)
+                self.assertEqual(first_path.read_bytes(), source_frame.read_bytes())
+                self.assertEqual(second_path.read_bytes(), source_frame.read_bytes())
+                first_slug = first["gui"]["artifacts"]["step_bound_evidence_url"].rsplit("/", 1)[-1]
+                self.assertEqual(
+                    manager.load_verify_evidence_artifact(
+                        session_id="session-evidence",
+                        step_name="verify-pre",
+                        recorded_at=first_slug,
+                    )["frame_path"].read_bytes(),
+                    b"frame-a",
+                )
+            finally:
+                for handler in owned_handlers:
+                    handler.flush()
+                    handler.close()
+                    manager.logger.removeHandler(handler)
 
 
 class G8TerminalRuntimeFinalizerRedTests(unittest.TestCase):
