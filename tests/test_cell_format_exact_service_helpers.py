@@ -119,6 +119,22 @@ class _MarginHwp:
         return self.result
 
 
+class _RealisticMarginHwp:
+    def __init__(self) -> None:
+        self.calls: list[tuple[float, float, float, float, str]] = []
+
+    def set_cell_margin(
+        self,
+        left: float = 1.8,
+        right: float = 1.8,
+        top: float = 0.5,
+        bottom: float = 0.5,
+        as_: str = 'mm',
+    ) -> bool:
+        self.calls.append((left, right, top, bottom, as_))
+        return True
+
+
 class _VerticalReadbackHwp:
     def __init__(self, *, default_result: bool | None = False, value: int = 1) -> None:
         self.HAction = SimpleNamespace(GetDefault=self._get_default)
@@ -377,6 +393,13 @@ class CellFormatExactServiceHelperTests(unittest.TestCase):
         self.assertEqual(hwp.calls, [((1984, 1984, 1984, 1984), {'as_': 'hwpunit'})])
         self.assertEqual(hwp.margins, {'left': 1984, 'right': 1984, 'top': 1984, 'bottom': 1984})
         self.assertEqual(result['result'], True)
+
+    def test_uniform_cell_margin_binds_realistic_pyhwpx_signature(self) -> None:
+        hwp = _RealisticMarginHwp()
+
+        self.service._bundle_set_uniform_cell_margin(hwp, 1984)
+
+        self.assertEqual(hwp.calls, [(1984, 1984, 1984, 1984, 'hwpunit')])
 
     def test_uniform_cell_margin_does_not_retry_side_effecting_failure(self) -> None:
         hwp = _MarginHwp(raise_after_apply=True)
