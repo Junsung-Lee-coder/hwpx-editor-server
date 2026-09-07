@@ -101,23 +101,44 @@ def _require_observed_cell_format_mutation(
     before_metrics: Mapping[str, Any],
     after_metrics: Mapping[str, Any],
     changed_metrics: Mapping[str, Any],
+    *,
+    expected_vertical_align: str | None = None,
 ) -> None:
     """Reject format commands whose target property was not observed changing.
 
-    ``HAction.Run`` may report success for a no-op native action.  Cell-margin
-    operations already expose a reliable getter; vertical alignment currently
-    does not, so it must fail closed instead of claiming a mutation based only
-    on the action return value.
+    Native action return values alone are not persistence evidence.  The
+    supported format selectors therefore require an exact before/after getter,
+    and vertical alignment also has to match the requested enum name.
     """
     if operation == 'set-cell-margin' and before_metrics.get('cell_margin_hu') == after_metrics.get('cell_margin_hu'):
         raise LocalCliRuntimeError(
             'cell_format_exact did not observe changed cell_margin_hu after mutation; '
             f'before={before_metrics!r}; after={after_metrics!r}'
         )
-    if operation == 'vertical-align' and not changed_metrics:
+    if operation != 'vertical-align':
+        return
+
+    before_vertical = before_metrics.get('vertical_align')
+    after_vertical = after_metrics.get('vertical_align')
+    if not isinstance(before_vertical, Mapping) or not before_vertical.get('available'):
         raise LocalCliRuntimeError(
-            'cell_format_exact vertical alignment has no distinct native readback; '
-            'refusing to report a successful mutation'
+            'cell_format_exact vertical alignment has no usable native before readback; '
+            f'before={before_vertical!r}'
+        )
+    if not isinstance(after_vertical, Mapping) or not after_vertical.get('available'):
+        raise LocalCliRuntimeError(
+            'cell_format_exact vertical alignment has no usable native after readback; '
+            f'after={after_vertical!r}'
+        )
+    if before_vertical.get('value') == after_vertical.get('value'):
+        raise LocalCliRuntimeError(
+            'cell_format_exact did not observe changed vertical alignment after mutation; '
+            f'before={before_vertical!r}; after={after_vertical!r}'
+        )
+    if expected_vertical_align and after_vertical.get('name') != expected_vertical_align:
+        raise LocalCliRuntimeError(
+            'cell_format_exact vertical alignment readback mismatched the requested value; '
+            f'requested={expected_vertical_align!r}; after={after_vertical!r}'
         )
 
 
@@ -4138,6 +4159,7 @@ class LocalCliService:
             metrics['char_height_raw'] = char_values.get('Height')
             metrics['para_line_spacing'] = para_values.get('LineSpacing')
             metrics['para_line_spacing_type'] = para_values.get('LineSpacingType')
+            metrics['vertical_align'] = self._bundle_table_cell_vertical_align(hwp)
             metrics['style_snapshot'] = {'char_shape': char_raw, 'para_shape': para_raw}
             metrics['available'] = not isinstance(metrics.get('row_height_hu'), dict)
             return metrics
@@ -4147,6 +4169,35 @@ class LocalCliService:
                     _set_pos(hwp, int(original_pos[0]), int(original_pos[1]), int(original_pos[2]))
                 except Exception:
                     pass
+
+    @staticmethod
+    def _bundle_table_cell_vertical_align(hwp: Any) -> dict[str, Any]:
+        """Read the native vertical alignment of the current table cell.
+
+        Hancom exposes this value after ``TablePropertyDialog`` populates
+        ``HShapeObject.ShapeTableCell``. The COM value is an integer enum:
+        0=top, 1=center, 2=bottom.
+        """
+        try:
+            parameter_root = getattr(hwp, 'HParameterSet')
+            shape = getattr(parameter_root, 'HShapeObject')
+            get_default = getattr(getattr(hwp, 'HAction'), 'GetDefault')
+            get_default('TablePropertyDialog', getattr(shape, 'HSet'))
+            cell = getattr(shape, 'ShapeTableCell')
+            value = int(getattr(cell, 'VertAlign'))
+            names = {0: 'top', 1: 'center', 2: 'bottom'}
+            return {
+                'available': True,
+                'value': value,
+                'name': names.get(value),
+                'source': 'HParameterSet.HShapeObject.ShapeTableCell.VertAlign',
+            }
+        except Exception as exc:
+            return {
+                'available': False,
+                'error': f'{type(exc).__name__}: {exc}',
+                'source': 'HParameterSet.HShapeObject.ShapeTableCell.VertAlign',
+            }
 
     def _bundle_exact_control_select_proof(self, hwp: Any, step: dict[str, Any]) -> dict[str, Any]:
         resolved = self._bundle_resolve_control_target(hwp, step, op_name='exact_control_select_proof')
@@ -5416,6 +5467,11 @@ class LocalCliService:
             before_metrics,
             after_metrics,
             changed_metrics,
+            expected_vertical_align=(
+                str(operation.get('vertical_align') or '')
+                if operation.get('op') == 'vertical-align'
+                else None
+            ),
         )
 
         post_controls, _post_mode = _enumerate_controls_headctrl(hwp, max_controls=int(resolved['max_controls']))
@@ -5443,7 +5499,7 @@ class LocalCliService:
 
         warnings = ['This primitive mutates one target table cell format only; rendered before/after proof is required before accepting the working copy.']
         if operation.get('op') == 'vertical-align':
-            warnings.append('Vertical alignment proof currently relies on native action success plus rendered review; pyhwpx does not expose a compact getter in this primitive yet.')
+            warnings.append('Vertical alignment includes native ShapeTableCell.VertAlign before/after readback; rendered review remains required for final acceptance.')
         return {
             'schema_version': 'local-cli/cell-format-exact/v1',
             'read_only': False,

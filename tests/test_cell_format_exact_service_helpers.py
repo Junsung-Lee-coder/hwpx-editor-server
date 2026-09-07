@@ -293,12 +293,41 @@ class CellFormatExactServiceHelperTests(unittest.TestCase):
             self.service._bundle_apply_cell_fill_color(_FillHwp(), '#XYZ123')
 
     def test_cell_format_exact_rejects_vertical_alignment_without_distinct_readback(self) -> None:
-        with self.assertRaisesRegex(LocalCliRuntimeError, 'no distinct native readback'):
+        with self.assertRaisesRegex(LocalCliRuntimeError, 'no usable native before readback'):
             _require_observed_cell_format_mutation(
                 'vertical-align',
                 {'cell_addr': [0, 0]},
                 {'cell_addr': [0, 0]},
                 {},
+            )
+
+    def test_cell_format_exact_accepts_distinct_vertical_alignment_readback(self) -> None:
+        _require_observed_cell_format_mutation(
+            'vertical-align',
+            {'vertical_align': {'available': True, 'value': 0, 'name': 'top'}},
+            {'vertical_align': {'available': True, 'value': 1, 'name': 'center'}},
+            {'vertical_align': {'before': 0, 'after': 1}},
+            expected_vertical_align='center',
+        )
+
+    def test_cell_format_exact_rejects_vertical_alignment_readback_mismatch(self) -> None:
+        with self.assertRaisesRegex(LocalCliRuntimeError, 'mismatched'):
+            _require_observed_cell_format_mutation(
+                'vertical-align',
+                {'vertical_align': {'available': True, 'value': 0, 'name': 'top'}},
+                {'vertical_align': {'available': True, 'value': 2, 'name': 'bottom'}},
+                {'vertical_align': {'before': 0, 'after': 2}},
+                expected_vertical_align='center',
+            )
+
+    def test_cell_format_exact_rejects_unchanged_vertical_alignment_readback(self) -> None:
+        with self.assertRaisesRegex(LocalCliRuntimeError, 'changed vertical alignment'):
+            _require_observed_cell_format_mutation(
+                'vertical-align',
+                {'vertical_align': {'available': True, 'value': 1, 'name': 'center'}},
+                {'vertical_align': {'available': True, 'value': 1, 'name': 'center'}},
+                {},
+                expected_vertical_align='center',
             )
 
     def test_cell_format_exact_rejects_unchanged_cell_margin(self) -> None:
