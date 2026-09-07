@@ -704,6 +704,59 @@ class MutationFailureProjectionRepairTests(unittest.TestCase):
             },
         )
 
+    def test_command_bundle_projects_false_after_margin_setter_as_dirty(self) -> None:
+        service = object.__new__(LocalCliService)
+        binding = {
+            'session_id': 'session-false-margin',
+            'command_generation': 0,
+            'native_command_sequence': 0,
+        }
+        hwp = SimpleNamespace(
+            calls=[],
+            margins={'left': 510, 'right': 510, 'top': 141, 'bottom': 141},
+        )
+
+        def set_cell_margin(*args: object, **kwargs: object) -> bool:
+            hwp.calls.append((args, kwargs))
+            hwp.margins = dict(zip(('left', 'right', 'top', 'bottom'), args[:4]))
+            return False
+
+        hwp.set_cell_margin = set_cell_margin
+        captured: dict[str, object] = {}
+        service._load_active_binding = lambda session_id=None: dict(binding)  # type: ignore[method-assign]
+        service._bundle_compact_snapshot = lambda hwp: {'snapshot': True}  # type: ignore[method-assign]
+        setattr(service, 'command_packages', SimpleNamespace(allowed_keys=lambda op: set(), get=lambda op: None))
+
+        def invoke_live(*, handler, **kwargs):
+            return handler(SimpleNamespace(hwp=hwp, source_filename='document.hwpx', session_id=binding['session_id']))
+
+        def invoke_margin(handle, step, *, binding=None):
+            service._bundle_set_uniform_cell_margin(handle.hwp, 1984)
+            raise AssertionError('the false setter result must raise LocalCliMutationError')
+
+        def update_live_binding(current, **kwargs):
+            captured.update(kwargs)
+            return current
+
+        service._execute_live = invoke_live  # type: ignore[method-assign]
+        service._execute_command_bundle_step = invoke_margin  # type: ignore[method-assign]
+        service._update_live_binding = update_live_binding  # type: ignore[method-assign]
+        service._save_binding = lambda current: current  # type: ignore[method-assign]
+        service._record_local_cli_command = lambda *args, **kwargs: None  # type: ignore[method-assign]
+
+        with patch('app.local_cli_service.snapshot_live_location', return_value={}):
+            result = service.command_bundle(steps=[{'op': 'context'}])
+
+        self.assertFalse(result['ok'])
+        self.assertTrue(result['dirty'])
+        self.assertTrue(result['steps'][0]['dirty'])
+        self.assertTrue(result['steps'][0]['mutation_may_have_persisted'])
+        self.assertEqual(len(hwp.calls), 1)
+        self.assertEqual(hwp.margins, {'left': 1984, 'right': 1984, 'top': 1984, 'bottom': 1984})
+        self.assertTrue(captured['dirty'])
+        self.assertTrue(captured['clear_last_find'])
+        self.assertTrue(captured['clear_selection_cache'])
+
 
 class CellFillRollbackRepairTests(unittest.TestCase):
     def test_hcellborderfill_readback_failure_is_terminalized_as_mutation_error(self) -> None:

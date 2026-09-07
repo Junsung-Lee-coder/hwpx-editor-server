@@ -134,6 +134,20 @@ def _valid_cell_addr(value: Any) -> bool:
     )
 
 
+def _normalize_cell_addr_value(value: Any) -> list[int] | None:
+    if _valid_cell_addr(value):
+        return [int(value[0]), int(value[1])]
+    if not isinstance(value, str):
+        return None
+    match = re.fullmatch(r'([A-Za-z]+)([1-9][0-9]*)', value.strip())
+    if match is None:
+        return None
+    column = 0
+    for char in match.group(1).upper():
+        column = column * 26 + (ord(char) - ord('A') + 1)
+    return [column - 1, int(match.group(2)) - 1]
+
+
 def _valid_numeric_readback(value: Any) -> bool:
     return (
         isinstance(value, (int, float))
@@ -150,6 +164,7 @@ def _require_observed_cell_format_mutation(
     *,
     expected_vertical_align: str | None = None,
     expected_cell_margin_hu: Mapping[str, Any] | None = None,
+    expected_cell_addr: Any = None,
 ) -> None:
     """Reject format commands whose target property was not observed changing.
 
@@ -172,6 +187,20 @@ def _require_observed_cell_format_mutation(
             fail(
                 'cell_format_exact has no usable native four-side cell-margin readback; '
                 f'before={before_metrics.get("cell_margin_hu")!r}; after={after_metrics.get("cell_margin_hu")!r}'
+            )
+        before_addr = _normalize_cell_addr_value(before_metrics.get('cell_addr'))
+        after_addr = _normalize_cell_addr_value(after_metrics.get('cell_addr'))
+        expected_addr = _normalize_cell_addr_value(expected_cell_addr) if expected_cell_addr is not None else None
+        if (
+            before_addr is None
+            or after_addr is None
+            or before_addr != after_addr
+            or (expected_cell_addr is not None and (expected_addr is None or before_addr != expected_addr))
+        ):
+            fail(
+                'cell_format_exact did not preserve a valid same target cell identity; '
+                f'before={before_metrics.get("cell_addr")!r}; after={after_metrics.get("cell_addr")!r}; '
+                f'expected={expected_cell_addr!r}'
             )
         if before_margin == after_margin:
             fail(
@@ -215,6 +244,20 @@ def _require_observed_cell_format_mutation(
         fail(
             'cell_format_exact vertical alignment has no usable native after readback; '
             f'after={after_vertical!r}'
+        )
+    before_addr = _normalize_cell_addr_value(before_metrics.get('cell_addr'))
+    after_addr = _normalize_cell_addr_value(after_metrics.get('cell_addr'))
+    expected_addr = _normalize_cell_addr_value(expected_cell_addr) if expected_cell_addr is not None else None
+    if (
+        before_addr is None
+        or after_addr is None
+        or before_addr != after_addr
+        or (expected_cell_addr is not None and (expected_addr is None or before_addr != expected_addr))
+    ):
+        fail(
+            'cell_format_exact did not preserve a valid same target cell identity; '
+            f'before={before_metrics.get("cell_addr")!r}; after={after_metrics.get("cell_addr")!r}; '
+            f'expected={expected_cell_addr!r}'
         )
     if normalized_before['value'] == normalized_after['value']:
         fail(
@@ -4199,6 +4242,71 @@ class LocalCliService:
             'attempts': attempts,
         }
 
+    def _bundle_native_cell_margin_readback(
+        self,
+        hwp: Any,
+        *,
+        expected_cell_addr: Any = None,
+    ) -> dict[str, Any]:
+        """Read fresh native four-side cell margins for the current cell.
+
+        ``pyhwpx.get_cell_margin`` can expose a cached wrapper value.  The
+        native action refresh is therefore part of this observation contract;
+        a failed refresh makes the observation unavailable instead of allowing
+        a stale value to serve as persistence evidence.
+        """
+        source = 'HParameterSet.HShapeObject.ShapeTableCell.Margin*'
+        observed_addr: list[int] | None = None
+        try:
+            get_cell_addr = getattr(hwp, 'get_cell_addr', None)
+            if not callable(get_cell_addr):
+                raise LocalCliRuntimeError('native cell identity getter is unavailable')
+            observed_addr = _normalize_cell_addr_value(get_cell_addr(as_='tuple'))
+            if observed_addr is None:
+                raise LocalCliRuntimeError('native cell identity is missing or invalid')
+            expected_addr = _normalize_cell_addr_value(expected_cell_addr) if expected_cell_addr is not None else None
+            if expected_cell_addr is not None and (expected_addr is None or observed_addr != expected_addr):
+                raise LocalCliRuntimeError(
+                    'native cell identity does not match the requested target; '
+                    f'observed={observed_addr!r}; expected={expected_cell_addr!r}'
+                )
+
+            parameter_root = getattr(hwp, 'HParameterSet')
+            shape = getattr(parameter_root, 'HShapeObject')
+            hset = getattr(shape, 'HSet')
+            get_default = getattr(getattr(hwp, 'HAction'), 'GetDefault', None)
+            if not callable(get_default):
+                raise LocalCliRuntimeError('TablePropertyDialog GetDefault is unavailable')
+            refresh_result = get_default('TablePropertyDialog', hset)
+            if refresh_result is not True:
+                raise LocalCliRuntimeError('TablePropertyDialog GetDefault returned no positive success')
+            cell = getattr(shape, 'ShapeTableCell')
+            margins = {
+                'left': getattr(cell, 'MarginLeft'),
+                'right': getattr(cell, 'MarginRight'),
+                'top': getattr(cell, 'MarginTop'),
+                'bottom': getattr(cell, 'MarginBottom'),
+            }
+            normalized = _normalize_cell_margin_readback(margins)
+            if normalized is None:
+                raise LocalCliRuntimeError(f'native four-side cell-margin values are invalid: {margins!r}')
+            return {
+                'available': True,
+                'refresh_succeeded': True,
+                'cell_addr': observed_addr,
+                'value': normalized,
+                'source': source,
+            }
+        except Exception as exc:
+            error = str(exc) if isinstance(exc, LocalCliRuntimeError) else f'{type(exc).__name__}: {exc}'
+            return {
+                'available': False,
+                'refresh_succeeded': False,
+                'cell_addr': observed_addr,
+                'error': error,
+                'source': source,
+            }
+
     def _bundle_table_cell_metrics(self, hwp: Any, ctrl: Any) -> dict[str, Any]:
         original_pos = None
         try:
@@ -4216,7 +4324,6 @@ class LocalCliService:
                 ('row_height_mm', 'get_row_height', {'as_': 'mm'}),
                 ('table_height_hu', 'get_table_height', {'as_': 'hwpunit'}),
                 ('table_height_mm', 'get_table_height', {'as_': 'mm'}),
-                ('cell_margin_hu', 'get_cell_margin', {'as_': 'hwpunit'}),
                 ('table_inside_margin_hu', 'get_table_inside_margin', {'as_': 'hwpunit'}),
                 ('table_outside_margin_hu', 'get_table_outside_margin', {'as_': 'hwpunit'}),
             ):
@@ -4228,6 +4335,22 @@ class LocalCliService:
                     metrics[key] = method(**kwargs)
                 except Exception as exc:
                     metrics[key] = {'error': f'{type(exc).__name__}: {exc}'}
+            target_cell_addr = _normalize_cell_addr_value(enter.get('cell_addr'))
+            if target_cell_addr is None:
+                target_cell_addr = _normalize_cell_addr_value(metrics.get('cell_addr'))
+            metrics['target_cell_addr'] = target_cell_addr
+            margin_readback = self._bundle_native_cell_margin_readback(
+                hwp,
+                expected_cell_addr=target_cell_addr,
+            )
+            metrics['cell_margin_readback'] = margin_readback
+            metrics['cell_margin_hu'] = (
+                margin_readback.get('value')
+                if margin_readback.get('available') is True
+                else {'error': margin_readback.get('error', 'native margin readback unavailable')}
+            )
+            if margin_readback.get('cell_addr') is not None:
+                metrics['cell_addr'] = margin_readback.get('cell_addr')
             char_raw = self._style_parameter_snapshot(
                 hwp,
                 'CharShape',
@@ -4247,15 +4370,22 @@ class LocalCliService:
             metrics['para_line_spacing_type'] = para_values.get('LineSpacingType')
             metrics['vertical_align'] = self._bundle_table_cell_vertical_align(hwp)
             metrics['style_snapshot'] = {'char_shape': char_raw, 'para_shape': para_raw}
-            metrics['cell_addr_valid'] = _valid_cell_addr(metrics.get('cell_addr'))
+            metrics['cell_addr_valid'] = _normalize_cell_addr_value(metrics.get('cell_addr')) is not None
             metrics['row_height_hu_valid'] = _valid_numeric_readback(metrics.get('row_height_hu'))
             metrics['cell_margin_hu_valid'] = _normalize_cell_margin_readback(metrics.get('cell_margin_hu')) is not None
-            metrics['cell_margin_hu_available'] = bool(metrics['cell_margin_hu_valid'])
+            metrics['cell_margin_hu_available'] = bool(
+                metrics['cell_margin_hu_valid'] and margin_readback.get('refresh_succeeded') is True
+            )
+            metrics['cell_identity_matches_target'] = bool(
+                target_cell_addr is not None
+                and _normalize_cell_addr_value(metrics.get('cell_addr')) == target_cell_addr
+            )
             metrics['vertical_align_available'] = _normalize_vertical_align_readback(metrics.get('vertical_align')) is not None
             metrics['available'] = (
                 bool(metrics['cell_addr_valid'])
                 and bool(metrics['row_height_hu_valid'])
-                and bool(metrics['cell_margin_hu_valid'])
+                and bool(metrics['cell_margin_hu_available'])
+                and bool(metrics['cell_identity_matches_target'])
             )
             return metrics
         finally:
@@ -4280,13 +4410,21 @@ class LocalCliService:
             if not callable(get_default):
                 raise LocalCliRuntimeError('TablePropertyDialog GetDefault is unavailable')
             default_result = get_default('TablePropertyDialog', getattr(shape, 'HSet'))
-            if default_result is not None and not bool(default_result):
-                raise LocalCliRuntimeError('TablePropertyDialog GetDefault returned false')
+            if default_result is not True:
+                raise LocalCliRuntimeError(
+                    'TablePropertyDialog GetDefault did not return positive success; '
+                    f'result={default_result!r}'
+                )
             cell = getattr(shape, 'ShapeTableCell')
             raw_value = getattr(cell, 'VertAlign')
             if isinstance(raw_value, bool):
                 raise LocalCliRuntimeError('TablePropertyDialog VertAlign is boolean, not a native enum')
-            value = int(raw_value)
+            if not isinstance(raw_value, int) or raw_value not in {0, 1, 2}:
+                raise LocalCliRuntimeError(
+                    'TablePropertyDialog VertAlign enum is invalid (not an integral native enum); '
+                    f'value={raw_value!r}'
+                )
+            value = raw_value
             names = {0: 'top', 1: 'center', 2: 'bottom'}
             if value not in names:
                 raise LocalCliRuntimeError(f'TablePropertyDialog VertAlign enum is invalid: {value!r}')
@@ -4300,6 +4438,7 @@ class LocalCliService:
         except Exception as exc:
             return {
                 'available': False,
+                'refresh_succeeded': False,
                 'error': f'{type(exc).__name__}: {exc}',
                 'source': 'HParameterSet.HShapeObject.ShapeTableCell.VertAlign',
             }
@@ -5024,7 +5163,7 @@ class LocalCliService:
         if raw is not None and not bool(raw):
             raise LocalCliMutationError(
                 'cell_format_exact set_cell_margin returned false after invocation',
-                mutation_may_have_persisted=False,
+                mutation_may_have_persisted=True,
                 rollback={'attempted': False, 'succeeded': False},
             )
         return {'method': label, 'result': result, 'attempts': [attempt], 'arguments': dict(normalized)}
@@ -5673,6 +5812,7 @@ class LocalCliService:
                     if operation.get('op') == 'set-cell-margin'
                     else None
                 ),
+                expected_cell_addr=before_metrics.get('cell_addr'),
             )
 
             post_controls, _post_mode = _enumerate_controls_headctrl(hwp, max_controls=int(resolved['max_controls']))

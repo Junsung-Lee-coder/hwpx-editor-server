@@ -119,6 +119,61 @@ class _MarginHwp:
         return self.result
 
 
+class _NativeMarginReadbackAction:
+    def __init__(self, owner: '_NativeMarginReadbackHwp') -> None:
+        self.owner = owner
+        self.calls: list[tuple[str, object]] = []
+
+    def GetDefault(self, action_name: str, hset: object) -> bool | None:
+        self.calls.append(('GetDefault', action_name))
+        return self.owner.default_result
+
+
+class _NativeMarginReadbackHwp:
+    def __init__(
+        self,
+        *,
+        default_result: bool | None = True,
+        cell_addr: tuple[int, int] = (0, 0),
+        margins: dict[str, int] | None = None,
+    ) -> None:
+        self.default_result = default_result
+        self.cell_addr = cell_addr
+        values = margins or {'left': 510, 'right': 510, 'top': 141, 'bottom': 141}
+        self.wrapper_margins = dict(values)
+        cell = SimpleNamespace(
+            MarginLeft=values['left'],
+            MarginRight=values['right'],
+            MarginTop=values['top'],
+            MarginBottom=values['bottom'],
+            VertAlign=1,
+        )
+        shape = SimpleNamespace(HSet=object(), ShapeTableCell=cell)
+        self.HParameterSet = SimpleNamespace(HShapeObject=shape)
+        self.HAction = _NativeMarginReadbackAction(self)
+
+    def is_cell(self) -> bool:
+        return True
+
+    def get_cell_addr(self, **kwargs: object) -> tuple[int, int]:
+        return self.cell_addr
+
+    def get_row_height(self, **kwargs: object) -> int:
+        return 1000
+
+    def get_table_height(self, **kwargs: object) -> int:
+        return 1000
+
+    def get_cell_margin(self, **kwargs: object) -> dict[str, int]:
+        return dict(self.wrapper_margins)
+
+    def get_table_inside_margin(self, **kwargs: object) -> dict[str, int]:
+        return {'left': 0}
+
+    def get_table_outside_margin(self, **kwargs: object) -> dict[str, int]:
+        return {'left': 0}
+
+
 class _RealisticMarginHwp:
     def __init__(self) -> None:
         self.calls: list[tuple[float, float, float, float, str]] = []
@@ -136,7 +191,7 @@ class _RealisticMarginHwp:
 
 
 class _VerticalReadbackHwp:
-    def __init__(self, *, default_result: bool | None = False, value: int = 1) -> None:
+    def __init__(self, *, default_result: bool | None = False, value: int | float = 1) -> None:
         self.HAction = SimpleNamespace(GetDefault=self._get_default)
         self.HParameterSet = SimpleNamespace(
             HShapeObject=SimpleNamespace(HSet=object(), ShapeTableCell=SimpleNamespace(VertAlign=value))
@@ -350,30 +405,33 @@ class CellFormatExactServiceHelperTests(unittest.TestCase):
     def test_cell_format_exact_accepts_distinct_vertical_alignment_readback(self) -> None:
         _require_observed_cell_format_mutation(
             'vertical-align',
-            {'vertical_align': {'available': True, 'value': 0, 'name': 'top'}},
-            {'vertical_align': {'available': True, 'value': 1, 'name': 'center'}},
+            {'cell_addr': [0, 0], 'vertical_align': {'available': True, 'value': 0, 'name': 'top'}},
+            {'cell_addr': [0, 0], 'vertical_align': {'available': True, 'value': 1, 'name': 'center'}},
             {'vertical_align': {'before': 0, 'after': 1}},
             expected_vertical_align='center',
+            expected_cell_addr=[0, 0],
         )
 
     def test_cell_format_exact_rejects_vertical_alignment_readback_mismatch(self) -> None:
         with self.assertRaisesRegex(LocalCliRuntimeError, 'mismatched'):
             _require_observed_cell_format_mutation(
                 'vertical-align',
-                {'vertical_align': {'available': True, 'value': 0, 'name': 'top'}},
-                {'vertical_align': {'available': True, 'value': 2, 'name': 'bottom'}},
+                {'cell_addr': [0, 0], 'vertical_align': {'available': True, 'value': 0, 'name': 'top'}},
+                {'cell_addr': [0, 0], 'vertical_align': {'available': True, 'value': 2, 'name': 'bottom'}},
                 {'vertical_align': {'before': 0, 'after': 2}},
                 expected_vertical_align='center',
+                expected_cell_addr=[0, 0],
             )
 
     def test_cell_format_exact_rejects_unchanged_vertical_alignment_readback(self) -> None:
         with self.assertRaisesRegex(LocalCliRuntimeError, 'changed vertical alignment'):
             _require_observed_cell_format_mutation(
                 'vertical-align',
-                {'vertical_align': {'available': True, 'value': 1, 'name': 'center'}},
-                {'vertical_align': {'available': True, 'value': 1, 'name': 'center'}},
+                {'cell_addr': [0, 0], 'vertical_align': {'available': True, 'value': 1, 'name': 'center'}},
+                {'cell_addr': [0, 0], 'vertical_align': {'available': True, 'value': 1, 'name': 'center'}},
                 {},
                 expected_vertical_align='center',
+                expected_cell_addr=[0, 0],
             )
 
     def test_cell_format_exact_rejects_unchanged_cell_margin(self) -> None:
@@ -411,8 +469,54 @@ class CellFormatExactServiceHelperTests(unittest.TestCase):
         self.assertTrue(raised.exception.mutation_may_have_persisted)
 
     def test_uniform_cell_margin_rejects_explicit_false(self) -> None:
-        with self.assertRaises(LocalCliMutationError):
-            self.service._bundle_set_uniform_cell_margin(_MarginHwp(result=False), 1984)
+        hwp = _MarginHwp(result=False)
+
+        with self.assertRaises(LocalCliMutationError) as raised:
+            self.service._bundle_set_uniform_cell_margin(hwp, 1984)
+
+        self.assertEqual(len(hwp.calls), 1)
+        self.assertEqual(hwp.margins, {'left': 1984, 'right': 1984, 'top': 1984, 'bottom': 1984})
+        self.assertTrue(raised.exception.mutation_may_have_persisted)
+        self.assertFalse(raised.exception.rollback['attempted'])
+        self.assertFalse(raised.exception.rollback['succeeded'])
+
+    def test_native_cell_margin_readback_requires_explicit_refresh_success(self) -> None:
+        hwp = _NativeMarginReadbackHwp(
+            default_result=False,
+            margins={'left': 1984, 'right': 1984, 'top': 1984, 'bottom': 1984},
+        )
+
+        result = self.service._bundle_native_cell_margin_readback(hwp, expected_cell_addr=[0, 0])
+
+        self.assertFalse(result['available'])
+        self.assertFalse(result['refresh_succeeded'])
+        self.assertIn('GetDefault', result['error'])
+        self.assertEqual(hwp.HAction.calls, [('GetDefault', 'TablePropertyDialog')])
+
+    def test_native_cell_margin_readback_accepts_fresh_four_side_values(self) -> None:
+        hwp = _NativeMarginReadbackHwp(
+            default_result=True,
+            margins={'left': 510, 'right': 510, 'top': 141, 'bottom': 141},
+        )
+
+        result = self.service._bundle_native_cell_margin_readback(hwp, expected_cell_addr=[0, 0])
+
+        self.assertTrue(result['available'])
+        self.assertTrue(result['refresh_succeeded'])
+        self.assertEqual(result['cell_addr'], [0, 0])
+        self.assertEqual(
+            result['value'],
+            {'left': 510, 'right': 510, 'top': 141, 'bottom': 141},
+        )
+
+    def test_native_cell_margin_readback_rejects_wrong_target_cell(self) -> None:
+        result = self.service._bundle_native_cell_margin_readback(
+            _NativeMarginReadbackHwp(default_result=True, cell_addr=(1, 0)),
+            expected_cell_addr=[0, 0],
+        )
+
+        self.assertFalse(result['available'])
+        self.assertIn('cell identity', result['error'])
 
     def test_cell_format_exact_margin_guard_requires_valid_four_side_readback(self) -> None:
         with self.assertRaisesRegex(LocalCliRuntimeError, 'usable native'):
@@ -428,24 +532,47 @@ class CellFormatExactServiceHelperTests(unittest.TestCase):
         with self.assertRaisesRegex(LocalCliRuntimeError, 'requested value'):
             _require_observed_cell_format_mutation(
                 'set-cell-margin',
-                {'cell_margin_hu': {'left': 510, 'right': 510, 'top': 141, 'bottom': 141}},
-                {'cell_margin_hu': {'left': 1984, 'right': 2, 'top': 0, 'bottom': 0}},
+                {'cell_addr': [0, 0], 'cell_margin_hu': {'left': 510, 'right': 510, 'top': 141, 'bottom': 141}},
+                {'cell_addr': [0, 0], 'cell_margin_hu': {'left': 1984, 'right': 2, 'top': 0, 'bottom': 0}},
                 {'cell_margin_hu': {'before': {'left': 510, 'right': 510, 'top': 141, 'bottom': 141}, 'after': {'left': 1984, 'right': 2, 'top': 0, 'bottom': 0}}},
                 expected_cell_margin_hu={'left': 1984, 'right': 1984, 'top': 1984, 'bottom': 1984},
+                expected_cell_addr=[0, 0],
             )
 
     def test_cell_format_exact_guard_failure_preserves_mutation_truth(self) -> None:
         with self.assertRaises(LocalCliMutationError) as raised:
             _require_observed_cell_format_mutation(
                 'set-cell-margin',
-                {'cell_margin_hu': {'left': 510, 'right': 510, 'top': 141, 'bottom': 141}},
-                {'cell_margin_hu': {'left': 1984, 'right': 2, 'top': 0, 'bottom': 0}},
+                {'cell_addr': [0, 0], 'cell_margin_hu': {'left': 510, 'right': 510, 'top': 141, 'bottom': 141}},
+                {'cell_addr': [0, 0], 'cell_margin_hu': {'left': 1984, 'right': 2, 'top': 0, 'bottom': 0}},
                 {'cell_margin_hu': {'before': {'left': 510, 'right': 510, 'top': 141, 'bottom': 141}, 'after': {'left': 1984, 'right': 2, 'top': 0, 'bottom': 0}}},
                 expected_cell_margin_hu={'left': 1984, 'right': 1984, 'top': 1984, 'bottom': 1984},
+                expected_cell_addr=[0, 0],
             )
 
         self.assertTrue(raised.exception.mutation_may_have_persisted)
         self.assertFalse(raised.exception.rollback['succeeded'])
+
+    def test_cell_format_exact_margin_guard_rejects_changed_cell_identity(self) -> None:
+        with self.assertRaisesRegex(LocalCliMutationError, 'cell identity'):
+            _require_observed_cell_format_mutation(
+                'set-cell-margin',
+                {'cell_addr': [0, 0], 'cell_margin_hu': {'left': 510, 'right': 510, 'top': 141, 'bottom': 141}},
+                {'cell_addr': [1, 0], 'cell_margin_hu': {'left': 1984, 'right': 1984, 'top': 1984, 'bottom': 1984}},
+                {'cell_margin_hu': {'before': {'left': 510, 'right': 510, 'top': 141, 'bottom': 141}, 'after': {'left': 1984, 'right': 1984, 'top': 1984, 'bottom': 1984}}},
+                expected_cell_margin_hu={'left': 1984, 'right': 1984, 'top': 1984, 'bottom': 1984},
+                expected_cell_addr=[0, 0],
+            )
+
+    def test_cell_format_exact_margin_guard_accepts_same_target_cell_identity(self) -> None:
+        _require_observed_cell_format_mutation(
+            'set-cell-margin',
+            {'cell_addr': [0, 0], 'cell_margin_hu': {'left': 510, 'right': 510, 'top': 141, 'bottom': 141}},
+            {'cell_addr': [0, 0], 'cell_margin_hu': {'left': 1984, 'right': 1984, 'top': 1984, 'bottom': 1984}},
+            {'cell_margin_hu': {'before': {'left': 510, 'right': 510, 'top': 141, 'bottom': 141}, 'after': {'left': 1984, 'right': 1984, 'top': 1984, 'bottom': 1984}}},
+            expected_cell_margin_hu={'left': 1984, 'right': 1984, 'top': 1984, 'bottom': 1984},
+            expected_cell_addr=[0, 0],
+        )
 
     def test_table_cell_metrics_marks_invalid_margin_readback_unavailable(self) -> None:
         self.service._bundle_enter_table_cell_for_ctrl = lambda hwp, ctrl: {'is_cell': True}  # type: ignore[method-assign]
@@ -470,6 +597,25 @@ class CellFormatExactServiceHelperTests(unittest.TestCase):
         self.assertFalse(metrics['cell_margin_hu_available'])
         self.assertFalse(metrics['available'])
 
+    def test_table_cell_metrics_rejects_stale_wrapper_when_native_refresh_fails(self) -> None:
+        hwp = _NativeMarginReadbackHwp(
+            default_result=False,
+            margins={'left': 1984, 'right': 1984, 'top': 1984, 'bottom': 1984},
+        )
+        self.service._bundle_enter_table_cell_for_ctrl = lambda hwp, ctrl: {  # type: ignore[method-assign]
+            'is_cell': True,
+            'normal_edit_state': True,
+            'cell_addr': 'A1',
+        }
+        self.service._style_parameter_snapshot = lambda *args, **kwargs: {'values': {}}  # type: ignore[method-assign]
+        with patch('app.local_cli_service._get_pos', return_value=(0, 0, 0)), patch('app.local_cli_service._set_pos'):
+            metrics = self.service._bundle_table_cell_metrics(hwp, object())
+
+        self.assertFalse(metrics['cell_margin_hu_available'])
+        self.assertFalse(metrics['available'])
+        self.assertFalse(metrics['cell_margin_readback']['refresh_succeeded'])
+        self.assertEqual(metrics['cell_margin_hu'], {'error': 'TablePropertyDialog GetDefault returned no positive success'})
+
     def test_vertical_alignment_getter_rejects_invalid_native_enum(self) -> None:
         result = self.service._bundle_table_cell_vertical_align(_VerticalReadbackHwp(default_result=True, value=9))
 
@@ -481,6 +627,18 @@ class CellFormatExactServiceHelperTests(unittest.TestCase):
 
         self.assertFalse(result['available'])
         self.assertIn('GetDefault', result['error'])
+
+    def test_vertical_alignment_getdefault_none_is_unavailable(self) -> None:
+        result = self.service._bundle_table_cell_vertical_align(_VerticalReadbackHwp(default_result=None))
+
+        self.assertFalse(result['available'])
+        self.assertIn('positive success', result['error'])
+
+    def test_vertical_alignment_rejects_fractional_native_enum(self) -> None:
+        result = self.service._bundle_table_cell_vertical_align(_VerticalReadbackHwp(default_result=True, value=1.5))
+
+        self.assertFalse(result['available'])
+        self.assertIn('enum is invalid', result['error'])
 
     def test_apply_cell_border_none_prefers_cellborderfill_parameter_set(self) -> None:
         hwp = _BorderFillHwp()
