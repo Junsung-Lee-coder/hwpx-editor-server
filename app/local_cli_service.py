@@ -96,6 +96,31 @@ _IMAGE_ALLOWED_SUFFIXES = {'.png', '.jpg', '.jpeg', '.bmp'}
 _IMAGE_SAFE_STEM_RE = re.compile(r'[^A-Za-z0-9._() -]+')
 
 
+def _require_observed_cell_format_mutation(
+    operation: str,
+    before_metrics: Mapping[str, Any],
+    after_metrics: Mapping[str, Any],
+    changed_metrics: Mapping[str, Any],
+) -> None:
+    """Reject format commands whose target property was not observed changing.
+
+    ``HAction.Run`` may report success for a no-op native action.  Cell-margin
+    operations already expose a reliable getter; vertical alignment currently
+    does not, so it must fail closed instead of claiming a mutation based only
+    on the action return value.
+    """
+    if operation == 'set-cell-margin' and before_metrics.get('cell_margin_hu') == after_metrics.get('cell_margin_hu'):
+        raise LocalCliRuntimeError(
+            'cell_format_exact did not observe changed cell_margin_hu after mutation; '
+            f'before={before_metrics!r}; after={after_metrics!r}'
+        )
+    if operation == 'vertical-align' and not changed_metrics:
+        raise LocalCliRuntimeError(
+            'cell_format_exact vertical alignment has no distinct native readback; '
+            'refusing to report a successful mutation'
+        )
+
+
 def _remove_visible_spaces(value: str) -> str:
     return ''.join(str(value or '').split())
 
@@ -5386,11 +5411,12 @@ class LocalCliService:
             for key in sorted(set(before_metrics) | set(after_metrics))
             if before_metrics.get(key) != after_metrics.get(key)
         }
-        if operation.get('op') == 'set-cell-margin' and before_metrics.get('cell_margin_hu') == after_metrics.get('cell_margin_hu'):
-            raise LocalCliRuntimeError(
-                'cell_format_exact did not observe changed cell_margin_hu after mutation; '
-                f'before={before_metrics!r}; after={after_metrics!r}; operation={operation!r}'
-            )
+        _require_observed_cell_format_mutation(
+            str(operation.get('op') or ''),
+            before_metrics,
+            after_metrics,
+            changed_metrics,
+        )
 
         post_controls, _post_mode = _enumerate_controls_headctrl(hwp, max_controls=int(resolved['max_controls']))
         if len(post_controls) != len(resolved['controls']):

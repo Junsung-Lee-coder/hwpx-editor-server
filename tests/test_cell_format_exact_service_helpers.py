@@ -4,7 +4,11 @@ import unittest
 
 try:
     from app.local_cli_runtime import LocalCliRuntimeError
-    from app.local_cli_service import LocalCliMutationError, LocalCliService
+    from app.local_cli_service import (
+        LocalCliMutationError,
+        LocalCliService,
+        _require_observed_cell_format_mutation,
+    )
 except ModuleNotFoundError as exc:  # pragma: no cover - dependency-light static environments
     LocalCliRuntimeError = RuntimeError  # type: ignore[assignment]
     LocalCliMutationError = RuntimeError  # type: ignore[assignment]
@@ -287,6 +291,24 @@ class CellFormatExactServiceHelperTests(unittest.TestCase):
     def test_apply_cell_fill_color_rejects_invalid_hex(self) -> None:
         with self.assertRaises(LocalCliRuntimeError):
             self.service._bundle_apply_cell_fill_color(_FillHwp(), '#XYZ123')
+
+    def test_cell_format_exact_rejects_vertical_alignment_without_distinct_readback(self) -> None:
+        with self.assertRaisesRegex(LocalCliRuntimeError, 'no distinct native readback'):
+            _require_observed_cell_format_mutation(
+                'vertical-align',
+                {'cell_addr': [0, 0]},
+                {'cell_addr': [0, 0]},
+                {},
+            )
+
+    def test_cell_format_exact_rejects_unchanged_cell_margin(self) -> None:
+        with self.assertRaisesRegex(LocalCliRuntimeError, 'changed cell_margin_hu'):
+            _require_observed_cell_format_mutation(
+                'set-cell-margin',
+                {'cell_margin_hu': 1200},
+                {'cell_margin_hu': 1200},
+                {},
+            )
 
     def test_apply_cell_border_none_prefers_cellborderfill_parameter_set(self) -> None:
         hwp = _BorderFillHwp()
