@@ -54,7 +54,7 @@ $mcpProcess = Start-Process -FilePath '.mcp-venv\Scripts\python.exe' -ArgumentLi
 
 권장 순서는 `open → status → find/where → command 또는 proof → save → 다운로드 → close → status`입니다. `save` 결과의 `download_path`는 백엔드 기준 경로입니다. 닫기 전에 기존 REST 다운로드 기능으로 보관할 파일을 받으세요. 어댑터의 `proof` 폴더에 복사된 페이지 증명은 닫아도 남으므로 필요 없을 때 직접 정리합니다.
 
-`hwpx_command`는 `context`, `selection_proof`, `readback`, `cell_format_exact`, `command_reconcile`만 받습니다. 셀 정렬 변경은 기존 대상 ID, 해시, 페이지, 구역 앵커와 `confirm_layout=true`를 요구하고 백엔드의 원본 일치·증명 검사를 그대로 통과해야 합니다. `pyhwpx_call`, `hwp_action`, 임의 Python·셸·명령 이름은 허용하지 않습니다. 이 어댑터는 기존 비변경용 `safe-schema` 자체를 확장하거나 쓰기 권한으로 해석하지 않습니다.
+`hwpx_command`는 `context`, `selection_proof`, `readback`, `cell_format_exact`, `command_reconcile`만 받습니다. `cell_format_exact`는 기존 대상 ID, 해시, 페이지, 구역 앵커와 `confirm_layout=true`를 요구하며, 형식 선택자는 `vertical_align`, `cell_margin_mm`, `cell_margin_hu` 중 하나만 지정합니다. 셀 여백 변경은 네이티브 전후 getter가 실제로 다른 값을 반환해야 성공으로 기록되며, 같은 값을 다시 요청한 no-op은 거부됩니다. 셀 정렬은 별도의 네이티브 전후 readback을 확보하지 못하면 성공으로 기록하지 않습니다. `pyhwpx_call`, `hwp_action`, 임의 Python·셸·명령 이름은 허용하지 않습니다. 이 어댑터는 기존 비변경용 `safe-schema` 자체를 확장하거나 쓰기 권한으로 해석하지 않습니다.
 
 페이지는 `1..10000`, DPI는 `72..600`으로 제한됩니다. 한 페이지를 렌더링한 결과는 전체 문서 검토 통과를 뜻하지 않습니다. 최종 문서는 모든 페이지를 Hancom 기반으로 렌더링하고 확인해야 합니다.
 

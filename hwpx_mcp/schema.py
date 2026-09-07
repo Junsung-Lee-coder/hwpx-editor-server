@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from typing import Annotated, Any, Literal
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 SessionId = Annotated[str, Field(pattern=r'^[a-f0-9]{32}$')]
 Text = Annotated[str, Field(min_length=1, max_length=16384)]
@@ -76,9 +76,18 @@ class CellFormatStep(Closed):
     page_from: int = Field(ge=1, le=10000)
     page_to: int = Field(ge=1, le=10000)
     around: int = Field(default=0, ge=0, le=5)
-    vertical_align: Literal['top', 'center', 'bottom']
+    vertical_align: Literal['top', 'center', 'bottom'] | None = None
+    cell_margin_hu: int | None = Field(default=None, ge=1, le=100000)
+    cell_margin_mm: float | None = Field(default=None, gt=0.0, le=70.0)
     confirm_layout: Literal[True]
     max_controls: int = Field(default=100, ge=1, le=1000)
+
+    @model_validator(mode='after')
+    def require_one_format_selector(self) -> 'CellFormatStep':
+        selectors = (self.vertical_align, self.cell_margin_hu, self.cell_margin_mm)
+        if sum(value is not None for value in selectors) != 1:
+            raise ValueError('cell_format_exact requires exactly one format selector')
+        return self
 
 
 class Reconcile(Closed):
