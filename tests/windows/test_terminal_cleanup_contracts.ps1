@@ -105,6 +105,9 @@ try {
     if ($parseErrors.Count -gt 0) { throw 'Installer source could not be parsed for stale terminal binding coverage.' }
     $bindingAst = $installerAst.Find({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Assert-TerminalReceiptBinding' }, $true)
     if ($null -eq $bindingAst) { throw 'Assert-TerminalReceiptBinding was not found for stale recovery coverage.' }
+    $recoveryStateAst = $installerAst.Find({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Test-TerminalTransactionRecoveryState' }, $true)
+    if ($null -eq $recoveryStateAst) { throw 'Test-TerminalTransactionRecoveryState was not found for stale recovery coverage.' }
+    Invoke-Expression $recoveryStateAst.Extent.Text
     Invoke-Expression $bindingAst.Extent.Text
     $staleRunId = 'terminal-cleanup-stale-run'
     $runId = 'terminal-cleanup-current-run'
