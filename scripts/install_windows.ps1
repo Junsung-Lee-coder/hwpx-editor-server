@@ -1717,15 +1717,19 @@ function Get-InstallInventory {
     Assert-NoReparsePath -Path $root | Out-Null
     $files = @(Get-ChildItem -LiteralPath $root -Recurse -File -Force -ErrorAction Stop | Sort-Object FullName)
     if ($files.Count -gt 100000) { throw "Install inventory exceeds the bounded file limit: $root" }
-    $fingerprints = @()
+    # A PreserveMove inventory may include a large virtual environment.  Array
+    # += copies the full fingerprint array on every file and can consume the
+    # entire bounded G12 controller budget; retain the same per-file hashes in
+    # a linear generic list instead.
+    $fingerprints = New-Object 'System.Collections.Generic.List[string]'
     foreach ($file in $files) {
         if (($file.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
             throw "Install inventory encountered a reparse-point file: $($file.FullName)"
         }
         $relative = $file.FullName.Substring($root.Length).TrimStart([char]92, [char]47)
-        $fingerprints += ('{0}|{1}|{2}' -f $relative.Replace('\\', '/').ToLowerInvariant(), [int64]$file.Length, (Get-Sha256Hex -Path $file.FullName))
+        $fingerprints.Add(('{0}|{1}|{2}' -f $relative.Replace('\\', '/').ToLowerInvariant(), [int64]$file.Length, (Get-Sha256Hex -Path $file.FullName))) | Out-Null
     }
-    $inventoryText = ($fingerprints -join "`n") + "`n"
+    $inventoryText = ($fingerprints.ToArray() -join "`n") + "`n"
     $inventorySha = [System.Security.Cryptography.SHA256]::Create()
     try {
         $inventoryBytes = [System.Text.Encoding]::UTF8.GetBytes($inventoryText)
