@@ -1789,6 +1789,81 @@ function Copy-ManifestToCandidate {
     return Copy-FileVerified -SourcePath $manifest -DestinationPath (Join-Path $Destination 'source-manifest.json') -ExpectedSize ([int64]$manifestItem.Length) -ExpectedSha256 (Get-Sha256Hex -Path $manifest)
 }
 
+function New-CandidateHardLinkVerified {
+    param(
+        [Parameter(Mandatory = $true)][string]$SourcePath,
+        [Parameter(Mandatory = $true)][string]$DestinationPath,
+        [Parameter(Mandatory = $true)][int64]$ExpectedSize,
+        [string]$ExpectedSha256
+    )
+    $source = Assert-NoReparsePath -Path $SourcePath
+    $destination = [IO.Path]::GetFullPath($DestinationPath)
+    $sourceVolume = [IO.Path]::GetPathRoot($source)
+    $destinationVolume = [IO.Path]::GetPathRoot($destination)
+    if ([string]::IsNullOrWhiteSpace($sourceVolume) -or
+        [string]::IsNullOrWhiteSpace($destinationVolume) -or
+        $sourceVolume -ine $destinationVolume) {
+        return $null
+    }
+    if (-not [string]::IsNullOrWhiteSpace($ExpectedSha256) -and $ExpectedSha256 -notmatch '^[0-9a-fA-F]{64}$') {
+        throw "Expected SHA-256 is invalid: $SourcePath"
+    }
+    Assert-NoReparsePath -Path (Split-Path -Parent $destination) | Out-Null
+    if (Test-Path -LiteralPath $destination) {
+        throw "Activation destination already exists: $destination"
+    }
+    $sourceItem = Get-Item -LiteralPath $source -Force -ErrorAction Stop
+    if ($sourceItem.PSIsContainer -or [int64]$sourceItem.Length -ne $ExpectedSize) {
+        throw "Candidate source size changed before activation: $SourcePath"
+    }
+    $sourceIdentity = Get-PathObjectIdentity -Path $source -RequireExisting
+    $created = $false
+    try {
+        # NTFS hardlinks avoid a second 500+ MB byte copy when candidate and
+        # activation roots share a volume.  The candidate root is run-owned;
+        # deleting its directory later only unlinks these files.
+        New-Item -ItemType HardLink -Path $destination -Target $source -ErrorAction Stop | Out-Null
+        $created = $true
+    }
+    catch {
+        if (Test-Path -LiteralPath $destination -PathType Leaf) {
+            Remove-Item -LiteralPath $destination -Force -ErrorAction SilentlyContinue
+        }
+        return $null
+    }
+    try {
+        $destinationItem = Get-Item -LiteralPath $destination -Force -ErrorAction Stop
+        if ($destinationItem.PSIsContainer -or [int64]$destinationItem.Length -ne $ExpectedSize) {
+            throw "Hardlink destination size did not match the candidate: $destination"
+        }
+        $destinationIdentity = Get-PathObjectIdentity -Path $destination -RequireExisting
+        if ([string]$destinationIdentity -cne [string]$sourceIdentity) {
+            throw "Hardlink destination identity did not match the candidate: $destination"
+        }
+        $destinationSha256 = Get-Sha256Hex -Path $destination
+        if (-not [string]::IsNullOrWhiteSpace($ExpectedSha256) -and $destinationSha256 -cne $ExpectedSha256.ToLowerInvariant()) {
+            throw "Hardlink destination bytes did not match the expected content: $destination"
+        }
+        return [pscustomobject]@{
+            source_path = $source
+            destination_path = $destination
+            source_size = [int64]$sourceItem.Length
+            source_sha256 = if ([string]::IsNullOrWhiteSpace($ExpectedSha256)) { $destinationSha256 } else { $ExpectedSha256.ToLowerInvariant() }
+            destination_size = [int64]$destinationItem.Length
+            destination_sha256 = $destinationSha256
+            source_object_identity = $sourceIdentity
+            destination_object_identity = $destinationIdentity
+            copy_mode = 'hardlink'
+        }
+    }
+    catch {
+        if ($created -and (Test-Path -LiteralPath $destination -PathType Leaf)) {
+            Remove-Item -LiteralPath $destination -Force -ErrorAction SilentlyContinue
+        }
+        throw
+    }
+}
+
 function Copy-CandidateToInstall {
     param(
         [Parameter(Mandatory = $true)][string]$CandidateRoot,
@@ -1825,10 +1900,17 @@ function Copy-CandidateToInstall {
         $copiedKeys[$key] = $true
         $expected = $manifestByKey[$key]
         $expectedSize = if ($null -ne $expected) { [int64]$expected.size } else { [int64]$item.Length }
-        $expectedSha256 = if ($null -ne $expected) { [string]$expected.sha256 } else { Get-Sha256Hex -Path ([string]$item.FullName) }
+        $expectedSha256 = if ($null -ne $expected) { [string]$expected.sha256 } else { $null }
         $destinationPath = Join-Path $destinationRoot $relative
         New-Item -ItemType Directory -Force -Path (Split-Path -Parent $destinationPath) | Out-Null
-        $records.Add((Copy-FileVerified -SourcePath ([string]$item.FullName) -DestinationPath $destinationPath -ExpectedSize $expectedSize -ExpectedSha256 $expectedSha256)) | Out-Null
+        $record = New-CandidateHardLinkVerified -SourcePath ([string]$item.FullName) -DestinationPath $destinationPath -ExpectedSize $expectedSize -ExpectedSha256 $expectedSha256
+        if ($null -eq $record) {
+            if ([string]::IsNullOrWhiteSpace($expectedSha256)) {
+                $expectedSha256 = Get-Sha256Hex -Path ([string]$item.FullName)
+            }
+            $record = Copy-FileVerified -SourcePath ([string]$item.FullName) -DestinationPath $destinationPath -ExpectedSize $expectedSize -ExpectedSha256 $expectedSha256
+        }
+        $records.Add($record) | Out-Null
     }
     foreach ($key in $manifestByKey.Keys) {
         if (-not $copiedKeys.ContainsKey($key)) { throw "Candidate is missing manifest member: $key" }
