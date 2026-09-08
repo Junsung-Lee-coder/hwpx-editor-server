@@ -180,6 +180,19 @@ function Get-InstallerTransactionJournalPayload {
         candidate_root = [string]$candidateRoot
         candidate_root_identity = [string]$candidateRootIdentity
         install_root_identity = [string]$installRootIdentity
+        # Seal the predecessor identity before the destructive move.  The
+        # destination object identity is unavailable until Move-PathIdentityExact
+        # returns, so stale recovery uses this pre-move identity for the narrow
+        # predecessor-move-started crash window.
+        pre_move_root_identity = [string]$preMoveRootIdentity
+        pre_move_inventory = if ($null -ne $preMoveBackupInventory) {
+            [ordered]@{
+                root = [string]$preMoveBackupInventory.root
+                file_count = [int]$preMoveBackupInventory.file_count
+                total_bytes = [int64]$preMoveBackupInventory.total_bytes
+                inventory_sha256 = [string]$preMoveBackupInventory.inventory_sha256
+            }
+        } else { $null }
         install_root_created_by_run = [bool]$candidateInstallCreated
         backup_root = [string]$backupRoot
         backup_root_identity = [string]$backupRootIdentity
@@ -714,6 +727,8 @@ function Invoke-StaleInstallTransactionRecovery {
     $candidateExists = -not [string]::IsNullOrWhiteSpace($candidate) -and (Test-Path -LiteralPath $candidate -PathType Container)
     $installIdentity = [string](Get-OptionalPropertyValue -Object $journal -Name 'install_root_identity')
     $installCreatedByRun = [bool](Get-OptionalPropertyValue -Object $journal -Name 'install_root_created_by_run')
+    $preMoveRootIdentity = [string](Get-OptionalPropertyValue -Object $journal -Name 'pre_move_root_identity')
+    $preMoveInventory = Get-OptionalPropertyValue -Object $journal -Name 'pre_move_inventory'
     if ($state -eq 'activation-root-creating' -and $installExists) {
         # The root was observed during the non-atomic directory creation seam
         # before its stable identity was journaled. Never guess ownership after
@@ -728,8 +743,51 @@ function Invoke-StaleInstallTransactionRecovery {
         Remove-PathIdentityExact -Path $install -ExpectedObjectIdentity $installIdentity | Out-Null
         $installExists = $false
     }
+    if ($state -eq 'predecessor-move-started' -and -not $installExists -and -not $backupExists) {
+        throw 'Stale predecessor move has neither the original install root nor its authenticated backup.'
+    }
     if ($backupExists) {
-        if ([string]::IsNullOrWhiteSpace($backupIdentity)) { throw 'Stale backup has no sealed object identity.' }
+        if ([string]::IsNullOrWhiteSpace($backupIdentity)) {
+            # A hard kill can occur after the atomic root move but before the
+            # follow-up journal replacement records the destination identity.
+            # Only the exact predecessor-move-started seam may recover this
+            # state, and only when the pre-move root identity plus the run-owned
+            # backup claim authenticate the destination.
+            if ($state -ne 'predecessor-move-started') {
+                throw 'Stale backup has no sealed object identity.'
+            }
+            if ([string]::IsNullOrWhiteSpace($preMoveRootIdentity)) {
+                throw 'Stale predecessor move lacks the sealed pre-move root identity.'
+            }
+            $expectedBackupPath = [IO.Path]::GetFullPath($install + '.backup-' + $owner)
+            $actualBackupPath = Get-CanonicalPath -Path $backup -RequireExisting
+            if (-not [string]::Equals($actualBackupPath, $expectedBackupPath, [StringComparison]::OrdinalIgnoreCase)) {
+                throw 'Stale predecessor backup path is not the current run-owned destination.'
+            }
+            $claimPath = [string](Get-OptionalPropertyValue -Object $journal -Name 'backup_claim_path')
+            $claimIdentity = [string](Get-OptionalPropertyValue -Object $journal -Name 'backup_claim_identity')
+            $expectedClaimPath = $actualBackupPath + '.claim-' + $owner
+            if ([string]::IsNullOrWhiteSpace($claimPath) -or
+                -not [string]::Equals((Get-CanonicalPath -Path $claimPath -RequireExisting), $expectedClaimPath, [StringComparison]::OrdinalIgnoreCase) -or
+                [string]::IsNullOrWhiteSpace($claimIdentity)) {
+                throw 'Stale predecessor backup claim is missing or not bound to the owner.'
+            }
+            Assert-PathObjectIdentity -Path $claimPath -ExpectedIdentity $claimIdentity | Out-Null
+            $claimText = ([IO.File]::ReadAllText($claimPath, [Text.Encoding]::UTF8)).Trim()
+            if ($claimText -cne $owner) { throw 'Stale predecessor backup claim content does not match its owner.' }
+            $backupIdentity = Get-PathObjectIdentity -Path $backup -RequireExisting
+            if ($backupIdentity -cne $preMoveRootIdentity) {
+                throw 'Stale predecessor backup identity does not match the sealed pre-move root identity.'
+            }
+            if ($null -ne $preMoveInventory) {
+                $actualPreMoveInventory = Get-InstallInventory -Path $backup
+                foreach ($field in @('file_count', 'total_bytes', 'inventory_sha256')) {
+                    if ([string]$actualPreMoveInventory.$field -cne [string]$preMoveInventory.$field) {
+                        throw "Stale predecessor backup inventory does not match the sealed pre-move ${field}."
+                    }
+                }
+            }
+        }
         Assert-PathObjectIdentity -Path $backup -ExpectedIdentity $backupIdentity | Out-Null
     }
     if ($candidateExists -and -not [string]::IsNullOrWhiteSpace($candidateIdentity)) {

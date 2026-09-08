@@ -67,6 +67,22 @@ class WindowsInstallerContractTests(unittest.TestCase):
         self.assertIn("$readbackValidated = $false", journal_function)
         self.assertIn("retain uncertain new bytes as HOLD evidence", journal_function)
 
+    def test_predecessor_move_journal_seals_identity_for_crash_recovery(self) -> None:
+        text = self.read("install_windows.ps1")
+        journal_function = text[
+            text.index("function Get-InstallerTransactionJournalPayload") :
+            text.index("function Write-InstallTransactionJournal")
+        ]
+        recovery_function = text[
+            text.index("function Invoke-StaleInstallTransactionRecovery") :
+            text.index("function Save-InstallerReceipt")
+        ]
+        self.assertIn("pre_move_root_identity = [string]$preMoveRootIdentity", journal_function)
+        self.assertIn("pre_move_inventory", journal_function)
+        self.assertIn("pre_move_root_identity", recovery_function)
+        self.assertIn("predecessor-move-started", recovery_function)
+        self.assertIn("backup identity", recovery_function.lower())
+
     def test_candidate_activation_record_collection_is_linear_for_large_venvs(self) -> None:
         text = self.read("install_windows.ps1")
         activation_function = text[text.index("function Copy-CandidateToInstall {") : text.index("function Set-EnvSetting")]
