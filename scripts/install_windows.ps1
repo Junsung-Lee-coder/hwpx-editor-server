@@ -1712,7 +1712,10 @@ function Assert-RunOwnedTaskIdentity {
 }
 
 function Get-InstallInventory {
-    param([Parameter(Mandatory = $true)][string]$Path)
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [switch]$IncludeFiles
+    )
     $root = Get-CanonicalPath -Path $Path -RequireExisting
     Assert-NoReparsePath -Path $root | Out-Null
     $files = @(Get-ChildItem -LiteralPath $root -Recurse -File -Force -ErrorAction Stop | Sort-Object FullName)
@@ -1722,12 +1725,22 @@ function Get-InstallInventory {
     # entire bounded G12 controller budget; retain the same per-file hashes in
     # a linear generic list instead.
     $fingerprints = New-Object 'System.Collections.Generic.List[string]'
+    $fileRecords = if ($IncludeFiles) { New-Object 'System.Collections.Generic.List[object]' } else { $null }
     foreach ($file in $files) {
         if (($file.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
             throw "Install inventory encountered a reparse-point file: $($file.FullName)"
         }
         $relative = $file.FullName.Substring($root.Length).TrimStart([char]92, [char]47)
-        $fingerprints.Add(('{0}|{1}|{2}' -f $relative.Replace('\\', '/').ToLowerInvariant(), [int64]$file.Length, (Get-Sha256Hex -Path $file.FullName))) | Out-Null
+        $sha256 = Get-Sha256Hex -Path $file.FullName
+        $fingerprints.Add(('{0}|{1}|{2}' -f $relative.Replace('\\', '/').ToLowerInvariant(), [int64]$file.Length, $sha256)) | Out-Null
+        if ($IncludeFiles) {
+            $fileRecords.Add([pscustomobject]@{
+                relative_path = $relative
+                size = [int64]$file.Length
+                sha256 = $sha256
+                path = [string]$file.FullName
+            }) | Out-Null
+        }
     }
     $inventoryText = ($fingerprints.ToArray() -join "`n") + "`n"
     $inventorySha = [System.Security.Cryptography.SHA256]::Create()
@@ -1737,12 +1750,14 @@ function Get-InstallInventory {
     }
     finally { $inventorySha.Dispose() }
     $totalBytes = if ($files.Count -gt 0) { [int64](($files | Measure-Object -Property Length -Sum).Sum) } else { 0L }
-    return [pscustomobject]@{
+    $result = [ordered]@{
         root = $root
         file_count = $files.Count
         total_bytes = $totalBytes
         inventory_sha256 = $inventoryHash
     }
+    if ($IncludeFiles) { $result.file_records = $fileRecords.ToArray() }
+    return [pscustomobject]$result
 }
 
 function Ensure-UserScopePoppler {
@@ -1864,6 +1879,111 @@ function New-CandidateHardLinkVerified {
     }
 }
 
+function Copy-CandidateToInstallHardLinkTree {
+    param(
+        [Parameter(Mandatory = $true)][string]$CandidateRoot,
+        [Parameter(Mandatory = $true)][string]$DestinationRoot,
+        [Parameter(Mandatory = $true)][hashtable]$ManifestByKey
+    )
+    $candidate = Get-CanonicalPath -Path $CandidateRoot -RequireExisting
+    $destination = Get-CanonicalPath -Path $DestinationRoot -RequireExisting
+    $candidateVolume = [IO.Path]::GetPathRoot($candidate)
+    $destinationVolume = [IO.Path]::GetPathRoot($destination)
+    if ([string]::IsNullOrWhiteSpace($candidateVolume) -or
+        [string]::IsNullOrWhiteSpace($destinationVolume) -or
+        $candidateVolume -ine $destinationVolume) {
+        return $null
+    }
+    $files = @(Get-ChildItem -LiteralPath $candidate -Recurse -File -Force -ErrorAction Stop)
+    if ($files.Count -eq 0) { return $null }
+    Assert-NoReparsePath -Path $candidate | Out-Null
+    Assert-NoReparsePath -Path $destination | Out-Null
+    # Probe the provider once.  Unsupported hardlinks use the existing
+    # identity-checked byte-copy fallback before any activation file is made.
+    $probe = Join-Path $destination ('.activation-hardlink-probe-' + [Guid]::NewGuid().ToString('N'))
+    try {
+        New-Item -ItemType HardLink -Path $probe -Target ([string]$files[0].FullName) -ErrorAction Stop | Out-Null
+    }
+    catch {
+        if (Test-Path -LiteralPath $probe -PathType Leaf) { Remove-Item -LiteralPath $probe -Force -ErrorAction SilentlyContinue }
+        return $null
+    }
+    finally {
+        if (Test-Path -LiteralPath $probe -PathType Leaf) { Remove-Item -LiteralPath $probe -Force -ErrorAction SilentlyContinue }
+    }
+    $copiedKeys = @{}
+    foreach ($directory in @(Get-ChildItem -LiteralPath $candidate -Recurse -Directory -Force -ErrorAction Stop)) {
+        Assert-NoReparsePath -Path ([string]$directory.FullName) | Out-Null
+    }
+    foreach ($item in $files) {
+        Assert-NoReparsePath -Path ([string]$item.FullName) | Out-Null
+        $relative = [string]$item.FullName.Substring($candidate.Length).TrimStart([char]92, [char]47)
+        $relative = Assert-WindowsSafeSourceRelativePath -RelativePath $relative
+        if (-not (Test-CanonicalPathWithinRoot -Path ([string]$item.FullName) -Root $candidate)) {
+            throw "Candidate file escaped the candidate root: $relative"
+        }
+        $key = $relative.ToLowerInvariant()
+        if ($copiedKeys.ContainsKey($key)) { throw "Duplicate candidate file path: $relative" }
+        $copiedKeys[$key] = $true
+        $destinationPath = Join-Path $destination $relative
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $destinationPath) | Out-Null
+        if (Test-Path -LiteralPath $destinationPath) { throw "Activation destination already exists: $destinationPath" }
+        New-Item -ItemType HardLink -Path $destinationPath -Target ([string]$item.FullName) -ErrorAction Stop | Out-Null
+        if (-not (Test-Path -LiteralPath $destinationPath -PathType Leaf)) {
+            throw "Hardlink activation destination was not created: $destinationPath"
+        }
+    }
+    foreach ($key in $ManifestByKey.Keys) {
+        if (-not $copiedKeys.ContainsKey($key)) { throw "Candidate is missing manifest member: $key" }
+    }
+    $destinationInventory = Get-InstallInventory -Path $destination -IncludeFiles
+    if ([int]$destinationInventory.file_count -ne $files.Count) {
+        throw "Hardlink activation file count did not match the candidate: expected $($files.Count), got $($destinationInventory.file_count)"
+    }
+    $destinationByKey = @{}
+    foreach ($fileRecord in @($destinationInventory.file_records)) {
+        $destinationByKey[[string]$fileRecord.relative_path.ToLowerInvariant()] = $fileRecord
+    }
+    $records = New-Object 'System.Collections.Generic.List[object]'
+    foreach ($item in $files) {
+        $relative = [string]$item.FullName.Substring($candidate.Length).TrimStart([char]92, [char]47)
+        $key = $relative.ToLowerInvariant()
+        $destinationRecord = $destinationByKey[$key]
+        if ($null -eq $destinationRecord) { throw "Hardlink activation destination is missing: $relative" }
+        if ([int64]$destinationRecord.size -ne [int64]$item.Length) {
+            throw "Hardlink activation destination size mismatch: $relative"
+        }
+        $expected = $ManifestByKey[$key]
+        if ($null -ne $expected -and
+            ([int64]$expected.size -ne [int64]$destinationRecord.size -or
+             [string]$expected.sha256 -cne [string]$destinationRecord.sha256)) {
+            throw "Hardlink activation destination content mismatch: $relative"
+        }
+        $records.Add([pscustomobject]@{
+            source_path = [string]$item.FullName
+            destination_path = [string]$destinationRecord.path
+            source_size = [int64]$item.Length
+            source_sha256 = [string]$destinationRecord.sha256
+            destination_size = [int64]$destinationRecord.size
+            destination_sha256 = [string]$destinationRecord.sha256
+            copy_mode = 'hardlink-tree'
+        }) | Out-Null
+    }
+    if ($destinationByKey.Count -ne $copiedKeys.Count) {
+        throw 'Hardlink activation destination contained an unexpected file.'
+    }
+    return [pscustomobject]@{
+        candidate_root = $candidate
+        destination_root = $destination
+        file_count = $records.Count
+        source_bytes = [int64](($records | Measure-Object -Property source_size -Sum).Sum)
+        destination_bytes = [int64](($records | Measure-Object -Property destination_size -Sum).Sum)
+        destination_sha256 = @($records | ForEach-Object { [string]$_.destination_sha256 })
+        files = $records.ToArray()
+        copy_mode = 'hardlink-tree'
+    }
+}
+
 function Copy-CandidateToInstall {
     param(
         [Parameter(Mandatory = $true)][string]$CandidateRoot,
@@ -1880,6 +2000,8 @@ function Copy-CandidateToInstall {
         $relative = Assert-WindowsSafeSourceRelativePath -RelativePath ([string]$manifestEntry.path)
         $manifestByKey[$relative.ToLowerInvariant()] = $manifestEntry
     }
+    $fastActivation = Copy-CandidateToInstallHardLinkTree -CandidateRoot $candidate -DestinationRoot $destinationRoot -ManifestByKey $manifestByKey
+    if ($null -ne $fastActivation) { return $fastActivation }
     $copiedKeys = @{}
     # The venv can contain thousands of files.  Array += copies the complete
     # PowerShell array on every iteration and turns activation into an

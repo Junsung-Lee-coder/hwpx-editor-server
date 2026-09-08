@@ -69,7 +69,7 @@ class WindowsInstallerContractTests(unittest.TestCase):
 
     def test_candidate_activation_record_collection_is_linear_for_large_venvs(self) -> None:
         text = self.read("install_windows.ps1")
-        activation_function = text[text.index("function Copy-CandidateToInstall") : text.index("function Set-EnvSetting")]
+        activation_function = text[text.index("function Copy-CandidateToInstall {") : text.index("function Set-EnvSetting")]
         self.assertIn("System.Collections.Generic.List[object]", activation_function)
         self.assertIn("$records.Add($record)", activation_function)
         self.assertIn("Copy-FileVerified", activation_function)
@@ -79,18 +79,25 @@ class WindowsInstallerContractTests(unittest.TestCase):
     def test_candidate_activation_uses_identity_verified_same_volume_fast_path(self) -> None:
         text = self.read("install_windows.ps1")
         helper = text[text.index("function New-CandidateHardLinkVerified") : text.index("function Copy-CandidateToInstall")]
-        activation = text[text.index("function Copy-CandidateToInstall") : text.index("function Set-EnvSetting")]
+        tree_helper = text[text.index("function Copy-CandidateToInstallHardLinkTree") : text.index("function Copy-CandidateToInstall {")]
+        activation = text[text.index("function Copy-CandidateToInstall {") : text.index("function Set-EnvSetting")]
         self.assertIn("New-Item -ItemType HardLink", helper)
         self.assertIn("source_object_identity", helper)
         self.assertIn("destination_object_identity", helper)
         self.assertIn("copy_mode = 'hardlink'", helper)
+        self.assertIn("Get-InstallInventory -Path $destination -IncludeFiles", tree_helper)
+        self.assertIn("copy_mode = 'hardlink-tree'", tree_helper)
+        self.assertIn("Hardlink activation destination content mismatch", tree_helper)
         self.assertIn("New-CandidateHardLinkVerified", activation)
+        self.assertIn("Copy-CandidateToInstallHardLinkTree", activation)
         self.assertIn("Copy-FileVerified", activation)
 
     def test_install_inventory_accumulation_is_linear_for_large_venvs(self) -> None:
         text = self.read("install_windows.ps1")
         inventory = text[text.index("function Get-InstallInventory") : text.index("function Ensure-UserScopePoppler")]
         self.assertIn("System.Collections.Generic.List[string]", inventory)
+        self.assertIn("[switch]$IncludeFiles", inventory)
+        self.assertIn("file_records", inventory)
         self.assertIn("$fingerprints.Add(", inventory)
         self.assertIn("$fingerprints.ToArray()", inventory)
         self.assertNotIn("$fingerprints +=", inventory)
