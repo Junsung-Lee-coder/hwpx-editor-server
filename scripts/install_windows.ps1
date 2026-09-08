@@ -497,7 +497,17 @@ function Assert-TerminalReceiptBinding {
         }
     }
     elseif ($terminal.PSObject.Properties['snapshot_cleanup'] -or $terminal.PSObject.Properties['snapshot_path'] -or $terminal.PSObject.Properties['snapshot_identity']) {
-        throw 'Terminal receipt carries an unbound snapshot cleanup record.'
+        # PowerShell JSON round-tripping can retain null-valued snapshot
+        # properties on a preflight receipt. Null is not a cleanup record; any
+        # non-null snapshot value remains an unbound destructive claim.
+        $unboundSnapshotPath = [string](Get-OptionalPropertyValue -Object $terminal -Name 'snapshot_path')
+        $unboundSnapshotIdentity = [string](Get-OptionalPropertyValue -Object $terminal -Name 'snapshot_identity')
+        $unboundSnapshotCleanup = Get-OptionalPropertyValue -Object $terminal -Name 'snapshot_cleanup'
+        if (-not [string]::IsNullOrWhiteSpace($unboundSnapshotPath) -or
+            -not [string]::IsNullOrWhiteSpace($unboundSnapshotIdentity) -or
+            $null -ne $unboundSnapshotCleanup) {
+            throw 'Terminal receipt carries an unbound snapshot cleanup record.'
+        }
     }
 
     $receiptJournal = Get-OptionalPropertyValue -Object $terminal -Name 'transaction_journal'
@@ -692,6 +702,38 @@ function Invoke-StaleInstallTransactionRecovery {
             $receipt.recovery.outcome = 'terminal-failure-preserved-for-recovery'
             $script:staleTransactionRecoveryFailed = $true
             throw 'Stale terminal receipt records a failed rollback; preserving its recovery objects for explicit adjudication.'
+        }
+        if (-not $terminalReceiptPresent -and
+            -not (Test-TerminalTransactionRecoveryState -Journal $journal) -and
+            [string](Get-OptionalPropertyValue -Object $journal -Name 'terminal_status') -ceq 'FAIL_PREFLIGHT' -and
+            [int](Get-OptionalPropertyValue -Object $journal -Name 'terminal_status_code') -eq 10 -and
+            [string](Get-OptionalPropertyValue -Object $journal -Name 'terminal_cleanup_authorized') -ieq 'true' -and
+            [string](Get-OptionalPropertyValue -Object $journal -Name 'terminal_cleanup_state') -in @('journal-only-authorized-pending', 'authorized-pending')) {
+            # A controller can die before writing a preflight receipt. When the
+            # authenticated journal proves that no recovery object was created,
+            # remove only that empty journal; never infer permission to remove a
+            # snapshot or any install preimage.
+            $script:staleTransactionRecoveryFailed = $true
+            try {
+                Assert-PathObjectIdentity -Path $record.path -ExpectedIdentity $record.object_identity | Out-Null
+                Remove-PathIdentityExact -Path $record.path -ExpectedObjectIdentity $record.object_identity | Out-Null
+                if (Test-Path -LiteralPath $record.path) { throw 'Empty preflight terminal journal remained after exact cleanup.' }
+                $receipt.recovery.transaction_journal_cleanup = [ordered]@{
+                    path = [string]$record.path
+                    validated = $true
+                    removed = $true
+                    snapshot_cleanup = 'not-applicable'
+                }
+                $script:transactionJournalPath = $null
+                $script:transactionJournalIdentity = $null
+                $script:transactionJournalOwnerRun = $false
+                $script:staleTransactionRecoveryFailed = $false
+                $receipt.recovery.outcome = 'reconciled-empty-preflight-journal'
+                return
+            }
+            catch {
+                throw "Stale empty preflight cleanup failed closed; preserving the authenticated journal: $($_.Exception.Message)"
+            }
         }
         if ($terminalReceiptValid) {
             # Keep the old transaction protected until every bound cleanup

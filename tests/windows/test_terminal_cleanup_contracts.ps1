@@ -249,6 +249,9 @@ try {
         status_code = 10
         run_id = $preflightRunId
         install_root = $install
+        snapshot_path = $null
+        snapshot_identity = $null
+        snapshot_cleanup = $null
         terminal_cleanup = [ordered]@{
             schema_version = 'hwpx/windows-terminal-cleanup/v1'
             cleanup_authorized = $true

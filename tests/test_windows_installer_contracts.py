@@ -278,6 +278,9 @@ class WindowsInstallerContractTests(unittest.TestCase):
             "FAIL_PREFLIGHT",
             "without recovery state",
             "dependency_mutation_attempted",
+            "reconciled-empty-preflight-journal",
+            "snapshot_cleanup = 'not-applicable'",
+            "Null is not a cleanup record",
         ):
             with self.subTest(token=token):
                 self.assertIn(token, text)
