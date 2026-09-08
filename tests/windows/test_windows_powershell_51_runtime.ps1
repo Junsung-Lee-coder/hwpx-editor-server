@@ -19,6 +19,102 @@ $nonEmptyPath = Join-Path $candidateRoot 'proof.manifest.json'
 $emptyPath = Join-Path $candidateRoot 'empty.manifest.json'
 $pythonProcess = $null
 $verifierProcess = $null
+$journalDirectory = Join-Path ([Environment]::GetFolderPath([Environment+SpecialFolder]::LocalApplicationData)) 'HWPX\transactions'
+if ([string]::IsNullOrWhiteSpace([Environment]::GetFolderPath([Environment+SpecialFolder]::LocalApplicationData))) {
+    $journalDirectory = Join-Path ([System.IO.Path]::GetTempPath()) 'HWPX\transactions'
+}
+$openingJournalIdentities = @{}
+$ownedTransactionJournals = New-Object System.Collections.ArrayList
+
+function Get-TestTransactionJournalSnapshot {
+    $snapshot = @{}
+    if (-not (Test-Path -LiteralPath $journalDirectory -PathType Container)) { return $snapshot }
+    foreach ($item in @(Get-ChildItem -LiteralPath $journalDirectory -File -Filter '*.journal.json' -Force)) {
+        $key = $item.FullName.ToLowerInvariant()
+        $snapshot[$key] = [pscustomobject]@{
+            path = $item.FullName
+            object_identity = Get-PathObjectIdentity -Path $item.FullName -RequireExisting
+        }
+    }
+    return $snapshot
+}
+
+function Test-TestJournalRootWithinRun {
+    param([Parameter(Mandatory = $true)][string]$InstallRoot)
+    $runRoot = Get-CanonicalPath -Path $tempRoot
+    $candidateRoot = Get-CanonicalPath -Path $InstallRoot
+    return $candidateRoot -eq $runRoot -or $candidateRoot.StartsWith(
+        $runRoot + [IO.Path]::DirectorySeparatorChar,
+        [StringComparison]::OrdinalIgnoreCase
+    )
+}
+
+function Register-TestCreatedTransactionJournals {
+    # Claim only journal files that appeared after the opening snapshot, whose
+    # authenticated install root belongs to this unique test root, and whose
+    # record carries a self-consistent installer run owner. The closing
+    # snapshot's object identity is retained for the later delete boundary.
+    $closing = Get-TestTransactionJournalSnapshot
+    foreach ($key in @($closing.Keys)) {
+        if ($openingJournalIdentities.ContainsKey($key)) { continue }
+        $entry = $closing[$key]
+        $record = Read-StableTransactionJournal -Path $entry.path
+        if ($null -eq $record -or $null -eq $record.value) {
+            throw "Test-created transaction journal was not stably readable: $($entry.path)"
+        }
+        $recordRoot = Get-CanonicalPath -Path ([string]$record.value.install_root)
+        if (-not (Test-TestJournalRootWithinRun -InstallRoot $recordRoot)) {
+            throw "Unowned transaction journal residue remained after the test: $($entry.path)"
+        }
+        $expectedPath = Get-InstallTransactionJournalPath -InstallRoot $recordRoot
+        if ($expectedPath.ToLowerInvariant() -cne $key) {
+            throw "Transaction journal path was not derived from its recorded install root: $($entry.path)"
+        }
+        $ownerRunId = [string]$record.value.owner_run_id
+        $runId = [string]$record.value.run_id
+        if ([string]::IsNullOrWhiteSpace($ownerRunId) -or $ownerRunId -cne $runId) {
+            throw "Test-created transaction journal did not carry exact run ownership: $($entry.path)"
+        }
+        Assert-PathObjectIdentity -Path $entry.path -ExpectedIdentity $entry.object_identity | Out-Null
+        [void]$ownedTransactionJournals.Add([pscustomobject]@{
+            path = $entry.path
+            object_identity = $entry.object_identity
+            expected_install_root = $recordRoot
+            owner_run_id = $ownerRunId
+            run_id = $runId
+        })
+    }
+}
+
+function Remove-TestOwnedTransactionJournals {
+    foreach ($owned in @($ownedTransactionJournals)) {
+        if (-not (Test-Path -LiteralPath $owned.path -PathType Leaf)) { continue }
+        Assert-PathObjectIdentity -Path $owned.path -ExpectedIdentity $owned.object_identity | Out-Null
+        $record = Read-StableTransactionJournal -Path $owned.path
+        $recordRoot = Get-CanonicalPath -Path ([string]$record.value.install_root)
+        if ($recordRoot -cne [string]$owned.expected_install_root -or
+            [string]$record.value.owner_run_id -cne [string]$owned.owner_run_id -or
+            [string]$record.value.run_id -cne [string]$owned.run_id) {
+            throw "Test journal ownership changed before exact cleanup: $($owned.path)"
+        }
+        Remove-PathIdentityExact -Path $owned.path -ExpectedObjectIdentity $owned.object_identity | Out-Null
+        if (Test-Path -LiteralPath $owned.path) { throw "Test journal remained after exact cleanup: $($owned.path)" }
+    }
+    $closing = Get-TestTransactionJournalSnapshot
+    foreach ($key in @($openingJournalIdentities.Keys)) {
+        if (-not $closing.ContainsKey($key)) { throw "Opening transaction journal disappeared during the test: $key" }
+        if ([string]$closing[$key].object_identity -cne [string]$openingJournalIdentities[$key].object_identity) {
+            throw "Opening transaction journal identity changed during the test: $key"
+        }
+    }
+    foreach ($key in @($closing.Keys)) {
+        if (-not $openingJournalIdentities.ContainsKey($key)) {
+            throw "Unowned transaction journal residue remained after the test: $($closing[$key].path)"
+        }
+    }
+}
+
+$openingJournalIdentities = Get-TestTransactionJournalSnapshot
 try {
     New-Item -ItemType Directory -Force -Path $candidateRoot | Out-Null
     [IO.File]::WriteAllText($nonEmptyPath, '{"ok":true}', (New-Object Text.UTF8Encoding($false)))
@@ -232,13 +328,19 @@ function Get-VerifierPythonRuntimeIdentity {
     Write-Output 'WINDOWS_POWERSHELL_51_RUNTIME=PASS'
 }
 finally {
-    if ($null -ne $pythonProcess) {
-        Stop-Process -Id $pythonProcess.Id -Force -ErrorAction SilentlyContinue
+    try {
+        Register-TestCreatedTransactionJournals
+        Remove-TestOwnedTransactionJournals
     }
-    if ($null -ne $verifierProcess -and -not $verifierProcess.HasExited) {
-        Stop-Process -Id $verifierProcess.Id -Force -ErrorAction SilentlyContinue
-    }
-    if (Test-Path -LiteralPath $tempRoot) {
-        Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
+    finally {
+        if ($null -ne $pythonProcess) {
+            Stop-Process -Id $pythonProcess.Id -Force -ErrorAction SilentlyContinue
+        }
+        if ($null -ne $verifierProcess -and -not $verifierProcess.HasExited) {
+            Stop-Process -Id $verifierProcess.Id -Force -ErrorAction SilentlyContinue
+        }
+        if (Test-Path -LiteralPath $tempRoot) {
+            Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
     }
 }

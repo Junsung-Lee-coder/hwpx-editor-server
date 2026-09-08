@@ -78,12 +78,161 @@ class WindowsInstallerContractTests(unittest.TestCase):
     def test_install_snapshot_cleanup_follows_terminal_receipt_readback(self) -> None:
         text = self.read("install_windows.ps1")
         terminal_receipt = text[text.index("function Complete-InstallerTerminalReceipt") : text.index("function Write-InstallerTerminalSummary")]
-        receipt_write = terminal_receipt.index("Save-InstallerReceipt")
+        receipt_write = terminal_receipt.index("Save-InstallerReceipt", terminal_receipt.index("terminal-committing"))
         snapshot_cleanup = terminal_receipt.index("snapshot_cleanup")
-        remove_snapshot = terminal_receipt.index("Remove-PathIdentityExact -Path $receipt.snapshot_path", receipt_write)
+        remove_snapshot = terminal_receipt.index("Remove-InstallSnapshotExact", receipt_write)
         self.assertLess(snapshot_cleanup, receipt_write)
         self.assertLess(receipt_write, remove_snapshot)
         self.assertIn("terminal_readback", terminal_receipt[snapshot_cleanup:receipt_write])
+        self.assertIn("Read-StableTransactionJournal -Path $journalCleanupPath", terminal_receipt)
+        self.assertIn("Assert-TerminalReceiptBinding -Journal", terminal_receipt)
+        self.assertIn("terminal_receipt_readback", terminal_receipt)
+
+    def test_success_terminal_path_requests_exact_snapshot_and_journal_cleanup(self) -> None:
+        text = self.read("install_windows.ps1")
+        self.assertIn("Complete-InstallerTerminalReceipt -RemoveSnapshot:$true", text)
+        self.assertIn("Remove-InstallTransactionJournal", text)
+        self.assertIn("Remove-InstallSnapshotExact", text)
+
+    def test_terminal_cleanup_uses_verified_snapshot_owner_identity_and_hash(self) -> None:
+        text = self.read("windows_install_common.psm1")
+        helper = text[text.index("function Remove-InstallSnapshotExact") : text.index("function Restore-InstallSnapshot")]
+        for token in (
+            "Read-VerifiedInstallSnapshot",
+            "ExpectedSnapshotSha256",
+            "ExpectedSnapshotIdentity",
+            "ExpectedRunId",
+            "OwnedByRun",
+            "Assert-PathObjectIdentity",
+            "Remove-PathIdentityExact",
+        ):
+            with self.subTest(token=token):
+                self.assertIn(token, helper)
+
+    def test_stale_terminal_reconciliation_validates_receipt_snapshot_binding(self) -> None:
+        text = self.read("install_windows.ps1")
+        self.assertIn("function Assert-TerminalReceiptBinding", text)
+        binding = text[text.index("function Assert-TerminalReceiptBinding") : text.index("function Recover-StaleVerifierHandoff")]
+        for token in (
+            "Read-BoundedJsonObject",
+            "receipt_path",
+            "snapshot_path",
+            "snapshot_sha256",
+            "snapshot_identity",
+            "terminal_readback",
+            "status_code",
+            "run_id",
+            "Assert-PathObjectIdentity",
+            "status and status code do not match",
+        ):
+            with self.subTest(token=token):
+                self.assertIn(token, binding)
+        stale = text[text.index("if ($state -eq 'terminal-committing')") : text.index("if ($state -eq 'verifier-handoff-started')")]
+        self.assertIn("Assert-TerminalReceiptBinding", stale)
+        self.assertIn("Remove-InstallSnapshotExact", stale)
+
+    def test_terminal_cleanup_refuses_mismatch_without_deleting_bound_objects(self) -> None:
+        text = self.read("install_windows.ps1")
+        binding = text[text.index("function Assert-TerminalReceiptBinding") : text.index("function Recover-StaleVerifierHandoff")]
+        for token in (
+            "receipt path does not match",
+            "snapshot path does not match",
+            "snapshot SHA-256 does not match",
+            "snapshot object identity does not match",
+            "Terminal receipt readback is not trusted",
+            "throw",
+        ):
+            with self.subTest(token=token):
+                self.assertIn(token, binding)
+        stale = text[text.index("if ($state -eq 'terminal-committing')") : text.index("if ($state -eq 'verifier-handoff-started')")]
+        self.assertIn("$script:staleTransactionRecoveryFailed = $true", stale)
+        self.assertIn("preserving authenticated transaction objects", stale)
+        fail_closed = text[text.rindex("$receipt.errors = @($receipt.errors) + $message") : text.index("    if ($dependencyMutationAttempted)", text.rindex("$receipt.errors = @($receipt.errors) + $message"))]
+        self.assertIn("terminal-receipt-binding-mismatch", fail_closed)
+        self.assertIn("stale_receipt_preserved", fail_closed)
+        self.assertNotIn("Write-InstallTransactionJournal", fail_closed)
+
+    def test_g12_harness_records_bounded_recovery_provenance(self) -> None:
+        harness = (ROOT / "tests" / "windows" / "test_g12_preserve_move_fault_path.ps1").read_text(encoding="utf-8")
+        for token in (
+            "recovery_chain",
+            "timeout_budget_seconds",
+            "measured_elapsed_seconds",
+            "termination_requested",
+            "termination_confirmed",
+            "surviving_tasks",
+            "surviving_process",
+            "process_exit_confirmed",
+            "remote_harness",
+            "provenance",
+            "terminal_artifacts",
+            "cleanup",
+            "postcheck",
+        ):
+            with self.subTest(token=token):
+                self.assertIn(token, harness)
+        self.assertNotIn("Start-Process -Wait", harness)
+        self.assertNotIn("timeout_seconds = 900", harness)
+        self.assertNotIn("timeout_duration_seconds = 0", harness)
+
+    def test_terminal_cleanup_commit_is_authenticated_before_destructive_cleanup(self) -> None:
+        text = self.read("install_windows.ps1")
+        terminal = text[text.index("function Complete-InstallerTerminalReceipt") : text.index("function Write-InstallerTerminalSummary")]
+        for token in (
+            "terminal_cleanup_authorized",
+            "terminal_cleanup_state",
+            "terminal_cleanup_owner_run_id",
+            "Assert-TerminalReceiptBinding -Journal",
+            "-AllowCurrentRun",
+            "authorized-pending",
+            "preserve-for-recovery",
+            "recovery_required",
+            "after-journal-terminal-commit",
+            "after-terminal-receipt-commit",
+            "after-snapshot-cleanup",
+            "after-journal-cleanup",
+        ):
+            with self.subTest(token=token):
+                self.assertIn(token, terminal if token not in {"terminal_cleanup_authorized", "terminal_cleanup_state", "terminal_cleanup_owner_run_id"} else text)
+        auth = terminal.index("Assert-TerminalReceiptBinding -Journal")
+        destructive = terminal.index("Remove-InstallSnapshotExact")
+        self.assertLess(auth, destructive)
+        self.assertIn("$RemoveSnapshot = $false", terminal)
+
+    def test_terminal_status_cleanup_matrix_is_fail_closed(self) -> None:
+        text = self.read("install_windows.ps1")
+        binding = text[text.index("function Assert-TerminalReceiptBinding") : text.index("function Recover-StaleVerifierHandoff")]
+        for token in (
+            "PASS_RUNTIME_ONLY",
+            "ROLLED_BACK",
+            "status and status code do not match",
+            "Successful terminal receipt lacks an authorized cleanup state",
+            "Failed terminal receipt must preserve recovery state",
+            "Failed terminal receipt cannot authorize snapshot removal",
+            "cleanup_authorized",
+            "cleanup_state",
+        ):
+            with self.subTest(token=token):
+                self.assertIn(token, binding)
+
+        self.assertIn("FAIL_ROLLBACK_FAILED", text)
+
+    def test_stale_pre_activation_candidate_is_removed_before_task_restore(self) -> None:
+        text = self.read("install_windows.ps1")
+        stale = text[text.index("function Invoke-StaleInstallTransactionRecovery") : text.index("function Save-InstallerReceipt")]
+        for token in (
+            "dependency-install-started",
+            "candidate_root_identity",
+            "candidate_root_owned_by_run",
+            "Stop-InstallProcesses -RootPath $candidate",
+            "Remove-RunOwnedRoot -Path $candidate",
+            "pre_activation_candidate_removed",
+        ):
+            with self.subTest(token=token):
+                self.assertIn(token, stale)
+        candidate_cleanup = stale.index("Remove-RunOwnedRoot -Path $candidate")
+        task_restore = stale.index("Restore-InstallSnapshot", candidate_cleanup)
+        self.assertLess(candidate_cleanup, task_restore)
 
     def test_existing_env_preservation_is_hash_and_size_enforced(self) -> None:
         text = self.read("install_windows.ps1")

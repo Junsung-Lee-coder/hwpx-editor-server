@@ -1194,6 +1194,7 @@ function Write-StableTransactionJournal {
     $backupHoldPath = $backupPath + '.HOLD'
     $stream = $null
     $readbackValidated = $false
+    $targetIdentityAfterCommit = $null
     try {
         $stream = [System.IO.File]::Open($temporaryPath, [IO.FileMode]::CreateNew, [IO.FileAccess]::ReadWrite, [IO.FileShare]::Read)
         $stream.Write($bytes, 0, $bytes.Length)
@@ -1210,6 +1211,7 @@ function Write-StableTransactionJournal {
         else {
             [System.IO.File]::Move($temporaryPath, $target)
         }
+        $targetIdentityAfterCommit = Get-PathObjectIdentity -Path $target -RequireExisting
         Assert-NoReparsePath -Path $target | Out-Null
         $stableStream = $null
         try {
@@ -1221,6 +1223,7 @@ function Write-StableTransactionJournal {
         }
         $readback = [System.IO.File]::ReadAllText($target, $encoding)
         if ($readback -cne $payload) { throw "Install transaction journal readback differed: $target" }
+        Assert-PathObjectIdentity -Path $target -ExpectedIdentity $targetIdentityAfterCommit | Out-Null
         $readbackValidated = $true
         return Get-CanonicalPath -Path $target -RequireExisting
     }
@@ -3797,6 +3800,61 @@ function Wait-ScheduledTaskRunning {
     return $false
 }
 
+function Get-InstallApiHealth {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][int]$ApiPort
+    )
+    $uri = "http://127.0.0.1:$ApiPort/health"
+    $health = [ordered]@{
+        ok = $false
+        applicable = $true
+        uri = $uri
+        status_code = $null
+        status = $null
+        api_port = $null
+        error = $null
+    }
+    if ($ApiPort -lt 1 -or $ApiPort -gt 65535) {
+        $health.error = 'API port is outside the valid TCP range.'
+        return [pscustomobject]$health
+    }
+    try {
+        $response = Invoke-WebRequest -Uri $uri -Method Get -UseBasicParsing -TimeoutSec 2 -ErrorAction Stop
+        $health.status_code = [int]$response.StatusCode
+        $content = [string]$response.Content
+        if ($content.Length -gt 65536) { throw 'API health response exceeded the bounded readback size.' }
+        $payload = $content | ConvertFrom-Json
+        $health.status = [string](Get-OptionalPropertyValue -Object $payload -Name 'status')
+        $reportedPort = 0
+        [void][int]::TryParse([string](Get-OptionalPropertyValue -Object $payload -Name 'api_port'), [ref]$reportedPort)
+        if ($reportedPort -gt 0) { $health.api_port = $reportedPort }
+        $health.ok = ($health.status_code -eq 200 -and $health.status -ceq 'ok' -and $reportedPort -eq $ApiPort)
+        if (-not $health.ok) { $health.error = 'API health response did not match the expected status or port.' }
+    }
+    catch {
+        $health.error = Limit-Text -Value $_.Exception.Message -MaxChars 1024
+    }
+    return [pscustomobject]$health
+}
+
+function Wait-InstallApiHealth {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][int]$ApiPort,
+        [ValidateRange(1, 120)][int]$TimeoutSeconds = 30
+    )
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    $last = $null
+    do {
+        $last = Get-InstallApiHealth -ApiPort $ApiPort
+        if ([bool]$last.ok) { return $last }
+        Start-Sleep -Milliseconds 250
+    } while ((Get-Date) -lt $deadline)
+    if ($null -eq $last) { $last = Get-InstallApiHealth -ApiPort $ApiPort }
+    return $last
+}
+
 function Get-ReceiptPropertyValue {
     [CmdletBinding()]
     param(
@@ -3891,7 +3949,7 @@ function New-BoundedReceiptProjection {
     $projection = [ordered]@{}
     foreach ($name in @(
         'schema_version', 'status', 'failure_class', 'status_code', 'phase', 'source_root',
-        'install_root', 'candidate_root', 'candidate_generation', 'snapshot_path', 'snapshot_identity', 'snapshot_cleanup', 'backup_identity', 'api_base_url', 'api_port',
+        'install_root', 'candidate_root', 'candidate_generation', 'snapshot_path', 'snapshot_identity', 'snapshot_cleanup', 'terminal_receipt_readback', 'transaction_journal', 'transaction_journal_cleanup', 'backup_identity', 'api_base_url', 'api_port',
         'source_identity', 'candidate_identity', 'failed_predicates', 'failure_predicates',
         'failed_gates', 'failure', 'failure_detail', 'failure_reason', 'errors', 'cleanup',
         'rollback', 'processes_released', 'tasks_removed', 'listener', 'checks',
@@ -3920,7 +3978,7 @@ function New-MinimalReceiptProjection {
     $projection = [ordered]@{}
     foreach ($name in @(
         'schema_version', 'status', 'failure_class', 'status_code', 'phase', 'source_root',
-        'install_root', 'candidate_root', 'candidate_generation', 'snapshot_path', 'snapshot_identity', 'snapshot_cleanup', 'backup_identity', 'api_base_url', 'api_port',
+        'install_root', 'candidate_root', 'candidate_generation', 'snapshot_path', 'snapshot_identity', 'snapshot_cleanup', 'terminal_receipt_readback', 'transaction_journal', 'transaction_journal_cleanup', 'backup_identity', 'api_base_url', 'api_port',
         'source_identity', 'candidate_identity', 'failed_predicates', 'failure_predicates',
         'failed_gates', 'failure', 'failure_detail', 'failure_reason', 'errors', 'cleanup',
         'rollback', 'processes_released', 'tasks_removed'
@@ -4030,6 +4088,7 @@ function Write-JsonReceipt {
         if ($readbackPayload -cne $payload) {
             throw "JSON receipt readback did not match the atomically committed bytes: $Path"
         }
+        Assert-PathObjectIdentity -Path $readbackPath -ExpectedIdentity $targetIdentityAfterCommit | Out-Null
         try {
             ConvertFrom-Json -InputObject $readbackPayload | Out-Null
         }
@@ -4214,6 +4273,55 @@ function Read-VerifiedInstallSnapshot {
     return $snapshot
 }
 
+function Remove-InstallSnapshotExact {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$SnapshotPath,
+        [Parameter(Mandatory = $true)][string]$ExpectedSnapshotSha256,
+        [Parameter(Mandatory = $true)][string]$ExpectedSnapshotIdentity,
+        [Parameter(Mandatory = $true)][string]$ExpectedRunId,
+        [Parameter(Mandatory = $true)][bool]$OwnedByRun
+    )
+    if (-not $OwnedByRun) {
+        throw "Refusing to remove a rollback snapshot without authenticated run ownership: $SnapshotPath"
+    }
+    if ([string]::IsNullOrWhiteSpace($ExpectedSnapshotSha256) -or
+        [string]::IsNullOrWhiteSpace($ExpectedSnapshotIdentity) -or
+        [string]::IsNullOrWhiteSpace($ExpectedRunId)) {
+        throw "Rollback snapshot cleanup requires a sealed path, SHA-256, object identity, and owner run ID: $SnapshotPath"
+    }
+    $canonical = Get-CanonicalPath -Path $SnapshotPath
+    if (-not (Test-Path -LiteralPath $canonical -PathType Leaf)) {
+        return [pscustomobject]@{
+            path = $canonical
+            removed = $false
+            already_absent = $true
+            owner_run_id = $ExpectedRunId
+        }
+    }
+
+    # Parse and authenticate the immutable preimage before any delete. This
+    # binds the cleanup to the same schema, owner, bytes, and object identity
+    # that were sealed when the transaction admitted the snapshot.
+    Read-VerifiedInstallSnapshot -SnapshotPath $canonical -ExpectedSnapshotSha256 $ExpectedSnapshotSha256 -ExpectedSnapshotIdentity $ExpectedSnapshotIdentity -ExpectedRunId $ExpectedRunId | Out-Null
+    Assert-NoReparsePath -Path $canonical | Out-Null
+    Assert-PathObjectIdentity -Path $canonical -ExpectedIdentity $ExpectedSnapshotIdentity | Out-Null
+    if ((Get-Sha256Hex -Path $canonical) -cne ([string]$ExpectedSnapshotSha256).ToLowerInvariant()) {
+        throw "Rollback snapshot SHA-256 changed before exact cleanup: $canonical"
+    }
+    Assert-PathObjectIdentity -Path $canonical -ExpectedIdentity $ExpectedSnapshotIdentity | Out-Null
+    Remove-PathIdentityExact -Path $canonical -ExpectedObjectIdentity $ExpectedSnapshotIdentity | Out-Null
+    if (Test-Path -LiteralPath $canonical -PathType Leaf) {
+        throw "Rollback snapshot remained after exact cleanup: $canonical"
+    }
+    return [pscustomobject]@{
+        path = $canonical
+        removed = $true
+        already_absent = $false
+        owner_run_id = $ExpectedRunId
+    }
+}
+
 function Restore-InstallSnapshot {
     [CmdletBinding(SupportsShouldProcess = $true)]
     param(
@@ -4225,7 +4333,9 @@ function Restore-InstallSnapshot {
         [string]$ExpectedCandidateRootIdentity,
         [switch]$KeepCandidateRoot,
         [switch]$CandidateRootOwnedByRun,
-        [switch]$RestoreTasks
+        [switch]$RestoreTasks,
+        [Nullable[int]]$ExpectedApiPort,
+        [ValidateRange(1, 120)][int]$RuntimeTimeoutSeconds = 30
     )
     $snapshot = Read-VerifiedInstallSnapshot -SnapshotPath $SnapshotPath -ExpectedSnapshotSha256 $ExpectedSnapshotSha256 -ExpectedSnapshotIdentity $ExpectedSnapshotIdentity -ExpectedRunId $ExpectedRunId
     if ([string]$snapshot.schema_version -ne 'hwpx/windows-install-snapshot/v1' -or
@@ -4251,6 +4361,12 @@ function Restore-InstallSnapshot {
     if ($snapshot.PSObject.Properties.Name -contains 'processes') {
         $preservedProcessIdentities = @($snapshot.processes)
     }
+    $cleanupProcessIdentities = @($preservedProcessIdentities)
+    $restoredTaskReadback = New-Object System.Collections.ArrayList
+    $restoredProcessIdentities = @()
+    $runtimeHealthBeforeCleanup = $null
+    $runtimeHealthAfterCleanup = $null
+    $expectedRestoredModules = @()
     $processReleaseBeforeTasks = if ($CandidateRoot) {
         Stop-InstallProcesses -RootPath $CandidateRoot -PreserveProcessIdentities $preservedProcessIdentities
     }
@@ -4338,17 +4454,41 @@ function Restore-InstallSnapshot {
                 }
                 if ([string]$task.state -eq 'Running' -and [string]$restoredTask.State -ne 'Running') {
                     Start-ScheduledTask -TaskName $taskName -TaskPath $taskPath -ErrorAction Stop
+                    if (-not (Wait-ScheduledTaskRunning -TaskName $taskName -TaskPath $taskPath -TimeoutSeconds $RuntimeTimeoutSeconds)) {
+                        throw "Scheduled task did not reach Running after rollback: $taskName"
+                    }
                 }
                 elseif ([string]$task.state -ne 'Running' -and [string]$restoredTask.State -eq 'Running') {
                     Stop-ScheduledTask -TaskName $taskName -TaskPath $taskPath -ErrorAction Stop
+                    if (-not (Wait-ScheduledTaskInactive -TaskName $taskName -TaskPath $taskPath -TimeoutSeconds $RuntimeTimeoutSeconds)) {
+                        throw "Scheduled task remained Running after rollback: $taskName"
+                    }
                 }
                 $readbackTask = Get-ScheduledTaskExact -TaskName $taskName -TaskPath $taskPath
+                $readbackIdentity = Get-ScheduledTaskIdentity -TaskName $taskName -TaskPath $taskPath
                 if ([string]$task.state -eq 'Running' -and [string]$readbackTask.State -ne 'Running') {
                     throw "Scheduled task state was not restored to Running: $taskName"
                 }
                 if ([string]$task.state -ne 'Running' -and [string]$readbackTask.State -eq 'Running') {
                     throw "Scheduled task state was not restored to $($task.state): $taskName"
                 }
+                if (-not (Test-ScheduledTaskIdentityExact -Actual $readbackIdentity -Expected $task)) {
+                    throw "Scheduled task identity did not survive terminal rollback readback: $taskName"
+                }
+                if ([bool]$readbackIdentity.enabled -ne [bool]$task.enabled) {
+                    throw "Scheduled task enabled state was not restored at terminal readback: $taskName"
+                }
+                [void]$restoredTaskReadback.Add([pscustomobject]@{
+                    task_name = $taskName
+                    task_path = $taskPath
+                    expected_state = [string]$task.state
+                    actual_state = [string]$readbackTask.State
+                    expected_enabled = [bool]$task.enabled
+                    actual_enabled = [bool]$readbackIdentity.enabled
+                    task_identity_hash = [string]$readbackIdentity.task_identity_hash
+                    exact_identity = $true
+                    running_and_enabled = ([string]$task.state -ne 'Running' -or ([string]$readbackTask.State -eq 'Running' -and [bool]$readbackIdentity.enabled))
+                })
             }
             elseif (-not $task.exists) {
                 $currentTask = Get-ScheduledTaskExact -TaskName $taskName -TaskPath $taskPath -AllowMissing
@@ -4369,23 +4509,131 @@ function Restore-InstallSnapshot {
             }
         }
     }
-    if ($CandidateRoot -and (Test-Path -LiteralPath $CandidateRoot) -and (-not $KeepCandidateRoot) -and $CandidateRootOwnedByRun -and $PSCmdlet.ShouldProcess($CandidateRoot, 'Remove candidate install root')) {
-        if ([string]::IsNullOrWhiteSpace($ExpectedCandidateRootIdentity)) { throw "Candidate root stable object identity is missing: $CandidateRoot" }
-        Assert-PathObjectIdentity -Path $CandidateRoot -ExpectedIdentity $ExpectedCandidateRootIdentity | Out-Null
-        Remove-PathIdentityExact -Path $CandidateRoot -ExpectedObjectIdentity $ExpectedCandidateRootIdentity | Out-Null
-        if (Test-Path -LiteralPath $CandidateRoot) { throw "Candidate install root remained after rollback cleanup: $CandidateRoot" }
+    if ($RestoreTasks) {
+        foreach ($task in @($snapshot.tasks)) {
+            if (-not $task.exists -or [string]$task.state -ne 'Running') { continue }
+            $taskArguments = [string](Get-OptionalPropertyValue -Object $task -Name 'arguments')
+            if (Test-CommandLineModuleToken -CommandLine $taskArguments -ModuleName 'app.api_server') {
+                $expectedRestoredModules += 'app.api_server'
+            }
+            elseif (Test-CommandLineModuleToken -CommandLine $taskArguments -ModuleName 'app.worker') {
+                $expectedRestoredModules += 'app.worker'
+            }
+        }
+        $expectedRestoredModules = @($expectedRestoredModules | Sort-Object -Unique)
+    }
+    $apiHealthRequired = ($null -ne $ExpectedApiPort -and $expectedRestoredModules -contains 'app.api_server')
+    if ($CandidateRoot -and $expectedRestoredModules.Count -gt 0 -and -not $KeepCandidateRoot) {
+        throw 'Cannot remove a candidate root while restoring running root-bound tasks.'
+    }
+    $restoredProcessSnapshot = @()
+    if ($CandidateRoot -and $expectedRestoredModules.Count -gt 0) {
+        $expectedPython = Join-Path (Get-CanonicalPath -Path $CandidateRoot -RequireExisting) '.venv\Scripts\python.exe'
+        $processDeadline = (Get-Date).AddSeconds($RuntimeTimeoutSeconds)
+        $missingModules = @()
+        do {
+            $restoredProcessSnapshot = @(Get-InstallProcessSnapshot -RootPath $CandidateRoot -ExpectedPythonPath $expectedPython)
+            $missingModules = @($expectedRestoredModules | ForEach-Object {
+                $expectedModule = [string]$_
+                if (@($restoredProcessSnapshot | Where-Object { [string]$_.module -ceq $expectedModule }).Count -eq 0) {
+                    $expectedModule
+                }
+            })
+            if ($missingModules.Count -eq 0) { break }
+            Start-Sleep -Milliseconds 250
+        } while ((Get-Date) -lt $processDeadline)
+        if ($missingModules.Count -gt 0) {
+            throw "Restored root-bound process identities were not observed for module(s): $($missingModules -join ',')"
+        }
+        if (@($restoredProcessSnapshot | Where-Object { $_.module -notin $expectedRestoredModules }).Count -gt 0) {
+            throw 'Restored root-bound process snapshot contained an unexpected module.'
+        }
+        $restoredProcessIdentities = @($restoredProcessSnapshot)
+        $cleanupProcessIdentities = @($cleanupProcessIdentities) + @($restoredProcessIdentities)
+    }
+    if ($apiHealthRequired) {
+        $runtimeHealthBeforeCleanup = Wait-InstallApiHealth -ApiPort ([int]$ExpectedApiPort) -TimeoutSeconds $RuntimeTimeoutSeconds
+        if (-not $runtimeHealthBeforeCleanup.ok) {
+            throw 'Restored API was not healthy before rollback cleanup.'
+        }
     }
     $processReleaseAfterTasks = if ($CandidateRoot) {
-        Stop-InstallProcesses -RootPath $CandidateRoot -PreserveProcessIdentities $preservedProcessIdentities
+        # Re-snapshot identities created by restored tasks above. The sealed
+        # predecessor PIDs are necessarily stale after task restart; preserving
+        # only those old PIDs lets cleanup terminate the newly restored API and
+        # worker generations, which made the previous rollback receipt false.
+        Stop-InstallProcesses -RootPath $CandidateRoot -PreserveProcessIdentities $cleanupProcessIdentities
     }
     else {
         [pscustomobject]@{ ok = $true; RootPath = $null; root = $null; snapshot_count = 0; stopped = @(); race_released_process_ids = @(); preserved_process_ids = @(); remaining = @() }
     }
     $processesReleased = [bool]$processReleaseBeforeTasks.ok -and [bool]$processReleaseAfterTasks.ok
+    if (-not $processesReleased -or @($processReleaseAfterTasks.remaining).Count -gt 0) {
+        throw 'Candidate process handles were not fully released after rollback task restoration.'
+    }
+    $terminalProcessReadback = @()
+    $processesBound = $true
+    if ($CandidateRoot -and $expectedRestoredModules.Count -gt 0) {
+        $terminalProcessReadback = @(Get-InstallProcessSnapshot -RootPath $CandidateRoot -ExpectedPythonPath $expectedPython)
+        foreach ($module in @($expectedRestoredModules)) {
+            if (@($terminalProcessReadback | Where-Object { [string]$_.module -ceq [string]$module }).Count -eq 0) {
+                $processesBound = $false
+            }
+        }
+        if (@($terminalProcessReadback | Where-Object { $_.module -notin $expectedRestoredModules }).Count -gt 0) {
+            $processesBound = $false
+        }
+        foreach ($expectedProcess in @($restoredProcessIdentities)) {
+            $actualProcess = @($terminalProcessReadback | Where-Object { [int]$_.process_id -eq [int]$expectedProcess.process_id })
+            if ($actualProcess.Count -ne 1 -or -not (Test-InstallProcessIdentityMatch -Expected $expectedProcess -Actual $actualProcess[0])) {
+                $processesBound = $false
+            }
+        }
+        if (-not $processesBound) { throw 'Restored root-bound process identity did not survive terminal rollback readback.' }
+    }
+    if ($apiHealthRequired) {
+        $runtimeHealthAfterCleanup = Wait-InstallApiHealth -ApiPort ([int]$ExpectedApiPort) -TimeoutSeconds $RuntimeTimeoutSeconds
+        if (-not $runtimeHealthAfterCleanup.ok) {
+            throw 'Restored API was not healthy after rollback cleanup.'
+        }
+    }
+    else {
+        $runtimeHealthAfterCleanup = [pscustomobject]@{ ok = $true; applicable = $false; status_code = $null; status = $null; api_port = $null; error = $null }
+    }
+    $tasksExact = (@($restoredTaskReadback | Where-Object { -not [bool]$_.exact_identity }).Count -eq 0)
+    $tasksRunningAndEnabled = (@($restoredTaskReadback | Where-Object { -not [bool]$_.running_and_enabled }).Count -eq 0)
+    $apiHealthyAfterCleanup = (-not $apiHealthRequired -or [bool]$runtimeHealthAfterCleanup.ok)
+    $terminalReadback = [pscustomobject]@{
+        complete = ($tasksExact -and $tasksRunningAndEnabled -and $processesBound -and $apiHealthyAfterCleanup)
+        tasks_exact = $tasksExact
+        tasks_running_and_enabled = $tasksRunningAndEnabled
+        processes_bound = $processesBound
+        api_health_applicable = $apiHealthRequired
+        api_healthy_after_cleanup = $apiHealthyAfterCleanup
+        tasks = @($restoredTaskReadback)
+        processes = @($terminalProcessReadback)
+        api_health_before_cleanup = $runtimeHealthBeforeCleanup
+        api_health_after_cleanup = $runtimeHealthAfterCleanup
+    }
+    if (-not $terminalReadback.complete) { throw 'Rollback terminal readback did not satisfy every restoration predicate.' }
+    $candidateRootRemoved = $false
+    if ($CandidateRoot -and (Test-Path -LiteralPath $CandidateRoot) -and (-not $KeepCandidateRoot) -and $CandidateRootOwnedByRun -and $PSCmdlet.ShouldProcess($CandidateRoot, 'Remove candidate install root')) {
+        if ([string]::IsNullOrWhiteSpace($ExpectedCandidateRootIdentity)) { throw "Candidate root stable object identity is missing: $CandidateRoot" }
+        Assert-PathObjectIdentity -Path $CandidateRoot -ExpectedIdentity $ExpectedCandidateRootIdentity | Out-Null
+        Remove-PathIdentityExact -Path $CandidateRoot -ExpectedObjectIdentity $ExpectedCandidateRootIdentity | Out-Null
+        if (Test-Path -LiteralPath $CandidateRoot) { throw "Candidate install root remained after rollback cleanup: $CandidateRoot" }
+        $candidateRootRemoved = $true
+    }
     return [pscustomobject]@{
-        restored = $true
+        restored = [bool]$terminalReadback.complete
         snapshot_path = (Get-CanonicalPath -Path $SnapshotPath -RequireExisting)
         processes_released = $processesReleased
+        candidate_root_removed = $candidateRootRemoved
+        restored_tasks = @($restoredTaskReadback)
+        restored_processes = @($restoredProcessIdentities)
+        terminal_readback = $terminalReadback
+        api_health_before_cleanup = $runtimeHealthBeforeCleanup
+        api_health_after_cleanup = $runtimeHealthAfterCleanup
         process_release = [pscustomobject]@{
             before_tasks = $processReleaseBeforeTasks
             after_tasks = $processReleaseAfterTasks
@@ -4393,4 +4641,4 @@ function Restore-InstallSnapshot {
     }
 }
 
-Export-ModuleMember -Function Test-ProhibitedPrivateSourceMember, Test-ProhibitedSourceMember, Get-CanonicalPath, Get-PathObjectIdentity, Assert-PathObjectIdentity, Enter-InstallRootLock, Enter-MachineLifecycleLock, Enter-InstallLifecycleLock, Add-MachineLifecycleLockScope, Exit-InstallLifecycleLock, Exit-PathMutex, Enter-ReceiptPathLock, Assert-ReceiptPathAdmission, Get-InstallTransactionJournalPath, Write-StableTransactionJournal, Read-StableTransactionJournal, Assert-NoReparsePath, Assert-NoReparseSourcePath, Assert-WindowsSafeSourceRelativePath, Remove-PathIdentityExact, Move-PathIdentityExact, Get-Sha256Hex, Get-TextSha256, Get-OptionalPropertyValue, Copy-FileVerified, Test-NonEmptyFile, Invoke-NativeChecked, Get-SourceManifest, Get-ScheduledTaskIdentity, Get-ScheduledTaskExact, Test-ScheduledTaskIdentityExact, Stop-ScheduledTaskExactAndWait, Register-ScheduledTaskExactNoClobber, Assert-SafeScheduledTaskName, Assert-CanonicalScheduledTaskPath, Test-CanonicalTaskSettings, Test-CanonicalPathWithinRoot, Test-CommandLineModuleToken, Test-CommandLinePathToken, Test-CanonicalTaskActionBinding, Test-CanonicalProcessIdentity, Get-InstallProcessSnapshot, Get-ProcessGenerationIdentity, Stop-InstallProcesses, Wait-ScheduledTaskInactive, Wait-ScheduledTaskRunning, Resolve-WindowsPrincipalIdentity, Test-WindowsPrincipalEquivalent, Test-ScheduledTaskLogonTypeEquivalent, Test-ScheduledTaskRunLevelEquivalent, Write-JsonReceipt, Save-InstallSnapshot, Read-VerifiedInstallSnapshot, Restore-InstallSnapshot, Limit-Text, Read-BoundedText, Read-BoundedJsonObject, Get-ConfiguredEnvValue, Get-ConfiguredApiPort, Resolve-ApiPort
+Export-ModuleMember -Function Test-ProhibitedPrivateSourceMember, Test-ProhibitedSourceMember, Get-CanonicalPath, Get-PathObjectIdentity, Assert-PathObjectIdentity, Enter-InstallRootLock, Enter-MachineLifecycleLock, Enter-InstallLifecycleLock, Add-MachineLifecycleLockScope, Exit-InstallLifecycleLock, Exit-PathMutex, Enter-ReceiptPathLock, Assert-ReceiptPathAdmission, Get-InstallTransactionJournalPath, Write-StableTransactionJournal, Read-StableTransactionJournal, Assert-NoReparsePath, Assert-NoReparseSourcePath, Assert-WindowsSafeSourceRelativePath, Remove-PathIdentityExact, Move-PathIdentityExact, Get-Sha256Hex, Get-TextSha256, Get-OptionalPropertyValue, Copy-FileVerified, Test-NonEmptyFile, Invoke-NativeChecked, Get-SourceManifest, Get-ScheduledTaskIdentity, Get-ScheduledTaskExact, Test-ScheduledTaskIdentityExact, Stop-ScheduledTaskExactAndWait, Register-ScheduledTaskExactNoClobber, Assert-SafeScheduledTaskName, Assert-CanonicalScheduledTaskPath, Test-CanonicalTaskSettings, Test-CanonicalPathWithinRoot, Test-CommandLineModuleToken, Test-CommandLinePathToken, Test-CanonicalTaskActionBinding, Test-CanonicalProcessIdentity, Get-InstallProcessSnapshot, Get-ProcessGenerationIdentity, Stop-InstallProcesses, Wait-InstallApiHealth, Wait-ScheduledTaskInactive, Wait-ScheduledTaskRunning, Get-InstallApiHealth, Resolve-WindowsPrincipalIdentity, Test-WindowsPrincipalEquivalent, Test-ScheduledTaskLogonTypeEquivalent, Test-ScheduledTaskRunLevelEquivalent, Write-JsonReceipt, Save-InstallSnapshot, Read-VerifiedInstallSnapshot, Remove-InstallSnapshotExact, Restore-InstallSnapshot, Limit-Text, Read-BoundedText, Read-BoundedJsonObject, Get-ConfiguredEnvValue, Get-ConfiguredApiPort, Resolve-ApiPort

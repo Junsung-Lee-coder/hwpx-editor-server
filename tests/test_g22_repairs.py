@@ -884,6 +884,77 @@ class G22WindowsContractRepairTests(unittest.TestCase):
         self.assertIn("Register-ScheduledTask -TaskName $workerTaskName", registrations)
         self.assertIn("after-task-registrations", registrations)
 
+    def test_preserve_move_refreshes_restored_process_generations_before_cleanup(self) -> None:
+        common = self._read("windows_install_common.psm1")
+        restore = common[common.index("function Restore-InstallSnapshot") :]
+        self.assertIn("$cleanupProcessIdentities", restore)
+        self.assertIn("$restoredProcessIdentities", restore)
+        self.assertIn("Get-InstallProcessSnapshot -RootPath $CandidateRoot", restore)
+        self.assertIn("PreserveProcessIdentities $cleanupProcessIdentities", restore)
+        self.assertIn("Wait-InstallApiHealth", restore)
+        self.assertLess(
+            restore.index("$restoredProcessIdentities = @($restoredProcessSnapshot)"),
+            restore.index("Stop-InstallProcesses -RootPath $CandidateRoot -PreserveProcessIdentities $cleanupProcessIdentities"),
+        )
+
+    def test_rollback_receipt_requires_terminal_runtime_readback(self) -> None:
+        installer = self._read("install_windows.ps1")
+        rollback = installer[installer.index("if ($receipt.snapshot_path -and (Test-Path", installer.index("catch {")) :]
+        self.assertIn("-ExpectedApiPort ([int]$apiPort)", rollback)
+        self.assertIn("$receipt.rollback.terminal_readback = $restoreResult.terminal_readback", rollback)
+        self.assertIn("$rollbackTerminalReadbackComplete", rollback)
+        self.assertIn("-and [bool]$receipt.rollback.processes_released", rollback)
+
+    def test_transaction_journal_cleanup_preserves_script_scope_state(self) -> None:
+        installer = self._read("install_windows.ps1")
+        write = installer[installer.index("function Write-InstallTransactionJournal") : installer.index("function Remove-InstallTransactionJournal")]
+        remove = installer[installer.index("function Remove-InstallTransactionJournal") : installer.index("function Suspend-InstallerLifecycleLockForVerifier")]
+        self.assertIn("$script:transactionJournalPath", write)
+        self.assertIn("$script:transactionJournalIdentity", write)
+        self.assertIn("$script:transactionJournalOwnerRun", write)
+        self.assertIn("$script:transactionJournalPath", remove)
+        self.assertIn("$script:transactionJournalIdentity", remove)
+        self.assertIn("$script:transactionJournalOwnerRun", remove)
+
+    def test_windows_harnesses_clean_only_exact_owned_transaction_journals(self) -> None:
+        for relative in (
+            "tests/windows/test_g3_integrated_repairs.ps1",
+            "tests/windows/test_windows_powershell_51_runtime.ps1",
+        ):
+            harness = (ROOT / relative).read_text(encoding="utf-8")
+            with self.subTest(harness=relative):
+                self.assertIn("$openingJournalIdentities", harness)
+                self.assertIn("$ownedTransactionJournals", harness)
+                self.assertIn("Get-PathObjectIdentity", harness)
+                self.assertIn("Assert-PathObjectIdentity", harness)
+                self.assertIn("Remove-PathIdentityExact", harness)
+                self.assertIn("Unowned transaction journal residue remained", harness)
+                self.assertIn("Register-TestCreatedTransactionJournals", harness)
+                self.assertIn("Test-TestJournalRootWithinRun", harness)
+                self.assertIn("Remove-TestOwnedTransactionJournals", harness)
+
+    def test_g12_fault_path_harness_is_opt_in_and_has_no_manual_recovery(self) -> None:
+        harness = (ROOT / "tests" / "windows" / "test_g12_preserve_move_fault_path.ps1").read_text(encoding="utf-8")
+        self.assertIn("[switch]$RunInstallerFaultPath", harness)
+        self.assertIn("HWPX_TEST_INSTALL_FAULT", harness)
+        self.assertIn("after-task-registrations", harness)
+        self.assertIn("Start-Process -FilePath 'powershell.exe'", harness)
+        self.assertNotIn("Start-ScheduledTask", harness)
+
+    def test_terminal_cleanup_contract_has_truthful_snapshot_and_journal_postcheck(self) -> None:
+        harness = (ROOT / "tests" / "windows" / "test_terminal_cleanup_contracts.ps1").read_text(encoding="utf-8")
+        for token in (
+            "Get-TestRollbackSnapshotSnapshot",
+            "openingSnapshotIdentities",
+            "ownedRollbackSnapshots",
+            "rollback_snapshot_namespace",
+            "transaction_journal_namespace",
+            "Unrelated rollback snapshot",
+            "Final cleanup postcheck",
+        ):
+            with self.subTest(token=token):
+                self.assertIn(token, harness)
+
     def test_preserve_move_rechecks_port_after_predecessor_move(self) -> None:
         installer = self._read("install_windows.ps1")
         activation = installer[installer.index("$phase = 'activation'") :]

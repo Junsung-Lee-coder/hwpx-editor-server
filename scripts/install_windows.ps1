@@ -108,9 +108,10 @@ $receiptPreimageBackupIdentity = $null
 $receiptPreimageBackupSha256 = $null
 $receiptPreimageBackupSize = $null
 $receiptPreimageOwnedByRun = $false
-$transactionJournalPath = $null
-$transactionJournalIdentity = $null
-$transactionJournalOwnerRun = $false
+$script:transactionJournalPath = $null
+$script:transactionJournalIdentity = $null
+$script:transactionJournalOwnerRun = $false
+$script:staleTransactionRecoveryFailed = $false
 $verifierHandoffLock = $null
 $verifierHandoffActive = $false
 $verifierHandoffRoot = $null
@@ -141,7 +142,7 @@ $receipt = [ordered]@{
     native_commands = @()
     task_identities_before = @()
     task_identities_after = @()
-    rollback = [ordered]@{ attempted = $false; restored = $false; processes_released = $false; backup_root = $null; pre_swap_process_release = @(); candidate_tasks_removed = @() }
+    rollback = [ordered]@{ attempted = $false; restored = $false; processes_released = $false; backup_root = $null; pre_swap_process_release = @(); candidate_tasks_removed = @(); restored_tasks = @(); restored_processes = @(); terminal_readback = $null; api_health_before_cleanup = $null; api_health_after_cleanup = $null }
     install_root_preimage = [ordered]@{
         path = $installInputPath
         exists = [bool]$installRootExistedAtStart
@@ -197,23 +198,28 @@ function Get-InstallerTransactionJournalPayload {
         task_path = [string]$taskPath
         api_port = $apiPort
         receipt_path = [string]$receiptFile
+        terminal_cleanup_authorized = [bool](Get-OptionalPropertyValue -Object (Get-OptionalPropertyValue -Object $receipt -Name 'terminal_cleanup') -Name 'cleanup_authorized')
+        terminal_cleanup_state = [string](Get-OptionalPropertyValue -Object (Get-OptionalPropertyValue -Object $receipt -Name 'terminal_cleanup') -Name 'cleanup_state')
+        terminal_cleanup_owner_run_id = [string](Get-OptionalPropertyValue -Object (Get-OptionalPropertyValue -Object $receipt -Name 'terminal_cleanup') -Name 'owner_run_id')
+        terminal_status = [string]$receipt.status
+        terminal_status_code = [int]$receipt.status_code
     }
 }
 
 function Write-InstallTransactionJournal {
     param([string]$State = 'in_progress')
     if ([string]::IsNullOrWhiteSpace([string]$install)) { return $null }
-    if ([string]::IsNullOrWhiteSpace([string]$transactionJournalPath)) {
-        $transactionJournalPath = Get-InstallTransactionJournalPath -InstallRoot $install
+    if ([string]::IsNullOrWhiteSpace([string]$script:transactionJournalPath)) {
+        $script:transactionJournalPath = Get-InstallTransactionJournalPath -InstallRoot $install
     }
     $journalPayload = Get-InstallerTransactionJournalPayload -State $State
-    $written = Write-StableTransactionJournal -Path $transactionJournalPath -Value $journalPayload
-    $transactionJournalPath = $written
-    $transactionJournalIdentity = Get-PathObjectIdentity -Path $written -RequireExisting
-    $transactionJournalOwnerRun = $true
+    $written = Write-StableTransactionJournal -Path $script:transactionJournalPath -Value $journalPayload
+    $script:transactionJournalPath = $written
+    $script:transactionJournalIdentity = Get-PathObjectIdentity -Path $written -RequireExisting
+    $script:transactionJournalOwnerRun = $true
     $receipt.transaction_journal = [ordered]@{
         path = $written
-        object_identity = $transactionJournalIdentity
+        object_identity = $script:transactionJournalIdentity
         state = $State
         owner_run_id = $runId
     }
@@ -221,16 +227,231 @@ function Write-InstallTransactionJournal {
 }
 
 function Remove-InstallTransactionJournal {
-    if ([string]::IsNullOrWhiteSpace([string]$transactionJournalPath)) { return }
-    if (-not $transactionJournalOwnerRun) { throw 'Refusing to remove a transaction journal without current-run ownership.' }
-    if (Test-Path -LiteralPath $transactionJournalPath -PathType Leaf) {
-        Assert-PathObjectIdentity -Path $transactionJournalPath -ExpectedIdentity $transactionJournalIdentity | Out-Null
-        Remove-PathIdentityExact -Path $transactionJournalPath -ExpectedObjectIdentity $transactionJournalIdentity | Out-Null
-        if (Test-Path -LiteralPath $transactionJournalPath) { throw 'Transaction journal remained after terminal cleanup.' }
+    if ([string]::IsNullOrWhiteSpace([string]$script:transactionJournalPath)) { return }
+    if (-not $script:transactionJournalOwnerRun) { throw 'Refusing to remove a transaction journal without current-run ownership.' }
+    if (Test-Path -LiteralPath $script:transactionJournalPath) {
+        if (-not (Test-Path -LiteralPath $script:transactionJournalPath -PathType Leaf)) {
+            throw 'Refusing to remove a transaction journal that is not a regular file.'
+        }
+        Assert-NoReparsePath -Path $script:transactionJournalPath | Out-Null
+        Assert-PathObjectIdentity -Path $script:transactionJournalPath -ExpectedIdentity $script:transactionJournalIdentity | Out-Null
+        Remove-PathIdentityExact -Path $script:transactionJournalPath -ExpectedObjectIdentity $script:transactionJournalIdentity | Out-Null
+        if (Test-Path -LiteralPath $script:transactionJournalPath) { throw 'Transaction journal remained after terminal cleanup.' }
     }
-    $transactionJournalPath = $null
-    $transactionJournalIdentity = $null
-    $transactionJournalOwnerRun = $false
+    $script:transactionJournalPath = $null
+    $script:transactionJournalIdentity = $null
+    $script:transactionJournalOwnerRun = $false
+}
+
+function Assert-TerminalReceiptBinding {
+    param(
+        [Parameter(Mandatory = $true)][object]$Journal,
+        [Parameter(Mandatory = $true)][object]$Record,
+        [Parameter(Mandatory = $true)][string]$ReceiptPath,
+        [switch]$AllowCurrentRun
+    )
+    $journalOwner = [string](Get-OptionalPropertyValue -Object $Journal -Name 'owner_run_id')
+    $journalRun = [string](Get-OptionalPropertyValue -Object $Journal -Name 'run_id')
+    if ([string]::IsNullOrWhiteSpace($journalOwner) -or $journalOwner -cne $journalRun) {
+        throw 'Terminal transaction journal owner identity is missing or inconsistent.'
+    }
+    if (-not $AllowCurrentRun -and $journalOwner -ceq $runId) {
+        throw 'Terminal transaction journal owner collides with the current run.'
+    }
+    $journalInstall = [string](Get-OptionalPropertyValue -Object $Journal -Name 'install_root')
+    if ([string]::IsNullOrWhiteSpace($journalInstall)) { throw 'Terminal transaction journal install root is missing.' }
+    $journalInstallCanonical = Get-CanonicalPath -Path $journalInstall
+    $currentInstallCanonical = Get-CanonicalPath -Path $install
+    if (-not [string]::Equals($journalInstallCanonical, $currentInstallCanonical, [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'Terminal transaction journal install root does not match the current install root.'
+    }
+
+    $journalReceiptPath = [string](Get-OptionalPropertyValue -Object $Journal -Name 'receipt_path')
+    if ([string]::IsNullOrWhiteSpace($journalReceiptPath)) { throw 'Terminal transaction journal receipt path is missing.' }
+    $terminalCapture = Read-BoundedJsonObject -Path $ReceiptPath -MaxBytes 4194304
+    $expectedReceiptPath = Get-CanonicalPath -Path $journalReceiptPath -RequireExisting
+    if (-not [string]::Equals([string]$terminalCapture.path, $expectedReceiptPath, [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'Terminal receipt path does not match the journal-bound receipt path.'
+    }
+    $terminal = $terminalCapture.value
+    if ([string](Get-OptionalPropertyValue -Object $terminal -Name 'schema_version') -cne 'hwpx/windows-install/v1') {
+        throw 'Terminal receipt schema is invalid.'
+    }
+    if ([string](Get-OptionalPropertyValue -Object $terminal -Name 'run_id') -cne $journalOwner) {
+        throw 'Terminal receipt run identity does not match the journal owner.'
+    }
+    $terminalStatus = [string](Get-OptionalPropertyValue -Object $terminal -Name 'status')
+    if ($terminalStatus -notmatch '^(PASS_RUNTIME_ONLY|PASS|FAIL_[A-Z0-9_]+|ROLLED_BACK)$') {
+        throw 'Terminal receipt status is not terminal.'
+    }
+    $statusCodeText = [string](Get-OptionalPropertyValue -Object $terminal -Name 'status_code')
+    $statusCode = 0
+    if ([string]::IsNullOrWhiteSpace($statusCodeText) -or -not [int]::TryParse($statusCodeText, [ref]$statusCode) -or $statusCode -lt 0) {
+        throw 'Terminal receipt status code is missing or invalid.'
+    }
+    if (($terminalStatus -in @('PASS', 'PASS_RUNTIME_ONLY') -and $statusCode -ne 0) -or
+        ($terminalStatus -eq 'ROLLED_BACK' -and $statusCode -ne 40) -or
+        ($terminalStatus -like 'FAIL_*' -and $statusCode -lt 1)) {
+        throw 'Terminal receipt status and status code do not match.'
+    }
+
+    $journalCleanupAuthorizedText = [string](Get-OptionalPropertyValue -Object $Journal -Name 'terminal_cleanup_authorized')
+    $journalCleanupState = [string](Get-OptionalPropertyValue -Object $Journal -Name 'terminal_cleanup_state')
+    $journalCleanupOwner = [string](Get-OptionalPropertyValue -Object $Journal -Name 'terminal_cleanup_owner_run_id')
+    $journalTerminalStatus = [string](Get-OptionalPropertyValue -Object $Journal -Name 'terminal_status')
+    $journalTerminalStatusCodeText = [string](Get-OptionalPropertyValue -Object $Journal -Name 'terminal_status_code')
+    $journalTerminalStatusCode = 0
+    if ([string]::IsNullOrWhiteSpace($journalCleanupAuthorizedText) -or
+        [string]::IsNullOrWhiteSpace($journalCleanupState) -or
+        [string]::IsNullOrWhiteSpace($journalCleanupOwner) -or
+        [string]::IsNullOrWhiteSpace($journalTerminalStatus) -or
+        -not [int]::TryParse($journalTerminalStatusCodeText, [ref]$journalTerminalStatusCode)) {
+        throw 'Terminal transaction journal cleanup commitment is incomplete.'
+    }
+    $journalCleanupAuthorized = $null
+    if ($journalCleanupAuthorizedText -ieq 'true') { $journalCleanupAuthorized = $true }
+    elseif ($journalCleanupAuthorizedText -ieq 'false') { $journalCleanupAuthorized = $false }
+    else { throw 'Terminal transaction journal cleanup authorization is not boolean.' }
+    if ($journalCleanupOwner -cne $journalOwner -or
+        $journalTerminalStatus -cne $terminalStatus -or
+        $journalTerminalStatusCode -ne $statusCode) {
+        throw 'Terminal transaction journal cleanup commitment does not match the receipt status.'
+    }
+    $terminalCleanupProperty = $terminal.PSObject.Properties['terminal_cleanup']
+    if ($null -eq $terminalCleanupProperty) { throw 'Terminal receipt cleanup commitment is missing.' }
+    $terminalCleanup = $terminalCleanupProperty.Value
+    $cleanupAuthorizedText = [string](Get-OptionalPropertyValue -Object $terminalCleanup -Name 'cleanup_authorized')
+    $cleanupState = [string](Get-OptionalPropertyValue -Object $terminalCleanup -Name 'cleanup_state')
+    $cleanupOwner = [string](Get-OptionalPropertyValue -Object $terminalCleanup -Name 'owner_run_id')
+    $cleanupStatus = [string](Get-OptionalPropertyValue -Object $terminalCleanup -Name 'terminal_status')
+    $cleanupStatusCodeText = [string](Get-OptionalPropertyValue -Object $terminalCleanup -Name 'terminal_status_code')
+    $cleanupStatusCode = 0
+    if ([string]::IsNullOrWhiteSpace($cleanupAuthorizedText) -or
+        [string]::IsNullOrWhiteSpace($cleanupState) -or
+        [string]::IsNullOrWhiteSpace($cleanupOwner) -or
+        [string]::IsNullOrWhiteSpace($cleanupStatus) -or
+        -not [int]::TryParse($cleanupStatusCodeText, [ref]$cleanupStatusCode)) {
+        throw 'Terminal receipt cleanup commitment is incomplete.'
+    }
+    $cleanupAuthorized = $null
+    if ($cleanupAuthorizedText -ieq 'true') { $cleanupAuthorized = $true }
+    elseif ($cleanupAuthorizedText -ieq 'false') { $cleanupAuthorized = $false }
+    else { throw 'Terminal receipt cleanup authorization is not boolean.' }
+    if ($cleanupOwner -cne $journalOwner -or
+        $cleanupStatus -cne $terminalStatus -or
+        $cleanupStatusCode -ne $statusCode -or
+        $cleanupAuthorized -ne $journalCleanupAuthorized -or
+        $cleanupState -cne $journalCleanupState) {
+        throw 'Terminal receipt cleanup commitment does not match the journal.'
+    }
+    $successfulTerminal = $terminalStatus -in @('PASS', 'PASS_RUNTIME_ONLY', 'ROLLED_BACK')
+    if ($successfulTerminal) {
+        if (-not $cleanupAuthorized -or $cleanupState -notin @('authorized-pending', 'snapshot-cleaned', 'journal-cleaned')) {
+            throw 'Successful terminal receipt lacks an authorized cleanup state.'
+        }
+        if ($terminalStatus -eq 'ROLLED_BACK') {
+            $rollbackRecord = Get-OptionalPropertyValue -Object $terminal -Name 'rollback'
+            $rollbackRestoredText = [string](Get-OptionalPropertyValue -Object $rollbackRecord -Name 'restored')
+            if ($rollbackRestoredText -ine 'true') { throw 'ROLLED_BACK terminal receipt does not prove a restored rollback.' }
+        }
+    }
+    elseif ($terminalStatus -like 'FAIL_*') {
+        if ($cleanupAuthorized -or $cleanupState -ne 'preserve-for-recovery') {
+            throw 'Failed terminal receipt must preserve recovery state.'
+        }
+        $recoveryRequiredText = [string](Get-OptionalPropertyValue -Object $terminalCleanup -Name 'recovery_required')
+        if ($recoveryRequiredText -ine 'true') { throw 'Failed terminal receipt is missing recovery-required authorization.' }
+    }
+    else {
+        throw 'Terminal receipt status has no cleanup authorization rule.'
+    }
+
+    $journalSnapshotPath = [string](Get-OptionalPropertyValue -Object $Journal -Name 'snapshot_path')
+    $journalSnapshotSha256 = [string](Get-OptionalPropertyValue -Object $Journal -Name 'snapshot_sha256')
+    $journalSnapshotIdentity = [string](Get-OptionalPropertyValue -Object $Journal -Name 'snapshot_identity')
+    if (-not [string]::IsNullOrWhiteSpace($journalSnapshotPath)) {
+        if ([string]::IsNullOrWhiteSpace($journalSnapshotSha256) -or
+            $journalSnapshotSha256 -notmatch '^[0-9a-fA-F]{64}$' -or
+            [string]::IsNullOrWhiteSpace($journalSnapshotIdentity)) {
+            throw 'Terminal transaction journal snapshot binding is incomplete.'
+        }
+        $receiptSnapshotPath = [string](Get-OptionalPropertyValue -Object $terminal -Name 'snapshot_path')
+        $receiptSnapshot = Get-OptionalPropertyValue -Object $terminal -Name 'snapshot_identity'
+        $receiptSnapshotIdentityPath = [string](Get-OptionalPropertyValue -Object $receiptSnapshot -Name 'path')
+        $receiptSnapshotSha256 = [string](Get-OptionalPropertyValue -Object $receiptSnapshot -Name 'sha256')
+        $receiptSnapshotObjectIdentity = [string](Get-OptionalPropertyValue -Object $receiptSnapshot -Name 'object_identity')
+        $receiptSnapshotOwner = [string](Get-OptionalPropertyValue -Object $receiptSnapshot -Name 'owner_run_id')
+        if ([string]::IsNullOrWhiteSpace($receiptSnapshotPath) -or
+            [string]::IsNullOrWhiteSpace($receiptSnapshotIdentityPath) -or
+            [string]::IsNullOrWhiteSpace($receiptSnapshotSha256) -or
+            $receiptSnapshotSha256 -notmatch '^[0-9a-fA-F]{64}$' -or
+            [string]::IsNullOrWhiteSpace($receiptSnapshotObjectIdentity) -or
+            [string]::IsNullOrWhiteSpace($receiptSnapshotOwner)) {
+            throw 'Terminal receipt snapshot binding is incomplete.'
+        }
+        $journalSnapshotCanonical = Get-CanonicalPath -Path $journalSnapshotPath
+        $receiptSnapshotCanonical = Get-CanonicalPath -Path $receiptSnapshotPath
+        $receiptSnapshotIdentityCanonical = Get-CanonicalPath -Path $receiptSnapshotIdentityPath
+        if (-not [string]::Equals($journalSnapshotCanonical, $receiptSnapshotCanonical, [StringComparison]::OrdinalIgnoreCase) -or
+            -not [string]::Equals($journalSnapshotCanonical, $receiptSnapshotIdentityCanonical, [StringComparison]::OrdinalIgnoreCase)) {
+            throw 'Terminal receipt snapshot path does not match the journal-bound snapshot path.'
+        }
+        if ($receiptSnapshotSha256.ToLowerInvariant() -cne $journalSnapshotSha256.ToLowerInvariant()) {
+            throw 'Terminal receipt snapshot SHA-256 does not match the journal binding.'
+        }
+        if ($receiptSnapshotObjectIdentity -cne $journalSnapshotIdentity) {
+            throw 'Terminal receipt snapshot object identity does not match the journal binding.'
+        }
+        if ($receiptSnapshotOwner -cne $journalOwner) {
+            throw 'Terminal receipt snapshot owner identity does not match the journal owner.'
+        }
+        $snapshotCleanupProperty = $terminal.PSObject.Properties['snapshot_cleanup']
+        if ($null -eq $snapshotCleanupProperty) { throw 'Terminal receipt snapshot cleanup record is missing.' }
+        $snapshotCleanup = $snapshotCleanupProperty.Value
+        $cleanupPath = [string](Get-OptionalPropertyValue -Object $snapshotCleanup -Name 'path')
+        $cleanupReadbackText = [string](Get-OptionalPropertyValue -Object $snapshotCleanup -Name 'terminal_readback')
+        $cleanupRemovedText = [string](Get-OptionalPropertyValue -Object $snapshotCleanup -Name 'removed')
+        if ([string]::IsNullOrWhiteSpace($cleanupPath) -or
+            -not [string]::Equals((Get-CanonicalPath -Path $cleanupPath), $journalSnapshotCanonical, [StringComparison]::OrdinalIgnoreCase) -or
+            $cleanupReadbackText -ine 'true' -or
+            $cleanupRemovedText -ine 'true' -and $cleanupRemovedText -ine 'false') {
+            throw 'Terminal receipt readback is not trusted for snapshot cleanup.'
+        }
+        if (-not $cleanupAuthorized -and $cleanupRemovedText -ieq 'true') {
+            throw 'Failed terminal receipt cannot authorize snapshot removal.'
+        }
+    }
+    elseif ($terminal.PSObject.Properties['snapshot_cleanup'] -or $terminal.PSObject.Properties['snapshot_path'] -or $terminal.PSObject.Properties['snapshot_identity']) {
+        throw 'Terminal receipt carries an unbound snapshot cleanup record.'
+    }
+
+    $receiptJournal = Get-OptionalPropertyValue -Object $terminal -Name 'transaction_journal'
+    $receiptJournalPath = [string](Get-OptionalPropertyValue -Object $receiptJournal -Name 'path')
+    $receiptJournalIdentity = [string](Get-OptionalPropertyValue -Object $receiptJournal -Name 'object_identity')
+    $receiptJournalOwner = [string](Get-OptionalPropertyValue -Object $receiptJournal -Name 'owner_run_id')
+    if ([string]::IsNullOrWhiteSpace($receiptJournalPath) -or
+        [string]::IsNullOrWhiteSpace($receiptJournalIdentity) -or
+        [string]::IsNullOrWhiteSpace($receiptJournalOwner) -or
+        -not [string]::Equals((Get-CanonicalPath -Path $receiptJournalPath), [string]$Record.path, [StringComparison]::OrdinalIgnoreCase) -or
+        $receiptJournalIdentity -cne [string]$Record.object_identity -or
+        $receiptJournalOwner -cne $journalOwner) {
+        throw 'Terminal receipt journal binding does not match the authenticated journal object.'
+    }
+    if ([string]$Journal.candidate_generation -and
+        [string]$Journal.candidate_generation -cne [string](Get-OptionalPropertyValue -Object $terminal -Name 'candidate_generation')) {
+        throw 'Terminal receipt candidate generation does not match the journal binding.'
+    }
+    Assert-PathObjectIdentity -Path $Record.path -ExpectedIdentity $Record.object_identity | Out-Null
+    return [pscustomobject]@{ capture = $terminalCapture; value = $terminal; cleanup_authorized = [bool]$cleanupAuthorized; cleanup_state = $cleanupState }
+}
+
+function Invoke-InstallerCrashPoint {
+    param([Parameter(Mandatory = $true)][string]$Name)
+    if ([Environment]::GetEnvironmentVariable('HWPX_TEST_INSTALL_CRASH_POINT', 'Process') -ceq $Name) {
+        # Deliberately terminate without running catch/finally so the next
+        # invocation exercises the journal/receipt recovery boundary.
+        Stop-Process -Id $PID -Force
+    }
 }
 
 function Suspend-InstallerLifecycleLockForVerifier {
@@ -336,10 +557,10 @@ function Recover-StaleVerifierHandoff {
 
 function Invoke-StaleInstallTransactionRecovery {
     if ([string]::IsNullOrWhiteSpace([string]$install)) { return }
-    if ([string]::IsNullOrWhiteSpace([string]$transactionJournalPath)) {
-        $transactionJournalPath = Get-InstallTransactionJournalPath -InstallRoot $install
+    if ([string]::IsNullOrWhiteSpace([string]$script:transactionJournalPath)) {
+        $script:transactionJournalPath = Get-InstallTransactionJournalPath -InstallRoot $install
     }
-    $record = Read-StableTransactionJournal -Path $transactionJournalPath
+    $record = Read-StableTransactionJournal -Path $script:transactionJournalPath
     if ($null -eq $record) { return }
     $journal = $record.value
     $owner = [string]$journal.owner_run_id
@@ -361,38 +582,83 @@ function Invoke-StaleInstallTransactionRecovery {
         return
     }
     if ($state -eq 'terminal-committing') {
-        # terminal-committing is a recoverable intent, not proof that the
-        # receipt or its cleanup was durable. Reconcile it only when the
-        # journal-bound receipt has a valid terminal readback; otherwise let
-        # the normal snapshot rollback path adjudicate the interrupted run.
+        # terminal-committing is recoverable only when the receipt is an
+        # authenticated terminal record for this exact journal and snapshot.
+        # A present-but-mismatched receipt is not an invitation to roll back or
+        # delete anything: preserve the old run's objects for adjudication.
         $terminalReceiptPath = [string](Get-OptionalPropertyValue -Object $journal -Name 'receipt_path')
         $terminalReceiptValid = $false
-        if (-not [string]::IsNullOrWhiteSpace($terminalReceiptPath) -and (Test-Path -LiteralPath $terminalReceiptPath -PathType Leaf)) {
+        $terminalReceiptPresent = -not [string]::IsNullOrWhiteSpace($terminalReceiptPath) -and (Test-Path -LiteralPath $terminalReceiptPath)
+        if ($terminalReceiptPresent -and -not (Test-Path -LiteralPath $terminalReceiptPath -PathType Leaf)) {
+            $script:staleTransactionRecoveryFailed = $true
+            throw 'Stale terminal receipt path exists but is not a regular file; refusing cleanup.'
+        }
+        if ($terminalReceiptPresent) {
             try {
-                $terminalCapture = Read-BoundedJsonObject -Path $terminalReceiptPath -MaxBytes 4194304
-                $terminalValue = $terminalCapture.value
-                $terminalStatus = [string](Get-OptionalPropertyValue -Object $terminalValue -Name 'status')
-                $terminalReceiptValid = (
-                    [string](Get-OptionalPropertyValue -Object $terminalValue -Name 'schema_version') -ceq 'hwpx/windows-install/v1' -and
-                    [string](Get-OptionalPropertyValue -Object $terminalValue -Name 'run_id') -ceq $owner -and
-                    $terminalStatus -match '^(PASS|PASS_RUNTIME_ONLY|FAIL_|ROLLED_BACK)' -and
-                    [int](Get-OptionalPropertyValue -Object $terminalValue -Name 'status_code') -ge 0
-                )
+                $terminalBinding = Assert-TerminalReceiptBinding -Journal $journal -Record $record -ReceiptPath $terminalReceiptPath
+                $terminalReceiptValid = [bool]$terminalBinding.cleanup_authorized
+                $receipt.recovery.terminal_cleanup = [ordered]@{
+                    validated = $true
+                    cleanup_authorized = [bool]$terminalBinding.cleanup_authorized
+                    cleanup_state = [string]$terminalBinding.cleanup_state
+                }
             }
-            catch { $terminalReceiptValid = $false }
+            catch {
+                $script:staleTransactionRecoveryFailed = $true
+                throw "Stale terminal receipt binding validation failed; refusing cleanup: $($_.Exception.Message)"
+            }
+        }
+        if ($terminalReceiptPresent -and -not $terminalReceiptValid) {
+            # A fully authenticated failed terminal outcome is deliberately
+            # not cleanup authorization. Preserve the failed run's receipt,
+            # journal, and snapshot for explicit recovery; do not enter the
+            # ordinary stale snapshot reconciliation path, which would remove
+            # the journal and could strand the recovery preimage.
+            $receipt.recovery.outcome = 'terminal-failure-preserved-for-recovery'
+            $script:staleTransactionRecoveryFailed = $true
+            throw 'Stale terminal receipt records a failed rollback; preserving its recovery objects for explicit adjudication.'
         }
         if ($terminalReceiptValid) {
-            $generatedPath = [string](Get-OptionalPropertyValue -Object $journal -Name 'generated_manifest_path')
-            $generatedIdentity = [string](Get-OptionalPropertyValue -Object $journal -Name 'generated_manifest_identity')
-            $generatedSha256 = [string](Get-OptionalPropertyValue -Object $journal -Name 'generated_manifest_sha256')
-            $generatedOwned = [bool](Get-OptionalPropertyValue -Object $journal -Name 'generated_manifest_owned_by_run')
-            if ($generatedOwned -and $generatedPath) {
-                Remove-GeneratedSourceManifest -Path $generatedPath -ExpectedIdentity $generatedIdentity -ExpectedSha256 $generatedSha256 -OwnedByRun:$generatedOwned
+            # Keep the old transaction protected until every bound cleanup
+            # operation succeeds. If anything below fails, the outer catch
+            # must not overwrite the stale journal with a new run's record.
+            $script:staleTransactionRecoveryFailed = $true
+            try {
+                $terminalSnapshotPath = [string](Get-OptionalPropertyValue -Object $journal -Name 'snapshot_path')
+                $terminalSnapshotSha256 = [string](Get-OptionalPropertyValue -Object $journal -Name 'snapshot_sha256')
+                $terminalSnapshotIdentity = [string](Get-OptionalPropertyValue -Object $journal -Name 'snapshot_identity')
+                $terminalSnapshotCleanup = Remove-InstallSnapshotExact -SnapshotPath $terminalSnapshotPath -ExpectedSnapshotSha256 $terminalSnapshotSha256 -ExpectedSnapshotIdentity $terminalSnapshotIdentity -ExpectedRunId $owner -OwnedByRun:$true
+                $receipt.recovery.snapshot_cleanup = [ordered]@{
+                    path = $terminalSnapshotCleanup.path
+                    validated = $true
+                    removed = (-not [bool]$terminalSnapshotCleanup.already_absent)
+                    already_absent = [bool]$terminalSnapshotCleanup.already_absent
+                }
+                $generatedPath = [string](Get-OptionalPropertyValue -Object $journal -Name 'generated_manifest_path')
+                $generatedIdentity = [string](Get-OptionalPropertyValue -Object $journal -Name 'generated_manifest_identity')
+                $generatedSha256 = [string](Get-OptionalPropertyValue -Object $journal -Name 'generated_manifest_sha256')
+                $generatedOwned = [bool](Get-OptionalPropertyValue -Object $journal -Name 'generated_manifest_owned_by_run')
+                if ($generatedOwned -and $generatedPath) {
+                    Remove-GeneratedSourceManifest -Path $generatedPath -ExpectedIdentity $generatedIdentity -ExpectedSha256 $generatedSha256 -OwnedByRun:$generatedOwned
+                }
+                Assert-PathObjectIdentity -Path $record.path -ExpectedIdentity $record.object_identity | Out-Null
+                Remove-PathIdentityExact -Path $record.path -ExpectedObjectIdentity $record.object_identity | Out-Null
+                if (Test-Path -LiteralPath $record.path) { throw 'Stale terminal transaction journal remained after exact cleanup.' }
+                $receipt.recovery.transaction_journal_cleanup = [ordered]@{
+                    path = [string]$record.path
+                    validated = $true
+                    removed = $true
+                }
+                $script:transactionJournalPath = $null
+                $script:transactionJournalIdentity = $null
+                $script:transactionJournalOwnerRun = $false
+                $script:staleTransactionRecoveryFailed = $false
+                $receipt.recovery.outcome = 'reconciled-terminal-journal'
+                return
             }
-            Assert-PathObjectIdentity -Path $record.path -ExpectedIdentity $record.object_identity | Out-Null
-            Remove-PathIdentityExact -Path $record.path -ExpectedObjectIdentity $record.object_identity | Out-Null
-            $receipt.recovery.outcome = 'reconciled-terminal-journal'
-            return
+            catch {
+                throw "Stale terminal cleanup failed closed; preserving authenticated transaction objects: $($_.Exception.Message)"
+            }
         }
         # No trustworthy terminal receipt exists. Continue through the stale
         # snapshot recovery below, which removes run-owned candidate state and
@@ -499,6 +765,44 @@ function Invoke-StaleInstallTransactionRecovery {
         $candidateExists = $true
         $candidateIdentity = Get-PathObjectIdentity -Path $candidate -RequireExisting
     }
+    # Before activation, a separate candidate is a run-owned disposable root;
+    # the sealed predecessor snapshot/tasks belong to the restored install root.
+    # Remove that candidate, with process and identity proof, before asking the
+    # snapshot restorer to bring back root-bound tasks. Passing the candidate
+    # into Restore-InstallSnapshot would make its safety guard reject removing
+    # the candidate while restoring those tasks, leaving crash recovery stuck.
+    $preActivationCandidateStates = @(
+        'candidate-creating', 'candidate-created', 'candidate-copy-started',
+        'venv-creating', 'venv-created', 'dependency-install-started',
+        'dependency-install-complete', 'marker-writing',
+        'activation-root-creating', 'activation-root-created', 'activation-copy-started'
+    )
+    $preActivationCandidateRemoved = $false
+    $candidateRootOwnedByStaleRun = $candidateExists -and
+        $candidate -ine $install -and
+        $state -in $preActivationCandidateStates
+    if ($candidateRootOwnedByStaleRun) {
+        if ([string]::IsNullOrWhiteSpace($candidateIdentity)) {
+            throw 'Stale pre-activation candidate has no sealed object identity.'
+        }
+        $candidateProcessRelease = Stop-InstallProcesses -RootPath $candidate -PreserveProcessIds @()
+        if (-not $candidateProcessRelease.ok -or @($candidateProcessRelease.remaining).Count -gt 0) {
+            throw 'Stale pre-activation candidate processes were not fully released.'
+        }
+        Remove-RunOwnedRoot -Path $candidate -ExpectedPath $candidate -ExpectedObjectIdentity $candidateIdentity -OwnedByRun $true | Out-Null
+        $receipt.recovery.pre_activation_candidate_removed = [ordered]@{
+            path = $candidate
+            object_identity = $candidateIdentity
+            owner_run_id = $owner
+            candidate_root_owned_by_run = [bool]$candidateRootOwnedByStaleRun
+            process_release = $candidateProcessRelease
+            removed = $true
+        }
+        $preActivationCandidateRemoved = $true
+        $candidateExists = $false
+        $candidate = $null
+        $candidateIdentity = $null
+    }
     $restoreCandidate = $null
     $restoreCandidateIdentity = $null
     if ($installExists -and $installCreatedByRun -and -not $backupExists) {
@@ -514,7 +818,23 @@ function Invoke-StaleInstallTransactionRecovery {
     }
     $secondaryCandidate = if ($candidateExists -and $candidate -ne $restoreCandidate) { $candidate } else { $null }
     $secondaryCandidateIdentity = if ($secondaryCandidate) { $candidateIdentity } else { $null }
-    Restore-InstallSnapshot -SnapshotPath $journalSnapshot -ExpectedSnapshotSha256 $journalSnapshotSha -ExpectedSnapshotIdentity $journalSnapshotIdentity -ExpectedRunId $owner -CandidateRoot $restoreCandidate -ExpectedCandidateRootIdentity $restoreCandidateIdentity -CandidateRootOwnedByRun:$([bool]$restoreCandidate) -RestoreTasks | Out-Null
+    $staleApiPort = 0
+    [void][int]::TryParse([string](Get-OptionalPropertyValue -Object $journal -Name 'api_port'), [ref]$staleApiPort)
+    $restoreArguments = @{
+        SnapshotPath = $journalSnapshot
+        ExpectedSnapshotSha256 = $journalSnapshotSha
+        ExpectedSnapshotIdentity = $journalSnapshotIdentity
+        ExpectedRunId = $owner
+        CandidateRoot = $restoreCandidate
+        ExpectedCandidateRootIdentity = $restoreCandidateIdentity
+        CandidateRootOwnedByRun = [bool]$restoreCandidate
+        RestoreTasks = $true
+    }
+    if ($staleApiPort -gt 0) {
+        $restoreArguments.ExpectedApiPort = $staleApiPort
+        $restoreArguments.RuntimeTimeoutSeconds = 120
+    }
+    Restore-InstallSnapshot @restoreArguments | Out-Null
     if ($restoreCandidate -and (Test-Path -LiteralPath $restoreCandidate -PathType Container)) {
         Assert-PathObjectIdentity -Path $restoreCandidate -ExpectedIdentity $restoreCandidateIdentity | Out-Null
         Remove-PathIdentityExact -Path $restoreCandidate -ExpectedObjectIdentity $restoreCandidateIdentity | Out-Null
@@ -622,38 +942,101 @@ function Remove-GeneratedSourceManifest {
 
 function Complete-InstallerTerminalReceipt {
     param([bool]$RemoveSnapshot)
+    if ($script:staleTransactionRecoveryFailed) {
+        # A present-but-invalid stale terminal receipt must leave the previous
+        # journal and snapshot untouched. Persist only the current bounded
+        # failure receipt; do not let terminal completion overwrite the stale
+        # transaction namespace.
+        try { Save-InstallerReceipt | Out-Null } catch { }
+        return $false
+    }
+
+    $successfulTerminal = $receipt.status -in @('PASS', 'PASS_RUNTIME_ONLY', 'ROLLED_BACK')
+    if ($RemoveSnapshot -and $receipt.snapshot_path -and -not $successfulTerminal) {
+        # A failure receipt is never permission to discard the recovery
+        # preimage. This also protects callers that accidentally request
+        # cleanup before proving rollback success.
+        $RemoveSnapshot = $false
+        $receipt.status = 'FAIL_ROLLBACK_FAILED'
+        $receipt.failure_class = 'FAIL_ROLLBACK_FAILED'
+        $receipt.status_code = 99
+    }
+    $cleanupState = if ($RemoveSnapshot) { 'authorized-pending' } else { 'preserve-for-recovery' }
+    $receipt.terminal_cleanup = [ordered]@{
+        schema_version = 'hwpx/windows-terminal-cleanup/v1'
+        cleanup_authorized = [bool]$RemoveSnapshot
+        cleanup_state = $cleanupState
+        recovery_required = [bool](-not $RemoveSnapshot)
+        owner_run_id = $runId
+        terminal_status = [string]$receipt.status
+        terminal_status_code = [int]$receipt.status_code
+    }
     if ($snapshotPath) {
         $receipt.snapshot_cleanup = [ordered]@{
             path = $snapshotPath
+            # This flag means the pre-cleanup terminal receipt itself was
+            # durably read back, not that the snapshot has already been deleted.
             terminal_readback = $true
             removed = $false
         }
     }
+    $journalCleanupPath = $null
     try {
-        # First commit proves that the terminal receipt is durable. Current-run
-        # temporary preimages are not eligible for cleanup before this readback.
+        # Commit and authenticate the complete terminal decision before any
+        # snapshot, generated-manifest, preimage, or journal cleanup.
         Write-InstallTransactionJournal -State 'terminal-committing' | Out-Null
+        $journalCleanupPath = $script:transactionJournalPath
+        $receipt.transaction_journal_cleanup = [ordered]@{
+            path = $journalCleanupPath
+            removed = $false
+            cleanup_state = $cleanupState
+        }
         Save-InstallerReceipt | Out-Null
+        Invoke-InstallerCrashPoint -Name 'after-journal-terminal-commit'
+        $journalRecord = Read-StableTransactionJournal -Path $journalCleanupPath
+        if ($null -eq $journalRecord) { throw 'Terminal transaction journal disappeared before authentication.' }
+        $terminalBinding = Assert-TerminalReceiptBinding -Journal $journalRecord.value -Record $journalRecord -ReceiptPath $receiptFile -AllowCurrentRun
+        if ([bool]$terminalBinding.cleanup_authorized -ne [bool]$RemoveSnapshot) {
+            throw 'Terminal cleanup authorization changed during durable readback.'
+        }
+        $terminalReceiptCapture = $terminalBinding.capture
+        $terminalReceiptValue = $terminalBinding.value
+        $receipt.terminal_receipt_readback = [ordered]@{
+            path = [string]$terminalReceiptCapture.path
+            bytes = [int64]$terminalReceiptCapture.bytes
+            sha256 = [string]$terminalReceiptCapture.sha256
+            object_identity = [string]$terminalReceiptCapture.object_identity
+            schema_validated = $true
+            cleanup_authenticated = $true
+            run_id = [string]$terminalReceiptValue.run_id
+        }
+        # Persist the authenticated readback marker as its own replacement.
+        # A hard kill before this write leaves the previous receipt and the
+        # journal for conservative stale recovery; after it, restart may
+        # converge using the authenticated terminal decision.
+        Save-InstallerReceipt | Out-Null
+        Invoke-InstallerCrashPoint -Name 'after-terminal-receipt-commit'
     }
     catch {
         return $false
     }
+
+    if (-not $RemoveSnapshot) {
+        # Failed rollback/receipt cleanup keeps both recovery objects and
+        # explicitly advertises the safe recovery requirement. No destructive
+        # terminal cleanup is allowed from this state.
+        $receipt.safe_recovery_required = $true
+        try { Save-InstallerReceipt | Out-Null } catch { return $false }
+        return $true
+    }
+
     $cleanupErrors = @()
-    if ($RemoveSnapshot -and $receipt.snapshot_path -and (Test-Path -LiteralPath $receipt.snapshot_path -PathType Leaf)) {
+    if ($receipt.snapshot_path) {
         try {
-            if (-not $snapshotOwnedByRun) { throw 'Refusing to remove a snapshot without current-run ownership.' }
-            if ([string]::IsNullOrWhiteSpace($snapshotIdentity)) { throw 'Rollback snapshot stable object identity is missing before terminal cleanup.' }
-            Assert-NoReparsePath -Path $receipt.snapshot_path | Out-Null
-            Assert-PathObjectIdentity -Path $receipt.snapshot_path -ExpectedIdentity $snapshotIdentity | Out-Null
-            if ([string]::IsNullOrWhiteSpace($snapshotSha256) -or (Get-Sha256Hex -Path $receipt.snapshot_path) -cne $snapshotSha256) {
-                throw 'Rollback snapshot identity changed before terminal cleanup.'
-            }
-            Assert-PathObjectIdentity -Path $receipt.snapshot_path -ExpectedIdentity $snapshotIdentity | Out-Null
-            Remove-PathIdentityExact -Path $receipt.snapshot_path -ExpectedObjectIdentity $snapshotIdentity | Out-Null
-            if (Test-Path -LiteralPath $receipt.snapshot_path -PathType Leaf) {
-                throw 'Rollback snapshot remained after terminal receipt readback cleanup.'
-            }
-            $receipt.snapshot_cleanup.removed = $true
+            $snapshotCleanup = Remove-InstallSnapshotExact -SnapshotPath $receipt.snapshot_path -ExpectedSnapshotSha256 $snapshotSha256 -ExpectedSnapshotIdentity $snapshotIdentity -ExpectedRunId $runId -OwnedByRun:$snapshotOwnedByRun
+            $receipt.snapshot_cleanup.removed = -not [bool]$snapshotCleanup.already_absent
+            $receipt.snapshot_cleanup.already_absent = [bool]$snapshotCleanup.already_absent
+            Invoke-InstallerCrashPoint -Name 'after-snapshot-cleanup'
         }
         catch {
             $cleanupErrors += Limit-Text -Value $_.Exception.Message -MaxChars 4096
@@ -693,23 +1076,70 @@ function Complete-InstallerTerminalReceipt {
         $receipt.failure_class = 'FAIL_RECEIPT'
         $receipt.status_code = 99
         $receipt.receipt_cleanup_failed = $true
+        $receipt.safe_recovery_required = $true
+        $receipt.terminal_cleanup.cleanup_authorized = $false
+        $receipt.terminal_cleanup.cleanup_state = 'preserve-for-recovery'
+        $receipt.terminal_cleanup.recovery_required = $true
+        $receipt.terminal_cleanup.terminal_status = 'FAIL_RECEIPT'
+        $receipt.terminal_cleanup.terminal_status_code = 99
         $receipt.errors = @($receipt.errors) + $cleanupErrors
         try {
+            Write-InstallTransactionJournal -State 'terminal-recovery-required' | Out-Null
             Save-InstallerReceipt | Out-Null
         }
-        catch {
-            return $false
-        }
+        catch { }
         return $false
     }
     try {
-        # Persist the cleanup readback, including the explicit removed flags.
+        # Persist cleanup readback before removing the journal. If a crash
+        # occurs here, the authenticated success receipt remains restartable.
         Save-InstallerReceipt | Out-Null
-        if ($RemoveSnapshot) {
-            Remove-InstallTransactionJournal
-        }
     }
     catch {
+        $cleanupError = Limit-Text -Value $_.Exception.Message -MaxChars 4096
+        $receipt.status = 'FAIL_RECEIPT'
+        $receipt.failure_class = 'FAIL_RECEIPT'
+        $receipt.status_code = 99
+        $receipt.receipt_cleanup_failed = $true
+        $receipt.safe_recovery_required = $true
+        $receipt.terminal_cleanup.cleanup_authorized = $false
+        $receipt.terminal_cleanup.cleanup_state = 'preserve-for-recovery'
+        $receipt.terminal_cleanup.recovery_required = $true
+        $receipt.terminal_cleanup.terminal_status = 'FAIL_RECEIPT'
+        $receipt.terminal_cleanup.terminal_status_code = 99
+        $receipt.errors = @($receipt.errors) + $cleanupError
+        try { Write-InstallTransactionJournal -State 'terminal-recovery-required' | Out-Null; Save-InstallerReceipt | Out-Null } catch { }
+        return $false
+    }
+    Invoke-InstallerCrashPoint -Name 'after-snapshot-receipt-commit'
+    try {
+        Remove-InstallTransactionJournal
+        $receipt.transaction_journal_cleanup.removed = $true
+        $receipt.terminal_cleanup.cleanup_state = 'journal-cleaned'
+        Invoke-InstallerCrashPoint -Name 'after-journal-cleanup'
+        # The final receipt records the completed journal delete. If this write
+        # fails, the transaction is reported as a cleanup failure rather than
+        # as a successful install with an untruthful receipt.
+        Save-InstallerReceipt | Out-Null
+    }
+    catch {
+        $cleanupError = Limit-Text -Value $_.Exception.Message -MaxChars 4096
+        $receipt.status = 'FAIL_RECEIPT'
+        $receipt.failure_class = 'FAIL_RECEIPT'
+        $receipt.status_code = 99
+        $receipt.receipt_cleanup_failed = $true
+        $receipt.safe_recovery_required = $true
+        $receipt.terminal_cleanup.cleanup_authorized = $false
+        $receipt.terminal_cleanup.cleanup_state = 'preserve-for-recovery'
+        $receipt.terminal_cleanup.recovery_required = $true
+        $receipt.terminal_cleanup.terminal_status = 'FAIL_RECEIPT'
+        $receipt.terminal_cleanup.terminal_status_code = 99
+        $receipt.errors = @($receipt.errors) + $cleanupError
+        if ($receipt.transaction_journal_cleanup) {
+            $receipt.transaction_journal_cleanup.removed = $false
+            $receipt.transaction_journal_cleanup.error = $cleanupError
+        }
+        try { Save-InstallerReceipt | Out-Null } catch { }
         return $false
     }
     return $true
@@ -2600,7 +3030,7 @@ try {
     $receipt.status = if ($FixturePath) { 'PASS' } else { 'PASS_RUNTIME_ONLY' }
     $receipt.status_code = 0
     $receipt.completed_at_utc = [DateTime]::UtcNow.ToString('o')
-    $terminalReceiptOk = Complete-InstallerTerminalReceipt -RemoveSnapshot:$false
+    $terminalReceiptOk = Complete-InstallerTerminalReceipt -RemoveSnapshot:$true
     Exit-InstallLifecycleLock -Lock $installRootLock
     Write-InstallerTerminalSummary
     if ($terminalReceiptOk) { exit 0 }
@@ -2618,6 +3048,29 @@ catch {
         }
     }
     $receipt.errors = @($receipt.errors) + $message
+    if ($script:staleTransactionRecoveryFailed) {
+        # A stale terminal receipt binding failure is fail-closed. Do not
+        # write rollback-started state to the authenticated stale journal, do
+        # not delete its snapshot, and do not overwrite the stale receipt at
+        # the caller-selected path. Emit a separate bounded diagnostic record.
+        $receipt.status = 'FAIL_ACTIVATION'
+        $receipt.failure_class = 'FAIL_ACTIVATION'
+        $receipt.status_code = 30
+        $receipt.receipt_cleanup_failed = $true
+        if ($receipt.recovery) {
+            $receipt.recovery.outcome = 'terminal-receipt-binding-mismatch'
+            $receipt.recovery.fail_closed = $true
+            $receipt.recovery.stale_receipt_preserved = $receiptFile
+        }
+        $receiptFile = Join-Path ([System.IO.Path]::GetTempPath()) ('hwpx-install-stale-recovery-' + $runId + '.json')
+        if ($receipt.recovery) { $receipt.recovery.current_run_receipt_path = $receiptFile }
+        try { Save-InstallerReceipt | Out-Null } catch { }
+        if ($null -ne $installRootLock) {
+            try { Exit-InstallLifecycleLock -Lock $installRootLock } catch { }
+        }
+        Write-InstallerTerminalSummary -ErrorMessage $message
+        exit 99
+    }
     if ($dependencyMutationAttempted) {
         $dependencyMutationRetained = $true
         if ($receipt.checks.Contains('dependency_phase')) {
@@ -2774,11 +3227,16 @@ catch {
         $rollbackRoot = if ($rootMovedToBackup -or $candidateInstallCreated -or $reused) { $candidateRoot } else { $null }
         try {
             $keepRollbackRoot = $reused -or $rollbackBackupActivated
-            $restoreResult = Restore-InstallSnapshot -SnapshotPath $receipt.snapshot_path -ExpectedSnapshotSha256 $snapshotSha256 -ExpectedSnapshotIdentity $snapshotIdentity -ExpectedRunId $runId -CandidateRoot $rollbackRoot -ExpectedCandidateRootIdentity $candidateRootIdentity -KeepCandidateRoot:$keepRollbackRoot -CandidateRootOwnedByRun:($candidateRootOwnedByRun -and -not $reused) -RestoreTasks -Confirm:$false
+            $restoreResult = Restore-InstallSnapshot -SnapshotPath $receipt.snapshot_path -ExpectedSnapshotSha256 $snapshotSha256 -ExpectedSnapshotIdentity $snapshotIdentity -ExpectedRunId $runId -CandidateRoot $rollbackRoot -ExpectedCandidateRootIdentity $candidateRootIdentity -KeepCandidateRoot:$keepRollbackRoot -CandidateRootOwnedByRun:($candidateRootOwnedByRun -and -not $reused) -RestoreTasks -ExpectedApiPort ([int]$apiPort) -RuntimeTimeoutSeconds 45 -Confirm:$false
             $receipt.rollback.processes_released = [bool]$restoreResult.processes_released
             $receipt.rollback.process_release = $restoreResult.process_release
-            if (-not $restoreResult.processes_released) {
-                throw 'Candidate process handles were not fully released during rollback.'
+            $receipt.rollback.restored_tasks = $restoreResult.restored_tasks
+            $receipt.rollback.restored_processes = $restoreResult.restored_processes
+            $receipt.rollback.terminal_readback = $restoreResult.terminal_readback
+            $receipt.rollback.api_health_before_cleanup = $restoreResult.api_health_before_cleanup
+            $receipt.rollback.api_health_after_cleanup = $restoreResult.api_health_after_cleanup
+            if (-not $restoreResult.processes_released -or -not $restoreResult.restored -or -not $restoreResult.terminal_readback.complete) {
+                throw 'Rollback terminal readback did not prove released candidate processes and restored runtime state.'
             }
             $rollbackActions++
         }
@@ -2868,16 +3326,26 @@ catch {
     }
     try { Remove-RunPathClaim -ClaimPath $backupClaimPath -ExpectedObjectIdentity $backupClaimIdentity } catch { $rollbackErrors += $_.Exception.Message }
     try { Remove-RunPathClaim -ClaimPath $rollbackQuarantineClaimPath -ExpectedObjectIdentity $rollbackQuarantineClaimIdentity } catch { $rollbackErrors += $_.Exception.Message }
-    if ($rollbackActions -gt 0 -and $rollbackErrors.Count -eq 0) {
+    $rollbackTerminalReadbackComplete = ($null -ne $receipt.rollback.terminal_readback -and [bool]$receipt.rollback.terminal_readback.complete)
+    if ($rollbackActions -gt 0 -and $rollbackErrors.Count -eq 0 -and [bool]$receipt.rollback.processes_released -and $rollbackTerminalReadbackComplete) {
         $receipt.rollback.restored = $true
         $receipt.status = 'ROLLED_BACK'
         $receipt.status_code = 40
     }
     elseif ($rollbackErrors.Count -gt 0) {
         $receipt.rollback.restore_error = $rollbackErrors -join '; '
+        $receipt.status = 'FAIL_ROLLBACK_FAILED'
+        $receipt.failure_class = 'FAIL_ROLLBACK_FAILED'
+        $receipt.status_code = 99
+    }
+    elseif ($receipt.rollback.attempted -and -not [bool]$receipt.rollback.restored) {
+        $receipt.status = 'FAIL_ROLLBACK_FAILED'
+        $receipt.failure_class = 'FAIL_ROLLBACK_FAILED'
+        $receipt.status_code = 99
     }
     $receipt.completed_at_utc = [DateTime]::UtcNow.ToString('o')
-    $terminalReceiptOk = Complete-InstallerTerminalReceipt -RemoveSnapshot:($rollbackErrors.Count -eq 0 -and -not $script:receiptPersistenceFailed)
+    $rollbackSafeToCleanup = (-not $receipt.rollback.attempted -or [bool]$receipt.rollback.restored) -and $rollbackErrors.Count -eq 0 -and -not $script:receiptPersistenceFailed
+    $terminalReceiptOk = Complete-InstallerTerminalReceipt -RemoveSnapshot:$rollbackSafeToCleanup
     Exit-InstallLifecycleLock -Lock $installRootLock
     Write-InstallerTerminalSummary -ErrorMessage $message
     if ($terminalReceiptOk) { exit [int]$receipt.status_code }

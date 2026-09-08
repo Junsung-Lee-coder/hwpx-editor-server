@@ -2,6 +2,7 @@
   "schema_version": "hwpx/windows-powershell-suite-manifest/v1",
   "suites": [
     "test_g11_native_capture.ps1",
+    "test_g12_preserve_move_fault_path.ps1",
     "test_g13_receipt_unicode.ps1",
     "test_g16_install_ownership.ps1",
     "test_g18_native_job.ps1",
@@ -15,6 +16,7 @@
     "test_scheduled_task_extra_action.ps1",
     "test_scheduled_task_identity_equivalence.ps1",
     "test_store_python_alias_identity.ps1",
+    "test_terminal_cleanup_contracts.ps1",
     "test_venv_process_identity_and_receipt_bound.ps1",
     "test_versioned_python_process_snapshot.ps1",
     "test_verify_windows.ps1",

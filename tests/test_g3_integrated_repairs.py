@@ -125,7 +125,7 @@ class G3IntegratedRepairTests(unittest.TestCase):
         self.assertIn("requestedReceiptPath", text)
         self.assertIn("Assert-ReceiptPathAdmission", text)
         self.assertIn("Write-InstallTransactionJournal", text)
-        self.assertIn("-RemoveSnapshot:$false", text)
+        self.assertIn("-RemoveSnapshot:$true", text)
         self.assertLess(text.index("$phase = 'dependency'"), text.index("$poppler = Ensure-UserScopePoppler"))
 
     def test_verifier_binds_invocation_and_closing_generation(self) -> None:
