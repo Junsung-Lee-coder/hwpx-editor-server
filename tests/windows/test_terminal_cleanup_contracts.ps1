@@ -268,6 +268,21 @@ try {
     [void]$ownedRollbackSnapshots.Add([pscustomobject]@{ path = $failedSnapshotPath; object_identity = $failedSnapshotIdentity })
     [void]$ownedTransactionJournals.Add([pscustomobject]@{ path = $failedJournalPath; object_identity = $failedJournalRecord.object_identity })
 
+    # The preservation assertions above must observe both recovery objects,
+    # while the opening-namespace postcheck below must not treat this
+    # test-owned pair as unrelated residue. Clean them through the same exact
+    # identity-bound helpers before comparing the final namespace.
+    $failedSnapshotCleanup = Remove-InstallSnapshotExact `
+        -SnapshotPath $failedSnapshotPath `
+        -ExpectedSnapshotSha256 $failedSnapshotSha256 `
+        -ExpectedSnapshotIdentity $failedSnapshotIdentity `
+        -ExpectedRunId $failedRunId `
+        -OwnedByRun:$true
+    Assert-True ([bool]$failedSnapshotCleanup.removed -and -not (Test-Path -LiteralPath $failedSnapshotPath -PathType Leaf)) 'Test-owned failed rollback snapshot cleanup did not remove the exact object.'
+    Assert-PathObjectIdentity -Path $failedJournalRecord.path -ExpectedIdentity $failedJournalRecord.object_identity | Out-Null
+    Remove-PathIdentityExact -Path $failedJournalRecord.path -ExpectedObjectIdentity $failedJournalRecord.object_identity | Out-Null
+    Assert-True (-not (Test-Path -LiteralPath $failedJournalRecord.path -PathType Leaf)) 'Test-owned failed rollback journal cleanup did not remove the exact object.'
+
     # A valid failed terminal receipt must remain in the explicit-recovery
     # branch. It must not fall through to ordinary stale snapshot recovery,
     # whose journal cleanup is reserved for non-terminal transactions.
