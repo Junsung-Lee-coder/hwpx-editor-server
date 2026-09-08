@@ -272,6 +272,16 @@ class WindowsInstallerContractTests(unittest.TestCase):
             with self.subTest(token=token):
                 self.assertIn(token, binding)
 
+        for token in (
+            "Test-TerminalTransactionRecoveryState",
+            "journal-only-authorized-pending",
+            "FAIL_PREFLIGHT",
+            "without recovery state",
+            "dependency_mutation_attempted",
+        ):
+            with self.subTest(token=token):
+                self.assertIn(token, text)
+
         self.assertIn("FAIL_ROLLBACK_FAILED", text)
 
     def test_stale_pre_activation_candidate_is_removed_before_task_restore(self) -> None:

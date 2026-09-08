@@ -197,6 +197,79 @@ try {
     $staleBinding = Assert-TerminalReceiptBinding -Journal $staleJournalRecord.value -Record $staleJournalRecord -ReceiptPath $staleReceiptPath
     Assert-True ([bool]$staleBinding.cleanup_authorized) 'Authenticated successful terminal receipt did not authorize exact cleanup.'
 
+    # A preflight failure before any recovery object exists authorizes only
+    # journal cleanup. This covers the legacy authorized-pending state that can
+    # remain if the controller crashes before it records the newer explicit
+    # journal-only state.
+    $preflightRunId = 'terminal-cleanup-preflight-run'
+    $preflightReceiptPath = Join-Path $testRoot 'preflight-receipt.json'
+    $preflightJournalPath = Join-Path $journalRoot 'preflight.journal.json'
+    Write-StableTransactionJournal -Path $preflightJournalPath -Value ([ordered]@{
+        schema_version = 'hwpx/windows-install-transaction/v1'
+        run_id = $preflightRunId
+        owner_run_id = $preflightRunId
+        state = 'terminal-committing'
+        phase = 'preflight'
+        install_root = $install
+        candidate_generation = ''
+        candidate_root = ''
+        candidate_root_identity = ''
+        install_root_created_by_run = $false
+        backup_root = ''
+        backup_root_identity = ''
+        backup_root_owned_by_run = $false
+        backup_claim_path = ''
+        backup_claim_identity = ''
+        root_moved_to_backup = $false
+        snapshot_path = ''
+        snapshot_sha256 = ''
+        snapshot_identity = ''
+        generated_manifest_path = ''
+        generated_manifest_sha256 = ''
+        generated_manifest_identity = ''
+        generated_manifest_owned_by_run = $false
+        dependency_mutation_attempted = $false
+        dependency_mutation_retained = $false
+        task_names = @()
+        receipt_path = $preflightReceiptPath
+        terminal_cleanup_authorized = $true
+        terminal_cleanup_state = 'journal-only-authorized-pending'
+        terminal_cleanup_owner_run_id = $preflightRunId
+        terminal_status = 'FAIL_PREFLIGHT'
+        terminal_status_code = 10
+    }) | Out-Null
+    $preflightJournalRecord = Read-StableTransactionJournal -Path $preflightJournalPath
+    Write-JsonReceipt -Path $preflightReceiptPath -Value ([ordered]@{
+        schema_version = 'hwpx/windows-install/v1'
+        status = 'FAIL_PREFLIGHT'
+        failure_class = 'FAIL_PREFLIGHT'
+        status_code = 10
+        run_id = $preflightRunId
+        install_root = $install
+        terminal_cleanup = [ordered]@{
+            schema_version = 'hwpx/windows-terminal-cleanup/v1'
+            cleanup_authorized = $true
+            cleanup_state = 'journal-only-authorized-pending'
+            recovery_required = $false
+            owner_run_id = $preflightRunId
+            terminal_status = 'FAIL_PREFLIGHT'
+            terminal_status_code = 10
+        }
+        transaction_journal = [ordered]@{
+            path = $preflightJournalRecord.path
+            object_identity = $preflightJournalRecord.object_identity
+            owner_run_id = $preflightRunId
+        }
+        rollback = [ordered]@{ attempted = $false; restored = $false }
+    }) -NoProjection | Out-Null
+    $preflightBinding = Assert-TerminalReceiptBinding -Journal $preflightJournalRecord.value -Record $preflightJournalRecord -ReceiptPath $preflightReceiptPath
+    Assert-True ([bool]$preflightBinding.cleanup_authorized) 'Preflight failure without recovery state did not authorize journal-only cleanup.'
+    Assert-True ([string]$preflightBinding.cleanup_state -ceq 'journal-only-authorized-pending') 'Preflight journal-only cleanup state was not preserved.'
+    [void]$ownedTransactionJournals.Add([pscustomobject]@{ path = $preflightJournalRecord.path; object_identity = $preflightJournalRecord.object_identity })
+    Assert-PathObjectIdentity -Path $preflightJournalRecord.path -ExpectedIdentity $preflightJournalRecord.object_identity | Out-Null
+    Remove-PathIdentityExact -Path $preflightJournalRecord.path -ExpectedObjectIdentity $preflightJournalRecord.object_identity | Out-Null
+    Assert-True (-not (Test-Path -LiteralPath $preflightJournalRecord.path)) 'Preflight journal-only cleanup did not remove the exact journal.'
+
     # A failed rollback is terminal evidence, not deletion authority. The
     # validator must accept its preservation contract while returning a false
     # cleanup authorization, and both objects must remain available for safe
