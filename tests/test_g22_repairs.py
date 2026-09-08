@@ -938,7 +938,8 @@ class G22WindowsContractRepairTests(unittest.TestCase):
         self.assertIn("[switch]$RunInstallerFaultPath", harness)
         self.assertIn("HWPX_TEST_INSTALL_FAULT", harness)
         self.assertIn("after-task-registrations", harness)
-        self.assertIn("Start-Process -FilePath 'powershell.exe'", harness)
+        self.assertIn("System.Diagnostics.ProcessStartInfo", harness)
+        self.assertIn("RedirectStandardOutput = $true", harness)
         self.assertNotIn("Start-ScheduledTask", harness)
 
     def test_terminal_cleanup_contract_has_truthful_snapshot_and_journal_postcheck(self) -> None:

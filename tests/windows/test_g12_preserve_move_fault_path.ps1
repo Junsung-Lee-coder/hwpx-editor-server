@@ -126,12 +126,42 @@ function Get-G12ProcessCapture {
     }
 }
 
+function Start-G12InstallerProcess {
+    param(
+        [Parameter(Mandatory = $true)][string[]]$Arguments,
+        [Parameter(Mandatory = $true)][string]$WorkingDirectory,
+        [Parameter(Mandatory = $true)][string]$StdoutPath,
+        [Parameter(Mandatory = $true)][string]$StderrPath
+    )
+    $startInfo = New-Object System.Diagnostics.ProcessStartInfo
+    $startInfo.FileName = 'powershell.exe'
+    $argumentValues = @($Arguments | ForEach-Object { ConvertTo-NativeCommandLineArgument -Value $_ })
+    $startInfo.Arguments = [string]::Join(' ', [string[]]$argumentValues)
+    $startInfo.WorkingDirectory = Get-CanonicalPath -Path $WorkingDirectory -RequireExisting
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+    $process = New-Object System.Diagnostics.Process
+    $process.StartInfo = $startInfo
+    if (-not $process.Start()) { throw 'G12 installer process could not be started.' }
+    $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+    $stderrTask = $process.StandardError.ReadToEndAsync()
+    $process | Add-Member -NotePropertyName 'g12_stdout_task' -NotePropertyValue $stdoutTask
+    $process | Add-Member -NotePropertyName 'g12_stderr_task' -NotePropertyValue $stderrTask
+    $process | Add-Member -NotePropertyName 'g12_stdout_path' -NotePropertyValue $StdoutPath
+    $process | Add-Member -NotePropertyName 'g12_stderr_path' -NotePropertyValue $StderrPath
+    return $process
+}
+
 function Wait-G12InstallerProcessBounded {
     param(
         [Parameter(Mandatory = $true)][System.Diagnostics.Process]$Process,
         [Parameter(Mandatory = $true)][int]$TimeoutSeconds,
         [Parameter(Mandatory = $true)][string]$RuntimeRoot,
-        [Parameter(Mandatory = $true)][int]$RuntimePort
+        [Parameter(Mandatory = $true)][int]$RuntimePort,
+        [Parameter(Mandatory = $true)][string]$StdoutPath,
+        [Parameter(Mandatory = $true)][string]$StderrPath
     )
     $startedAt = [DateTime]::UtcNow
     $processId = [int]$Process.Id
@@ -178,6 +208,49 @@ function Wait-G12InstallerProcessBounded {
     if ($exitConfirmed) {
         try { $exitCode = [int]$Process.ExitCode } catch { $waitError = [string]$_.Exception.Message }
     }
+    $stdoutCaptureComplete = $false
+    $stderrCaptureComplete = $false
+    $stdoutCaptureError = $null
+    $stderrCaptureError = $null
+    $utf8 = New-Object Text.UTF8Encoding($false)
+    foreach ($stream in @(
+        [pscustomobject]@{ task = $Process.g12_stdout_task; path = $StdoutPath; name = 'stdout' },
+        [pscustomobject]@{ task = $Process.g12_stderr_task; path = $StderrPath; name = 'stderr' }
+    )) {
+        $complete = $false
+        try {
+            $complete = [bool]$stream.task.Wait(5000)
+            if ($complete) {
+                [IO.File]::WriteAllText($stream.path, [string]$stream.task.Result, $utf8)
+            }
+            else {
+                [IO.File]::WriteAllText($stream.path, '', $utf8)
+            }
+        }
+        catch {
+            [IO.File]::WriteAllText($stream.path, '', $utf8)
+            if ($stream.name -eq 'stdout') { $stdoutCaptureError = [string]$_.Exception.Message }
+            else { $stderrCaptureError = [string]$_.Exception.Message }
+        }
+        if ($stream.name -eq 'stdout') { $stdoutCaptureComplete = $complete }
+        else { $stderrCaptureComplete = $complete }
+    }
+    if (-not $stdoutCaptureComplete) {
+        $waitError = if ($waitError) { $waitError + '; ' } else { '' }
+        $waitError += 'stdout capture did not complete within the bounded drain window'
+    }
+    if (-not $stderrCaptureComplete) {
+        $waitError = if ($waitError) { $waitError + '; ' } else { '' }
+        $waitError += 'stderr capture did not complete within the bounded drain window'
+    }
+    if ($stdoutCaptureError) {
+        $waitError = if ($waitError) { $waitError + '; ' } else { '' }
+        $waitError += 'stdout capture error: ' + $stdoutCaptureError
+    }
+    if ($stderrCaptureError) {
+        $waitError = if ($waitError) { $waitError + '; ' } else { '' }
+        $waitError += 'stderr capture error: ' + $stderrCaptureError
+    }
     $survivingProcess = Get-G12ProcessCapture -ProcessId $processId -StartIdentity $startIdentity
     $survivingProcesses = @()
     $survivingTasks = @()
@@ -199,6 +272,8 @@ function Wait-G12InstallerProcessBounded {
         process_start_identity = $startIdentity
         process_exit_confirmed = [bool]$exitConfirmed
         exit_code = $exitCode
+        process_exit_code = $exitCode
+        process_exit_source = 'System.Diagnostics.Process.ExitCode after bounded wait/readback.'
         termination_grace_budget_seconds = if ($timeoutOccurred) { 15 } else { $null }
         termination_requested = if ($timeoutOccurred) { [bool]$terminationRequested } else { $null }
         termination_confirmed = if ($timeoutOccurred) { [bool]$terminationConfirmed } else { $null }
@@ -208,6 +283,10 @@ function Wait-G12InstallerProcessBounded {
         surviving_processes = if ($timeoutOccurred) { @($survivingProcesses) } else { @() }
         surviving_tasks = if ($timeoutOccurred) { @($survivingTasks) } else { @() }
         survivor_capture_complete = [bool]($timeoutOccurred -and ($null -ne $survivingProcess)) -or -not $timeoutOccurred
+        stdout_path = $StdoutPath
+        stderr_path = $StderrPath
+        stdout_capture_complete = [bool]$stdoutCaptureComplete
+        stderr_capture_complete = [bool]$stderrCaptureComplete
         provenance = 'Measured by the G12 controller on the same Windows host as the installer child process.'
     }
 }
@@ -335,8 +414,8 @@ try {
     $oldFault = [Environment]::GetEnvironmentVariable('HWPX_TEST_INSTALL_FAULT', 'Process')
     try {
         [Environment]::SetEnvironmentVariable('HWPX_TEST_INSTALL_FAULT', 'after-task-registrations', 'Process')
-        $installerProcess = Start-Process -FilePath 'powershell.exe' -ArgumentList $arguments -WorkingDirectory $source -RedirectStandardOutput $installerStdout -RedirectStandardError $installerStderr -PassThru -WindowStyle Hidden
-        $waitEvidence = Wait-G12InstallerProcessBounded -Process $installerProcess -TimeoutSeconds $ControllerTimeoutSeconds -RuntimeRoot $install -RuntimePort ([int]$ApiPort)
+        $installerProcess = Start-G12InstallerProcess -Arguments $arguments -WorkingDirectory $source -StdoutPath $installerStdout -StderrPath $installerStderr
+        $waitEvidence = Wait-G12InstallerProcessBounded -Process $installerProcess -TimeoutSeconds $ControllerTimeoutSeconds -RuntimeRoot $install -RuntimePort ([int]$ApiPort) -StdoutPath $installerStdout -StderrPath $installerStderr
         if ([bool]$waitEvidence.process_exit_confirmed) { $exitCode = [int]$waitEvidence.exit_code }
     }
     finally {
@@ -401,6 +480,9 @@ try {
         manual_task_recovery_not_used = $true
         controller_timeout_provenance_complete = ($null -ne $waitEvidence -and [bool]$waitEvidence.timeout_budget_enforced -and [string]$waitEvidence.owner -eq 'g12-controller' -and [double]$waitEvidence.measured_elapsed_seconds -ge 0 -and -not [string]::IsNullOrWhiteSpace([string]$waitEvidence.provenance))
         controller_process_exit_confirmed = ($null -ne $waitEvidence -and [bool]$waitEvidence.process_exit_confirmed)
+        controller_process_exit_readback = ($null -ne $waitEvidence -and [bool]$waitEvidence.process_exit_confirmed -and [int]$waitEvidence.process_exit_code -eq [int]$exitCode -and [string]$waitEvidence.process_exit_source -eq 'System.Diagnostics.Process.ExitCode after bounded wait/readback.')
+        controller_stdout_capture_complete = ($null -ne $waitEvidence -and [bool]$waitEvidence.stdout_capture_complete -and (Test-Path -LiteralPath $installerStdout -PathType Leaf))
+        controller_stderr_capture_complete = ($null -ne $waitEvidence -and [bool]$waitEvidence.stderr_capture_complete -and (Test-Path -LiteralPath $installerStderr -PathType Leaf))
         controller_timeout_fields_derived = ($null -ne $waitEvidence -and [int]$waitEvidence.timeout_budget_seconds -eq $ControllerTimeoutSeconds -and $null -ne $waitEvidence.started_at_utc -and $null -ne $waitEvidence.ended_at_utc)
     }
     $passed = (@($checks.GetEnumerator() | Where-Object { -not [bool]$_.Value }).Count -eq 0)

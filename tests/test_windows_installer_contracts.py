@@ -218,6 +218,20 @@ class WindowsInstallerContractTests(unittest.TestCase):
         self.assertNotIn("timeout_seconds = 900", harness)
         self.assertNotIn("timeout_duration_seconds = 0", harness)
 
+    def test_g12_harness_uses_direct_process_exit_with_redirected_output(self) -> None:
+        harness = (ROOT / "tests" / "windows" / "test_g12_preserve_move_fault_path.ps1").read_text(encoding="utf-8")
+        for token in (
+            "System.Diagnostics.ProcessStartInfo",
+            "UseShellExecute = $false",
+            "RedirectStandardOutput = $true",
+            "RedirectStandardError = $true",
+            "ReadToEndAsync",
+            "process_exit_code",
+        ):
+            with self.subTest(token=token):
+                self.assertIn(token, harness)
+        self.assertNotIn("Start-Process -FilePath 'powershell.exe' -ArgumentList $arguments", harness)
+
     def test_terminal_cleanup_commit_is_authenticated_before_destructive_cleanup(self) -> None:
         text = self.read("install_windows.ps1")
         terminal = text[text.index("function Complete-InstallerTerminalReceipt") : text.index("function Write-InstallerTerminalSummary")]
