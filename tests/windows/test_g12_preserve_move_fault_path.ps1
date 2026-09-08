@@ -37,6 +37,44 @@ function Assert-NonEmpty {
     if ([string]::IsNullOrWhiteSpace($Value)) { throw "$Name is required for the opt-in fault-path regression." }
 }
 
+function Append-G12NativeBackslashes {
+    param(
+        [Parameter(Mandatory = $true)][System.Text.StringBuilder]$Builder,
+        [Parameter(Mandatory = $true)][int]$Count
+    )
+    if ($Count -gt 0) {
+        [void]$Builder.Append([string]::new([char]92, $Count))
+    }
+}
+
+function ConvertTo-G12NativeCommandLineArgument {
+    [CmdletBinding()]
+    param([AllowNull()][object]$Value)
+
+    $text = if ($null -eq $Value) { '' } else { [string]$Value }
+    $builder = New-Object System.Text.StringBuilder
+    [void]$builder.Append([char]34)
+    $backslashes = 0
+    foreach ($character in $text.ToCharArray()) {
+        if ($character -eq [char]92) {
+            $backslashes++
+            continue
+        }
+        if ($character -eq [char]34) {
+            Append-G12NativeBackslashes -Builder $builder -Count ($backslashes * 2 + 1)
+            [void]$builder.Append([char]34)
+            $backslashes = 0
+            continue
+        }
+        Append-G12NativeBackslashes -Builder $builder -Count $backslashes
+        [void]$builder.Append($character)
+        $backslashes = 0
+    }
+    Append-G12NativeBackslashes -Builder $builder -Count ($backslashes * 2)
+    [void]$builder.Append([char]34)
+    return $builder.ToString()
+}
+
 function Get-TaskEvidence {
     param([Parameter(Mandatory = $true)][string]$TaskName, [string]$TaskPath = '\')
     $identity = Get-ScheduledTaskIdentity -TaskName $TaskName -TaskPath $TaskPath
@@ -135,7 +173,7 @@ function Start-G12InstallerProcess {
     )
     $startInfo = New-Object System.Diagnostics.ProcessStartInfo
     $startInfo.FileName = 'powershell.exe'
-    $argumentValues = @($Arguments | ForEach-Object { ConvertTo-NativeCommandLineArgument -Value $_ })
+    $argumentValues = @($Arguments | ForEach-Object { ConvertTo-G12NativeCommandLineArgument -Value $_ })
     $startInfo.Arguments = [string]::Join(' ', [string[]]$argumentValues)
     $startInfo.WorkingDirectory = Get-CanonicalPath -Path $WorkingDirectory -RequireExisting
     $startInfo.UseShellExecute = $false
