@@ -290,10 +290,16 @@ function Test-TerminalTransactionRecoveryState {
             return $true
         }
     }
-    $taskNames = @(Get-OptionalPropertyValue -Object $Journal -Name 'task_names')
-    if ($taskNames.Count -gt 0) { return $true }
-    $externalMutations = @(Get-OptionalPropertyValue -Object $Journal -Name 'external_mutations')
-    if ($externalMutations.Count -gt 0) { return $true }
+    $taskNamesValue = Get-OptionalPropertyValue -Object $Journal -Name 'task_names'
+    if ($null -ne $taskNamesValue) {
+        $taskNames = @($taskNamesValue | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) })
+        if ($taskNames.Count -gt 0) { return $true }
+    }
+    $externalMutationsValue = Get-OptionalPropertyValue -Object $Journal -Name 'external_mutations'
+    if ($null -ne $externalMutationsValue) {
+        $externalMutations = @($externalMutationsValue | Where-Object { $null -ne $_ })
+        if ($externalMutations.Count -gt 0) { return $true }
+    }
     return $false
 }
 
