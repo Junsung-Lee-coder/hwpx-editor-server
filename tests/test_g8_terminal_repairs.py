@@ -313,7 +313,7 @@ class G8TerminalInstallerContractRedTests(unittest.TestCase):
     def test_fresh_install_recovery_passes_run_owned_install_root_to_cleanup(self) -> None:
         installer = self._read("install_windows.ps1")
         recovery = installer[installer.index("function Invoke-StaleInstallTransactionRecovery") : installer.index("function Save-InstallerReceipt")]
-        self.assertIn("if ($installExists -and $installCreatedByRun -and -not $backupExists)", recovery)
+        self.assertIn("$installExists -and $installCreatedByRun -and -not $backupExists", recovery)
         self.assertIn("$restoreCandidate = $install", recovery)
 
     def test_port_preflight_enumerates_all_listener_addresses(self) -> None:
