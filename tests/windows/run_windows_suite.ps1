@@ -202,9 +202,14 @@ function Get-OutputStatus {
     $text = ''
     if (Test-Path -LiteralPath $StdoutPath -PathType Leaf) { $text += [IO.File]::ReadAllText($StdoutPath) }
     if (Test-Path -LiteralPath $StderrPath -PathType Leaf) { $text += "`n" + [IO.File]::ReadAllText($StderrPath) }
-    if ($text -match '(?im)\bSKIP\b') { return 'SKIP' }
-    if ($text -match '(?im)\bFAIL(?:ED|URE)?\b') { return 'FAIL' }
-    return 'PASS'
+    $matches = [regex]::Matches($text, '(?im)"status"\s*:\s*"(?<status>[^"\r\n]+)"')
+    if ($matches.Count -gt 0) {
+        $status = [string]$matches[$matches.Count - 1].Groups['status'].Value
+        if ($status -ceq 'SKIP') { return 'SKIP' }
+        if ($status -like 'FAIL*') { return 'FAIL' }
+        if ($status -like 'PASS*') { return 'PASS' }
+    }
+    return $null
 }
 
 $identity = Get-ManifestIdentity
@@ -318,7 +323,6 @@ $result = [ordered]@{
         timeout_enforced = $true
         runner_sha256 = $runnerSha256
     }
-    runner_sha256 = $runnerSha256
     crash_point_environment_key = 'HWPX_TEST_INSTALL_CRASH_POINT'
     manifest_declared_count = [int]$suites.Count
     eligible_count = [int]$rows.Count

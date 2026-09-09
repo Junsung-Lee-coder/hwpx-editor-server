@@ -96,7 +96,7 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           # run_windows_suite.ps1 owns the suite-manifest.json/eligible checks;
-          # G23 remains a required manifest member. CI is parser-only, so its
+          # test_g23_native_helper_repairs.ps1 remains a required manifest member. CI is parser-only, so its
           # explicit allowance does not turn a required native G12 skip into a
           # release acceptance result.
           $runner = Join-Path $PWD 'tests\windows\run_windows_suite.ps1'
