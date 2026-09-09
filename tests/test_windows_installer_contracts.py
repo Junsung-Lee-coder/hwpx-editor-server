@@ -314,6 +314,17 @@ class WindowsInstallerContractTests(unittest.TestCase):
         task_restore = stale.index("Restore-InstallSnapshot", candidate_cleanup)
         self.assertLess(candidate_cleanup, task_restore)
 
+    def test_stale_recovery_keeps_restored_predecessor_out_of_candidate_cleanup(self) -> None:
+        text = self.read("install_windows.ps1")
+        stale = text[text.index("function Invoke-StaleInstallTransactionRecovery") : text.index("function Save-InstallerReceipt")]
+        self.assertIn("$predecessorRestored = $false", stale)
+        self.assertIn("$predecessorRestored = $true", stale)
+        candidate_selection = stale.index("$restoreCandidate = $candidate")
+        fresh_selection = stale.index("$restoreCandidate = $install")
+        self.assertLess(candidate_selection, fresh_selection)
+        fresh_guard = stale[fresh_selection - 400 : fresh_selection]
+        self.assertIn("-not $predecessorRestored", fresh_guard)
+
     def test_existing_env_preservation_is_hash_and_size_enforced(self) -> None:
         text = self.read("install_windows.ps1")
         self.assertIn("[Nullable[int64]]$PreimageSize", text)

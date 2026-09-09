@@ -909,6 +909,7 @@ function Invoke-StaleInstallTransactionRecovery {
         Assert-PathObjectIdentity -Path $candidate -ExpectedIdentity $candidateIdentity | Out-Null
     }
     $recoveryQuarantine = "$install.recovery-$owner"
+    $predecessorRestored = $false
     if (-not $installExists -and $backupExists -and $candidate -eq $install -and (Test-Path -LiteralPath $recoveryQuarantine -PathType Container)) {
         if ([string]::IsNullOrWhiteSpace($candidateIdentity)) { throw 'Stale recovery quarantine has no sealed candidate identity.' }
         Assert-PathObjectIdentity -Path $recoveryQuarantine -ExpectedIdentity $candidateIdentity | Out-Null
@@ -934,6 +935,7 @@ function Invoke-StaleInstallTransactionRecovery {
         Move-PathIdentityExact -Source $backup -Destination $install -ExpectedObjectIdentity $backupIdentity | Out-Null
         $backupExists = $false
         $installExists = $true
+        $predecessorRestored = $true
         $candidate = $quarantine
         $candidateExists = $true
         $candidateIdentity = Get-PathObjectIdentity -Path $candidate -RequireExisting
@@ -978,16 +980,16 @@ function Invoke-StaleInstallTransactionRecovery {
     }
     $restoreCandidate = $null
     $restoreCandidateIdentity = $null
-    if ($installExists -and $installCreatedByRun -and -not $backupExists) {
+    if ($candidateExists -and $candidate -ne $install) {
+        $restoreCandidate = $candidate
+        $restoreCandidateIdentity = $candidateIdentity
+    }
+    elseif (-not $predecessorRestored -and $installExists -and $installCreatedByRun -and -not $backupExists) {
         # Fresh installs have no predecessor backup. The active install path
         # is still a run-owned candidate and must be passed to task/root
         # cleanup after a hard kill in any later journal state.
         $restoreCandidate = $install
         $restoreCandidateIdentity = $installIdentity
-    }
-    elseif ($candidateExists -and $candidate -ne $install) {
-        $restoreCandidate = $candidate
-        $restoreCandidateIdentity = $candidateIdentity
     }
     $secondaryCandidate = if ($candidateExists -and $candidate -ne $restoreCandidate) { $candidate } else { $null }
     $secondaryCandidateIdentity = if ($secondaryCandidate) { $candidateIdentity } else { $null }
