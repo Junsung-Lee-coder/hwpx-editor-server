@@ -1310,6 +1310,8 @@ class WindowsInstallerContractTests(unittest.TestCase):
         self.assertIn("$RunInstallerCrashMatrix", cleanup)
         self.assertIn("cases = @($cases.ToArray())", cleanup)
         self.assertIn("suites = @($rows.ToArray())", runner)
+        self.assertIn("$suiteTimeoutSeconds = [Math]::Max($PerTestTimeoutSeconds, 3600)", runner)
+        self.assertIn("terminal_crash_matrix_timeout_seconds", runner)
 
     def test_windows_suite_runner_accepts_zero_argument_suites(self) -> None:
         runner = (ROOT / "tests" / "windows" / "run_windows_suite.ps1").read_text(encoding="utf-8")

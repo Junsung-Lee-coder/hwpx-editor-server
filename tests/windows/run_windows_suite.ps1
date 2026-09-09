@@ -257,7 +257,14 @@ foreach ($suite in $suites) {
         $suiteArgs = @('-RunInstallerCrashMatrix', '-SourceRoot', $SourceRoot, '-InstallRoot', $InstallRoot, '-ApiPort', [string]$ApiPort, '-CrashEvidenceRoot', $crashEvidenceRoot, '-ExpectedRepository', $identity.repository, '-ExpectedCommit', $identity.commit, '-ExpectedTree', $identity.tree, '-ExpectedManifestSha256', $identity.manifest_sha256, '-CrashTimeoutSeconds', [string]$ControllerTimeoutSeconds)
         if ($FixturePath) { $suiteArgs += @('-FixturePath', $FixturePath) }
     }
-    $process = Invoke-BoundedSuiteProcess -ScriptPath $scriptPath -Arguments $suiteArgs -WorkingDirectory $SourceRoot -StdoutPath $stdoutPath -StderrPath $stderrPath -TimeoutSeconds $PerTestTimeoutSeconds -EnvironmentOverrides $environment
+    $suiteTimeoutSeconds = $PerTestTimeoutSeconds
+    if ($RunInstallerCrashMatrix -and $suite -ceq 'test_terminal_cleanup_contracts.ps1') {
+        # The real matrix runs five sequential bounded installer/restart
+        # cases. Keep each child bounded by CrashTimeoutSeconds while giving
+        # the enclosing suite process enough time to complete all cases.
+        $suiteTimeoutSeconds = [Math]::Max($PerTestTimeoutSeconds, 3600)
+    }
+    $process = Invoke-BoundedSuiteProcess -ScriptPath $scriptPath -Arguments $suiteArgs -WorkingDirectory $SourceRoot -StdoutPath $stdoutPath -StderrPath $stderrPath -TimeoutSeconds $suiteTimeoutSeconds -EnvironmentOverrides $environment
     $reportedStatus = Get-OutputStatus -StdoutPath $stdoutPath -StderrPath $stderrPath
     $processHealthy = [bool]($process.process_exit_confirmed -and $process.exit_code -eq 0 -and -not $process.timed_out -and $process.stdout_capture_complete -and $process.stderr_capture_complete)
     $outputStatus = if ($reportedStatus) { $reportedStatus } elseif ($processHealthy) { 'PASS' } else { 'FAIL' }
@@ -277,6 +284,7 @@ foreach ($suite in $suites) {
         started_at_utc = $process.started_at_utc
         ended_at_utc = $process.ended_at_utc
         measured_elapsed_seconds = $process.measured_elapsed_seconds
+        timeout_seconds = $suiteTimeoutSeconds
         exit_code = $process.exit_code
         process_exit_confirmed = $process.process_exit_confirmed
         timed_out = $process.timed_out
@@ -340,6 +348,7 @@ $result = [ordered]@{
     measured_elapsed_seconds = [Math]::Round(($endedAt - $startedAt).TotalSeconds, 3)
     per_test_timeout_seconds = $PerTestTimeoutSeconds
     timeout_enforced = $true
+    terminal_crash_matrix_timeout_seconds = if ($RunInstallerCrashMatrix) { [Math]::Max($PerTestTimeoutSeconds, 3600) } else { $null }
     output_root = $OutputRoot
     suites = @($rows.ToArray())
 }
