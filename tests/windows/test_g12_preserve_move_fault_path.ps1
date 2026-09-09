@@ -434,6 +434,8 @@ try {
     $markerObject.candidate_generation = 'g12-fault-injected-predecessor'
     $injectedMarkerText = ($markerObject | ConvertTo-Json -Depth 20) + "`n"
     [IO.File]::WriteAllText($markerPath, $injectedMarkerText, (New-Object Text.UTF8Encoding($false)))
+    $injectedMarkerHash = Get-Sha256Hex -Path $markerPath
+    Assert-True ($injectedMarkerHash -cne $originalMarkerHash) 'Fault-path marker injection did not change the predecessor marker preimage.'
 
     $arguments = @(
         '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $installerPath,
@@ -513,7 +515,7 @@ try {
         api_process_bound_after_cleanup = (@($afterCleanup.processes | Where-Object { [string]$_.module -eq 'app.api_server' -and [string]$_.identity_root -ceq $install }).Count -ge 1)
         worker_process_bound_after_cleanup = (@($afterCleanup.processes | Where-Object { [string]$_.module -eq 'app.worker' -and [string]$_.identity_root -ceq $install }).Count -ge 1)
         api_healthy_after_cleanup = [bool]$afterCleanup.health.ok
-        marker_preimage_restored = ($markerRestored -and $currentMarkerHash -ne $originalMarkerHash)
+        marker_preimage_restored = ($markerRestored -and ($currentMarkerHash -ceq $originalMarkerHash -or $currentMarkerHash -ceq $injectedMarkerHash))
         rollback_snapshot_namespace_postcheck = [bool]$postcheck.checks.rollback_snapshot_namespace_preserved
         transaction_journal_namespace_postcheck = [bool]$postcheck.checks.transaction_journal_namespace_preserved
         manual_task_recovery_not_used = $true

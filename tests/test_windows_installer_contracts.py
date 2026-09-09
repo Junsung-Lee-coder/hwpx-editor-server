@@ -237,6 +237,11 @@ class WindowsInstallerContractTests(unittest.TestCase):
         self.assertIn("$scriptText = Get-Content -LiteralPath $PSCommandPath -Raw", harness)
         self.assertIn("$scriptText.Contains($needle)", harness)
 
+    def test_g12_marker_preimage_accepts_installer_or_harness_restore(self) -> None:
+        harness = (ROOT / "tests" / "windows" / "test_g12_preserve_move_fault_path.ps1").read_text(encoding="utf-8")
+        self.assertIn("$injectedMarkerHash = Get-Sha256Hex -Path $markerPath", harness)
+        self.assertIn("$currentMarkerHash -ceq $originalMarkerHash -or $currentMarkerHash -ceq $injectedMarkerHash", harness)
+
     def test_terminal_cleanup_commit_is_authenticated_before_destructive_cleanup(self) -> None:
         text = self.read("install_windows.ps1")
         terminal = text[text.index("function Complete-InstallerTerminalReceipt") : text.index("function Write-InstallerTerminalSummary")]
