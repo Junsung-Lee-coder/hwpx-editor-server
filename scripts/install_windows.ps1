@@ -1305,7 +1305,7 @@ function Complete-InstallerTerminalReceipt {
         Remove-InstallTransactionJournal
         $receipt.transaction_journal_cleanup.removed = $true
         $receipt.transaction_journal_cleanup.cleanup_state = 'journal-cleaned'
-        $receipt.terminal_cleanup.cleanup_state = 'journal-cleaned'
+        $receipt.terminal_cleanup.cleanup_state = $receipt.transaction_journal_cleanup.cleanup_state
         # The final receipt records the completed journal delete. If this write
         # fails, the transaction is reported as a cleanup failure rather than
         # as a successful install with an untruthful receipt.

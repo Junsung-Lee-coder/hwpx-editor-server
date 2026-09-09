@@ -243,7 +243,6 @@ foreach ($suite in $suites) {
             $g12Result = Join-Path $OutputRoot 'g12-result.json'
             $g12Receipt = Join-Path $OutputRoot 'g12-installer-receipt.json'
             $suiteArgs = @('-RunInstallerFaultPath', '-SourceRoot', $SourceRoot, '-InstallRoot', $InstallRoot, '-ApiPort', [string]$ApiPort, '-ReceiptPath', $g12Receipt, '-ResultPath', $g12Result, '-ExpectedRepository', $identity.repository, '-ExpectedCommit', $identity.commit, '-ExpectedTree', $identity.tree, '-ExpectedManifestSha256', $identity.manifest_sha256, '-ControllerTimeoutSeconds', [string]$ControllerTimeoutSeconds)
-            if ($FixturePath) { $suiteArgs += @('-FixturePath', $FixturePath) }
             if ($PopplerPath) { $suiteArgs += @('-PopplerPath', $PopplerPath) }
             if ($null -ne $RemoteHarnessTimeoutSeconds) { $suiteArgs += @('-RemoteHarnessTimeoutSeconds', [string]$RemoteHarnessTimeoutSeconds) }
             $environment['HWPX_TEST_INSTALL_FAULT'] = 'after-task-registrations'
@@ -257,7 +256,6 @@ foreach ($suite in $suites) {
         $crashEvidenceRoot = Join-Path $OutputRoot 'terminal-crash-matrix'
         $suiteArgs = @('-RunInstallerCrashMatrix', '-SourceRoot', $SourceRoot, '-InstallRoot', $InstallRoot, '-ApiPort', [string]$ApiPort, '-CrashEvidenceRoot', $crashEvidenceRoot, '-ExpectedRepository', $identity.repository, '-ExpectedCommit', $identity.commit, '-ExpectedTree', $identity.tree, '-ExpectedManifestSha256', $identity.manifest_sha256, '-CrashTimeoutSeconds', [string]$ControllerTimeoutSeconds)
         if ($FixturePath) { $suiteArgs += @('-FixturePath', $FixturePath) }
-        if ($PopplerPath) { $suiteArgs += @('-PopplerPath', $PopplerPath) }
     }
     $process = Invoke-BoundedSuiteProcess -ScriptPath $scriptPath -Arguments $suiteArgs -WorkingDirectory $SourceRoot -StdoutPath $stdoutPath -StderrPath $stderrPath -TimeoutSeconds $PerTestTimeoutSeconds -EnvironmentOverrides $environment
     $reportedStatus = Get-OutputStatus -StdoutPath $stdoutPath -StderrPath $stderrPath

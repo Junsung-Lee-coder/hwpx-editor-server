@@ -1277,6 +1277,10 @@ class WindowsInstallerContractTests(unittest.TestCase):
         self.assertLess(delete_index, state_index)
         self.assertLess(state_index, save_index)
         self.assertLess(save_index, crash_index)
+        self.assertIn(
+            "$receipt.terminal_cleanup.cleanup_state = $receipt.transaction_journal_cleanup.cleanup_state",
+            terminal,
+        )
 
     def test_windows_suite_runner_executes_required_g12_and_rejects_skip(self) -> None:
         runner = (ROOT / "tests" / "windows" / "run_windows_suite.ps1").read_text(encoding="utf-8")
@@ -1310,6 +1314,18 @@ class WindowsInstallerContractTests(unittest.TestCase):
         invoke = runner[runner.index("function Invoke-BoundedSuiteProcess") : runner.index("function Get-OutputStatus")]
         self.assertIn("[AllowEmptyCollection()]", invoke)
         self.assertIn("[string[]]$Arguments = @()", invoke)
+
+    def test_windows_suite_runner_forwards_only_supported_suite_parameters(self) -> None:
+        runner = (ROOT / "tests" / "windows" / "run_windows_suite.ps1").read_text(encoding="utf-8")
+        g12_start = runner.index("if ($suite -ceq 'test_g12_preserve_move_fault_path.ps1')")
+        terminal_start = runner.index("elseif ($suite -ceq 'test_terminal_cleanup_contracts.ps1'", g12_start)
+        g12 = runner[g12_start:terminal_start]
+        terminal_end = runner.index("    $process = Invoke-BoundedSuiteProcess", terminal_start)
+        terminal = runner[terminal_start:terminal_end]
+        self.assertIn("'-PopplerPath'", g12)
+        self.assertNotIn("'-FixturePath'", g12)
+        self.assertIn("'-FixturePath'", terminal)
+        self.assertNotIn("'-PopplerPath'", terminal)
 
 
 if __name__ == "__main__":
