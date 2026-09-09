@@ -341,7 +341,7 @@ $result = [ordered]@{
     per_test_timeout_seconds = $PerTestTimeoutSeconds
     timeout_enforced = $true
     output_root = $OutputRoot
-    suites = @($rows)
+    suites = @($rows.ToArray())
 }
 $resultPath = Join-Path $OutputRoot 'suite-result.json'
 $result | ConvertTo-Json -Depth 40 | Set-Content -LiteralPath $resultPath -Encoding UTF8

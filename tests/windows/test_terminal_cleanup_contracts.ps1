@@ -237,7 +237,7 @@ function Invoke-RealInstallerCrashMatrix {
         [void]$cases.Add($case)
         if (-not $case.passed) { throw "Terminal crash matrix case failed: $point" }
     }
-    $matrix = [ordered]@{ schema = 'hwpx/windows-terminal-crash-matrix/v1'; source_root = $RuntimeSource; install_root = $RuntimeRoot; api_port = $RuntimePort; candidate_generation = ($ExpectedCommit + ':' + $ExpectedTree + ':' + $ExpectedManifestSha256); crash_points = $points; cases = @($cases); case_count = $cases.Count; passed_count = @($cases | Where-Object { $_.passed }).Count; failed_count = @($cases | Where-Object { -not $_.passed }).Count; overall_pass = (@($cases | Where-Object { -not $_.passed }).Count -eq 0); fixture_sha256_before = $beforeFixtureHash; fixture_sha256_after = if ($FixturePath) { Get-Sha256Hex -Path $FixturePath } else { $null } }
+    $matrix = [ordered]@{ schema = 'hwpx/windows-terminal-crash-matrix/v1'; source_root = $RuntimeSource; install_root = $RuntimeRoot; api_port = $RuntimePort; candidate_generation = ($ExpectedCommit + ':' + $ExpectedTree + ':' + $ExpectedManifestSha256); crash_points = $points; cases = @($cases.ToArray()); case_count = $cases.Count; passed_count = @($cases | Where-Object { $_.passed }).Count; failed_count = @($cases | Where-Object { -not $_.passed }).Count; overall_pass = (@($cases | Where-Object { -not $_.passed }).Count -eq 0); fixture_sha256_before = $beforeFixtureHash; fixture_sha256_after = if ($FixturePath) { Get-Sha256Hex -Path $FixturePath } else { $null } }
     $matrix | ConvertTo-Json -Depth 45 | Set-Content -LiteralPath (Join-Path $EvidenceRoot 'matrix-result.json') -Encoding UTF8
     return $matrix
 }
