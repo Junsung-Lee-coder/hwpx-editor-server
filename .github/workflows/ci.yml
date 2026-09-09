@@ -95,20 +95,13 @@ jobs:
         shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'
-          $manifestPath = Join-Path $PWD 'tests\windows\suite-manifest.json'
-          $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
-          if ([string]$manifest.schema_version -ne 'hwpx/windows-powershell-suite-manifest/v1') { throw 'PowerShell suite manifest schema is invalid.' }
-          $suites = @($manifest.suites | ForEach-Object { [string]$_ })
-          $eligible = @(Get-ChildItem -LiteralPath (Join-Path $PWD 'tests\windows') -File -Filter 'test_*.ps1' | Sort-Object Name | ForEach-Object { $_.Name })
-          if (($suites | Sort-Object | Select-Object -Unique).Count -ne $suites.Count) { throw 'PowerShell suite manifest contains duplicate entries.' }
-          if ($suites -notcontains 'test_g23_native_helper_repairs.ps1') { throw 'PowerShell suite manifest omitted the G23 native helper regression.' }
-          $expectedJoined = [string]::Join("`n", @($suites | Sort-Object))
-          $actualJoined = [string]::Join("`n", $eligible)
-          if ($expectedJoined -cne $actualJoined) { throw "PowerShell suite manifest does not exactly enumerate eligible suites. expected=$($suites -join ','); actual=$($eligible -join ',')" }
-          foreach ($suite in $suites) {
-            & (Join-Path $PWD ('tests\windows\' + $suite))
-            if (-not $?) { throw "PowerShell contract suite failed: $suite" }
-          }
+          # run_windows_suite.ps1 owns the suite-manifest.json/eligible checks;
+          # G23 remains a required manifest member. CI is parser-only, so its
+          # explicit allowance does not turn a required native G12 skip into a
+          # release acceptance result.
+          $runner = Join-Path $PWD 'tests\windows\run_windows_suite.ps1'
+          & $runner -AllowRequiredSkipForStaticCi
+          if ($LASTEXITCODE -ne 0) { throw "PowerShell contract suite failed: $runner" }
       - name: Verify installer scripts are source-only
         shell: pwsh
         run: |

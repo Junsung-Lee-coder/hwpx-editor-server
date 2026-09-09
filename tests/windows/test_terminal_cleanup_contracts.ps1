@@ -173,6 +173,8 @@ function Get-CrashMatrixRuntimeState {
 }
 
 function Invoke-RealInstallerCrashMatrix {
+    # The exact runner passes -RunInstallerCrashMatrix to this test so each
+    # case starts a real installer child with HWPX_TEST_INSTALL_CRASH_POINT.
     param([Parameter(Mandatory = $true)][string]$RuntimeSource, [Parameter(Mandatory = $true)][string]$RuntimeRoot, [Parameter(Mandatory = $true)][int]$RuntimePort, [Parameter(Mandatory = $true)][string]$EvidenceRoot)
     if ([string]::IsNullOrWhiteSpace($ExpectedRepository) -or [string]::IsNullOrWhiteSpace($ExpectedCommit) -or [string]::IsNullOrWhiteSpace($ExpectedTree) -or [string]::IsNullOrWhiteSpace($ExpectedManifestSha256)) { throw 'Crash matrix requires complete expected candidate identity.' }
     if (-not (Test-Path -LiteralPath $RuntimeRoot -PathType Container)) { throw "Crash matrix install root is missing: $RuntimeRoot" }

@@ -1163,7 +1163,7 @@ class WindowsInstallerContractTests(unittest.TestCase):
             with self.subTest(suite=suite):
                 self.assertIn(suite, suite_manifest)
         self.assertIn("suite-manifest.json", workflow)
-        self.assertIn("Join-Path $PWD ('tests\\windows\\' + $suite)", workflow)
+        self.assertIn("run_windows_suite.ps1", workflow)
         self.assertRegex(workflow, r"- name: Run PowerShell 5\.1 contract tests\s+shell: powershell")
         self.assertIn("Run function-style tests", workflow)
         self.assertIn("PowerShell contract suite failed", workflow)
