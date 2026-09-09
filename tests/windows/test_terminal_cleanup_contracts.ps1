@@ -1,5 +1,17 @@
 [CmdletBinding()]
-param()
+param(
+    [switch]$RunInstallerCrashMatrix,
+    [string]$SourceRoot,
+    [string]$InstallRoot,
+    [Nullable[int]]$ApiPort,
+    [string]$FixturePath,
+    [string]$CrashEvidenceRoot,
+    [string]$ExpectedRepository,
+    [string]$ExpectedCommit,
+    [string]$ExpectedTree,
+    [string]$ExpectedManifestSha256,
+    [ValidateRange(1, 1800)][int]$CrashTimeoutSeconds = 300
+)
 
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
@@ -61,6 +73,171 @@ function Assert-OpeningNamespacePreserved {
     foreach ($key in @($Final.Keys)) {
         Assert-True $Opening.ContainsKey($key) ("$Label unexpected residue remained: $($Final[$key].path)")
     }
+}
+
+function ConvertTo-CrashMatrixArgument {
+    param([AllowNull()][object]$Value)
+    $text = if ($null -eq $Value) { '' } else { [string]$Value }
+    $builder = New-Object System.Text.StringBuilder
+    [void]$builder.Append([char]34)
+    $backslashes = 0
+    foreach ($character in $text.ToCharArray()) {
+        if ($character -eq [char]92) { $backslashes++; continue }
+        if ($character -eq [char]34) {
+            if ($backslashes -gt 0) { [void]$builder.Append([string]::new([char]92, ($backslashes * 2 + 1))) }
+            [void]$builder.Append([char]34)
+            $backslashes = 0
+            continue
+        }
+        if ($backslashes -gt 0) { [void]$builder.Append([string]::new([char]92, $backslashes)) }
+        [void]$builder.Append($character)
+        $backslashes = 0
+    }
+    if ($backslashes -gt 0) { [void]$builder.Append([string]::new([char]92, ($backslashes * 2))) }
+    [void]$builder.Append([char]34)
+    return $builder.ToString()
+}
+
+function Invoke-CrashMatrixInstaller {
+    param(
+        [Parameter(Mandatory = $true)][string[]]$Arguments,
+        [Parameter(Mandatory = $true)][string]$WorkingDirectory,
+        [Parameter(Mandatory = $true)][string]$StdoutPath,
+        [Parameter(Mandatory = $true)][string]$StderrPath,
+        [Parameter(Mandatory = $true)][int]$TimeoutSeconds,
+        [Parameter(Mandatory = $true)][hashtable]$EnvironmentOverrides
+    )
+    $powershell = (Get-Command powershell.exe -ErrorAction Stop).Source
+    $argumentVector = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $Arguments[0]) + @($Arguments[1..($Arguments.Count - 1)])
+    $startInfo = New-Object System.Diagnostics.ProcessStartInfo
+    $startInfo.FileName = $powershell
+    $startInfo.Arguments = [string]::Join(' ', @($argumentVector | ForEach-Object { ConvertTo-CrashMatrixArgument $_ }))
+    $startInfo.WorkingDirectory = (Resolve-Path $WorkingDirectory).Path
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+    foreach ($key in @($EnvironmentOverrides.Keys)) { $startInfo.EnvironmentVariables[$key] = [string]$EnvironmentOverrides[$key] }
+    $process = New-Object System.Diagnostics.Process
+    $process.StartInfo = $startInfo
+    $startedAt = [DateTime]::UtcNow
+    $startError = $null
+    try { $process.Start() | Out-Null } catch { $startError = [string]$_.Exception.Message }
+    if ($startError) {
+        [IO.File]::WriteAllText($StdoutPath, '', (New-Object Text.UTF8Encoding($false)))
+        [IO.File]::WriteAllText($StderrPath, $startError, (New-Object Text.UTF8Encoding($false)))
+        return [ordered]@{ argv = $argumentVector; process_id = $null; process_exit_confirmed = $false; exit_code = $null; timed_out = $false; termination_requested = $false; termination_confirmed = $false; start_error = $startError; stdout_capture_complete = $true; stderr_capture_complete = $true; started_at_utc = $startedAt.ToString('o'); ended_at_utc = [DateTime]::UtcNow.ToString('o'); measured_elapsed_seconds = 0.0 }
+    }
+    $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+    $stderrTask = $process.StandardError.ReadToEndAsync()
+    $timedOut = -not $process.WaitForExit($TimeoutSeconds * 1000)
+    $terminationRequested = $false
+    $terminationConfirmed = $false
+    $terminationError = $null
+    if ($timedOut) {
+        $terminationRequested = $true
+        try { $process.Kill() } catch { $terminationError = [string]$_.Exception.Message }
+        try { $terminationConfirmed = [bool]$process.WaitForExit(15000) } catch { }
+    }
+    $stdoutComplete = $false
+    $stderrComplete = $false
+    $stdoutText = ''
+    $stderrText = ''
+    try { $stdoutComplete = [bool]$stdoutTask.Wait(15000); if ($stdoutComplete) { $stdoutText = [string]$stdoutTask.Result } } catch { }
+    try { $stderrComplete = [bool]$stderrTask.Wait(15000); if ($stderrComplete) { $stderrText = [string]$stderrTask.Result } } catch { }
+    [IO.File]::WriteAllText($StdoutPath, $stdoutText, (New-Object Text.UTF8Encoding($false)))
+    [IO.File]::WriteAllText($StderrPath, $stderrText, (New-Object Text.UTF8Encoding($false)))
+    $process.Refresh()
+    $exitConfirmed = [bool]$process.HasExited
+    $exitCode = if ($exitConfirmed) { [int]$process.ExitCode } else { $null }
+    $endedAt = [DateTime]::UtcNow
+    return [ordered]@{ argv = $argumentVector; process_id = [int]$process.Id; process_exit_confirmed = $exitConfirmed; exit_code = $exitCode; timed_out = [bool]$timedOut; termination_requested = [bool]$terminationRequested; termination_confirmed = [bool]$terminationConfirmed; termination_error = $terminationError; start_error = $null; stdout_capture_complete = [bool]$stdoutComplete; stderr_capture_complete = [bool]$stderrComplete; started_at_utc = $startedAt.ToString('o'); ended_at_utc = $endedAt.ToString('o'); measured_elapsed_seconds = [Math]::Round(($endedAt - $startedAt).TotalSeconds, 3) }
+}
+
+function Get-CrashMatrixRuntimeState {
+    param([Parameter(Mandatory = $true)][string]$RuntimeRoot, [Parameter(Mandatory = $true)][int]$RuntimePort)
+    $tasks = @()
+    foreach ($name in @('hwpx-editor-api', 'hwpx-editor-worker')) {
+        try {
+            $identity = Get-ScheduledTaskIdentity -TaskName $name -TaskPath '\'
+            $task = Get-ScheduledTaskExact -TaskName $name -TaskPath '\' -AllowMissing
+            $tasks += [ordered]@{ name = $name; exists = [bool]$identity.exists; state = if ($task) { [string]$task.State } else { $null }; enabled = if ($identity.PSObject.Properties.Name -contains 'enabled') { [bool]$identity.enabled } else { $null }; task_identity_hash = [string]$identity.task_identity_hash }
+        }
+        catch { $tasks += [ordered]@{ name = $name; exists = $false; state = $null; enabled = $false; error = [string]$_.Exception.Message } }
+    }
+    $health = $null
+    try { $health = Get-InstallApiHealth -ApiPort $RuntimePort } catch { $health = [ordered]@{ ok = $false; error = [string]$_.Exception.Message } }
+    $processes = @()
+    try { $processes = @(Get-InstallProcessSnapshot -RootPath $RuntimeRoot -ExpectedPythonPath (Join-Path $RuntimeRoot '.venv\Scripts\python.exe')) } catch { }
+    return [ordered]@{ tasks = $tasks; processes = $processes; health = $health; snapshots = Get-TestRollbackSnapshotSnapshot; journals = Get-TestTransactionJournalSnapshot }
+}
+
+function Invoke-RealInstallerCrashMatrix {
+    param([Parameter(Mandatory = $true)][string]$RuntimeSource, [Parameter(Mandatory = $true)][string]$RuntimeRoot, [Parameter(Mandatory = $true)][int]$RuntimePort, [Parameter(Mandatory = $true)][string]$EvidenceRoot)
+    if ([string]::IsNullOrWhiteSpace($ExpectedRepository) -or [string]::IsNullOrWhiteSpace($ExpectedCommit) -or [string]::IsNullOrWhiteSpace($ExpectedTree) -or [string]::IsNullOrWhiteSpace($ExpectedManifestSha256)) { throw 'Crash matrix requires complete expected candidate identity.' }
+    if (-not (Test-Path -LiteralPath $RuntimeRoot -PathType Container)) { throw "Crash matrix install root is missing: $RuntimeRoot" }
+    if ($null -eq $ApiPort -or [int]$ApiPort -ne $RuntimePort) { throw 'Crash matrix API port binding is incomplete.' }
+    New-Item -ItemType Directory -Force -Path $EvidenceRoot | Out-Null
+    $installerPath = Join-Path $RuntimeSource 'scripts\install_windows.ps1'
+    $beforeFixtureHash = if ($FixturePath) { Get-Sha256Hex -Path $FixturePath } else { $null }
+    $points = @('after-journal-terminal-commit', 'after-terminal-receipt-commit', 'after-snapshot-cleanup', 'after-snapshot-receipt-commit', 'after-journal-cleanup')
+    $cases = New-Object System.Collections.Generic.List[object]
+    foreach ($point in $points) {
+        $caseRoot = Join-Path $EvidenceRoot $point
+        New-Item -ItemType Directory -Force -Path $caseRoot | Out-Null
+        $crashReceipt = Join-Path $caseRoot 'crash-installer-receipt.json'
+        $crashStdout = Join-Path $caseRoot 'crash.stdout.log'
+        $crashStderr = Join-Path $caseRoot 'crash.stderr.log'
+        $restartReceipt = Join-Path $caseRoot 'restart-installer-receipt.json'
+        $restartStdout = Join-Path $caseRoot 'restart.stdout.log'
+        $restartStderr = Join-Path $caseRoot 'restart.stderr.log'
+        $before = Get-CrashMatrixRuntimeState -RuntimeRoot $RuntimeRoot -RuntimePort $RuntimePort
+        $crashArgs = @($installerPath, '-SourceRoot', $RuntimeSource, '-InstallRoot', $RuntimeRoot, '-DependencyMode', 'CheckOnly', '-ExistingInstallDisposition', 'PreserveMove', '-ReplaceExistingTasks', '-ApiPort', [string]$RuntimePort, '-ReceiptPath', $crashReceipt, '-ExpectedRepository', $ExpectedRepository, '-ExpectedCommit', $ExpectedCommit, '-ExpectedTree', $ExpectedTree, '-ExpectedManifestSha256', $ExpectedManifestSha256)
+        if ($FixturePath) { $crashArgs += @('-FixturePath', $FixturePath) }
+        if ($PopplerPath) { $crashArgs += @('-PopplerPath', $PopplerPath) }
+        $crashRun = Invoke-CrashMatrixInstaller -Arguments $crashArgs -WorkingDirectory $RuntimeSource -StdoutPath $crashStdout -StderrPath $crashStderr -TimeoutSeconds $CrashTimeoutSeconds -EnvironmentOverrides @{ HWPX_TEST_INSTALL_CRASH_POINT = $point }
+        $afterCrash = Get-CrashMatrixRuntimeState -RuntimeRoot $RuntimeRoot -RuntimePort $RuntimePort
+        $crashReceiptObject = $null
+        if (Test-Path -LiteralPath $crashReceipt -PathType Leaf) { try { $crashReceiptObject = Get-Content -LiteralPath $crashReceipt -Raw | ConvertFrom-Json } catch { } }
+        $restartArgs = @($installerPath, '-SourceRoot', $RuntimeSource, '-InstallRoot', $RuntimeRoot, '-DependencyMode', 'CheckOnly', '-ExistingInstallDisposition', 'PreserveMove', '-ReplaceExistingTasks', '-ApiPort', [string]$RuntimePort, '-ReceiptPath', $restartReceipt, '-ExpectedRepository', $ExpectedRepository, '-ExpectedCommit', $ExpectedCommit, '-ExpectedTree', $ExpectedTree, '-ExpectedManifestSha256', $ExpectedManifestSha256)
+        if ($FixturePath) { $restartArgs += @('-FixturePath', $FixturePath) }
+        if ($PopplerPath) { $restartArgs += @('-PopplerPath', $PopplerPath) }
+        $restartRun = Invoke-CrashMatrixInstaller -Arguments $restartArgs -WorkingDirectory $RuntimeSource -StdoutPath $restartStdout -StderrPath $restartStderr -TimeoutSeconds $CrashTimeoutSeconds -EnvironmentOverrides @{}
+        $afterRestart = Get-CrashMatrixRuntimeState -RuntimeRoot $RuntimeRoot -RuntimePort $RuntimePort
+        $restartReceiptObject = $null
+        if (Test-Path -LiteralPath $restartReceipt -PathType Leaf) { try { $restartReceiptObject = Get-Content -LiteralPath $restartReceipt -Raw | ConvertFrom-Json } catch { } }
+        $namespacePreserved = $true
+        try { Assert-OpeningNamespacePreserved -Opening $before.snapshots -Final $afterRestart.snapshots -Label "$point snapshot namespace"; Assert-OpeningNamespacePreserved -Opening $before.journals -Final $afterRestart.journals -Label "$point journal namespace" } catch { $namespacePreserved = $false }
+        $expectedCrashJournal = $point -ne 'after-journal-cleanup'
+        $restartProcesses = @($afterRestart.processes | Where-Object { [string]$_.module -in @('app.api_server', 'app.worker') -and [string]$_.identity_root -ceq $RuntimeRoot })
+        $checks = [ordered]@{
+            crash_process_exit_confirmed = [bool]$crashRun.process_exit_confirmed
+            crash_process_nonzero = ($null -ne $crashRun.exit_code -and [int]$crashRun.exit_code -ne 0)
+            crash_not_timed_out = -not [bool]$crashRun.timed_out
+            crash_stdout_captured = [bool]$crashRun.stdout_capture_complete
+            crash_stderr_captured = [bool]$crashRun.stderr_capture_complete
+            crash_receipt_present = ($null -ne $crashReceiptObject)
+            crash_journal_boundary_recorded = if ($expectedCrashJournal) { $afterCrash.journals.Count -ge $before.journals.Count } else { $null -ne $crashReceiptObject -and [string]$crashReceiptObject.transaction_journal_cleanup.cleanup_state -eq 'journal-cleaned' }
+            restart_process_exit_confirmed = [bool]$restartRun.process_exit_confirmed
+            restart_exit_zero = ($restartRun.exit_code -eq 0)
+            restart_not_timed_out = -not [bool]$restartRun.timed_out
+            restart_receipt_pass = ($null -ne $restartReceiptObject -and [string]$restartReceiptObject.status -eq 'PASS')
+            restart_candidate_bound = ($null -ne $restartReceiptObject -and [string]$restartReceiptObject.candidate_generation -eq ($ExpectedCommit + ':' + $ExpectedTree + ':' + $ExpectedManifestSha256))
+            restart_terminal_cleanup_consistent = ($null -ne $restartReceiptObject -and [bool]$restartReceiptObject.transaction_journal_cleanup.removed -and [string]$restartReceiptObject.transaction_journal_cleanup.cleanup_state -eq 'journal-cleaned' -and [string]$restartReceiptObject.terminal_cleanup.cleanup_state -eq 'journal-cleaned')
+            restart_tasks_running_enabled = (@($afterRestart.tasks | Where-Object { -not $_.exists -or [string]$_.state -ne 'Running' -or -not [bool]$_.enabled }).Count -eq 0)
+            restart_processes_bound = ($restartProcesses.Count -ge 2)
+            restart_api_healthy = [bool]$afterRestart.health.ok
+            unrelated_namespaces_preserved = [bool]$namespacePreserved
+            fixture_preserved = ($null -eq $FixturePath -or (Get-Sha256Hex -Path $FixturePath) -ceq $beforeFixtureHash)
+        }
+        $case = [ordered]@{ schema = 'hwpx/windows-terminal-crash-case/v1'; crash_point = $point; run_root = $caseRoot; crash = $crashRun; restart = $restartRun; before = $before; after_crash = $afterCrash; after_restart = $afterRestart; crash_receipt = if ($crashReceiptObject) { $crashReceiptObject } else { $null }; restart_receipt = if ($restartReceiptObject) { $restartReceiptObject } else { $null }; checks = $checks; passed = (@($checks.GetEnumerator() | Where-Object { -not [bool]$_.Value }).Count -eq 0) }
+        $case | ConvertTo-Json -Depth 40 | Set-Content -LiteralPath (Join-Path $caseRoot 'case-result.json') -Encoding UTF8
+        [void]$cases.Add($case)
+        if (-not $case.passed) { throw "Terminal crash matrix case failed: $point" }
+    }
+    $matrix = [ordered]@{ schema = 'hwpx/windows-terminal-crash-matrix/v1'; source_root = $RuntimeSource; install_root = $RuntimeRoot; api_port = $RuntimePort; candidate_generation = ($ExpectedCommit + ':' + $ExpectedTree + ':' + $ExpectedManifestSha256); crash_points = $points; cases = @($cases); case_count = $cases.Count; passed_count = @($cases | Where-Object { $_.passed }).Count; failed_count = @($cases | Where-Object { -not $_.passed }).Count; overall_pass = (@($cases | Where-Object { -not $_.passed }).Count -eq 0); fixture_sha256_before = $beforeFixtureHash; fixture_sha256_after = if ($FixturePath) { Get-Sha256Hex -Path $FixturePath } else { $null } }
+    $matrix | ConvertTo-Json -Depth 45 | Set-Content -LiteralPath (Join-Path $EvidenceRoot 'matrix-result.json') -Encoding UTF8
+    return $matrix
 }
 
 $testRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('hwpx-terminal-cleanup-' + [Guid]::NewGuid().ToString('N'))
@@ -471,7 +648,15 @@ try {
     [void]$ownedTransactionJournals.Add([pscustomobject]@{ path = $journalRecord.path; object_identity = $journalRecord.object_identity })
     Assert-PathObjectIdentity -Path $journalRecord.path -ExpectedIdentity $journalRecord.object_identity | Out-Null
     Remove-PathIdentityExact -Path $journalRecord.path -ExpectedObjectIdentity $journalRecord.object_identity | Out-Null
-    Assert-True (-not (Test-Path -LiteralPath $journalRecord.path -PathType Leaf)) 'Run-owned transaction journal remained after exact cleanup.'
+    Assert-True (-not (Test-Path -LiteralPath $journalRecord.path)) 'Run-owned transaction journal remained after exact cleanup.'
+
+    $crashMatrix = $null
+    if ($RunInstallerCrashMatrix) {
+        $matrixSourceRoot = if ([string]::IsNullOrWhiteSpace($SourceRoot)) { $root } else { (Resolve-Path $SourceRoot).Path }
+        $matrixEvidencePath = if ([string]::IsNullOrWhiteSpace($CrashEvidenceRoot)) { Join-Path ([System.IO.Path]::GetTempPath()) ('hwpx-terminal-crash-matrix-' + [Guid]::NewGuid().ToString('N')) } else { $CrashEvidenceRoot }
+        $crashMatrix = Invoke-RealInstallerCrashMatrix -RuntimeSource $matrixSourceRoot -RuntimeRoot ((Resolve-Path $InstallRoot).Path) -RuntimePort ([int]$ApiPort) -EvidenceRoot $matrixEvidencePath
+        Assert-True ([bool]$crashMatrix.overall_pass) 'Real installer terminal crash/restart matrix did not pass all five transitions.'
+    }
 
     $finalSnapshotIdentities = Get-TestRollbackSnapshotSnapshot
     $finalJournalIdentities = Get-TestTransactionJournalSnapshot
@@ -487,6 +672,7 @@ try {
     $finalPostcheck = [ordered]@{
         schema = 'hwpx/windows-terminal-cleanup-postcheck/v1'
         captured_utc = [DateTime]::UtcNow.ToString('o')
+        crash_matrix = $crashMatrix
         rollback_snapshot_namespace = [ordered]@{
             opening_count = [int]$openingSnapshotIdentities.Count
             final_count = [int]$finalSnapshotIdentities.Count
@@ -506,6 +692,7 @@ try {
             unrelated_snapshot_preserved = [bool]$unrelatedPreserved
             owned_snapshot_cleanup_verified = (-not (Test-Path -LiteralPath $ownedSnapshotPath) -and -not (Test-Path -LiteralPath $mismatchSnapshotPath))
             owned_journal_cleanup_verified = (-not (Test-Path -LiteralPath $journalRecord.path))
+            crash_matrix_verified = ($null -eq $crashMatrix -or [bool]$crashMatrix.overall_pass)
         }
     }
     $postcheckPath = Join-Path $testRoot 'terminal-cleanup-postcheck.json'

@@ -1302,12 +1302,17 @@ function Complete-InstallerTerminalReceipt {
     try {
         Remove-InstallTransactionJournal
         $receipt.transaction_journal_cleanup.removed = $true
+        $receipt.transaction_journal_cleanup.cleanup_state = 'journal-cleaned'
         $receipt.terminal_cleanup.cleanup_state = 'journal-cleaned'
-        Invoke-InstallerCrashPoint -Name 'after-journal-cleanup'
         # The final receipt records the completed journal delete. If this write
         # fails, the transaction is reported as a cleanup failure rather than
         # as a successful install with an untruthful receipt.
         Save-InstallerReceipt | Out-Null
+        # This crash point is after the final authenticated receipt commit. A
+        # restart must observe either the complete receipt or a preserved
+        # journal/snapshot, never a receipt that says cleanup is pending after
+        # the journal has already been removed.
+        Invoke-InstallerCrashPoint -Name 'after-journal-cleanup'
     }
     catch {
         $cleanupError = Limit-Text -Value $_.Exception.Message -MaxChars 4096

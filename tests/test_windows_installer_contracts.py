@@ -1254,6 +1254,44 @@ class WindowsInstallerContractTests(unittest.TestCase):
         self.assertIn("Write-Output $summary", installer)
         self.assertIn("Limit-Text", installer)
 
+    def test_terminal_journal_cleanup_state_is_persisted_after_delete(self) -> None:
+        text = self.read("install_windows.ps1")
+        terminal = text[text.index("function Complete-InstallerTerminalReceipt") : text.index("function Write-InstallerTerminalSummary")]
+        delete_index = terminal.index("Remove-InstallTransactionJournal")
+        state_index = terminal.index("$receipt.transaction_journal_cleanup.cleanup_state = 'journal-cleaned'", delete_index)
+        save_index = terminal.index("Save-InstallerReceipt | Out-Null", state_index)
+        crash_index = terminal.index("Invoke-InstallerCrashPoint -Name 'after-journal-cleanup'", state_index)
+        self.assertLess(delete_index, state_index)
+        self.assertLess(state_index, save_index)
+        self.assertLess(save_index, crash_index)
+
+    def test_windows_suite_runner_executes_required_g12_and_rejects_skip(self) -> None:
+        runner = (ROOT / "tests" / "windows" / "run_windows_suite.ps1").read_text(encoding="utf-8")
+        cleanup = (ROOT / "tests" / "windows" / "test_terminal_cleanup_contracts.ps1").read_text(encoding="utf-8")
+        for token in (
+            "HWPX_TEST_INSTALL_CRASH_POINT",
+            "WaitForExit(",
+            "process_exit_confirmed",
+            "required",
+            "output_status",
+            "SKIP",
+            "-RunInstallerFaultPath",
+            "runner_sha256",
+            "argv",
+        ):
+            with self.subTest(token=token):
+                self.assertIn(token, runner)
+        for crash_point in (
+            "after-journal-terminal-commit",
+            "after-terminal-receipt-commit",
+            "after-snapshot-cleanup",
+            "after-snapshot-receipt-commit",
+            "after-journal-cleanup",
+        ):
+            with self.subTest(crash_point=crash_point):
+                self.assertIn(crash_point, cleanup)
+        self.assertIn("$RunInstallerCrashMatrix", cleanup)
+
 
 if __name__ == "__main__":
     unittest.main()
