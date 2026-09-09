@@ -365,6 +365,14 @@ class WindowsInstallerContractTests(unittest.TestCase):
         self.assertNotIn("C:\\Users\\", text)
         self.assertIn("LASTEXITCODE", text)
 
+    def test_replaced_running_tasks_are_quiesced_before_candidate_start(self) -> None:
+        text = self.read("install_windows.ps1")
+        activation = text[text.index("$taskActivation = @()") : text.index("$receipt.checks.task_activation = @($taskActivation)")]
+        self.assertIn("-in @('Running', 'Queued')", activation)
+        self.assertIn("Stop-ScheduledTaskExactAndWait", activation)
+        self.assertIn("-ExpectedIdentity $roleIdentity", activation)
+        self.assertLess(activation.index("Stop-ScheduledTaskExactAndWait"), activation.index("Start-ScheduledTask"))
+
     def test_source_manifest_git_identity_is_independently_rebound(self) -> None:
         text = self.read("windows_install_common.psm1")
         manifest = text[text.index("function Get-IndependentGitIdentity") : text.index("function Resolve-WindowsPrincipalIdentity")]

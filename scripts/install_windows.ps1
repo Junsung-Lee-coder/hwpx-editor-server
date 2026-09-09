@@ -3311,13 +3311,17 @@ try {
         $roleIdentity = Get-ScheduledTaskIdentity -TaskName $roleTask.name -TaskPath $taskPath
         if (-not [bool]$roleIdentity.exists) { throw "Post-registration scheduled task is missing: $($roleTask.name)" }
         $roleTaskObject = Get-ScheduledTaskExact -TaskName $roleTask.name -TaskPath $taskPath
-        $startedRole = $false
-        if ([string]$roleTaskObject.State -ne 'Running') {
-            Start-ScheduledTask -TaskName $roleTask.name -TaskPath $taskPath -ErrorAction Stop
-            $startedRole = $true
-            if (-not (Wait-ScheduledTaskRunning -TaskName $roleTask.name -TaskPath $taskPath)) {
-                throw "Post-registration scheduled task did not reach Running: $($roleTask.name)"
-            }
+        # Register-ScheduledTask -Force can leave the replacement definition
+        # reporting Running while no process for the replacement action exists.
+        # Quiesce the exact candidate-bound definition first so the explicit
+        # start cannot be suppressed by a stale scheduler instance.
+        if ([string]$roleTaskObject.State -in @('Running', 'Queued')) {
+            Stop-ScheduledTaskExactAndWait -TaskName $roleTask.name -TaskPath $taskPath -ExpectedIdentity $roleIdentity | Out-Null
+        }
+        Start-ScheduledTask -TaskName $roleTask.name -TaskPath $taskPath -ErrorAction Stop
+        $startedRole = $true
+        if (-not (Wait-ScheduledTaskRunning -TaskName $roleTask.name -TaskPath $taskPath)) {
+            throw "Post-registration scheduled task did not reach Running: $($roleTask.name)"
         }
         $postIdentity = Get-ScheduledTaskIdentity -TaskName $roleTask.name -TaskPath $taskPath
         if ([string]$postIdentity.state -ne 'Running' -or -not [bool]$postIdentity.enabled) {
