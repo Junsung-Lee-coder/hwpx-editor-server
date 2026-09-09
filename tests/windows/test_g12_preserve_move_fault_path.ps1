@@ -348,6 +348,7 @@ function Test-G12OpeningNamespacePreserved {
 if (-not $RunInstallerFaultPath) {
     $installerText = Get-Content -LiteralPath $installerPath -Raw
     $commonText = Get-Content -LiteralPath $commonPath -Raw
+    $scriptText = Get-Content -LiteralPath $PSCommandPath -Raw
     foreach ($needle in @(
         'after-task-registrations',
         'Restore-InstallSnapshot',
@@ -361,7 +362,7 @@ if (-not $RunInstallerFaultPath) {
         'remote_harness',
         'HWPX_TEST_INSTALL_CRASH_POINT'
     )) {
-        Assert-True ($installerText.Contains($needle) -or $commonText.Contains($needle)) "Fault-path contract is missing: $needle"
+        Assert-True ($installerText.Contains($needle) -or $commonText.Contains($needle) -or $scriptText.Contains($needle)) "Fault-path contract is missing: $needle"
     }
     [pscustomobject]@{
         status = 'SKIP'

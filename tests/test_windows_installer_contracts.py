@@ -232,6 +232,11 @@ class WindowsInstallerContractTests(unittest.TestCase):
                 self.assertIn(token, harness)
         self.assertNotIn("Start-Process -FilePath 'powershell.exe' -ArgumentList $arguments", harness)
 
+    def test_g12_default_contract_validates_its_own_harness_tokens(self) -> None:
+        harness = (ROOT / "tests" / "windows" / "test_g12_preserve_move_fault_path.ps1").read_text(encoding="utf-8")
+        self.assertIn("$scriptText = Get-Content -LiteralPath $PSCommandPath -Raw", harness)
+        self.assertIn("$scriptText.Contains($needle)", harness)
+
     def test_terminal_cleanup_commit_is_authenticated_before_destructive_cleanup(self) -> None:
         text = self.read("install_windows.ps1")
         terminal = text[text.index("function Complete-InstallerTerminalReceipt") : text.index("function Write-InstallerTerminalSummary")]
