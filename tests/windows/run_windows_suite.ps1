@@ -94,7 +94,7 @@ function Get-ManifestIdentity {
 function Invoke-BoundedSuiteProcess {
     param(
         [Parameter(Mandatory = $true)][string]$ScriptPath,
-        [Parameter(Mandatory = $true)][string[]]$Arguments,
+        [Parameter(Mandatory = $false)][AllowEmptyCollection()][string[]]$Arguments = @(),
         [Parameter(Mandatory = $true)][string]$WorkingDirectory,
         [Parameter(Mandatory = $true)][string]$StdoutPath,
         [Parameter(Mandatory = $true)][string]$StderrPath,

@@ -1292,6 +1292,12 @@ class WindowsInstallerContractTests(unittest.TestCase):
                 self.assertIn(crash_point, cleanup)
         self.assertIn("$RunInstallerCrashMatrix", cleanup)
 
+    def test_windows_suite_runner_accepts_zero_argument_suites(self) -> None:
+        runner = (ROOT / "tests" / "windows" / "run_windows_suite.ps1").read_text(encoding="utf-8")
+        invoke = runner[runner.index("function Invoke-BoundedSuiteProcess") : runner.index("function Get-OutputStatus")]
+        self.assertIn("[AllowEmptyCollection()]", invoke)
+        self.assertIn("[string[]]$Arguments = @()", invoke)
+
 
 if __name__ == "__main__":
     unittest.main()
