@@ -1310,7 +1310,10 @@ class WindowsInstallerContractTests(unittest.TestCase):
         self.assertIn("$RunInstallerCrashMatrix", cleanup)
         self.assertIn("cases = @($cases.ToArray())", cleanup)
         self.assertIn("suites = @($rows.ToArray())", runner)
-        self.assertIn("$suiteTimeoutSeconds = [Math]::Max($PerTestTimeoutSeconds, 3600)", runner)
+        self.assertIn("$g12MinimumOuterTimeoutSeconds = [Math]::Min(3600, $ControllerTimeoutSeconds + 120)", runner)
+        self.assertIn("$g12OuterTimeoutSeconds", runner)
+        self.assertIn("RemoteHarnessTimeoutSeconds", runner)
+        self.assertIn("g12_outer_timeout_seconds", runner)
         self.assertIn("terminal_crash_matrix_timeout_seconds", runner)
 
     def test_windows_suite_runner_accepts_zero_argument_suites(self) -> None:

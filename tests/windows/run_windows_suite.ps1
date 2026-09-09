@@ -216,6 +216,9 @@ $identity = Get-ManifestIdentity
 if ($RunInstallerCrashMatrix -and -not $RunInstallerFaultPath) {
     throw 'The exact crash-matrix suite requires G12 -RunInstallerFaultPath in the same invocation.'
 }
+if ($null -ne $RemoteHarnessTimeoutSeconds -and ($RemoteHarnessTimeoutSeconds -lt 1 -or $RemoteHarnessTimeoutSeconds -gt 3600)) {
+    throw 'RemoteHarnessTimeoutSeconds must be a positive outer-harness budget no greater than 3600 seconds.'
+}
 $manifest = Get-Content -LiteralPath $ManifestPath -Raw | ConvertFrom-Json
 if ([string]$manifest.schema_version -ne 'hwpx/windows-powershell-suite-manifest/v1') {
     throw 'PowerShell suite manifest schema is invalid.'
@@ -231,6 +234,8 @@ if ((@($eligible | Sort-Object) -join "`n") -cne (@($suites | Sort-Object) -join
 $runnerSha256 = Get-FileSha256 -Path $PSCommandPath
 $startedAt = [DateTime]::UtcNow
 $rows = New-Object System.Collections.Generic.List[object]
+$g12MinimumOuterTimeoutSeconds = $null
+$g12OuterTimeoutSeconds = $null
 foreach ($suite in $suites) {
     $scriptPath = Join-Path (Join-Path $SourceRoot 'tests\windows') $suite
     $stdoutPath = Join-Path $OutputRoot ($suite + '.stdout.log')
@@ -258,6 +263,18 @@ foreach ($suite in $suites) {
         if ($FixturePath) { $suiteArgs += @('-FixturePath', $FixturePath) }
     }
     $suiteTimeoutSeconds = $PerTestTimeoutSeconds
+    if ($RunInstallerFaultPath -and $suite -ceq 'test_g12_preserve_move_fault_path.ps1') {
+        # The G12 child owns the installer controller deadline, while this
+        # runner owns the enclosing process deadline. Keep a bounded drain
+        # margin so the child can record its measured termination/readback
+        # fields after the controller reaches its own deadline.
+        $g12MinimumOuterTimeoutSeconds = [Math]::Min(3600, $ControllerTimeoutSeconds + 120)
+        $g12OuterTimeoutSeconds = $g12MinimumOuterTimeoutSeconds
+        if ($null -ne $RemoteHarnessTimeoutSeconds) {
+            $g12OuterTimeoutSeconds = [Math]::Max($g12OuterTimeoutSeconds, [int]$RemoteHarnessTimeoutSeconds)
+        }
+        $suiteTimeoutSeconds = [Math]::Max($PerTestTimeoutSeconds, $g12OuterTimeoutSeconds)
+    }
     if ($RunInstallerCrashMatrix -and $suite -ceq 'test_terminal_cleanup_contracts.ps1') {
         # The real matrix runs five sequential bounded installer/restart
         # cases. Keep each child bounded by CrashTimeoutSeconds while giving
@@ -348,6 +365,8 @@ $result = [ordered]@{
     measured_elapsed_seconds = [Math]::Round(($endedAt - $startedAt).TotalSeconds, 3)
     per_test_timeout_seconds = $PerTestTimeoutSeconds
     timeout_enforced = $true
+    g12_controller_timeout_seconds = if ($RunInstallerFaultPath) { $ControllerTimeoutSeconds } else { $null }
+    g12_outer_timeout_seconds = $g12OuterTimeoutSeconds
     terminal_crash_matrix_timeout_seconds = if ($RunInstallerCrashMatrix) { [Math]::Max($PerTestTimeoutSeconds, 3600) } else { $null }
     output_root = $OutputRoot
     suites = @($rows.ToArray())
