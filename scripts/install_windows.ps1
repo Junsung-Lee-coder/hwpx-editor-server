@@ -955,7 +955,7 @@ function Invoke-StaleInstallTransactionRecovery {
     $preActivationCandidateRemoved = $false
     $candidateRootOwnedByStaleRun = $candidateExists -and
         $candidate -ine $install -and
-        $state -in $preActivationCandidateStates
+        ($state -in $preActivationCandidateStates -or $predecessorRestored)
     if ($candidateRootOwnedByStaleRun) {
         if ([string]::IsNullOrWhiteSpace($candidateIdentity)) {
             throw 'Stale pre-activation candidate has no sealed object identity.'

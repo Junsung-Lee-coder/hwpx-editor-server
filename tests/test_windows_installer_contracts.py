@@ -324,6 +324,8 @@ class WindowsInstallerContractTests(unittest.TestCase):
         self.assertLess(candidate_selection, fresh_selection)
         fresh_guard = stale[fresh_selection - 400 : fresh_selection]
         self.assertIn("-not $predecessorRestored", fresh_guard)
+        candidate_cleanup_guard = stale[stale.index("$candidateRootOwnedByStaleRun") : candidate_selection]
+        self.assertIn("$predecessorRestored", candidate_cleanup_guard)
 
     def test_existing_env_preservation_is_hash_and_size_enforced(self) -> None:
         text = self.read("install_windows.ps1")
