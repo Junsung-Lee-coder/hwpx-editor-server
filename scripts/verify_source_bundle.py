@@ -11,9 +11,9 @@ from pathlib import Path, PurePosixPath
 from typing import Any, BinaryIO
 
 try:
-    from scripts.source_bundle_policy import is_prohibited_member
+    from scripts.source_bundle_policy import find_python_source_hygiene_violations, is_prohibited_member
 except ImportError:  # direct script execution
-    from source_bundle_policy import is_prohibited_member
+    from source_bundle_policy import find_python_source_hygiene_violations, is_prohibited_member
 
 
 class SourceBundleVerificationError(RuntimeError):
@@ -664,6 +664,14 @@ def _verify_source_bundle_open(
             })
     if mismatches:
         raise SourceBundleVerificationError(f"extracted source file mismatch count: {len(mismatches)}")
+    hygiene_violations = find_python_source_hygiene_violations(
+        destination,
+        [Path(item['path']) for item in expected_files.values() if str(item['path']).casefold().endswith('.py')],
+    )
+    if hygiene_violations:
+        raise SourceBundleVerificationError(
+            'Python source hygiene check failed: ' + '; '.join(hygiene_violations[:20])
+        )
     return {
         "schema_version": "hwpx/source-bundle-verification/v1",
         "archive_sha256": actual_archive_sha,

@@ -24,6 +24,7 @@ from app.interactive_session_manager import (
 )
 from app.logging_utils import configure_logger
 from app.local_cli_router import build_local_cli_router
+from app.local_cli_service import LocalCliService
 from app.command_packages.runtime import get_command_package_registry
 
 from app.models import (
@@ -77,7 +78,14 @@ db = QueueDB(settings.db_path)
 logger = configure_logger('hwp.api', settings.log_level, settings.logs_root / 'api.log')
 interactive_sessions = InteractiveSessionManager(settings)
 app = FastAPI(title='Windows HWPX Converter Pilot', version='0.2.0')
-app.include_router(build_local_cli_router(settings=settings, interactive_sessions=interactive_sessions))
+local_cli_service = LocalCliService(settings=settings, interactive_sessions=interactive_sessions)
+app.include_router(
+    build_local_cli_router(
+        settings=settings,
+        interactive_sessions=interactive_sessions,
+        service=local_cli_service,
+    )
+)
 
 ensure_viewer_session()
 
@@ -649,16 +657,50 @@ def _redact_interactive_status_value(value: Any, *, key: str | None = None) -> A
     return value
 
 
-def _interactive_session_has_managed_origin(session: dict[str, Any]) -> bool:
-    metadata = session.get('metadata')
-    local = metadata.get('local_cli_v1') if isinstance(metadata, dict) else None
-    if not isinstance(local, dict) or local.get('opened_via') != 'local_cli_v1':
+def _interactive_session_has_managed_origin(
+    session: dict[str, Any],
+    *,
+    artifact_service: Any | None = None,
+) -> bool:
+    """Return whether the managed service proves a working-copy route."""
+
+    session_id = str(session.get('session_id') or '').strip()
+    if not session_id:
         return False
-    state = str(session.get('state') or '').strip().casefold()
-    return state not in {'closed', 'closed_cleanup_pending'}
+    service = artifact_service if artifact_service is not None else local_cli_service
+    try:
+        projection = service.public_artifact_projection(session_id=session_id, session=session)
+    except Exception:
+        return False
+    return isinstance(projection, dict) and isinstance(
+        projection.get('latest_working_copy_download_path'),
+        str,
+    )
 
 
-def _public_interactive_session(session: dict[str, Any]) -> dict[str, Any]:
+def _strip_untrusted_artifact_routes(value: Any) -> Any:
+    if isinstance(value, dict):
+        result: dict[str, Any] = {}
+        for key, child in value.items():
+            folded_key = str(key).casefold()
+            if (
+                folded_key == 'download_path'
+                or folded_key.endswith('_download_path')
+                or folded_key in {'latest_recovery_sha256', 'latest_recovery_size_bytes'}
+            ):
+                continue
+            result[str(key)] = _strip_untrusted_artifact_routes(child)
+        return result
+    if isinstance(value, list):
+        return [_strip_untrusted_artifact_routes(item) for item in value]
+    return value
+
+
+def _public_interactive_session(
+    session: dict[str, Any],
+    *,
+    artifact_service: Any | None = None,
+) -> dict[str, Any]:
     """Project an interactive record for external HTTP/MCP consumers."""
 
     public = _redact_interactive_status_value(session)
@@ -667,17 +709,39 @@ def _public_interactive_session(session: dict[str, Any]) -> dict[str, Any]:
     session_id = str(session.get('session_id') or '').strip()
     if session.get('source_path') and 'source_path' not in public:
         public['source_path'] = '<redacted>'
-    if session_id and session.get('source_path') and _interactive_session_has_managed_origin(session):
-        download_path = f'/local-cli/session/{session_id}/artifact/working-copy'
+    artifacts = _strip_untrusted_artifact_routes(public.get('artifacts'))
+    if not isinstance(artifacts, dict):
+        artifacts = {}
+    service = artifact_service if artifact_service is not None else local_cli_service
+    authoritative: dict[str, Any] = {}
+    if session_id:
+        try:
+            projection = service.public_artifact_projection(session_id=session_id, session=session)
+            if isinstance(projection, dict):
+                authoritative = {
+                    str(key): value
+                    for key, value in projection.items()
+                    if str(key).casefold().endswith('_download_path')
+                    and isinstance(value, str)
+                }
+        except Exception:
+            authoritative = {}
+    artifacts.update(authoritative)
+    public['artifacts'] = artifacts
+    download_path = authoritative.get('latest_working_copy_download_path')
+    if session_id and session.get('source_path') and isinstance(download_path, str):
         public['source_path'] = download_path
-        artifacts = public.get('artifacts') if isinstance(public.get('artifacts'), dict) else {}
-        artifacts['working_copy_download_path'] = download_path
-        public['artifacts'] = artifacts
     return public
 
 
-def _interactive_response(session: dict[str, Any]) -> InteractiveSessionResponse:
-    return InteractiveSessionResponse(session=_public_interactive_session(session))
+def _interactive_response(
+    session: dict[str, Any],
+    *,
+    artifact_service: Any | None = None,
+) -> InteractiveSessionResponse:
+    return InteractiveSessionResponse(
+        session=_public_interactive_session(session, artifact_service=artifact_service),
+    )
 
 
 def _load_json_dict(path: Path) -> dict[str, Any] | None:

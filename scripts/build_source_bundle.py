@@ -13,9 +13,9 @@ from pathlib import Path, PurePosixPath
 from typing import Iterable
 
 try:
-    from scripts.source_bundle_policy import is_prohibited_member
+    from scripts.source_bundle_policy import find_python_source_hygiene_violations, is_prohibited_member
 except ImportError:  # direct script execution
-    from source_bundle_policy import is_prohibited_member
+    from source_bundle_policy import find_python_source_hygiene_violations, is_prohibited_member
 
 
 class SourceBundleError(RuntimeError):
@@ -659,6 +659,11 @@ def build_source_bundle(
     # Validate lexical member safety before Git status so a replaced ancestor
     # cannot be hidden behind the dirty-worktree check.
     paths = _walk_source_paths(source_root, archive_path=archive_path, manifest_path=manifest_path)
+    hygiene_violations = find_python_source_hygiene_violations(source_root, paths)
+    if hygiene_violations:
+        raise SourceBundleError(
+            'Python source hygiene check failed: ' + '; '.join(hygiene_violations[:20])
+        )
     git_identity = _git_identity(source_root, tracked)
     if git_identity is not None:
         derived_commit, derived_tree = git_identity

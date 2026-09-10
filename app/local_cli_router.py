@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import re
+import unicodedata
 from typing import Any
+from urllib.parse import quote_from_bytes
 
 from fastapi import APIRouter, File, Form, UploadFile
 from fastapi.responses import StreamingResponse
@@ -126,9 +129,34 @@ class LocalCliCommandBundleRequest(BaseModel):
 
 
 
-def build_local_cli_router(*, settings: Any, interactive_sessions: Any) -> APIRouter:
+_RFC5987_ATTR_SAFE = "!#$&+-.^_`|~"
+
+
+def _ascii_fallback_filename(filename: str) -> str:
+    raw_name = str(filename or 'download')
+    suffix_match = re.search(r'(\.[A-Za-z0-9]{1,32})$', raw_name)
+    suffix = suffix_match.group(1) if suffix_match else ''
+    stem = raw_name[:-len(suffix)] if suffix else raw_name
+    ascii_stem = unicodedata.normalize('NFKD', stem).encode('ascii', errors='ignore').decode('ascii')
+    ascii_stem = re.sub(r'[^A-Za-z0-9!#$&+.^_`|~ -]', '_', ascii_stem)
+    ascii_stem = re.sub(r'\s+', ' ', ascii_stem).strip(' .')
+    if not ascii_stem or ascii_stem in {'.', '..'} or ascii_stem.startswith('.'):
+        ascii_stem = 'download'
+    return ascii_stem + suffix
+
+
+def _content_disposition(filename: str) -> str:
+    raw_name = str(filename or 'download')
+    encoded_name = quote_from_bytes(raw_name.encode('utf-8'), safe=_RFC5987_ATTR_SAFE)
+    return (
+        f'attachment; filename="{_ascii_fallback_filename(raw_name)}"; '
+        f"filename*=UTF-8''{encoded_name}"
+    )
+
+
+def build_local_cli_router(*, settings: Any, interactive_sessions: Any, service: LocalCliService | None = None) -> APIRouter:
     router = APIRouter()
-    service = LocalCliService(settings=settings, interactive_sessions=interactive_sessions)
+    service = service or LocalCliService(settings=settings, interactive_sessions=interactive_sessions)
 
     @router.get('/local-cli/status')
     def local_cli_status() -> dict[str, Any]:
@@ -483,32 +511,32 @@ def build_local_cli_router(*, settings: Any, interactive_sessions: Any) -> APIRo
         except Exception as exc:
             raise as_http_error(exc) from exc
 
-        filename = download.filename
-        safe_filename = (
-            filename.replace('\\', '_')
-            .replace('"', '_')
-            .replace('\r', '_')
-            .replace('\n', '_')
-        )
-        media_type = {
-            'screenshot': 'image/png',
-            'export': 'application/pdf',
-        }.get(kind, 'application/octet-stream')
+        try:
+            media_type = {
+                'screenshot': 'image/png',
+                'export': 'application/pdf',
+            }.get(kind, 'application/octet-stream')
+            headers = {'Content-Disposition': _content_disposition(download.filename)}
+            size_bytes = getattr(download, 'size_bytes', None)
+            if isinstance(size_bytes, int) and not isinstance(size_bytes, bool) and size_bytes >= 0:
+                headers['Content-Length'] = str(size_bytes)
 
-        def body():
+            def body():
+                try:
+                    while True:
+                        chunk = download.stream.read(1024 * 1024)
+                        if not chunk:
+                            break
+                        yield chunk
+                finally:
+                    download.close()
+
+            return StreamingResponse(body(), media_type=media_type, headers=headers)
+        except Exception:
             try:
-                while True:
-                    chunk = download.stream.read(1024 * 1024)
-                    if not chunk:
-                        break
-                    yield chunk
-            finally:
                 download.close()
-
-        return StreamingResponse(
-            body(),
-            media_type=media_type,
-            headers={'Content-Disposition': f'attachment; filename="{safe_filename}"'},
-        )
+            except Exception:
+                pass
+            raise
 
     return router

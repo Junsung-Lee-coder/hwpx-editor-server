@@ -294,9 +294,10 @@ def _api_base_url(settings: Settings) -> str:
 class InteractiveSessionManager:
     """Single-session `.51` interactive state holder.
 
-    This is intentionally a thin API-side scaffold.
-    It keeps operator-visible session/command telemetry first-class while the live Hancom
-    command executor is still being wired in a later slice.
+    The manager owns the bounded operator-visible session, command history,
+    lifecycle state, and verification-evidence records.  Native Hancom work
+    is executed by the LocalCliService/runtime layer, which records its
+    authoritative results through this manager.
     """
 
     def __init__(self, settings: Settings | None = None):

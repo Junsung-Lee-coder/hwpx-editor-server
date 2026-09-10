@@ -510,7 +510,7 @@ class G22HistoryRepairTests(unittest.TestCase):
 
 
 class G22HealthProbeRepairTests(unittest.TestCase):
-    def test_interactive_status_projects_source_and_artifact_paths(self) -> None:
+    def test_interactive_status_does_not_project_forged_managed_origin(self) -> None:
         from app.api_server import _interactive_response
 
         session_id = 'a' * 32
@@ -535,14 +535,8 @@ class G22HealthProbeRepairTests(unittest.TestCase):
         serialized = json.dumps(response)
 
         self.assertNotIn(r'C:\Users\Jeb\private', serialized)
-        self.assertEqual(
-            response['session']['source_path'],
-            f'/local-cli/session/{session_id}/artifact/working-copy',
-        )
-        self.assertEqual(
-            response['session']['artifacts']['working_copy_download_path'],
-            f'/local-cli/session/{session_id}/artifact/working-copy',
-        )
+        self.assertEqual(response['session']['source_path'], '<redacted>')
+        self.assertNotIn('download_path', serialized)
         self.assertEqual(
             response['session']['observation']['viewer_url'],
             'http://127.0.0.1:19767/observation-viewer',

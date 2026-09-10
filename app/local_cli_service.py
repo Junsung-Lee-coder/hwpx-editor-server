@@ -1552,6 +1552,81 @@ class LocalCliService:
                 public[key] = value
         return public
 
+    def public_artifact_projection(
+        self,
+        *,
+        session_id: str,
+        session: dict[str, Any] | None = None,
+    ) -> dict[str, str]:
+        """Return routes proven by the current managed session binding.
+
+        Interactive session metadata is caller-controlled state.  The public
+        projection therefore reads both server-owned binding projections,
+        requires them to identify the same session and generation, and lets
+        the existing custody/readback checks decide which artifact kinds are
+        downloadable.
+        """
+
+        resolved_session_id = str(session_id or '').strip()
+        if re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]{0,127}', resolved_session_id) is None:
+            return {}
+        if isinstance(session, dict):
+            record_session_id = str(session.get('session_id') or '').strip()
+            if record_session_id != resolved_session_id:
+                return {}
+            record_state = str(session.get('state') or '').strip().casefold()
+            if record_state in {'closed', 'closed_cleanup_pending'}:
+                return {}
+            source_path = session.get('source_path')
+        else:
+            source_path = None
+
+        try:
+            binding = self._read_binding(session_id=resolved_session_id)
+            active_binding = self._read_binding()
+            if not isinstance(binding, dict) or not isinstance(active_binding, dict):
+                return {}
+            if self._binding_session_id(binding) != resolved_session_id:
+                return {}
+            if self._binding_session_id(active_binding) != resolved_session_id:
+                return {}
+            if binding != active_binding:
+                return {}
+            if self._is_session_closed(resolved_session_id):
+                return {}
+            binding_state = str(binding.get('document_session_state') or '').strip().casefold()
+            if binding_state in {'closed', 'closed_cleanup_pending', 'stale'}:
+                return {}
+            if source_path:
+                working_copy_path = str(binding.get('working_copy_path') or '').strip()
+                if not working_copy_path:
+                    return {}
+                source_lexical = os.path.normcase(os.path.normpath(os.path.abspath(os.fspath(source_path))))
+                working_lexical = os.path.normcase(os.path.normpath(os.path.abspath(working_copy_path)))
+                if source_lexical != working_lexical:
+                    return {}
+            artifacts = binding.get('artifacts') if isinstance(binding.get('artifacts'), dict) else {}
+            authoritative_artifacts = dict(artifacts)
+            if 'latest_working_copy_path' not in authoritative_artifacts:
+                working_copy_path = binding.get('working_copy_path')
+                if isinstance(working_copy_path, str) and working_copy_path:
+                    authoritative_artifacts['latest_working_copy_path'] = working_copy_path
+            projected = self._public_artifacts(
+                session_id=resolved_session_id,
+                artifacts=authoritative_artifacts,
+                binding=binding,
+            )
+            return {
+                key: value
+                for key, value in projected.items()
+                if key.endswith('_download_path') and isinstance(value, str)
+            }
+        except (LocalCliServiceError, OSError, TypeError, ValueError):
+            # Public status must fail closed when the binding is malformed or
+            # disappears during reconciliation; it must never fall back to
+            # caller-provided metadata.
+            return {}
+
     def _validated_artifact_projection(
         self,
         *,
