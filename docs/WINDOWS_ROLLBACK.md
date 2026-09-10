@@ -36,6 +36,18 @@ The old root is moved to a run-owned sibling such as `hwpx-editor-server.backup-
 
 The common module exposes `Restore-InstallSnapshot` for an operator-approved recovery script. Use the exact snapshot path recorded in the receipt; do not guess a task name or root. The function restores the previous XML and unregisters tasks that did not exist in the snapshot.
 
+## Recovering a timed-out Hancom command
+
+The local-CLI backend quarantines a document when a native command exceeds its wait limit. This is different from installer rollback: the Hancom document remains owned by its original session, ordinary commands and `close` are fenced, and a retry must not create a second native command.
+
+1. Keep the session ID and command ID from the timeout response. Do not replay the timed-out command.
+2. Query the session status and call `command_reconcile` with the same session ID and command ID.
+3. If reconciliation is pending, wait and query the same command again. Do not close the session or remove its managed root.
+4. Treat a response that says the native recovery snapshot is unavailable, missing, or failed verification as unknown. Keep the binding and logs for operator review; do not claim that the document was recovered.
+5. Only after a recovery artifact has been committed with its managed relative path, size, and SHA-256 may the session be released and closed. Download any artifact that must be kept before closing, because explicit close removes the server-managed working copy and temporary output.
+
+The recovery snapshot is a new native `SaveAs` output. It does not overwrite the source file or silently replace the working copy. A native save that returns anything other than an affirmative success result, produces no regular nonempty file, or changes during custody verification is a recovery failure. A hung or dirty native process remains fenced; do not kill it merely because the client-side timeout elapsed.
+
 ## Forced activation-failure rehearsal
 
 Use a disposable test directory and a synthetic fixture only. Do not run a rehearsal against the live book installation or production scheduled tasks. A safe rehearsal records:

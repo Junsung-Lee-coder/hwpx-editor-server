@@ -1087,6 +1087,45 @@ class InteractiveSessionManager:
             merged.update(update)
         return merged
 
+    def _merge_metadata(self, current: Any, update: Any) -> dict[str, Any]:
+        """Merge metadata without allowing a later client to rewrite origin."""
+
+        merged = self._merge_mapping(current, update)
+        if not isinstance(update, dict):
+            return merged
+        existing_local_cli = current.get('local_cli_v1') if isinstance(current, dict) else None
+        incoming_local_cli = update.get('local_cli_v1')
+        if existing_local_cli is not None and not isinstance(existing_local_cli, dict):
+            raise InteractiveSessionError('Existing interactive local CLI provenance metadata is malformed.')
+        if incoming_local_cli is None:
+            if isinstance(existing_local_cli, dict):
+                merged['local_cli_v1'] = dict(existing_local_cli)
+            return merged
+        if not isinstance(incoming_local_cli, dict):
+            raise InteractiveSessionError('Interactive local CLI provenance metadata must be a mapping.')
+        local_cli = dict(existing_local_cli) if isinstance(existing_local_cli, dict) else {}
+        immutable = {'opened_via', 'bridge', 'closed_via'}
+        existing_provenance = {
+            key: value
+            for key, value in local_cli.items()
+            if key in immutable and value not in (None, '')
+        }
+        for key, value in incoming_local_cli.items():
+            if key in immutable:
+                if value in (None, ''):
+                    continue
+                conflicting = any(existing_value != value for existing_value in existing_provenance.values())
+                if conflicting:
+                    raise InteractiveSessionError(
+                        f'Interactive local CLI provenance cannot be overwritten: {key}.'
+                    )
+            if value is not None:
+                local_cli[key] = value
+                if key in immutable and value not in (None, ''):
+                    existing_provenance[key] = value
+        merged['local_cli_v1'] = local_cli
+        return merged
+
     def _save_session_locked(
         self,
         session: dict[str, Any],
@@ -1301,7 +1340,7 @@ class InteractiveSessionManager:
             if isinstance(active_target, dict) and active_target:
                 session['active_target'] = active_target
             if isinstance(metadata, dict) and metadata:
-                session['metadata'] = self._merge_mapping(session.get('metadata'), metadata)
+                session['metadata'] = self._merge_metadata(session.get('metadata'), metadata)
             if isinstance(artifacts, dict) and artifacts:
                 session['artifacts'] = self._merge_mapping(session.get('artifacts'), artifacts)
             if isinstance(live_runtime, dict) and live_runtime:
@@ -1376,7 +1415,7 @@ class InteractiveSessionManager:
                 if isinstance(undo_result, dict) and undo_result:
                     session['undo_result'] = undo_result
                 if isinstance(metadata, dict) and metadata:
-                    session['metadata'] = self._merge_mapping(session.get('metadata'), metadata)
+                    session['metadata'] = self._merge_metadata(session.get('metadata'), metadata)
                 if isinstance(live_runtime, dict) and live_runtime:
                     session['live_runtime'] = self._merge_mapping(session.get('live_runtime'), live_runtime)
                 if isinstance(artifacts, dict) and artifacts:

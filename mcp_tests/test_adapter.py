@@ -85,6 +85,9 @@ class Backend(BaseHTTPRequestHandler):
                 time.sleep(2)
             if type(self).mode == 'failure':
                 return self.reply({'detail': {'code': 'NATIVE_BLOCKED', 'message': 'blocked', 'command_id': 'cmd-owned'}}, 409)
+            if type(self).mode == 'semantic_failure' and self.path == '/local-cli/command-reconcile':
+                return self.reply({'ok': False, 'semantic_ok': False, 'session_id': SID,
+                                   'command_id': 'cmd-owned', 'state': 'failed_after_timeout'})
             return self.reply({'ok': True, 'session_id': SID, 'command_id': 'cmd-owned', 'state': 'succeeded'})
         return self.reply({'detail': 'not found'}, 404)
 
@@ -191,6 +194,17 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(result.is_error)
         self.assertTrue(result.structured_content['ok'])
         self.assertEqual(json.loads(result.content[0].text), result.structured_content)
+
+    async def test_semantic_backend_failure_is_mcp_error(self):
+        Backend.mode = 'semantic_failure'
+        result = await self.sdk_call('hwpx_command', {
+            'session_id': SID,
+            'request': {'op': 'command_reconcile', 'command_id': 'cmd-owned'},
+        })
+        self.assertTrue(result.is_error)
+        self.assertFalse(result.structured_content['ok'])
+        self.assertIsNone(result.structured_content['result'])
+        self.assertFalse(result.structured_content['error']['details']['backend']['semantic_ok'])
 
     async def test_backend_bridge_marker_keeps_session_usable(self):
         Backend.mode = 'bridge'

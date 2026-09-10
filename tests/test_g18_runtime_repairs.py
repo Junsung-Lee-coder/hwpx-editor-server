@@ -92,6 +92,7 @@ class LiveRuntimeTimeoutTests(unittest.TestCase):
         command = session._commands_by_id[error.command_id]
         self.assertTrue(command.timed_out)
         self.assertEqual(command.state, 'timed_out_pending_reconciliation')
+        self.assertGreater(command.sequence, 0)
 
     def test_runtime_manager_does_not_replace_terminal_session_before_reconciliation(self) -> None:
         manager = LocalCliRuntimeManager()
@@ -108,6 +109,34 @@ class LiveRuntimeTimeoutTests(unittest.TestCase):
 
         with mock.patch('app.local_cli_runtime.LocalCliLiveSession') as live_session:
             with self.assertRaisesRegex(LocalCliRuntimeError, 'terminal|reconcil'):
+                manager.open_session(
+                    session_id='session-timeout',
+                    session_root=Path(tempfile.gettempdir()),
+                    working_copy_path=Path(tempfile.gettempdir()) / 'document.hwpx',
+                    source_filename='document.hwpx',
+                )
+
+        live_session.assert_not_called()
+        self.assertIs(manager._sessions['session-timeout'], existing)
+
+    def test_runtime_manager_does_not_replace_reconciled_session_before_cleanup(self) -> None:
+        manager = LocalCliRuntimeManager()
+
+        class ReconciledButAlive:
+            def is_alive(self) -> bool:
+                return True
+
+            def is_terminal(self) -> bool:
+                return True
+
+            def has_unreconciled_reconciliation(self) -> bool:
+                return False
+
+        existing = ReconciledButAlive()
+        manager._sessions['session-timeout'] = existing  # type: ignore[assignment]
+
+        with mock.patch('app.local_cli_runtime.LocalCliLiveSession') as live_session:
+            with self.assertRaisesRegex(LocalCliRuntimeError, 'cleanup'):
                 manager.open_session(
                     session_id='session-timeout',
                     session_root=Path(tempfile.gettempdir()),

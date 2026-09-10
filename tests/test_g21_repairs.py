@@ -806,5 +806,139 @@ class BindingCleanupRepairTests(unittest.TestCase):
             self.assertFalse(service.active_binding_path.exists())
 
 
+class R10MetadataProvenanceTests(unittest.TestCase):
+    def test_local_cli_origin_is_merged_key_by_key_and_cannot_be_overwritten(self) -> None:
+        manager = object.__new__(InteractiveSessionManager)
+        merge = getattr(manager, '_merge_metadata', None)
+        self.assertTrue(callable(merge))
+        merged = merge(
+            {'local_cli_v1': {'opened_via': 'local_cli_v1'}},
+            {'local_cli_v1': {'bridge': 'local_cli_v1'}},
+        )
+        self.assertEqual(merged['local_cli_v1']['opened_via'], 'local_cli_v1')
+        self.assertEqual(merged['local_cli_v1']['bridge'], 'local_cli_v1')
+        with self.assertRaises(Exception):
+            merge(
+                merged,
+                {'local_cli_v1': {'opened_via': None, 'bridge': 'other-client'}},
+            )
+
+
+class R10ServiceReconciliationTests(unittest.TestCase):
+    def test_reconcile_requests_native_recovery_before_acknowledging_custody(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            service = LocalCliService.__new__(LocalCliService)
+            service.root = root / 'local_cli_v1'
+            service.sessions_root = service.root / 'sessions'
+            service.active_binding_path = service.root / 'active_binding.json'
+            service.root.mkdir(parents=True)
+            service.sessions_root.mkdir(parents=True)
+            service._closed_session_ids = set()
+            service._closed_session_ids_lock = threading.Lock()
+            session_id = 'session-r10-recovery'
+            command_id = f'{session_id}:command-1'
+            session_root = service.sessions_root / session_id
+            (session_root / 'working').mkdir(parents=True)
+            recovery_path = session_root / 'output' / 'recovery-1' / 'recovery.hwpx'
+            recovery_path.parent.mkdir(parents=True)
+            recovery_bytes = b'checked native recovery snapshot'
+            recovery_path.write_bytes(recovery_bytes)
+            recovery_entry = {
+                'kind': 'recovery',
+                'relative_path': 'output/recovery-1/recovery.hwpx',
+                'size_bytes': len(recovery_bytes),
+                'sha256': hashlib.sha256(recovery_bytes).hexdigest(),
+            }
+            private_data = {
+                'version': 1,
+                'session_id': session_id,
+                'command_id': command_id,
+                'sequence': 1,
+                'session_root_identity': service._managed_path_identity(session_root),
+                'semantic_ok': False,
+                'may_have_mutated': True,
+                'delta_dirty': True,
+                'step_count': 1,
+                'failed_step_count': 1,
+                'document_modified_before_recovery': True,
+                'recovery': {'state': 'preserved', 'attempt_id': 'session-r10-recovery:attempt-1', 'artifact': recovery_entry},
+                'artifacts': [recovery_entry],
+            }
+            public_status = {
+                'command_id': command_id,
+                'command': 'command-bundle',
+                'sequence': 1,
+                'state': 'completed_after_timeout',
+                'timed_out': True,
+                'reconciled': False,
+                'recovery': {'state': 'quarantined'},
+                'result': {'ok': True, 'dirty': False},
+            }
+            private_status = {**public_status, 'reconciliation_data': private_data}
+            service.runtime_manager = SimpleNamespace(
+                latest_command_sequence=lambda session_id, **kwargs: 0,
+                has_session=lambda session_id: True,
+            )
+            service._save_binding({
+                'session_id': session_id,
+                'session_root_path': str(session_root),
+                'session_root_identity': service._managed_path_identity(session_root),
+                'working_copy_path': str(session_root / 'working' / 'document.hwpx'),
+                'source_filename': 'document.hwpx',
+                'command_generation': 0,
+                'native_command_sequence': 0,
+                'pending_command': {'command_id': command_id, 'command': 'command-bundle', 'sequence': 1},
+            })
+
+            class Runtime:
+                def __init__(self) -> None:
+                    self.reconcile_calls = 0
+                    self.acknowledge_calls = 0
+
+                def has_session(self, session_id: str) -> bool:
+                    return True
+
+                def latest_command_sequence(self, session_id: str, **kwargs: object) -> int:
+                    return 0
+
+                def command_status(self, session_id: str, command_id: str | None = None, **kwargs: object) -> dict[str, object]:
+                    return dict(public_status)
+
+                def reconcile_command(self, session_id: str, command_id: str, **kwargs: object) -> dict[str, object]:
+                    self.reconcile_calls += 1
+                    recovered = dict(public_status)
+                    recovered['recovery'] = {'state': 'preserved'}
+                    return recovered
+
+                def command_custody(self, session_id: str, command_id: str, **kwargs: object) -> dict[str, object]:
+                    return dict(private_status)
+
+                def acknowledge_reconciliation(self, session_id: str, command_id: str, **kwargs: object) -> dict[str, object]:
+                    self.acknowledge_calls += 1
+                    return {'reconciled': True, 'command_id': command_id}
+
+                def close_session(self, session_id: str, **kwargs: object) -> None:
+                    return None
+
+            runtime = Runtime()
+            service.runtime_manager = runtime
+            service.interactive_sessions = SimpleNamespace(record_command=lambda *args, **kwargs: None)
+            result = service.reconcile_command(command_id=command_id, session_id=session_id)
+
+            self.assertEqual(runtime.reconcile_calls, 1)
+            self.assertEqual(runtime.acknowledge_calls, 1)
+            self.assertFalse(result['ok'])
+            self.assertFalse(result['semantic_ok'])
+            self.assertTrue(result['working_copy_dirty'])
+            self.assertEqual(result['recovery_artifact']['sha256'], recovery_entry['sha256'])
+            serialized = json.dumps(result)
+            self.assertNotIn(str(session_root), serialized)
+            self.assertIn('/local-cli/session/session-r10-recovery/artifact/recovery', serialized)
+            binding = service._read_binding(session_id=session_id)
+            self.assertNotIn('pending_command', binding)
+            self.assertEqual(binding['artifact_custody']['recovery']['relative_path'], recovery_entry['relative_path'])
+
+
 if __name__ == '__main__':
     unittest.main()

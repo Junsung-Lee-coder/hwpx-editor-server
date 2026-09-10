@@ -27,6 +27,7 @@ from app.local_cli_runtime import (
     _LiveCommand,
     _bounded_command_result,
 )
+import app.local_cli_runtime as local_cli_runtime
 from app.local_cli_service import LocalCliService, LocalCliServiceError
 from local_cli_v1.proof_packet import (
     ProofPacketError,
@@ -1093,6 +1094,138 @@ class G22WindowsContractRepairTests(unittest.TestCase):
         self.assertIn("--expected-archive-sha256", docs)
         self.assertIn("python -m local_cli_v1.main", cli_readme)
         self.assertNotIn("/tmp/fixture", legacy_smoke)
+
+class R10RuntimeReconciliationTests(unittest.TestCase):
+    def test_normalizer_preserves_semantic_failure_and_aggregate_counts(self) -> None:
+        normalizer = getattr(local_cli_runtime, 'normalize_command_outcome', None)
+        self.assertTrue(callable(normalizer))
+        raw = {
+            'ok': True,
+            'dirty': False,
+            'steps': [
+                {'ok': True, 'dirty': False},
+                {'ok': False, 'dirty': True, 'mutation_may_have_persisted': True},
+            ] + [{'ok': True} for _ in range(120)],
+        }
+        normalized = normalizer('command-bundle', raw)
+        self.assertFalse(normalized['semantic_ok'])
+        self.assertTrue(normalized['may_have_mutated'])
+        self.assertEqual(normalized['step_count'], 122)
+        self.assertEqual(normalized['failed_step_count'], 1)
+
+        no_mutation = normalizer('command-bundle', {
+            'ok': False,
+            'steps': [{'ok': False, 'dirty': False, 'mutation_may_have_persisted': False}],
+        })
+        self.assertFalse(no_mutation['semantic_ok'])
+        self.assertFalse(no_mutation['may_have_mutated'])
+
+    def test_checked_recovery_save_requires_affirmative_native_result_and_hashes_file(self) -> None:
+        saver = getattr(local_cli_runtime, 'checked_save_hwp_as', None)
+        self.assertTrue(callable(saver))
+        with tempfile.TemporaryDirectory() as raw:
+            destination = Path(raw) / 'recovery.hwpx'
+
+            class Hwp:
+                def save_as(self, path: str, *, format: str):
+                    Path(path).write_bytes(b'recovery bytes')
+                    return True
+
+            result = saver(Hwp(), destination, 'HWPX')
+            self.assertEqual(result['size_bytes'], len(b'recovery bytes'))
+            self.assertEqual(result['sha256'], hashlib.sha256(b'recovery bytes').hexdigest())
+
+            class AmbiguousHwp:
+                def save_as(self, path: str, *, format: str):
+                    Path(path).write_bytes(b'unsafe')
+                    return None
+
+            with self.assertRaises(Exception):
+                saver(AmbiguousHwp(), Path(raw) / 'ambiguous.hwpx', 'HWPX')
+
+    def test_timeout_enters_quarantine_without_automatic_close_sentinel(self) -> None:
+        session = object.__new__(LocalCliLiveSession)
+        session._state_lock = threading.Lock()
+        session._terminal_error = None
+        session._closing = False
+        session.session_id = 's1'
+        session._commands = Queue()
+        session._commands_by_id = {}
+        session._last_command_id = 's1:command-1'
+        session._cancel_pending_commands = lambda *_args, **_kwargs: None
+        session._persist_command = lambda _command: None
+        command = _LiveCommand(
+            command_id='s1:command-1',
+            name='replace',
+            handler=None,
+            future=Future(),
+            state='running',
+        )
+        session._commands_by_id[command.command_id] = command
+        error = session._terminalize_timeout(
+            command_name='replace',
+            command_id=command.command_id,
+            message='timeout',
+            command=command,
+        )
+        self.assertEqual(error.command_state, 'timed_out_pending_reconciliation')
+        self.assertTrue(getattr(session, '_quarantined', False))
+        self.assertNotIn('__close__', [item.name for item in list(session._commands.queue)])
+
+    def test_dirty_reducer_preserves_preexisting_dirty_for_read_only_false_delta(self) -> None:
+        reducer = getattr(LocalCliService, '_reduce_working_copy_dirty', None)
+        self.assertTrue(callable(reducer))
+        service = object.__new__(LocalCliService)
+        dirty, source = reducer(
+            service,
+            prior_dirty=True,
+            semantic_ok=True,
+            delta_dirty=False,
+            may_have_mutated=False,
+            command_name='command-bundle',
+            fresh_document_modified=False,
+            fresh_sequence_matches=False,
+            ordinary_save_confirmed=False,
+        )
+        self.assertTrue(dirty)
+        self.assertEqual(source, 'preserved_prior_dirty')
+
+    def test_public_bundle_steps_redact_paths_and_document_payloads(self) -> None:
+        service = object.__new__(LocalCliService)
+        steps = service._public_bundle_steps(
+            session_id='session-r10',
+            steps=[{
+                'op': 'export',
+                'result': {
+                    'artifact_path': '/private/export.pdf',
+                    'artifact_kind': 'export',
+                    'selected_text': 'private document text',
+                    'artifacts': {'latest_export_path': '/private/export.pdf'},
+                },
+            }],
+        )
+        serialized = json.dumps(steps)
+        self.assertNotIn('/private/export.pdf', serialized)
+        self.assertNotIn('private document text', serialized)
+        self.assertIn('/local-cli/session/session-r10/artifact/export', serialized)
+
+    def test_recovery_artifact_name_uses_source_stem_and_suffix(self) -> None:
+        service = object.__new__(LocalCliService)
+        self.assertEqual(
+            service._artifact_name(kind='recovery', source_filename='source.hwp'),
+            'source-recovered.hwp',
+        )
+
+    def test_recovery_documentation_matches_quarantine_lifecycle(self) -> None:
+        rollback = (ROOT / 'docs' / 'WINDOWS_ROLLBACK.md').read_text(encoding='utf-8')
+        setup = (ROOT / 'docs' / 'MCP_SETUP.md').read_text(encoding='utf-8')
+        self.assertIn('Recovering a timed-out Hancom command', rollback)
+        self.assertIn('Do not replay the timed-out command.', rollback)
+        self.assertIn('Download any artifact that must be kept before closing', rollback)
+        self.assertIn('command_reconcile', setup)
+        self.assertIn('reconciled=false', setup)
+        self.assertIn('/local-cli/session/{session_id}/artifact/recovery', setup)
+        self.assertIn('복구 전에는 원본 문서나 서버 관리 복사본을 직접 삭제하지 마세요.', setup)
 
 
 if __name__ == "__main__":

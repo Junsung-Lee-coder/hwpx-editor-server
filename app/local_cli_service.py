@@ -56,6 +56,10 @@ from app.local_cli_document import (
     resolve_match_target,
 )
 from app.local_cli_runtime import (
+    _RECOVERY_STATES,
+    _RECOVERY_ARTIFACT_KINDS,
+    _artifact_kind_from_key,
+    _bounded_journal_value,
     LocalCliRuntimeError,
     LocalCliRuntimeHandle,
     LocalCliRuntimeTimeoutError,
@@ -866,7 +870,11 @@ class LocalCliService:
         outcome: str = 'stale',
     ) -> None:
         session_id = self._binding_session_id(binding)
-        if self._binding_has_pending_reconciliation(binding):
+        if (
+            self._binding_has_pending_reconciliation(binding)
+            or binding.get('document_session_state') in {'reconciled', 'reconciled_cleanup_pending'}
+            or isinstance(binding.get('artifact_custody'), dict)
+        ):
             return
         self._mark_session_closed(session_id)
         try:
@@ -1047,6 +1055,11 @@ class LocalCliService:
             raise LocalCliServiceError(
                 'A native local CLI command is awaiting reconciliation; '
                 f'use command-reconcile for command_id={command_id}.',
+                status_code=409,
+            )
+        if require_live and binding.get('live_session_bound') is False:
+            raise LocalCliServiceError(
+                'The local CLI session is no longer live; close it and open a new managed copy.',
                 status_code=409,
             )
         if require_live and not self.runtime_manager.has_session(resolved_session_id):
@@ -1434,7 +1447,8 @@ class LocalCliService:
         cursor = location.get('cursor') if isinstance(location.get('cursor'), dict) else None
         binding['last_live_location'] = location
         binding['last_cursor_snapshot'] = cursor
-        binding['document_session_state'] = 'open'
+        if not self._binding_has_pending_reconciliation(binding):
+            binding['document_session_state'] = 'open'
         binding['live_session_bound'] = self.runtime_manager.has_session(self._binding_session_id(binding))
         if isinstance(cursor, dict):
             binding = self._update_binding_from_snapshot(binding, cursor, clear_last_find=clear_last_find)
@@ -1465,18 +1479,164 @@ class LocalCliService:
             return f'{stem}.pdf'
         if kind in {'working-copy', 'working_copy'}:
             return f'{stem}-edited{suffix}'
+        if kind == 'recovery':
+            return f'{stem}-recovered{suffix}'
         raise LocalCliServiceError(f'Unsupported local CLI artifact kind: {kind}', status_code=400)
 
     def _artifact_download_path(self, *, session_id: str, kind: str) -> str:
         return f'/local-cli/session/{session_id}/artifact/{kind}'
 
+    def _public_artifacts(
+        self,
+        *,
+        session_id: str,
+        artifacts: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        """Expose download routes and custody metadata, never server paths."""
+
+        source = artifacts if isinstance(artifacts, dict) else {}
+        public: dict[str, Any] = {}
+        route_kinds = {
+            'latest_working_copy_path': 'working-copy',
+            'latest_export_path': 'export',
+            'latest_screenshot_path': 'screenshot',
+            'latest_recovery_path': 'recovery',
+        }
+        for key, kind in route_kinds.items():
+            if isinstance(source.get(key), str) and source[key]:
+                public[key.replace('_path', '_download_path')] = self._artifact_download_path(
+                    session_id=session_id,
+                    kind=kind,
+                )
+        for key in ('latest_recovery_sha256', 'latest_recovery_size_bytes'):
+            value = source.get(key)
+            if value not in (None, ''):
+                public[key] = value
+        return public
+
+    def _validated_artifact_projection(
+        self,
+        *,
+        binding: dict[str, Any],
+        artifacts: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        """Keep only artifact paths proven to be children of this session root."""
+
+        source = artifacts if isinstance(artifacts, dict) else {}
+        projection: dict[str, Any] = {}
+        path_kinds = {
+            'latest_working_copy_path': 'working-copy',
+            'latest_export_path': 'export',
+            'latest_screenshot_path': 'screenshot',
+            'latest_recovery_path': 'recovery',
+        }
+        for key, kind in path_kinds.items():
+            value = source.get(key)
+            if value in (None, ''):
+                continue
+            if not isinstance(value, str):
+                raise LocalCliServiceError('Local CLI artifact path is invalid.', status_code=409)
+            projection[key] = str(self._verify_artifact_readback(binding, Path(value)))
+        for key in ('latest_recovery_sha256', 'latest_recovery_size_bytes'):
+            if source.get(key) not in (None, ''):
+                projection[key] = source[key]
+        return projection
+
+    def _public_bundle_steps(
+        self,
+        *,
+        session_id: str,
+        steps: Any,
+    ) -> list[dict[str, Any]]:
+        """Remove internal artifact paths from bounded bundle step results."""
+
+        if not isinstance(steps, list):
+            return []
+        public_steps: list[dict[str, Any]] = []
+        for raw_step in steps:
+            if not isinstance(raw_step, dict):
+                continue
+            step = _bounded_journal_value(raw_step)
+            if not isinstance(step, dict):
+                continue
+            raw_result = raw_step.get('result')
+            if isinstance(raw_result, dict):
+                artifact_path = raw_result.get('artifact_path')
+                artifact_kind = raw_result.get('artifact_kind')
+                result = _bounded_journal_value(raw_result)
+                if not isinstance(result, dict):
+                    result = {}
+                result.pop('artifact_path', None)
+                if isinstance(artifact_path, str) and artifact_path:
+                    if not isinstance(artifact_kind, str) or artifact_kind not in _RECOVERY_ARTIFACT_KINDS:
+                        artifact_kind = _artifact_kind_from_key(str(step.get('op') or ''))
+                    if artifact_kind in _RECOVERY_ARTIFACT_KINDS:
+                        result['download_path'] = self._artifact_download_path(
+                            session_id=session_id,
+                            kind=artifact_kind,
+                        )
+                if isinstance(result.get('artifacts'), dict):
+                    result['artifacts'] = self._public_artifacts(
+                        session_id=session_id,
+                        artifacts=result['artifacts'],
+                    )
+                step['result'] = result
+            if 'error' in step:
+                step['error'] = 'native command step failed'
+            public_steps.append(step)
+        return public_steps
+
+    def _verify_artifact_readback(
+        self,
+        binding: dict[str, Any],
+        path: Path,
+        *,
+        expected: dict[str, Any] | None = None,
+    ) -> Path:
+        root = self._binding_session_root(binding).resolve(strict=True)
+        lexical = path.absolute()
+        lexical.relative_to(root)
+        current = root
+        for part in lexical.relative_to(root).parts:
+            current = current / part
+            if current.is_symlink():
+                raise LocalCliServiceError('Local CLI artifact path is symlinked.', status_code=409)
+        resolved = lexical.resolve(strict=True)
+        if resolved != lexical or not resolved.is_file():
+            raise LocalCliServiceError('Local CLI artifact is not a regular managed file.', status_code=409)
+        identity_before = self._managed_path_identity(resolved)
+        if identity_before is None:
+            raise LocalCliServiceError('Local CLI artifact identity could not be verified.', status_code=409)
+        if expected is not None:
+            expected_size = expected.get('size_bytes')
+            expected_sha256 = expected.get('sha256')
+            if isinstance(expected_size, bool) or not isinstance(expected_size, int) or expected_size <= 0:
+                raise LocalCliServiceError('Local CLI artifact custody size is invalid.', status_code=409)
+            if not isinstance(expected_sha256, str) or re.fullmatch(r'[0-9a-f]{64}', expected_sha256) is None:
+                raise LocalCliServiceError('Local CLI artifact custody hash is invalid.', status_code=409)
+            digest = hashlib.sha256()
+            actual_size = 0
+            with resolved.open('rb') as stream:
+                for chunk in iter(lambda: stream.read(1024 * 1024), b''):
+                    actual_size += len(chunk)
+                    digest.update(chunk)
+            if self._managed_path_identity(resolved) != identity_before:
+                raise LocalCliServiceError('Local CLI artifact changed during custody readback.', status_code=409)
+            if actual_size != expected_size or digest.hexdigest() != expected_sha256:
+                raise LocalCliServiceError('Local CLI artifact changed after custody.', status_code=409)
+        return resolved
+
     def _resolve_artifact(self, *, kind: str, session_id: str | None = None) -> tuple[dict[str, Any], Path]:
         binding = self._load_active_binding(session_id=session_id, require_live=False)
         if kind in {'working-copy', 'working_copy'}:
-            return binding, self._working_copy_path(binding)
+            return binding, self._verify_artifact_readback(binding, self._working_copy_path(binding))
         artifacts = binding.get('artifacts') if isinstance(binding.get('artifacts'), dict) else {}
         path = Path(str(artifacts.get(f'latest_{kind}_path') or ''))
-        if not path.exists() or not path.is_file():
+        custody_map = binding.get('artifact_custody') if isinstance(binding.get('artifact_custody'), dict) else {}
+        expected = custody_map.get(kind) if isinstance(custody_map.get(kind), dict) else None
+        try:
+            path = self._verify_artifact_readback(binding, path, expected=expected)
+        except (OSError, ValueError):
             raise LocalCliServiceError(f'No local CLI {kind} artifact is available yet.', status_code=404)
         return binding, path
 
@@ -3365,15 +3525,15 @@ class LocalCliService:
     def _bundle_compact_snapshot(self, hwp: Any) -> dict[str, Any]:
         try:
             snapshot = _snapshot_cursor_context(hwp)
-        except Exception as exc:
-            return {'error': f'{type(exc).__name__}: {exc}'}
+        except Exception:
+            return {'error': 'native location snapshot unavailable'}
         return {
             'pos': snapshot.get('pos'),
             'cell_addr': snapshot.get('cell_addr'),
             'is_cell': snapshot.get('is_cell'),
             'has_selection': snapshot.get('has_selection'),
             'selection_mode': snapshot.get('selection_mode'),
-            'current_paragraph_preview': snapshot.get('current_paragraph_preview'),
+            'current_paragraph_preview': None,
         }
 
 
@@ -3420,7 +3580,7 @@ class LocalCliService:
         return {
             'cursor_summary': location.get('cursor_summary'),
             'selection_summary': location.get('selection_summary'),
-            'current_paragraph_preview': location.get('current_paragraph_preview'),
+            'current_paragraph_preview': None,
             'caret_in_table_cell': location.get('caret_in_table_cell'),
             'document_is_modified': location.get('document_is_modified'),
         }
@@ -7787,10 +7947,13 @@ class LocalCliService:
         if not session_id:
             return
         try:
+            semantic_ok = payload.get('semantic_ok') if isinstance(payload.get('semantic_ok'), bool) else (
+                payload.get('ok') if isinstance(payload.get('ok'), bool) else None
+            )
             self.interactive_sessions.record_command(
                 command,
                 session_id=session_id,
-                state='succeeded',
+                state='failed' if semantic_ok is False else 'succeeded',
                 summary=summary,
                 payload=payload,
                 metadata={'local_cli_v1': {'bridge': 'local_cli_v1'}},
@@ -7849,12 +8012,27 @@ class LocalCliService:
                 command_status = {}
             if isinstance(result, dict):
                 result = dict(result)
+                semantic_ok = command_status.get('semantic_ok')
+                if isinstance(semantic_ok, bool):
+                    # The handler's envelope may have been assembled before a
+                    # later bundle step failed.  Normalize before redaction so
+                    # the adapter cannot report a semantic failure as success.
+                    result['ok'] = semantic_ok
+                    result['semantic_ok'] = semantic_ok
+                if isinstance(command_status.get('may_have_mutated'), bool):
+                    result['may_have_mutated'] = command_status['may_have_mutated']
+                if isinstance(command_status.get('failed_step_count'), int):
+                    result['failed_step_count'] = command_status['failed_step_count']
+                if isinstance(command_status.get('step_count'), int):
+                    result['step_count'] = command_status['step_count']
                 result['_local_cli_command'] = {
                     'command': command_name,
                     'generation': command_generation,
                     'command_id': command_status.get('command_id'),
                     'sequence': command_status.get('sequence', native_command_sequence),
                     'state': command_status.get('state', 'succeeded'),
+                    'semantic_ok': command_status.get('semantic_ok'),
+                    'recovery': command_status.get('recovery'),
                 }
             command_sequence = command_status.get('sequence')
             if isinstance(command_sequence, int) and command_sequence >= native_command_sequence:
@@ -8004,6 +8182,14 @@ class LocalCliService:
                 )
             if active_session_id and self.runtime_manager.has_session(active_session_id):
                 raise LocalCliServiceError('A local CLI document is already open. Close it before opening another one.', status_code=409)
+            if (
+                active_binding.get('document_session_state') in {'reconciled', 'reconciled_cleanup_pending'}
+                or isinstance(active_binding.get('artifact_custody'), dict)
+            ):
+                raise LocalCliServiceError(
+                    'A reconciled local CLI session must be explicitly closed after downloading its artifacts.',
+                    status_code=409,
+                )
             self._cleanup_stale_binding(active_binding)
 
         filename = Path(file.filename or 'upload.hwpx').name
@@ -8059,12 +8245,71 @@ class LocalCliService:
                     status_code=500,
                 )
 
-            runtime_open = self.runtime_manager.open_session(
-                session_id=session_id,
-                session_root=session_root,
-                working_copy_path=working_copy_path,
-                source_filename=filename,
-            )
+            try:
+                runtime_open = self.runtime_manager.open_session(
+                    session_id=session_id,
+                    session_root=session_root,
+                    working_copy_path=working_copy_path,
+                    source_filename=filename,
+                )
+            except LocalCliRuntimeTimeoutError as exc:
+                try:
+                    command_status = self.runtime_manager.command_status(session_id, exc.command_id)
+                except Exception:
+                    command_status = {'command_id': exc.command_id, 'state': exc.command_state}
+                try:
+                    command_sequence = command_status.get('sequence', 1)
+                    if isinstance(command_sequence, bool) or not isinstance(command_sequence, int) or command_sequence <= 0:
+                        raise ValueError('invalid startup timeout sequence')
+                except (TypeError, ValueError) as sequence_exc:
+                    raise LocalCliServiceError('Local CLI startup reconciliation sequence is invalid.', status_code=500) from sequence_exc
+                root_identity = self._managed_path_identity(session_root)
+                if not isinstance(root_identity, dict):
+                    raise LocalCliServiceError('Server-managed session root identity could not be captured.', status_code=500)
+                binding = {
+                    'session_id': session_id,
+                    'session_root_path': str(session_root),
+                    'session_root_identity': root_identity,
+                    'source_filename': filename,
+                    'uploaded_path': str(uploaded_path),
+                    'working_copy_path': str(working_copy_path),
+                    'opened_at': utc_now_iso(),
+                    'updated_at': utc_now_iso(),
+                    'command_generation': 0,
+                    'native_command_sequence': command_sequence,
+                    'document_session_state': 'timed_out_pending_reconciliation',
+                    'live_session_bound': True,
+                    'working_copy_dirty': False,
+                    'pending_command': {
+                        'command_id': exc.command_id,
+                        'command': 'start',
+                        'sequence': command_sequence,
+                        'state': command_status.get('state', exc.command_state),
+                        'timed_out_at': utc_now_iso(),
+                    },
+                    'artifacts': {'latest_working_copy_path': str(working_copy_path)},
+                }
+                self._save_binding(binding)
+                try:
+                    self.interactive_sessions.record_command(
+                        'open',
+                        session_id=session_id,
+                        state='pending',
+                        summary='open timed out; awaiting native reconciliation',
+                        payload={'command_id': exc.command_id, 'sequence': command_sequence},
+                        metadata={'local_cli_v1': {'reconciliation_pending': True}},
+                        live_runtime={
+                            'reconciliation_pending': True,
+                            'pending_command': dict(binding['pending_command']),
+                        },
+                    )
+                except Exception:
+                    pass
+                raise LocalCliServiceError(
+                    f'{exc} status={command_status.get("state", exc.command_state)} '
+                    f'command_id={exc.command_id}; run command-reconcile before retrying.',
+                    status_code=504,
+                ) from exc
             location = runtime_open.get('location') if isinstance(runtime_open.get('location'), dict) else {}
 
             binding = {
@@ -8152,6 +8397,8 @@ class LocalCliService:
                 status_code=409,
             )
         status = self._command_status_for_binding(binding, command_id)
+        if str(status.get('command_id') or '').strip() not in {'', command_id}:
+            raise LocalCliServiceError('Native command identity did not match the requested reconciliation.', status_code=409)
         state = str(status.get('state') or 'unknown')
         if state == 'timed_out_pending_reconciliation':
             return {
@@ -8166,6 +8413,95 @@ class LocalCliService:
                 f'Local CLI command is not awaiting reconciliation: state={state}.',
                 status_code=409,
             )
+        custody_reader = getattr(self.runtime_manager, 'command_custody', None)
+        legacy_runtime_double = not callable(custody_reader)
+        if not legacy_runtime_double and not status.get('reconciled'):
+            try:
+                status = self.runtime_manager.reconcile_command(
+                    self._binding_session_id(binding),
+                    command_id,
+                    session_root=self._binding_session_root(binding),
+                )
+            except Exception as exc:
+                raise LocalCliServiceError(
+                    'Native command reconciliation could not complete; outcome remains unknown.',
+                    status_code=409,
+                ) from exc
+            state = str(status.get('state') or 'unknown')
+            if state == 'timed_out_pending_reconciliation':
+                return {
+                    'ok': True,
+                    'reconciled': False,
+                    'reconciliation': 'pending',
+                    'session_id': self._binding_session_id(binding),
+                    'command': status,
+                }
+            if state not in {'completed_after_timeout', 'failed_after_timeout'}:
+                raise LocalCliServiceError(
+                    f'Local CLI command is not awaiting reconciliation: state={state}.',
+                    status_code=409,
+                )
+        if legacy_runtime_double:
+            # Existing unit seams predate the custody API.  Keep this branch
+            # limited to objects that cannot be the production runtime manager;
+            # the real manager always exposes command_custody below.
+            custody = status
+        else:
+            try:
+                custody = custody_reader(
+                    self._binding_session_id(binding),
+                    command_id,
+                    session_root=self._binding_session_root(binding),
+                )
+            except Exception as exc:
+                raise LocalCliServiceError(
+                    'Late command custody is unavailable; the native outcome is unknown and must not be promoted.',
+                    status_code=409,
+                ) from exc
+        reconciliation_data = custody.get('reconciliation_data') if isinstance(custody.get('reconciliation_data'), dict) else {}
+        if not legacy_runtime_double:
+            private_version = reconciliation_data.get('version')
+            private_session_id = str(reconciliation_data.get('session_id') or '').strip()
+            private_command_id = str(reconciliation_data.get('command_id') or '').strip()
+            private_sequence = reconciliation_data.get('sequence')
+            if private_version != 1 or private_session_id != self._binding_session_id(binding) or private_command_id != command_id:
+                raise LocalCliServiceError('Late command custody identity did not match the managed binding.', status_code=409)
+            if isinstance(private_sequence, bool) or not isinstance(private_sequence, int) or private_sequence <= 0:
+                raise LocalCliServiceError('Late command custody sequence is invalid.', status_code=409)
+            if not isinstance(status.get('sequence'), int) or isinstance(status.get('sequence'), bool) or status['sequence'] != private_sequence:
+                raise LocalCliServiceError('Late command custody sequence did not match the command status.', status_code=409)
+            for field in ('semantic_ok', 'delta_dirty', 'document_modified_before_recovery'):
+                value = reconciliation_data.get(field)
+                if value is not None and not isinstance(value, bool):
+                    raise LocalCliServiceError(f'Late command custody field is invalid: {field}.', status_code=409)
+            if not isinstance(reconciliation_data.get('may_have_mutated'), bool):
+                raise LocalCliServiceError('Late command custody mutation flag is invalid.', status_code=409)
+            for field in ('step_count', 'failed_step_count'):
+                value = reconciliation_data.get(field)
+                if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                    raise LocalCliServiceError(f'Late command custody count is invalid: {field}.', status_code=409)
+            if reconciliation_data['failed_step_count'] > reconciliation_data['step_count']:
+                raise LocalCliServiceError('Late command custody step counts are inconsistent.', status_code=409)
+        recovery = reconciliation_data.get('recovery') if isinstance(reconciliation_data.get('recovery'), dict) else {}
+        public_recovery = status.get('recovery') if isinstance(status.get('recovery'), dict) else {}
+        recovery_state = str(recovery.get('state') or public_recovery.get('state') or 'none')
+        if recovery_state not in _RECOVERY_STATES:
+            raise LocalCliServiceError('Late command recovery state is invalid.', status_code=409)
+        if not legacy_runtime_double and recovery_state == 'preserved' and not str(recovery.get('attempt_id') or '').strip():
+            raise LocalCliServiceError('Late command recovery attempt identity is missing.', status_code=409)
+        if recovery_state == 'saving':
+            return {
+                'ok': True,
+                'reconciled': False,
+                'reconciliation': 'pending',
+                'session_id': self._binding_session_id(binding),
+                'command': status,
+            }
+        if not legacy_runtime_double and recovery_state != 'preserved':
+            raise LocalCliServiceError(
+                'Late command result has no committed native recovery artifact; outcome remains unknown.',
+                status_code=409,
+            )
         associated_command_id = str(binding.get('last_reconciliation_command_id') or '').strip()
         if not pending_id and not status.get('reconciled') and associated_command_id != command_id:
             raise LocalCliServiceError(
@@ -8173,8 +8509,49 @@ class LocalCliService:
                 status_code=409,
             )
         if status.get('reconciled') and not pending_id:
+            custody_map = binding.get('artifact_custody') if isinstance(binding.get('artifact_custody'), dict) else {}
+            committed_artifacts = binding.get('artifacts') if isinstance(binding.get('artifacts'), dict) else {}
+            if not legacy_runtime_double and 'recovery' not in custody_map:
+                raise LocalCliServiceError('Committed reconciliation has no recovery custody.', status_code=409)
+            for kind, expected in custody_map.items():
+                if not isinstance(expected, dict):
+                    raise LocalCliServiceError('Committed artifact custody is malformed.', status_code=409)
+                artifact_key = 'latest_working_copy_path' if kind in {'working-copy', 'working_copy'} else f'latest_{kind}_path'
+                artifact_path = committed_artifacts.get(artifact_key)
+                if not isinstance(artifact_path, str):
+                    raise LocalCliServiceError('Committed artifact projection is missing.', status_code=409)
+                try:
+                    self._verify_artifact_readback(binding, Path(artifact_path), expected=expected)
+                except (OSError, ValueError) as exc:
+                    raise LocalCliServiceError('Committed artifact failed retry readback.', status_code=409) from exc
+            stored_semantic_ok = (
+                custody.get('semantic_ok') if isinstance(custody.get('semantic_ok'), bool) else
+                status.get('semantic_ok') if isinstance(status.get('semantic_ok'), bool) else None
+            )
+            if not isinstance(stored_semantic_ok, bool):
+                raise LocalCliServiceError('Stored semantic command outcome is unavailable; outcome remains unknown.', status_code=409)
+            private_sequence = reconciliation_data.get('sequence')
+            if (
+                isinstance(private_sequence, bool)
+                or not isinstance(private_sequence, int)
+                or binding.get('native_command_sequence') != private_sequence
+            ):
+                raise LocalCliServiceError('Committed reconciliation sequence did not match the binding.', status_code=409)
+            for expected in custody_map.values():
+                if (
+                    expected.get('command_id') not in (None, '', command_id)
+                    or expected.get('sequence') not in (None, private_sequence)
+                ):
+                    raise LocalCliServiceError('Committed artifact custody identity did not match the command.', status_code=409)
+            recovery_claim = recovery.get('artifact') if isinstance(recovery.get('artifact'), dict) else None
+            recovery_entry = custody_map.get('recovery')
+            if recovery_claim is None or recovery_entry is None or any(
+                recovery_claim.get(key) != recovery_entry.get(key)
+                for key in ('relative_path', 'sha256', 'size_bytes')
+            ):
+                raise LocalCliServiceError('Committed recovery claim did not match artifact custody.', status_code=409)
             return {
-                'ok': True,
+                'ok': stored_semantic_ok,
                 'reconciled': True,
                 'reconciliation': 'already_reconciled',
                 'session_id': self._binding_session_id(binding),
@@ -8185,38 +8562,144 @@ class LocalCliService:
         try:
             current_generation = int(binding.get('command_generation', 0))
             current_sequence = int(binding.get('native_command_sequence', 0))
-            command_sequence = max(current_sequence, int(status.get('sequence', 0)))
+            status_sequence = status.get('sequence')
+            if isinstance(status_sequence, bool) or not isinstance(status_sequence, int) or status_sequence <= 0:
+                raise ValueError('invalid native command sequence')
+            command_sequence = status_sequence
         except (TypeError, ValueError) as exc:
             raise LocalCliServiceError('Local CLI reconciliation sequence is invalid.', status_code=500) from exc
+        pending_sequence = pending.get('sequence')
+        if pending_id and (
+            isinstance(pending_sequence, bool)
+            or not isinstance(pending_sequence, int)
+            or pending_sequence != command_sequence
+        ):
+            raise LocalCliServiceError('Local CLI reconciliation sequence did not match its pending command.', status_code=409)
+        if not pending_id and current_sequence != command_sequence:
+            raise LocalCliServiceError('Local CLI reconciliation sequence did not match the binding.', status_code=409)
         result = status.get('result') if isinstance(status.get('result'), dict) else {}
         command_name = str(status.get('command') or pending.get('command') or '')
-        mutation_commands = {
-            'command-bundle', 'replace', 'cell-replace', 'type', 'anchor-insert',
-            'figure-section', 'figure-section-image', 'image', 'image-at-anchor',
-            'fontsize', 'bold', 'font', 'bullet', 'table', 'list', 'action',
-            'undo', 'redo', 'save', 'insert-text-file',
-        }
         location = result.get('location') if isinstance(result.get('location'), dict) else {}
         if not location and isinstance(result.get('after_location'), dict):
             location = result['after_location']
         artifacts = result.get('artifacts') if isinstance(result.get('artifacts'), dict) else {}
-        dirty: bool | None = None
-        if state == 'completed_after_timeout':
-            if isinstance(result.get('dirty'), bool):
-                dirty = bool(result['dirty'])
-            elif command_name == 'save':
-                dirty = False
-            elif command_name in mutation_commands:
-                dirty = True
-            if command_name == 'save':
-                artifacts = {**artifacts, 'latest_working_copy_path': str(self._working_copy_path(binding))}
-            if command_name == 'export' and result.get('artifact_path'):
-                artifacts = {**artifacts, 'latest_export_path': str(result['artifact_path'])}
-        else:
-            # A failed native mutation may have taken effect before the
-            # exception crossed the COM boundary. Keep the binding and report
-            # it dirty until a later explicit proof/undo establishes safety.
-            dirty = True if command_name in mutation_commands else None
+        root = self._binding_session_root(binding).resolve(strict=True)
+        private_identity = reconciliation_data.get('session_root_identity')
+        if not legacy_runtime_double:
+            try:
+                actual_stat = os.stat(root, follow_symlinks=False)
+                actual_identity = {
+                    'device': int(actual_stat.st_dev),
+                    'inode': int(actual_stat.st_ino),
+                    'mode': int(actual_stat.st_mode),
+                }
+            except OSError as exc:
+                raise LocalCliServiceError('Recovery root custody could not be verified.', status_code=409) from exc
+            if private_identity != actual_identity:
+                raise LocalCliServiceError('Recovery root identity changed; native outcome remains unknown.', status_code=409)
+        private_artifacts = reconciliation_data.get('artifacts') if isinstance(reconciliation_data.get('artifacts'), list) else []
+        artifact_custody: dict[str, dict[str, Any]] = {}
+        for entry in private_artifacts:
+            if not isinstance(entry, dict):
+                continue
+            kind = str(entry.get('kind') or '')
+            relative = str(entry.get('relative_path') or '')
+            if not relative or kind not in {'recovery', 'export', 'screenshot', 'working-copy', 'working_copy'}:
+                continue
+            try:
+                if (
+                    relative.startswith(('/', '\\'))
+                    or re.match(r'^[A-Za-z]:', relative)
+                    or ':' in relative
+                    or any(part in {'', '.', '..'} for part in relative.replace('\\', '/').split('/'))
+                ):
+                    raise ValueError('invalid managed artifact relative path')
+                lexical = root / relative
+                lexical.relative_to(root)
+                current_path = root
+                for part in lexical.relative_to(root).parts:
+                    current_path = current_path / part
+                    if current_path.is_symlink():
+                        raise ValueError('symlinked managed artifact path')
+                candidate = lexical.resolve(strict=True)
+                candidate.relative_to(root)
+                if candidate != lexical:
+                    raise ValueError('managed artifact path resolves through a link')
+                if not candidate.is_file() or candidate.is_symlink():
+                    raise ValueError('not a regular managed artifact')
+                expected_size = entry.get('size_bytes')
+                expected_sha256 = entry.get('sha256')
+                if isinstance(expected_size, bool) or not isinstance(expected_size, int) or expected_size <= 0:
+                    raise ValueError('invalid committed artifact size')
+                if not isinstance(expected_sha256, str) or re.fullmatch(r'[0-9a-f]{64}', expected_sha256) is None:
+                    raise ValueError('invalid committed artifact hash')
+                digest = hashlib.sha256()
+                actual_size = 0
+                with candidate.open('rb') as stream:
+                    for chunk in iter(lambda: stream.read(1024 * 1024), b''):
+                        actual_size += len(chunk)
+                        digest.update(chunk)
+                if actual_size != expected_size or digest.hexdigest() != expected_sha256:
+                    raise ValueError('committed artifact changed after custody')
+                artifact_custody[kind] = {
+                    'relative_path': relative,
+                    'sha256': expected_sha256,
+                    'size_bytes': expected_size,
+                    'command_id': command_id,
+                    'sequence': command_sequence,
+                }
+                if kind == 'recovery':
+                    artifacts = {**artifacts, 'latest_recovery_path': str(candidate)}
+                    artifacts = {**artifacts, 'latest_recovery_sha256': expected_sha256, 'latest_recovery_size_bytes': expected_size}
+                elif kind == 'export':
+                    artifacts = {**artifacts, 'latest_export_path': str(candidate)}
+                elif kind == 'screenshot':
+                    artifacts = {**artifacts, 'latest_screenshot_path': str(candidate)}
+                elif kind in {'working-copy', 'working_copy'}:
+                    artifacts = {**artifacts, 'latest_working_copy_path': str(candidate)}
+            except (OSError, ValueError) as exc:
+                raise LocalCliServiceError('Committed recovery artifact failed managed-root readback.', status_code=409) from exc
+        if not legacy_runtime_double:
+            recovery_entry = artifact_custody.get('recovery')
+            recovery_claim = recovery.get('artifact') if isinstance(recovery.get('artifact'), dict) else None
+            if recovery_entry is None or recovery_claim is None or any(
+                recovery_claim.get(key) != recovery_entry.get(key)
+                for key in ('relative_path', 'sha256', 'size_bytes')
+            ):
+                raise LocalCliServiceError('Committed recovery custody has no matching recovery artifact.', status_code=409)
+        semantic_ok = reconciliation_data.get('semantic_ok') if isinstance(reconciliation_data.get('semantic_ok'), bool) else (
+            status.get('semantic_ok') if isinstance(status.get('semantic_ok'), bool) else None
+        )
+        if not isinstance(semantic_ok, bool):
+            if legacy_runtime_double:
+                semantic_ok = state == 'completed_after_timeout'
+            else:
+                raise LocalCliServiceError('Stored semantic command outcome is unavailable; outcome remains unknown.', status_code=409)
+        delta_dirty = reconciliation_data.get('delta_dirty') if isinstance(reconciliation_data.get('delta_dirty'), bool) else (
+            result.get('dirty') if legacy_runtime_double and isinstance(result.get('dirty'), bool) else None
+        )
+        may_have_mutated = reconciliation_data.get('may_have_mutated') is True or (
+            legacy_runtime_double and result.get('dirty') is True
+        )
+        dirty, dirty_source = self._reduce_working_copy_dirty(
+            prior_dirty=binding.get('working_copy_dirty') is True or binding.get('dirty') is True,
+            semantic_ok=semantic_ok,
+            delta_dirty=delta_dirty,
+            may_have_mutated=may_have_mutated,
+            command_name=command_name,
+            fresh_document_modified=location.get('document_is_modified') if isinstance(location.get('document_is_modified'), bool) else None,
+            fresh_sequence_matches=int(reconciliation_data.get('sequence', -1)) == int(status.get('sequence', -2)),
+            ordinary_save_confirmed=reconciliation_data.get('ordinary_save_confirmed') is True,
+        )
+        if command_name == 'save':
+            artifacts = {**artifacts, 'latest_working_copy_path': str(self._working_copy_path(binding))}
+        if command_name == 'export':
+            for entry in private_artifacts:
+                if isinstance(entry, dict) and entry.get('kind') == 'export':
+                    candidate = root / str(entry.get('relative_path') or '')
+                    artifacts = {**artifacts, 'latest_export_path': str(candidate)}
+                    break
+        if state == 'failed_after_timeout':
             failure = status.get('error') if isinstance(status.get('error'), dict) else {}
             binding['last_reconciliation_error'] = {
                 'command_id': command_id,
@@ -8224,39 +8707,73 @@ class LocalCliService:
                 'error': failure,
                 'recorded_at': utc_now_iso(),
             }
+        binding['_expected_command_generation'] = current_generation
+        binding['_expected_native_command_sequence'] = current_sequence
+        binding['native_command_sequence'] = command_sequence
+        binding['last_reconciliation_command_id'] = command_id
+        binding['reconciliation_state'] = state
+        if artifact_custody:
+            binding['artifact_custody'] = artifact_custody
+        if not location:
+            location = binding.get('last_live_location') if isinstance(binding.get('last_live_location'), dict) else {}
+        # First persist the artifact/location/dirty projection while the
+        # binding still owns the pending command and the live session.
+        binding = self._update_live_binding(binding, location=location, artifacts=artifacts, dirty=dirty)
         try:
-            reconciled = self.runtime_manager.reconcile_command(
-                session_id,
-                command_id,
-                session_root=self._binding_session_root(binding),
-            )
+            if legacy_runtime_double:
+                acknowledged = self.runtime_manager.reconcile_command(
+                    session_id,
+                    command_id,
+                    session_root=self._binding_session_root(binding),
+                )
+            else:
+                acknowledged = self.runtime_manager.acknowledge_reconciliation(
+                    session_id,
+                    command_id,
+                    session_root=self._binding_session_root(binding),
+                )
         except Exception as exc:
             raise LocalCliServiceError(
                 'Late command result could not be durably acknowledged; binding ownership remains pending.',
                 status_code=500,
             ) from exc
-        if not reconciled.get('reconciled'):
+        if not acknowledged.get('reconciled'):
             raise LocalCliServiceError(
                 'Late command result was not durably marked reconciled; binding ownership remains pending.',
                 status_code=500,
             )
-        binding['_expected_command_generation'] = current_generation
-        binding['_expected_native_command_sequence'] = current_sequence
-        binding['native_command_sequence'] = command_sequence
         binding.pop('pending_command', None)
-        binding['last_reconciliation_command_id'] = command_id
-        binding['reconciliation_state'] = state
         binding['live_session_bound'] = False
-        if not location:
-            location = binding.get('last_live_location') if isinstance(binding.get('last_live_location'), dict) else {}
-        binding = self._update_live_binding(binding, location=location, artifacts=artifacts, dirty=dirty)
+        binding['document_session_state'] = 'reconciled'
+        binding = self._save_binding(binding)
+        cleanup_pending = False
+        try:
+            self.runtime_manager.close_session(session_id, timeout=30.0)
+        except Exception:
+            # Custody is already committed; leave the registered runtime for a
+            # later explicit cleanup retry rather than reopening the document.
+            cleanup_pending = True
+            binding['cleanup_pending'] = True
+            binding['document_session_state'] = 'reconciled_cleanup_pending'
+            binding['live_session_bound'] = False
+            try:
+                binding = self._save_binding(binding)
+            except Exception:
+                pass
         try:
             self.interactive_sessions.record_command(
                 command_name or 'native-command',
                 session_id=session_id,
                 state='succeeded' if state == 'completed_after_timeout' else 'failed',
                 summary=f'{command_name or "native command"} reconciled after timeout ({state})',
-                payload={'command_id': command_id, 'sequence': command_sequence, 'result': result},
+                payload={
+                    'command_id': command_id,
+                    'sequence': command_sequence,
+                    'result': result,
+                    'semantic_ok': semantic_ok,
+                    'dirty': dirty,
+                    'dirty_source': dirty_source,
+                },
                 metadata={'local_cli_v1': {'reconciliation': state, 'reconciliation_pending': False}},
                 live_runtime={
                     'reconciliation_pending': False,
@@ -8266,14 +8783,29 @@ class LocalCliService:
         except Exception:
             pass
         return {
-            'ok': state == 'completed_after_timeout',
+            'ok': bool(semantic_ok) if isinstance(semantic_ok, bool) else state == 'completed_after_timeout',
             'reconciled': True,
             'reconciliation': 'completed_after_timeout' if state == 'completed_after_timeout' else 'failed_after_timeout',
             'session_id': session_id,
-            'command': reconciled,
+            'command': acknowledged,
             'binding_generation': binding.get('command_generation'),
             'working_copy_dirty': binding.get('working_copy_dirty'),
-            'artifacts': binding.get('artifacts') if isinstance(binding.get('artifacts'), dict) else {},
+            'artifacts': self._public_artifacts(
+                session_id=session_id,
+                artifacts=binding.get('artifacts') if isinstance(binding.get('artifacts'), dict) else {},
+            ),
+            'recovery_artifact_path': self._artifact_download_path(session_id=session_id, kind='recovery'),
+            'recovery_artifact': {
+                'download_path': self._artifact_download_path(session_id=session_id, kind='recovery'),
+                **{
+                    key: recovery['artifact'].get(key)
+                    for key in ('sha256', 'size_bytes')
+                    if recovery['artifact'].get(key) not in (None, '')
+                },
+            } if isinstance(recovery.get('artifact'), dict) else None,
+            'cleanup_pending': cleanup_pending,
+            'semantic_ok': semantic_ok,
+            'dirty_source': dirty_source,
         }
 
     def status(self) -> dict[str, Any]:
@@ -8290,8 +8822,15 @@ class LocalCliService:
             if isinstance(active_binding, dict) and self._binding_has_pending_reconciliation(active_binding)
             else None
         )
-        cleanup_pending = False
-        live_bound = bool(session_id and self.runtime_manager.has_session(session_id))
+        cleanup_pending = bool(
+            isinstance(active_binding, dict)
+            and active_binding.get('document_session_state') in {'reconciled', 'reconciled_cleanup_pending'}
+        )
+        live_bound = bool(
+            session_id
+            and (not isinstance(active_binding, dict) or active_binding.get('live_session_bound') is not False)
+            and self.runtime_manager.has_session(session_id)
+        )
         if isinstance(active_binding, dict) and session_id:
             if pending_reconciliation is not None:
                 live_bound = False
@@ -8304,6 +8843,8 @@ class LocalCliService:
                         pending_reconciliation = self._command_status_for_binding(active_binding)
                     if pending_reconciliation is not None:
                         pass
+                    elif active_binding.get('document_session_state') in {'reconciled', 'reconciled_cleanup_pending'}:
+                        cleanup_pending = True
                     elif self._is_session_closed(session_id):
                         if active_binding.get('session_root_path'):
                             # A previous close may have released COM but failed
@@ -10405,6 +10946,36 @@ class LocalCliService:
             'summary': summary,
         }
 
+    def _reduce_working_copy_dirty(
+        self,
+        *,
+        prior_dirty: bool,
+        semantic_ok: bool | None,
+        delta_dirty: bool | None,
+        may_have_mutated: bool,
+        command_name: str,
+        fresh_document_modified: bool | None,
+        fresh_sequence_matches: bool,
+        ordinary_save_confirmed: bool,
+    ) -> tuple[bool, str]:
+        """Reduce dirty state without allowing a stale false delta to clear it."""
+
+        if semantic_ok is False and may_have_mutated:
+            return True, 'semantic_failure_may_have_mutated'
+        if ordinary_save_confirmed and semantic_ok is True:
+            return False, 'ordinary_save_confirmed'
+        if fresh_sequence_matches and isinstance(fresh_document_modified, bool):
+            if fresh_document_modified:
+                return True, 'fresh_native_modified_state'
+            if prior_dirty:
+                return True, 'preserved_prior_dirty'
+            return False, 'fresh_native_clean_state'
+        if delta_dirty is True:
+            return True, 'command_dirty_delta'
+        if delta_dirty is False:
+            return bool(prior_dirty), 'preserved_prior_dirty' if prior_dirty else 'command_clean_delta'
+        return bool(prior_dirty), 'preserved_prior_dirty' if prior_dirty else 'unknown_preserved'
+
     def command_bundle(self, *, steps: list[dict[str, Any]], session_id: str | None = None) -> dict[str, Any]:
         cleaned_steps = self._validate_command_bundle_steps(steps)
         binding = self._load_active_binding(session_id=session_id)
@@ -10487,6 +11058,7 @@ class LocalCliService:
                 'artifacts': artifacts,
             }
 
+        prior_native_sequence = binding.get('native_command_sequence', 0)
         result = self._execute_live(
             binding=binding,
             command_name='command-bundle',
@@ -10495,13 +11067,34 @@ class LocalCliService:
             timeout=120.0,
         )
         location = result.get('after_location') if isinstance(result.get('after_location'), dict) else {}
-        dirty = bool(result.get('dirty'))
-        artifacts = result.get('artifacts') if isinstance(result.get('artifacts'), dict) else {}
+        command_evidence = result.get('_local_cli_command') if isinstance(result.get('_local_cli_command'), dict) else {}
+        semantic_ok = command_evidence.get('semantic_ok') if isinstance(command_evidence.get('semantic_ok'), bool) else (
+            result.get('semantic_ok') if isinstance(result.get('semantic_ok'), bool) else None
+        )
+        command_sequence = command_evidence.get('sequence')
+        try:
+            fresh_sequence_matches = isinstance(command_sequence, int) and command_sequence > int(prior_native_sequence)
+        except (TypeError, ValueError):
+            fresh_sequence_matches = False
+        dirty, dirty_source = self._reduce_working_copy_dirty(
+            prior_dirty=binding.get('working_copy_dirty') is True or binding.get('dirty') is True,
+            semantic_ok=semantic_ok,
+            delta_dirty=result.get('dirty') if isinstance(result.get('dirty'), bool) else None,
+            may_have_mutated=result.get('may_have_mutated') is True,
+            command_name='command-bundle',
+            fresh_document_modified=location.get('document_is_modified') if isinstance(location.get('document_is_modified'), bool) else None,
+            fresh_sequence_matches=fresh_sequence_matches,
+            ordinary_save_confirmed=False,
+        )
+        artifacts = self._validated_artifact_projection(
+            binding=binding,
+            artifacts=result.get('artifacts') if isinstance(result.get('artifacts'), dict) else {},
+        )
         binding = self._update_live_binding(
             binding,
             location=location,
             artifacts=artifacts,
-            dirty=True if dirty else None,
+            dirty=dirty,
             clear_last_find=dirty,
             clear_selection_cache=dirty,
         )
@@ -10517,21 +11110,31 @@ class LocalCliService:
             payload={
                 'ok': bool(result.get('ok')),
                 'dirty': dirty,
+                'dirty_source': dirty_source,
+                'semantic_ok': semantic_ok,
+                'may_have_mutated': result.get('may_have_mutated') is True,
                 'step_count': len(cleaned_steps),
                 'warnings': result.get('warnings') if isinstance(result.get('warnings'), list) else [],
                 'artifacts': artifacts,
             },
         )
         return {
-            'ok': bool(result.get('ok')),
+            'ok': bool(semantic_ok) if isinstance(semantic_ok, bool) else bool(result.get('ok')),
+            'semantic_ok': semantic_ok,
             'command': 'command-bundle',
             'summary': summary,
             'dirty': dirty,
             'before': self._bundle_compact_location(result.get('before_location') if isinstance(result.get('before_location'), dict) else {}),
             'after': self._bundle_compact_location(location),
-            'steps': result.get('steps') if isinstance(result.get('steps'), list) else [],
+            'steps': self._public_bundle_steps(
+                session_id=self._binding_session_id(binding),
+                steps=result.get('steps'),
+            ),
             'warnings': result.get('warnings') if isinstance(result.get('warnings'), list) else [],
-            'artifacts': artifacts,
+            'artifacts': self._public_artifacts(
+                session_id=self._binding_session_id(binding),
+                artifacts=artifacts,
+            ),
             **self._compact_state_payload(location=location),
         }
 
@@ -10558,7 +11161,11 @@ class LocalCliService:
         result = self._execute_live(binding=binding, command_name='screenshot', task_label='local_cli.screenshot', handler=_handler)
         location = result.get('location') if isinstance(result.get('location'), dict) else {}
         artifact_path = str(result.get('artifact_path') or '')
-        binding = self._update_live_binding(binding, location=location, artifacts={'latest_screenshot_path': artifact_path})
+        artifacts = self._validated_artifact_projection(
+            binding=binding,
+            artifacts={'latest_screenshot_path': artifact_path},
+        )
+        binding = self._update_live_binding(binding, location=location, artifacts=artifacts)
         self._record_local_cli_command('screenshot', binding=binding, summary='captured editor screenshot', payload={'artifact_path': artifact_path})
         return {
             'ok': True,
@@ -10573,23 +11180,56 @@ class LocalCliService:
 
         def _handler(handle: LocalCliRuntimeHandle) -> dict[str, Any]:
             save_document(handle.hwp)
+            if working_copy_path.is_symlink() or not working_copy_path.is_file():
+                raise LocalCliRuntimeError('Native save returned without a regular working-copy file.')
+            try:
+                working_copy_size = working_copy_path.stat().st_size
+            except OSError as exc:
+                raise LocalCliRuntimeError('Saved working-copy readback failed.') from exc
+            if working_copy_size <= 0:
+                raise LocalCliRuntimeError('Native save produced an empty working copy.')
+            location = snapshot_live_location(
+                hwp=handle.hwp,
+                source_filename=handle.source_filename,
+                working_copy_id=handle.session_id,
+            )
             return {
-                'location': snapshot_live_location(
-                    hwp=handle.hwp,
-                    source_filename=handle.source_filename,
-                    working_copy_id=handle.session_id,
-                ),
+                'location': location,
+                'ordinary_save_confirmed': True,
+                'working_copy_size_bytes': working_copy_size,
             }
 
         result = self._execute_live(binding=binding, command_name='save', task_label='local_cli.save', handler=_handler)
         location = result.get('location') if isinstance(result.get('location'), dict) else {}
+        command_evidence = result.get('_local_cli_command') if isinstance(result.get('_local_cli_command'), dict) else {}
+        semantic_ok = command_evidence.get('semantic_ok') if isinstance(command_evidence.get('semantic_ok'), bool) else True
+        dirty, dirty_source = self._reduce_working_copy_dirty(
+            prior_dirty=binding.get('working_copy_dirty') is True or binding.get('dirty') is True,
+            semantic_ok=semantic_ok,
+            delta_dirty=False,
+            may_have_mutated=result.get('may_have_mutated') is True,
+            command_name='save',
+            fresh_document_modified=location.get('document_is_modified') if isinstance(location.get('document_is_modified'), bool) else None,
+            fresh_sequence_matches=True,
+            ordinary_save_confirmed=result.get('ordinary_save_confirmed') is True,
+        )
         binding = self._update_live_binding(
             binding,
             location=location,
-            dirty=False,
+            dirty=dirty,
             artifacts={'latest_working_copy_path': str(working_copy_path)},
         )
-        self._record_local_cli_command('save', binding=binding, summary='saved active working copy', payload={'working_copy_path': str(working_copy_path)})
+        self._record_local_cli_command(
+            'save',
+            binding=binding,
+            summary='saved active working copy',
+            payload={
+                'working_copy_path': str(working_copy_path),
+                'dirty': dirty,
+                'dirty_source': dirty_source,
+                'semantic_ok': semantic_ok,
+            },
+        )
         resolved_session_id = self._binding_session_id(binding)
         return {
             'ok': True,
@@ -10621,7 +11261,11 @@ class LocalCliService:
         result = self._execute_live(binding=binding, command_name='export', task_label='local_cli.export', handler=_handler)
         location = result.get('location') if isinstance(result.get('location'), dict) else {}
         artifact_path = str(result.get('artifact_path') or '')
-        binding = self._update_live_binding(binding, location=location, artifacts={'latest_export_path': artifact_path})
+        artifacts = self._validated_artifact_projection(
+            binding=binding,
+            artifacts={'latest_export_path': artifact_path},
+        )
+        binding = self._update_live_binding(binding, location=location, artifacts=artifacts)
         self._record_local_cli_command('export', binding=binding, summary='exported live document to PDF', payload={'artifact_path': artifact_path})
         return {
             'ok': True,
@@ -10759,14 +11403,64 @@ class LocalCliService:
                 f"{str(pending.get('command_id') or '').strip()}",
                 status_code=409,
             )
-        # Close admission is a persistence boundary too: any command that
-        # returns after this point must not be able to recreate a cleared
-        # binding from its pre-close snapshot.
-        self._mark_session_closed(resolved_session_id)
+        # Close admission is a persistence boundary too.  The runtime rejects
+        # new work as soon as close begins; mark the tombstone only after
+        # native close succeeds so a close timeout remains reconcilable.
         try:
             self.runtime_manager.close_session(resolved_session_id)
+        except LocalCliRuntimeTimeoutError as exc:
+            try:
+                command_status = self.runtime_manager.command_status(resolved_session_id, exc.command_id)
+            except Exception:
+                command_status = {'command_id': exc.command_id, 'state': exc.command_state}
+            try:
+                current_sequence = self._parse_binding_generation(binding.get('native_command_sequence', 0))
+            except LocalCliServiceError:
+                current_sequence = 0
+            try:
+                raw_sequence = command_status.get('sequence', current_sequence)
+                if isinstance(raw_sequence, bool) or not isinstance(raw_sequence, int) or raw_sequence < current_sequence:
+                    raise ValueError('invalid or stale native command sequence')
+                command_sequence = raw_sequence
+            except (TypeError, ValueError) as exc:
+                raise LocalCliServiceError('Local CLI close reconciliation sequence is invalid.', status_code=409) from exc
+            binding['_expected_command_generation'] = binding.get('command_generation', 0)
+            binding['_expected_native_command_sequence'] = current_sequence
+            binding['native_command_sequence'] = command_sequence
+            binding['pending_command'] = {
+                'command_id': exc.command_id,
+                'command': 'close',
+                'sequence': command_sequence,
+                'state': command_status.get('state', exc.command_state),
+                'timed_out_at': utc_now_iso(),
+            }
+            binding['document_session_state'] = 'timed_out_pending_reconciliation'
+            binding['live_session_bound'] = True
+            self._save_binding(binding)
+            try:
+                self.interactive_sessions.record_command(
+                    'close',
+                    session_id=resolved_session_id,
+                    state='pending',
+                    summary='close timed out; awaiting native reconciliation',
+                    payload={'command_id': exc.command_id, 'sequence': command_sequence},
+                    metadata={'local_cli_v1': {'reconciliation_pending': True}},
+                    live_runtime={
+                        'reconciliation_pending': True,
+                        'pending_command': dict(binding['pending_command']),
+                    },
+                )
+            except Exception:
+                pass
+            raise LocalCliServiceError(
+                f'{exc} status={command_status.get("state", exc.command_state)} '
+                f'command_id={exc.command_id}; run command-reconcile before retrying.',
+                status_code=504,
+            ) from exc
         except LocalCliRuntimeError as exc:
             raise LocalCliServiceError(str(exc), status_code=500) from exc
+
+        self._mark_session_closed(resolved_session_id)
 
         if binding.get('session_root_path'):
             try:

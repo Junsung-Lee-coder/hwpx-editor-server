@@ -48,11 +48,11 @@ $mcpProcess = Start-Process -FilePath '.mcp-venv\Scripts\python.exe' -ArgumentLi
 | `hwpx_command` | `session_id`, `request.op`. 아래 제한된 명령만 허용 |
 | `hwpx_proof` | `session_id`, `request.kind`: `frame` 또는 `page`. 페이지 방식은 `page`와 선택 항목 `dpi` 사용 |
 | `hwpx_save` | `session_id`. 관리 복사본 저장 |
-| `hwpx_close` | `session_id`. 문서를 닫고 서버의 관리 복사본·임시 산출물 삭제 |
+| `hwpx_close` | `session_id`. 다운로드가 끝난 뒤 문서를 닫고 서버의 관리 복사본·임시 산출물 삭제 |
 
 열기 결과의 `session_id`를 이후 모든 호출의 최상위 필드로 전달하세요. 중첩 `request`에 세션 ID를 넣으면 거부합니다. `document_id`는 이 관리 복사본의 ID이며, 원본 파일의 해시나 전역 문서 번호가 아닙니다. 닫은 뒤에도 명시적인 세션 ID로 상태 기록을 조회할 수 있습니다.
 
-권장 순서는 `open → status → find/where → command 또는 proof → save → 다운로드 → close → status`입니다. `save` 결과의 `download_path`는 백엔드 기준 경로입니다. 닫기 전에 기존 REST 다운로드 기능으로 보관할 파일을 받으세요. 어댑터의 `proof` 폴더에 복사된 페이지 증명은 닫아도 남으므로 필요 없을 때 직접 정리합니다.
+권장 순서는 `open → status → find/where → command 또는 proof → save → 다운로드 → close → status`입니다. `save` 결과의 `download_path`는 백엔드 기준 경로입니다. 닫기는 관리 복사본과 서버 임시 산출물을 삭제하므로, 닫기 전에 기존 REST 다운로드 기능으로 보관할 파일을 받으세요. 어댑터의 `proof` 폴더에 복사된 페이지 증명은 닫아도 남으므로 필요 없을 때 직접 정리합니다.
 
 `hwpx_command`는 `context`, `selection_proof`, `readback`, `cell_format_exact`, `command_reconcile`만 받습니다. `cell_format_exact`는 기존 대상 ID, 해시, 페이지, 구역 앵커와 `confirm_layout=true`를 요구하며, 형식 선택자는 `vertical_align`, `cell_margin_mm`, `cell_margin_hu` 중 하나만 지정합니다. 셀 여백 변경은 선언된 단위로 네 변(left/right/top/bottom)을 모두 명시한 단일 네이티브 호출을 사용하고, 요청에서 독립적으로 계산한 네 변의 값과 네이티브 전후 getter가 정확히 일치해야 성공으로 기록됩니다. 유효하지 않거나 신선하지 않은 네이티브 getter, 같은 값을 다시 요청한 no-op, 요청값과 다른 여백은 거부되며, 동작 후 판정 실패는 변경 가능성을 보존합니다. 셀 정렬은 별도의 네이티브 전후 readback을 확보하지 못하면 성공으로 기록하지 않습니다. `pyhwpx_call`, `hwp_action`, 임의 Python·셸·명령 이름은 허용하지 않습니다. 이 어댑터는 기존 비변경용 `safe-schema` 자체를 확장하거나 쓰기 권한으로 해석하지 않습니다.
 
@@ -62,9 +62,13 @@ $mcpProcess = Start-Process -FilePath '.mcp-venv\Scripts\python.exe' -ArgumentLi
 
 결과는 `ok`, `operation`, `session_id`, `document_id`, `result`, `error`를 포함합니다. 같은 내용이 MCP의 텍스트와 `structuredContent`에 들어갑니다. 백엔드 거부와 도구 입력 오류는 `isError=true`입니다. JSON-RPC 문법·메서드·요청 메타데이터 오류는 별도의 프로토콜 오류입니다.
 
-`BACKEND_OUTCOME_UNKNOWN`이면 작업을 반복하지 마세요. 클라이언트의 대기가 끝나도 이미 제출된 Hancom 작업은 계속될 수 있습니다. `hwpx_status`에서 처리 중인 명령 ID를 확인한 뒤 `hwpx_command`의 `command_reconcile`로 결과를 재확인합니다. 문서 열기 응답을 받기 전에 연결이 끊겨 세션 ID가 없다면 백엔드 운영자가 기존 `/local-cli/status`에서 세션과 처리 기록을 먼저 확인해야 합니다.
+`BACKEND_OUTCOME_UNKNOWN`이면 작업을 반복하지 마세요. 클라이언트의 대기가 끝나도 이미 제출된 Hancom 작업은 계속될 수 있습니다. `hwpx_status`에서 처리 중인 명령 ID를 확인한 뒤 같은 `session_id`와 그 명령 ID로 `hwpx_command`의 `command_reconcile`을 호출해 결과를 재확인합니다. 문서 열기 응답을 받기 전에 연결이 끊겨 세션 ID가 없다면 백엔드 운영자가 기존 `/local-cli/status`에서 세션과 처리 기록을 먼저 확인해야 합니다.
 
-연결 취소는 롤백이 아닙니다. 어댑터는 변경 명령을 자동 재전송하지 않습니다. 백엔드 대기 제한은 `HWPX_MCP_TIMEOUT`으로 설정하며 기본 120초, 허용 범위는 0.1..600초입니다. 페이지 렌더링은 별도로 60초를 제한합니다. 취소된 렌더링의 임시 파일은 잠시 남을 수 있으며 완료된 `manifest.json`이 없는 파일을 증명으로 사용하면 안 됩니다.
+명령 시간 초과 뒤에는 해당 세션이 격리됩니다. 대기 중인 명령을 다시 보내거나 `close`를 호출하지 마세요. `command_reconcile`은 원래 Hancom 작업이 끝난 뒤 소유 STA에서 현재 문서 상태를 확인하고, 문서 전체의 변경 상태를 기록한 다음 네이티브 `SaveAs`가 정확히 성공한 경우에만 새 recovery 산출물을 보존합니다. 산출물의 존재·관리 루트·파일 크기·SHA-256을 확인해 커밋한 뒤에만 세션 소유권을 해제합니다.
+
+복구가 아직 진행 중이면 `reconciled=false`와 `reconciliation=pending`이 반환됩니다. recovery 산출물을 만들 수 없거나 파일 검증에 실패하면 결과는 알 수 없음으로 남고, 세션의 보류 상태도 유지됩니다. 이 경우 명령을 재실행하지 말고 응답과 백엔드 로그를 보존해 운영자가 판단해야 합니다. 복구가 완료된 뒤 같은 명령 ID로 다시 조회할 수 있으며, 서버는 저장된 의미적 성공·실패 결과를 그대로 반환합니다. 보관할 recovery 파일은 인증된 `/local-cli/session/{session_id}/artifact/recovery` 경로로 다운로드하세요.
+
+연결 취소는 롤백이 아닙니다. 어댑터는 변경 명령을 자동 재전송하지 않습니다. 백엔드 대기 제한은 `HWPX_MCP_TIMEOUT`으로 설정하며 기본 120초, 허용 범위는 0.1..600초입니다. 페이지 렌더링은 별도로 60초를 제한합니다. 취소된 렌더링의 임시 파일은 잠시 남을 수 있으며 완료된 `manifest.json`이 없는 파일을 증명으로 사용하면 안 됩니다. 복구 전에는 원본 문서나 서버 관리 복사본을 직접 삭제하지 마세요.
 
 ## 종료와 보안
 
