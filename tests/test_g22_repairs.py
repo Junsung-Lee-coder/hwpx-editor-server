@@ -12,6 +12,7 @@ from concurrent.futures import Future
 from queue import Queue
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from app.interactive_session_manager import (
     MAX_INTERACTIVE_EVENT_FILE_BYTES,
@@ -23,12 +24,13 @@ from app.interactive_session_manager import (
 )
 from app.local_cli_runtime import (
     LocalCliLiveSession,
+    LocalCliRuntimeError,
     LocalCliRuntimeTimeoutError,
     _LiveCommand,
     _bounded_command_result,
 )
 import app.local_cli_runtime as local_cli_runtime
-from app.local_cli_service import LocalCliService, LocalCliServiceError
+from app.local_cli_service import LocalCliService, LocalCliServiceError, as_http_error
 from local_cli_v1.proof_packet import (
     ProofPacketError,
     _validate_native_border_readback,
@@ -551,6 +553,201 @@ class G22HealthProbeRepairTests(unittest.TestCase):
 
         self.assertEqual(calls, [])
 
+    def test_stale_cleanup_preserves_root_when_runtime_is_absent(self) -> None:
+        service = object.__new__(LocalCliService)
+        service._closed_session_ids = set()
+        service._closed_session_ids_lock = threading.Lock()
+        close_calls = []
+        service.runtime_manager = type('Runtime', (), {
+            'has_session': lambda *_args, **_kwargs: False,
+            'close_session': lambda *_args, **_kwargs: close_calls.append('close'),
+        })()
+        calls = []
+        service._cleanup_managed_session_root = lambda _binding: calls.append('cleanup') or {'removed': True}
+        service._record_session_close = lambda **_kwargs: calls.append('recorded')
+        service._clear_binding = lambda **_kwargs: calls.append('cleared')
+        binding = {'session_id': 's1'}
+
+        self.assertFalse(service._cleanup_stale_binding(binding))
+        self.assertEqual(calls, [])
+        self.assertEqual(close_calls, [])
+
+    def test_status_projects_public_artifact_routes_without_server_paths(self) -> None:
+        service = object.__new__(LocalCliService)
+        binding = {
+            'session_id': 's1',
+            'source_filename': 'document.hwpx',
+            'working_copy_path': '/srv/private/sessions/s1/working/working-copy.hwpx',
+            'artifacts': {
+                'latest_working_copy_path': '/srv/private/sessions/s1/working/working-copy.hwpx',
+                'latest_export_path': '/srv/private/sessions/s1/output/document.pdf',
+            },
+        }
+        service._runtime_snapshot = lambda: {
+            'ready': True,
+            'errors': [],
+            'checks': {'hancom_automation': {'ok': True}},
+        }
+        service._read_binding = lambda **_kwargs: dict(binding)
+        service._binding_has_pending_reconciliation = lambda _binding: False
+        service._is_session_closed = lambda _session_id: False
+        service._save_binding = lambda value: value
+        service.runtime_manager = type('Runtime', (), {
+            'has_session': lambda *_args, **_kwargs: False,
+        })()
+
+        result = service.status()
+
+        serialized = json.dumps(result)
+        self.assertNotIn('/srv/private/sessions', serialized)
+        self.assertNotIn('working_copy_path', result)
+        self.assertEqual(
+            result['artifacts']['latest_working_copy_download_path'],
+            '/local-cli/session/s1/artifact/working-copy',
+        )
+        self.assertEqual(
+            result['artifacts']['latest_export_download_path'],
+            '/local-cli/session/s1/artifact/export',
+        )
+
+    def test_open_upload_blocks_replacement_when_stale_cleanup_is_unproven(self) -> None:
+        source = (ROOT / 'app' / 'local_cli_service.py').read_text(encoding='utf-8')
+        open_upload = source[source.index('    async def open_upload(') : source.index('\n\n', source.index('    async def open_upload('))]
+        self.assertIn('if not self._cleanup_stale_binding(active_binding)', open_upload)
+
+    def test_live_native_error_does_not_expose_native_detail(self) -> None:
+        service = object.__new__(LocalCliService)
+        binding = {'session_id': 's1', 'command_generation': 0, 'native_command_sequence': 0}
+        service._require_ready_runtime = lambda _label: None
+        service._read_binding = lambda **_kwargs: dict(binding)
+        service.runtime_manager = type('Runtime', (), {
+            'has_session': lambda *_args, **_kwargs: True,
+            'execute': lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                LocalCliRuntimeError('private native path C:/Users/owner/document.hwpx')
+            ),
+        })()
+
+        with self.assertRaises(LocalCliServiceError) as raised:
+            service._execute_live(
+                binding=binding,
+                command_name='info',
+                task_label='local_cli.info',
+                handler=lambda _handle: {},
+            )
+
+        self.assertNotIn('C:/Users/owner/document.hwpx', raised.exception.message)
+        self.assertEqual(raised.exception.message, 'Local CLI native command failed.')
+
+    def test_http_mapping_redacts_unwrapped_native_error(self) -> None:
+        mapped = as_http_error(LocalCliRuntimeError('private native path C:/Users/owner/document.hwpx'))
+
+        self.assertNotIn('C:/Users/owner/document.hwpx', str(mapped.detail))
+        self.assertEqual(mapped.detail, 'Local CLI native operation failed.')
+
+
+class G22RuntimeFinalizationRepairTests(unittest.TestCase):
+    def test_finalizer_does_not_signal_closed_after_cleanup_error(self) -> None:
+        session = object.__new__(LocalCliLiveSession)
+        session._state_lock = threading.Lock()
+        session._closed = threading.Event()
+        session._closing = False
+        session._terminal_error = None
+        session._quarantined = False
+        session._allow_native_cleanup = False
+        session._commands_by_id = {}
+        session._cancel_pending_commands = lambda *_args, **_kwargs: None
+        session.log_path = Path(tempfile.gettempdir()) / 'runtime-finalize-test.log'
+        session.source_filename = 'document.hwpx'
+
+        class BrokenStop:
+            def set(self) -> None:
+                raise RuntimeError('watchdog cleanup failed')
+
+        with patch('app.local_cli_runtime.discard_live_document'), \
+                patch('app.local_cli_runtime.close_hwp_instance'), \
+                patch('app.local_cli_runtime.update_runtime_status'):
+            session._finalize(
+                hwp=object(),
+                pythoncom=None,
+                coinitialized=False,
+                watchdog_stop=BrokenStop(),
+                watchdog_thread=None,
+            )
+
+        self.assertFalse(session._closed.is_set())
+        self.assertTrue(session.is_terminal())
+
+    def test_finalizer_does_not_signal_closed_when_watchdog_survives_join(self) -> None:
+        session = object.__new__(LocalCliLiveSession)
+        session._state_lock = threading.Lock()
+        session._closed = threading.Event()
+        session._closing = False
+        session._terminal_error = None
+        session._quarantined = False
+        session._allow_native_cleanup = False
+        session._commands_by_id = {}
+        session._cancel_pending_commands = lambda *_args, **_kwargs: None
+        session.log_path = Path(tempfile.gettempdir()) / 'runtime-finalize-watchdog-test.log'
+        session.source_filename = 'document.hwpx'
+
+        class StuckThread:
+            def join(self, *, timeout: float) -> None:
+                return None
+
+            def is_alive(self) -> bool:
+                return True
+
+        with patch('app.local_cli_runtime.discard_live_document'), \
+                patch('app.local_cli_runtime.close_hwp_instance'), \
+                patch('app.local_cli_runtime.update_runtime_status'):
+            session._finalize(
+                hwp=object(),
+                pythoncom=None,
+                coinitialized=False,
+                watchdog_stop=type('Stop', (), {'set': lambda self: None})(),
+                watchdog_thread=StuckThread(),
+            )
+
+        self.assertFalse(session._closed.is_set())
+        self.assertTrue(session.is_terminal())
+
+    def test_close_teardown_timeout_does_not_quarantine_settled_close_command(self) -> None:
+        session = object.__new__(LocalCliLiveSession)
+        session.session_id = 's1'
+        session._state_lock = threading.Lock()
+        session._closed = threading.Event()
+        session._closing = False
+        session._close_future = None
+        session._terminal_error = None
+        session._quarantined = False
+        session._allow_native_cleanup = False
+        session._active_hwp = None
+        session._active_handle = None
+        session._recovery_target_id = None
+        session._recovery_future = None
+        session._recovery_close_enqueued = False
+        session._command_counter = 0
+        session._commands_by_id = {}
+        session._last_command_id = None
+        session._caller_command_ids = threading.local()
+        session._cleanup_errors = []
+        session._persist_command = lambda _command: None
+        session._cancel_pending_commands = lambda *_args, **_kwargs: None
+
+        class SettledQueue:
+            def put(self, command: object) -> None:
+                command.future.set_result({'ok': True})  # type: ignore[attr-defined]
+
+        session._commands = SettledQueue()
+
+        with self.assertRaisesRegex(LocalCliRuntimeError, 'release|cleanup'):
+            session.close(timeout=0.01)
+
+        self.assertFalse(session._quarantined)
+        self.assertFalse(session.is_terminal())
+        close_command = session._commands_by_id['s1:close']
+        self.assertFalse(close_command.timed_out)
+
 
 class G22ManagedFixtureCleanupTests(unittest.TestCase):
     def test_close_cleanup_removes_and_verifies_server_managed_session_root(self) -> None:
@@ -643,6 +840,10 @@ class G22ManagedFixtureCleanupTests(unittest.TestCase):
             self.assertTrue(session_root.exists())
             self.assertIsNotNone(service._read_json(service._binding_path('s1')))
             self.assertIsNotNone(service._read_json(service.active_binding_path))
+            self.assertNotIn('s1', service._closed_session_ids)
+            persisted = service._read_json(service._binding_path('s1'))
+            self.assertEqual(persisted['document_session_state'], 'closed_cleanup_pending')
+            self.assertFalse(persisted['live_session_bound'])
 
     def test_close_cleanup_does_not_treat_unexpectedly_missing_root_as_verified(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -1120,6 +1321,17 @@ class R10RuntimeReconciliationTests(unittest.TestCase):
         self.assertFalse(no_mutation['semantic_ok'])
         self.assertFalse(no_mutation['may_have_mutated'])
 
+    def test_missing_mutating_result_is_fail_closed(self) -> None:
+        normalizer = local_cli_runtime.normalize_command_outcome
+
+        missing = normalizer('command-bundle', None)
+        corrupt = normalizer('save', {'ok': 'true'})
+
+        self.assertIs(missing['semantic_ok'], False)
+        self.assertIs(corrupt['semantic_ok'], False)
+        self.assertTrue(missing['may_have_mutated'])
+        self.assertTrue(corrupt['may_have_mutated'])
+
     def test_checked_recovery_save_requires_affirmative_native_result_and_hashes_file(self) -> None:
         saver = getattr(local_cli_runtime, 'checked_save_hwp_as', None)
         self.assertTrue(callable(saver))
@@ -1189,6 +1401,25 @@ class R10RuntimeReconciliationTests(unittest.TestCase):
         )
         self.assertTrue(dirty)
         self.assertEqual(source, 'preserved_prior_dirty')
+
+    def test_dirty_reducer_preserves_unknown_possible_mutation(self) -> None:
+        reducer = LocalCliService._reduce_working_copy_dirty
+        service = object.__new__(LocalCliService)
+
+        dirty, source = reducer(
+            service,
+            prior_dirty=False,
+            semantic_ok=None,
+            delta_dirty=None,
+            may_have_mutated=True,
+            command_name='replace',
+            fresh_document_modified=False,
+            fresh_sequence_matches=True,
+            ordinary_save_confirmed=False,
+        )
+
+        self.assertTrue(dirty)
+        self.assertEqual(source, 'semantic_uncertainty_may_have_mutated')
 
     def test_public_bundle_steps_redact_paths_and_document_payloads(self) -> None:
         service = object.__new__(LocalCliService)

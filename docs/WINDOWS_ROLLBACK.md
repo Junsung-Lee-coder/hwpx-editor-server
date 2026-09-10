@@ -1,6 +1,6 @@
 # Windows rollback
 
-The installer is fail-closed before mutation and records a task/root snapshot before activation. The hash-bound transaction snapshot is retained after a successful run; do not delete the receipt, backup root, or snapshot until the result has been reviewed and an explicit retention decision has been recorded.
+The installer is fail-closed before mutation and records a task/root snapshot before activation. After successful terminal cleanup, the transaction snapshot and journal are removed; retain the install receipt. A `PreserveMove` backup root remains only when that run created one, while failed or incomplete rollback may retain hash-bound recovery material. Check the receipt before assuming any backup or snapshot exists.
 
 ## Automatic rollback
 
@@ -23,7 +23,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass `
   -ReceiptPath $receipt
 ```
 
-The old root is moved to a run-owned sibling such as `hwpx-editor-server.backup-<run-id>`. Its file count, byte total, and object identity are recorded. Existing spool files are not deleted. Keep that sibling and the retained transaction snapshot until the new installation has passed `verify_windows.ps1` and the retention decision is explicit.
+The old root is moved to a run-owned sibling such as `hwpx-editor-server.backup-<run-id>`. Its file count, byte total, and object identity are recorded. Existing spool files are not deleted. Keep that sibling while the new installation is being verified. The transaction snapshot and journal are normally removed after successful terminal cleanup; use the receipt to determine whether a `PreserveMove` backup or failed-run recovery material remains.
 
 ## Manual recovery when automatic rollback reports an error
 

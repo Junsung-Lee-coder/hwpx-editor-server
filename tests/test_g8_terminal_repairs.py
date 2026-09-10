@@ -240,7 +240,8 @@ class G8TerminalRuntimeFinalizerRedTests(unittest.TestCase):
                 side_effect=RuntimeError("close failed"),
             ):
                 session._run()
-            self.assertTrue(session._closed.is_set())
+            self.assertFalse(session._closed.is_set())
+            self.assertTrue(session.is_terminal())
 
     def test_pending_probe_cannot_become_ready_by_flipping_top_level_fields(self) -> None:
         identity = readiness.current_worker_identity()

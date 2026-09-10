@@ -868,31 +868,44 @@ class LocalCliService:
         *,
         summary: str = 'Local CLI live document session is no longer available.',
         outcome: str = 'stale',
-    ) -> None:
+    ) -> bool:
         session_id = self._binding_session_id(binding)
         if (
             self._binding_has_pending_reconciliation(binding)
-            or binding.get('document_session_state') in {'reconciled', 'reconciled_cleanup_pending'}
+            or binding.get('document_session_state') in {
+                'reconciled', 'reconciled_cleanup_pending', 'closed_cleanup_pending'
+            }
             or isinstance(binding.get('artifact_custody'), dict)
         ):
-            return
-        self._mark_session_closed(session_id)
+            return False
+        # A missing runtime is not proof that the managed document was
+        # released.  Preserve its binding/root so a restart or operator can
+        # inspect the last custody evidence instead of deleting the only copy.
+        has_session = getattr(self.runtime_manager, 'has_session', None)
+        if callable(has_session):
+            try:
+                if not has_session(session_id):
+                    return False
+            except Exception:
+                return False
         try:
             self.runtime_manager.close_session(session_id)
         except Exception:
             # Do not remove the managed session root while native/COM teardown
             # is uncertain.  The binding remains the ownership record for a
             # later retry or operator inspection.
-            return
+            return False
         try:
             self._cleanup_managed_session_root(binding)
         except Exception:
             # Retain the binding when ownership cleanup cannot be proven; a
             # later reconciliation/operator pass must still be able to find
             # the server-managed root.
-            return
+            return False
         self._record_session_close(session_id=session_id, summary=summary, outcome=outcome)
         self._clear_binding(binding=binding)
+        self._mark_session_closed(session_id)
+        return True
 
     def _command_status_for_binding(
         self,
@@ -8092,7 +8105,7 @@ class LocalCliService:
             if not self.runtime_manager.has_session(session_id):
                 self._cleanup_stale_binding(binding)
                 raise LocalCliServiceError('Live local CLI session is unavailable. Re-open the document.', status_code=409) from exc
-            raise LocalCliServiceError(str(exc), status_code=500) from exc
+            raise LocalCliServiceError('Local CLI native command failed.', status_code=500) from exc
 
     def _snapshot_temp_hwpx(self, handle: LocalCliRuntimeHandle, *, purpose: str) -> Path:
         snapshot_path = handle.session_root / 'metadata' / f'{purpose}-{uuid.uuid4().hex}.hwpx'
@@ -8190,7 +8203,12 @@ class LocalCliService:
                     'A reconciled local CLI session must be explicitly closed after downloading its artifacts.',
                     status_code=409,
                 )
-            self._cleanup_stale_binding(active_binding)
+            if not self._cleanup_stale_binding(active_binding):
+                raise LocalCliServiceError(
+                    'The previous local CLI session is unavailable and its managed root is retained; '
+                    'retry cleanup before opening another document.',
+                    status_code=409,
+                )
 
         filename = Path(file.filename or 'upload.hwpx').name
         suffix = Path(filename).suffix.lower() or '.hwpx'
@@ -8764,7 +8782,7 @@ class LocalCliService:
             self.interactive_sessions.record_command(
                 command_name or 'native-command',
                 session_id=session_id,
-                state='succeeded' if state == 'completed_after_timeout' else 'failed',
+                state='succeeded' if semantic_ok is True else 'failed',
                 summary=f'{command_name or "native command"} reconciled after timeout ({state})',
                 payload={
                     'command_id': command_id,
@@ -8843,7 +8861,9 @@ class LocalCliService:
                         pending_reconciliation = self._command_status_for_binding(active_binding)
                     if pending_reconciliation is not None:
                         pass
-                    elif active_binding.get('document_session_state') in {'reconciled', 'reconciled_cleanup_pending'}:
+                    elif active_binding.get('document_session_state') in {
+                        'reconciled', 'reconciled_cleanup_pending', 'closed_cleanup_pending'
+                    }:
                         cleanup_pending = True
                     elif self._is_session_closed(session_id):
                         if active_binding.get('session_root_path'):
@@ -8867,6 +8887,11 @@ class LocalCliService:
 
         artifacts = (active_binding or {}).get('artifacts') if isinstance(active_binding, dict) else None
         artifacts = artifacts if isinstance(artifacts, dict) else {}
+        public_artifacts = (
+            self._public_artifacts(session_id=session_id, artifacts=artifacts)
+            if session_id
+            else {}
+        )
         return {
             'ok': True,
             'runtime_up': ready,
@@ -8888,11 +8913,10 @@ class LocalCliService:
             ),
             'session_id': session_id,
             'active_document': (active_binding or {}).get('source_filename'),
-            'working_copy_path': (active_binding or {}).get('working_copy_path'),
-            'artifacts': artifacts,
+            'artifacts': public_artifacts,
             'last_proof_artifact': (
-                artifacts.get('latest_screenshot_path')
-                or artifacts.get('latest_export_path')
+                public_artifacts.get('latest_screenshot_download_path')
+                or public_artifacts.get('latest_export_download_path')
             ),
             'live_session_bound': live_bound,
             'command_reconciliation': pending_reconciliation,
@@ -10962,6 +10986,8 @@ class LocalCliService:
 
         if semantic_ok is False and may_have_mutated:
             return True, 'semantic_failure_may_have_mutated'
+        if semantic_ok is None and may_have_mutated:
+            return True, 'semantic_uncertainty_may_have_mutated'
         if ordinary_save_confirmed and semantic_ok is True:
             return False, 'ordinary_save_confirmed'
         if fresh_sequence_matches and isinstance(fresh_document_modified, bool):
@@ -11458,9 +11484,7 @@ class LocalCliService:
                 status_code=504,
             ) from exc
         except LocalCliRuntimeError as exc:
-            raise LocalCliServiceError(str(exc), status_code=500) from exc
-
-        self._mark_session_closed(resolved_session_id)
+            raise LocalCliServiceError('Local CLI native close failed.', status_code=500) from exc
 
         if binding.get('session_root_path'):
             try:
@@ -11468,6 +11492,14 @@ class LocalCliService:
             except LocalCliServiceError:
                 # Keep the binding as an operator-visible ownership record
                 # when managed cleanup cannot prove the exact root was removed.
+                binding['cleanup_pending'] = True
+                binding['live_session_bound'] = False
+                binding['document_session_state'] = 'closed_cleanup_pending'
+                binding['updated_at'] = utc_now_iso()
+                try:
+                    self._save_binding(binding)
+                except Exception:
+                    pass
                 raise
         else:
             # Bindings created before server-managed root custody was added do
@@ -11483,6 +11515,7 @@ class LocalCliService:
             outcome='closed',
         )
         self._clear_binding(session_id=resolved_session_id, force=True)
+        self._mark_session_closed(resolved_session_id)
         return {'ok': True, 'cleanup': cleanup_result}
 
 
@@ -11490,4 +11523,6 @@ class LocalCliService:
 def as_http_error(exc: Exception) -> HTTPException:
     if isinstance(exc, LocalCliServiceError):
         return HTTPException(status_code=exc.status_code, detail=exc.message)
-    return HTTPException(status_code=500, detail=str(exc))
+    if isinstance(exc, LocalCliRuntimeError):
+        return HTTPException(status_code=500, detail='Local CLI native operation failed.')
+    return HTTPException(status_code=500, detail='Local CLI request failed.')

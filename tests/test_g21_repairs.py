@@ -352,8 +352,9 @@ class ServiceReconciliationRepairTests(unittest.TestCase):
                 'command_status': lambda self, session_id, command_id=None, **kwargs: read_command_journal(session_root, command_id),
                 'reconcile_command': lambda self, session_id, command_id, **kwargs: reconcile_command_journal(session_root, command_id),
             })()
+            recorded_history = []
             service.interactive_sessions = type('Interactive', (), {
-                'record_command': lambda self, *args, **kwargs: None,
+                'record_command': lambda self, *args, **kwargs: recorded_history.append(kwargs),
             })()
             service._save_binding({
                 'session_id': 'session-reconcile',
@@ -396,6 +397,8 @@ class ServiceReconciliationRepairTests(unittest.TestCase):
                     'timed_out': True,
                     'reconcilable': True,
                     'reconciled': False,
+                    'semantic_ok': False,
+                    'may_have_mutated': True,
                     'result': {
                         'ok': True,
                         'dirty': True,
@@ -409,6 +412,8 @@ class ServiceReconciliationRepairTests(unittest.TestCase):
                 session_id='session-reconcile',
             )
             self.assertTrue(result['reconciled'])
+            self.assertFalse(result['ok'])
+            self.assertEqual(recorded_history[-1]['state'], 'failed')
             self.assertTrue(result['working_copy_dirty'])
             binding = service._read_binding(session_id='session-reconcile')
             self.assertNotIn('pending_command', binding)

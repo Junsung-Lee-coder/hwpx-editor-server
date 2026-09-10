@@ -140,7 +140,12 @@ def normalize_command_outcome(
 
     if not isinstance(result, dict):
         return {
-            'semantic_ok': True if command in _KNOWN_NON_ENVELOPE_COMMANDS else None,
+            # A mutating command without a result envelope is not evidence of
+            # success.  Keep non-envelope read/status commands compatible with
+            # their existing handlers, but fail closed for mutation commands.
+            'semantic_ok': False if command in _MUTATING_COMMANDS else (
+                True if command in _KNOWN_NON_ENVELOPE_COMMANDS else None
+            ),
             'may_have_mutated': command in _MUTATING_COMMANDS,
             'delta_dirty': None,
             'step_count': 0,
@@ -1121,7 +1126,7 @@ class LocalCliLiveSession:
         self._state_lock = threading.Lock()
         self._closing = False
         self._close_future: Future[Any] | None = None
-        self._terminal_error: LocalCliRuntimeTimeoutError | None = None
+        self._terminal_error: LocalCliRuntimeError | None = None
         self._quarantined = False
         self._allow_native_cleanup = False
         self._active_hwp: object | None = None
@@ -1636,7 +1641,7 @@ class LocalCliLiveSession:
 
     def close(self, *, timeout: float = 30.0) -> None:
         self._ensure_lifecycle_state()
-        terminal_error: LocalCliRuntimeTimeoutError | None = None
+        terminal_error: LocalCliRuntimeError | None = None
         future: Future[Any] | None = None
         close_command: _LiveCommand | None = None
         with self._state_lock:
@@ -1695,14 +1700,18 @@ class LocalCliLiveSession:
             raise error from exc
         remaining = max(0.0, deadline - time.monotonic())
         if not self._closed.wait(timeout=remaining):
-            error = self._terminalize_timeout(
-                command_name='close',
-                command_id=f'{self.session_id}:close',
-                message='Timed out while releasing the live local CLI runtime.',
-                command=close_command,
-                enqueue_close=False,
+            cleanup_errors = getattr(self, '_cleanup_errors', [])
+            if cleanup_errors:
+                raise LocalCliRuntimeError(
+                    'The live local CLI runtime could not complete cleanup; retain the binding and retry cleanup.'
+                )
+            # The close command has already settled.  A slow native release is
+            # a cleanup condition, not a second command timeout: quarantining
+            # the settled close command here can race the finalizer and strand
+            # a binding that is otherwise still being released.
+            raise LocalCliRuntimeError(
+                'The live local CLI runtime is still releasing native resources; retry cleanup without replaying close.'
             )
-            raise error
 
     def is_terminal(self) -> bool:
         self._ensure_lifecycle_state()
@@ -1832,6 +1841,8 @@ class LocalCliLiveSession:
             self._close_future = None
         if not hasattr(self, '_terminal_error'):
             self._terminal_error = None
+        if not hasattr(self, '_cleanup_errors'):
+            self._cleanup_errors = []
         if not hasattr(self, '_quarantined'):
             self._quarantined = False
         if not hasattr(self, '_allow_native_cleanup'):
@@ -1920,7 +1931,13 @@ class LocalCliLiveSession:
         if watchdog_stop is not None:
             attempt('watchdog_stop', watchdog_stop.set)
         if watchdog_thread is not None:
-            attempt('watchdog_join', lambda: watchdog_thread.join(timeout=1.0))
+            def _join_watchdog() -> None:
+                watchdog_thread.join(timeout=1.0)
+                is_alive = getattr(watchdog_thread, 'is_alive', None)
+                if callable(is_alive) and is_alive():
+                    raise RuntimeError('runtime watchdog did not stop before cleanup completed')
+
+            attempt('watchdog_join', _join_watchdog)
         if cleanup_permitted:
             if hwp is not None:
                 attempt('discard_live_document', lambda: discard_live_document(hwp))
@@ -1959,16 +1976,23 @@ class LocalCliLiveSession:
             ),
         )
         if cleanup_permitted:
-            # Signal closure before best-effort queue cleanup.  Callers must
-            # never be left waiting for a terminal session because a journal
-            # write failed.
-            self._closed.set()
             attempt(
                 'cancel_pending_commands',
                 lambda: self._cancel_pending_commands(
                     'The live local CLI session terminated before queued work could run.'
                 ),
             )
+        with self._state_lock:
+            self._cleanup_errors = list(cleanup_errors)
+            if cleanup_errors and self._terminal_error is None:
+                self._terminal_error = LocalCliRuntimeError(
+                    'The live local CLI runtime could not complete cleanup; retain the binding and retry cleanup.'
+                )
+            if cleanup_permitted and not cleanup_errors:
+                # `_closed` is proof that every required native cleanup step
+                # completed.  A worker with cleanup errors remains terminal but
+                # must not be presented as cleanly closed.
+                self._closed.set()
 
     def _run(self) -> None:
         pythoncom = None
@@ -2149,10 +2173,10 @@ class LocalCliLiveSession:
                     command.result = command.handler(handle)
                     self._apply_normalized_outcome(command, command.result)
                     with self._state_lock:
-                        terminal_state = 'failed' if command.semantic_ok is False else 'succeeded'
+                        terminal_state = 'failed' if command.semantic_ok is not True else 'succeeded'
                         if command.timed_out:
                             terminal_state = (
-                                'failed_after_timeout' if command.semantic_ok is False else 'completed_after_timeout'
+                                'failed_after_timeout' if command.semantic_ok is not True else 'completed_after_timeout'
                             )
                         command.state = terminal_state
                         data = self._ensure_reconciliation_data(command)
