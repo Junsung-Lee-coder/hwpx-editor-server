@@ -11,6 +11,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 from urllib.parse import quote_from_bytes
 
+from fastapi import FastAPI
 from app.local_cli_router import build_local_cli_router
 from app.local_cli_service import LocalCliService
 from starlette.responses import StreamingResponse
@@ -32,6 +33,41 @@ async def _consume_response(response: StreamingResponse) -> bytes:
     if background is not None:
         await background()
     return b''.join(chunks)
+
+
+async def _invoke_asgi(app: FastAPI, path: str) -> list[dict[str, object]]:
+    messages: list[dict[str, object]] = []
+    request_sent = False
+
+    async def receive() -> dict[str, object]:
+        nonlocal request_sent
+        if not request_sent:
+            request_sent = True
+            return {'type': 'http.request', 'body': b'', 'more_body': False}
+        await asyncio.sleep(3600)
+        return {'type': 'http.disconnect'}
+
+    async def send(message: dict[str, object]) -> None:
+        messages.append(message)
+
+    raw_path = path.encode('ascii')
+    scope = {
+        'type': 'http',
+        'asgi': {'version': '3.0', 'spec_version': '2.0'},
+        'http_version': '1.1',
+        'method': 'GET',
+        'scheme': 'http',
+        'path': path,
+        'raw_path': raw_path,
+        'query_string': b'',
+        'root_path': '',
+        'headers': [],
+        'client': ('test-client', 1),
+        'server': ('test-server', 80),
+        'state': {},
+    }
+    await app(scope, receive, send)
+    return messages
 
 
 def _session_record(session_id: str, source_path: Path, *, state: str = 'open', metadata: object = None) -> dict[str, object]:
@@ -196,6 +232,32 @@ class R22UnicodeDownloadTests(unittest.TestCase):
         self.assertIn(f"filename*=UTF-8''{encoded}", disposition)
         self.assertEqual(asyncio.run(_consume_response(response)), b'correct Korean artifact bytes')
         self.assertTrue(download.stream.closed)
+
+    def test_asgi_application_delivers_unicode_artifact_and_closes(self) -> None:
+        stream = io.BytesIO(b'ASGI application bytes')
+        download = SimpleNamespace(
+            stream=stream,
+            filename='한글문서.hwpx',
+            size_bytes=len(b'ASGI application bytes'),
+            close=stream.close,
+        )
+        app = FastAPI()
+        app.include_router(self._router(download))
+        messages = asyncio.run(_invoke_asgi(app, '/local-cli/session/s1/artifact/working-copy'))
+        start = next(message for message in messages if message['type'] == 'http.response.start')
+        body = b''.join(
+            bytes(message.get('body', b''))
+            for message in messages
+            if message['type'] == 'http.response.body'
+        )
+        headers = dict(start['headers'])
+        disposition = bytes(headers[b'content-disposition']).decode('latin-1')
+        self.assertEqual(start['status'], 200)
+        self.assertEqual(body, b'ASGI application bytes')
+        self.assertIn('filename="', disposition)
+        self.assertIn("filename*=UTF-8''%ED%95%9C%EA%B8%80%EB%AC%B8%EC%84%9C.hwpx", disposition)
+        self.assertNotRegex(disposition, r'[\u0080-\uffff]')
+        self.assertTrue(stream.closed)
 
     def test_stream_closes_when_response_construction_fails(self) -> None:
         stream = io.BytesIO(b'bytes')
