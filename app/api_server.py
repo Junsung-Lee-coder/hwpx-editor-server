@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import ntpath
 import os
+import re
 import shutil
 import time
 import uuid
@@ -610,8 +611,57 @@ def _interactive_http_error(exc: InteractiveSessionError, *, status_code: int = 
     return HTTPException(status_code=status_code, detail=str(exc))
 
 
+_PRIVATE_INTERACTIVE_PATH_KEYS = {
+    'path', 'paths', 'source_path', 'document_path', 'working_copy_path',
+    'artifact_path', 'artifact_paths', 'manifest_path', 'output_path',
+    'session_state_path', 'session_events_path', 'operator_status_path',
+    'verify_evidence_retention_path', 'evidence_dir', 'directory', 'root',
+    'working_directory',
+}
+_ABSOLUTE_PATH_IN_STATUS = re.compile(r'(?i)(?:[a-z]:[\\/]|\\\\|/(?:home|srv|tmp|var)/)')
+
+
+def _redact_interactive_status_value(value: Any, *, key: str | None = None) -> Any:
+    """Remove server paths from public interactive status without mutating state."""
+
+    folded_key = str(key or '').casefold()
+    if folded_key in _PRIVATE_INTERACTIVE_PATH_KEYS or (
+        folded_key.endswith('_path') and not folded_key.endswith('_download_path')
+    ):
+        return None
+    if isinstance(value, dict):
+        return {
+            str(child_key): _redact_interactive_status_value(child_value, key=str(child_key))
+            for child_key, child_value in value.items()
+            if str(child_key).casefold() not in _PRIVATE_INTERACTIVE_PATH_KEYS
+            and not (
+                str(child_key).casefold().endswith('_path')
+                and not str(child_key).casefold().endswith('_download_path')
+            )
+        }
+    if isinstance(value, list):
+        return [_redact_interactive_status_value(item) for item in value]
+    if isinstance(value, str) and _ABSOLUTE_PATH_IN_STATUS.search(value):
+        return '<redacted>'
+    return value
+
+
+def _public_interactive_session(session: dict[str, Any]) -> dict[str, Any]:
+    """Project an interactive record for external HTTP/MCP consumers."""
+
+    public = _redact_interactive_status_value(session)
+    if not isinstance(public, dict):
+        public = {}
+    session_id = str(session.get('session_id') or '').strip()
+    if session_id and session.get('source_path'):
+        download_path = f'/local-cli/session/{session_id}/artifact/working-copy'
+        public['source_path'] = download_path
+        public['artifacts'] = {'working_copy_download_path': download_path}
+    return public
+
+
 def _interactive_response(session: dict[str, Any]) -> InteractiveSessionResponse:
-    return InteractiveSessionResponse(session=session)
+    return InteractiveSessionResponse(session=_public_interactive_session(session))
 
 
 def _load_json_dict(path: Path) -> dict[str, Any] | None:

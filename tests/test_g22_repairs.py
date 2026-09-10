@@ -490,6 +490,36 @@ class G22HistoryRepairTests(unittest.TestCase):
 
 
 class G22HealthProbeRepairTests(unittest.TestCase):
+    def test_interactive_status_projects_source_and_artifact_paths(self) -> None:
+        from app.api_server import _interactive_response
+
+        session_id = 'a' * 32
+        response = _interactive_response({
+            'session_id': session_id,
+            'state': 'open',
+            'source_path': r'C:\Users\Jeb\private\working-copy.hwpx',
+            'source_filename': 'working-copy.hwpx',
+            'created_at': '2026-01-01T00:00:00+00:00',
+            'updated_at': '2026-01-01T00:00:00+00:00',
+            'artifacts': {
+                'session_state_path': r'C:\Users\Jeb\private\session_state.json',
+                'operator_status_path': r'C:\Users\Jeb\private\operator.json',
+            },
+            'readiness': {'artifact_path': r'C:\Users\Jeb\private\worker_ready.json'},
+            'observation': {'last_frame': {'path': r'C:\Users\Jeb\private\frame.png'}},
+        }).model_dump()
+        serialized = json.dumps(response)
+
+        self.assertNotIn(r'C:\Users\Jeb\private', serialized)
+        self.assertEqual(
+            response['session']['source_path'],
+            f'/local-cli/session/{session_id}/artifact/working-copy',
+        )
+        self.assertEqual(
+            response['session']['artifacts']['working_copy_download_path'],
+            f'/local-cli/session/{session_id}/artifact/working-copy',
+        )
+
     def test_probe_timeout_projects_pending_command_before_cleanup(self) -> None:
         class Runtime:
             def has_session(self, _session_id: str) -> bool:
