@@ -641,8 +641,11 @@ def _redact_interactive_status_value(value: Any, *, key: str | None = None) -> A
         }
     if isinstance(value, list):
         return [_redact_interactive_status_value(item) for item in value]
-    if isinstance(value, str) and _ABSOLUTE_PATH_IN_STATUS.search(value):
-        return '<redacted>'
+    if isinstance(value, str):
+        if re.match(r'^[A-Za-z][A-Za-z0-9+.-]*://', value):
+            return value
+        if _ABSOLUTE_PATH_IN_STATUS.search(value):
+            return '<redacted>'
     return value
 
 

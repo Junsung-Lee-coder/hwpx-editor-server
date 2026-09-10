@@ -506,7 +506,10 @@ class G22HealthProbeRepairTests(unittest.TestCase):
                 'operator_status_path': r'C:\Users\Jeb\private\operator.json',
             },
             'readiness': {'artifact_path': r'C:\Users\Jeb\private\worker_ready.json'},
-            'observation': {'last_frame': {'path': r'C:\Users\Jeb\private\frame.png'}},
+            'observation': {
+                'viewer_url': 'http://127.0.0.1:19767/observation-viewer',
+                'last_frame': {'path': r'C:\Users\Jeb\private\frame.png'},
+            },
         }).model_dump()
         serialized = json.dumps(response)
 
@@ -518,6 +521,10 @@ class G22HealthProbeRepairTests(unittest.TestCase):
         self.assertEqual(
             response['session']['artifacts']['working_copy_download_path'],
             f'/local-cli/session/{session_id}/artifact/working-copy',
+        )
+        self.assertEqual(
+            response['session']['observation']['viewer_url'],
+            'http://127.0.0.1:19767/observation-viewer',
         )
 
     def test_probe_timeout_projects_pending_command_before_cleanup(self) -> None:
