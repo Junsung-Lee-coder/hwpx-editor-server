@@ -11516,7 +11516,9 @@ class LocalCliService:
         )
         self._clear_binding(session_id=resolved_session_id, force=True)
         self._mark_session_closed(resolved_session_id)
-        return {'ok': True, 'cleanup': cleanup_result}
+        public_cleanup = dict(cleanup_result) if isinstance(cleanup_result, dict) else {}
+        public_cleanup.pop('path', None)
+        return {'ok': True, 'cleanup': public_cleanup}
 
 
 

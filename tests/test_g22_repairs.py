@@ -842,6 +842,8 @@ class G22ManagedFixtureCleanupTests(unittest.TestCase):
             self.assertFalse(session_root.exists())
             self.assertIsNone(service._read_json(service._binding_path('s1')))
             self.assertIsNone(service._read_json(service.active_binding_path))
+            self.assertNotIn(str(session_root), json.dumps(result))
+            self.assertNotIn('path', result['cleanup'])
 
     def test_close_retains_binding_when_managed_root_identity_cannot_be_proven(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
