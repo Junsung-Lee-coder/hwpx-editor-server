@@ -822,9 +822,15 @@ class R10MetadataProvenanceTests(unittest.TestCase):
         )
         self.assertEqual(merged['local_cli_v1']['opened_via'], 'local_cli_v1')
         self.assertEqual(merged['local_cli_v1']['bridge'], 'local_cli_v1')
+        closed = merge(
+            merged,
+            {'local_cli_v1': {'closed_via': 'local_cli_v1', 'outcome': 'closed'}},
+        )
+        self.assertEqual(closed['local_cli_v1']['opened_via'], 'local_cli_v1')
+        self.assertEqual(closed['local_cli_v1']['closed_via'], 'local_cli_v1')
         with self.assertRaises(Exception):
             merge(
-                merged,
+                closed,
                 {'local_cli_v1': {'opened_via': None, 'bridge': 'other-client'}},
             )
 

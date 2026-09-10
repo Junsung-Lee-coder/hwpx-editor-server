@@ -5,6 +5,7 @@ import importlib.util
 import json
 import asyncio
 import multiprocessing
+import os
 import tempfile
 import threading
 import unittest
@@ -29,6 +30,7 @@ from app.local_cli_runtime import (
     _LiveCommand,
     _bounded_command_result,
 )
+from app.local_cli_router import build_local_cli_router
 import app.local_cli_runtime as local_cli_runtime
 from app.local_cli_service import LocalCliService, LocalCliServiceError, as_http_error
 from local_cli_v1.proof_packet import (
@@ -39,9 +41,27 @@ from local_cli_v1.proof_packet import (
     seal_native_border_readback,
 )
 from local_cli_v1.state import StatePersistenceError, clear_session_binding, load_state, update_state
+from starlette.responses import StreamingResponse
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+async def _consume_asgi_response(response: object) -> tuple[int, bytes]:
+    body: list[bytes] = []
+    iterator = response.body_iterator  # type: ignore[attr-defined]
+    if hasattr(iterator, '__aiter__'):
+        async for chunk in iterator:
+            if isinstance(chunk, bytes):
+                body.append(chunk)
+    else:
+        for chunk in iterator:
+            if isinstance(chunk, bytes):
+                body.append(chunk)
+    background = getattr(response, 'background', None)
+    if background is not None:
+        await background()
+    return 200, b''.join(body)
 
 
 def load_script(name: str):
@@ -499,6 +519,7 @@ class G22HealthProbeRepairTests(unittest.TestCase):
             'state': 'open',
             'source_path': r'C:\Users\Jeb\private\working-copy.hwpx',
             'source_filename': 'working-copy.hwpx',
+            'metadata': {'local_cli_v1': {'opened_via': 'local_cli_v1'}},
             'created_at': '2026-01-01T00:00:00+00:00',
             'updated_at': '2026-01-01T00:00:00+00:00',
             'artifacts': {
@@ -526,6 +547,64 @@ class G22HealthProbeRepairTests(unittest.TestCase):
             response['session']['observation']['viewer_url'],
             'http://127.0.0.1:19767/observation-viewer',
         )
+
+    def test_interactive_status_does_not_project_unmanaged_artifact_route(self) -> None:
+        from app.api_server import _public_interactive_session
+
+        response = _public_interactive_session({
+            'session_id': 'b' * 32,
+            'state': 'open',
+            'source_path': r'C:\Users\Jeb\private\working-copy.hwpx',
+            'source_filename': 'working-copy.hwpx',
+            'created_at': '2026-01-01T00:00:00+00:00',
+            'updated_at': '2026-01-01T00:00:00+00:00',
+            'metadata': {'local_cli_v1': {'bridge': 'local_cli_v1'}},
+        })
+
+        serialized = json.dumps(response)
+        self.assertNotIn(r'C:\Users\Jeb\private', serialized)
+        self.assertNotIn('working_copy_download_path', serialized)
+
+    def test_interactive_status_does_not_project_closed_artifact_route(self) -> None:
+        from app.api_server import _public_interactive_session
+
+        response = _public_interactive_session({
+            'session_id': 'c' * 32,
+            'state': 'closed',
+            'source_path': r'C:\Users\Jeb\private\working-copy.hwpx',
+            'source_filename': 'working-copy.hwpx',
+            'created_at': '2026-01-01T00:00:00+00:00',
+            'updated_at': '2026-01-01T00:00:00+00:00',
+            'metadata': {
+                'local_cli_v1': {
+                    'opened_via': 'local_cli_v1',
+                    'closed_via': 'local_cli_v1',
+                }
+            },
+        })
+
+        self.assertNotIn('working_copy_download_path', json.dumps(response))
+
+    def test_closed_interactive_status_response_remains_schema_valid_without_route(self) -> None:
+        from app.api_server import _interactive_response
+
+        response = _interactive_response({
+            'session_id': 'd' * 32,
+            'state': 'closed',
+            'source_path': r'C:\Users\Jeb\private\working-copy.hwpx',
+            'source_filename': 'working-copy.hwpx',
+            'created_at': '2026-01-01T00:00:00+00:00',
+            'updated_at': '2026-01-01T00:00:00+00:00',
+            'metadata': {
+                'local_cli_v1': {
+                    'opened_via': 'local_cli_v1',
+                    'closed_via': 'local_cli_v1',
+                }
+            },
+        }).model_dump()
+
+        self.assertEqual(response['session']['source_path'], '<redacted>')
+        self.assertNotIn('working_copy_download_path', json.dumps(response))
 
     def test_probe_timeout_projects_pending_command_before_cleanup(self) -> None:
         class Runtime:
@@ -610,42 +689,64 @@ class G22HealthProbeRepairTests(unittest.TestCase):
         self.assertEqual(close_calls, [])
 
     def test_status_projects_public_artifact_routes_without_server_paths(self) -> None:
-        service = object.__new__(LocalCliService)
-        binding = {
-            'session_id': 's1',
-            'source_filename': 'document.hwpx',
-            'working_copy_path': '/srv/private/sessions/s1/working/working-copy.hwpx',
-            'artifacts': {
-                'latest_working_copy_path': '/srv/private/sessions/s1/working/working-copy.hwpx',
-                'latest_export_path': '/srv/private/sessions/s1/output/document.pdf',
-            },
-        }
-        service._runtime_snapshot = lambda: {
-            'ready': True,
-            'errors': [],
-            'checks': {'hancom_automation': {'ok': True}},
-        }
-        service._read_binding = lambda **_kwargs: dict(binding)
-        service._binding_has_pending_reconciliation = lambda _binding: False
-        service._is_session_closed = lambda _session_id: False
-        service._save_binding = lambda value: value
-        service.runtime_manager = type('Runtime', (), {
-            'has_session': lambda *_args, **_kwargs: False,
-        })()
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw) / 'sessions'
+            session_root = root / 's1'
+            working_copy = session_root / 'working' / 'working-copy.hwpx'
+            export = session_root / 'output' / 'document.pdf'
+            working_copy.parent.mkdir(parents=True)
+            export.parent.mkdir(parents=True)
+            working_copy.write_bytes(b'working copy')
+            export.write_bytes(b'%PDF synthetic')
+            service = object.__new__(LocalCliService)
+            service.sessions_root = root
+            binding = {
+                'session_id': 's1',
+                'source_filename': 'document.hwpx',
+                'session_root_path': str(session_root),
+                'session_root_identity': service._managed_path_identity(session_root),
+                'working_copy_path': str(working_copy),
+                'artifacts': {
+                    'latest_working_copy_path': str(working_copy),
+                    'latest_export_path': str(export),
+                },
+                'artifact_custody': {
+                    'working-copy': {
+                        'size_bytes': working_copy.stat().st_size,
+                        'sha256': hashlib.sha256(working_copy.read_bytes()).hexdigest(),
+                    },
+                    'export': {
+                        'size_bytes': export.stat().st_size,
+                        'sha256': hashlib.sha256(export.read_bytes()).hexdigest(),
+                    },
+                },
+            }
+            service._runtime_snapshot = lambda: {
+                'ready': True,
+                'errors': [],
+                'checks': {'hancom_automation': {'ok': True}},
+            }
+            service._read_binding = lambda **_kwargs: dict(binding)
+            service._binding_has_pending_reconciliation = lambda _binding: False
+            service._is_session_closed = lambda _session_id: False
+            service._save_binding = lambda value: value
+            service.runtime_manager = type('Runtime', (), {
+                'has_session': lambda *_args, **_kwargs: False,
+            })()
 
-        result = service.status()
+            result = service.status()
 
-        serialized = json.dumps(result)
-        self.assertNotIn('/srv/private/sessions', serialized)
-        self.assertNotIn('working_copy_path', result)
-        self.assertEqual(
-            result['artifacts']['latest_working_copy_download_path'],
-            '/local-cli/session/s1/artifact/working-copy',
-        )
-        self.assertEqual(
-            result['artifacts']['latest_export_download_path'],
-            '/local-cli/session/s1/artifact/export',
-        )
+            serialized = json.dumps(result)
+            self.assertNotIn(str(root), serialized)
+            self.assertNotIn('working_copy_path', result)
+            self.assertEqual(
+                result['artifacts']['latest_working_copy_download_path'],
+                '/local-cli/session/s1/artifact/working-copy',
+            )
+            self.assertEqual(
+                result['artifacts']['latest_export_download_path'],
+                '/local-cli/session/s1/artifact/export',
+            )
 
     def test_open_upload_blocks_replacement_when_stale_cleanup_is_unproven(self) -> None:
         source = (ROOT / 'app' / 'local_cli_service.py').read_text(encoding='utf-8')
@@ -814,6 +915,162 @@ class G22ManagedFixtureCleanupTests(unittest.TestCase):
                 service._resolve_artifact(kind='working-copy', session_id='s1')
 
             self.assertEqual(replacement_working_copy.read_bytes(), b'foreign replacement bytes')
+
+    def test_working_copy_artifact_applies_bound_custody_hash(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            sessions_root = Path(raw) / 'sessions'
+            session_root = sessions_root / 's1'
+            working_copy = session_root / 'working' / 'working-copy.hwpx'
+            working_copy.parent.mkdir(parents=True)
+            original = b'original working-copy bytes'
+            working_copy.write_bytes(original)
+
+            service = object.__new__(LocalCliService)
+            service.sessions_root = sessions_root
+            binding = {
+                'session_id': 's1',
+                'session_root_path': str(session_root),
+                'session_root_identity': service._managed_path_identity(session_root),
+                'working_copy_path': str(working_copy),
+                'artifact_custody': {
+                    'working-copy': {
+                        'size_bytes': len(original),
+                        'sha256': hashlib.sha256(original).hexdigest(),
+                    }
+                },
+            }
+            service._load_active_binding = lambda **_kwargs: binding  # type: ignore[method-assign]
+
+            working_copy.write_bytes(b'foreign replacement bytes')
+            with self.assertRaisesRegex(LocalCliServiceError, 'changed after custody'):
+                service._resolve_artifact(kind='working-copy', session_id='s1')
+
+    def test_public_artifact_route_is_suppressed_after_custody_hash_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            sessions_root = Path(raw) / 'sessions'
+            session_root = sessions_root / 's1'
+            working_copy = session_root / 'working' / 'working-copy.hwpx'
+            working_copy.parent.mkdir(parents=True)
+            original = b'original working-copy bytes'
+            working_copy.write_bytes(original)
+
+            service = object.__new__(LocalCliService)
+            service.sessions_root = sessions_root
+            binding = {
+                'session_id': 's1',
+                'session_root_path': str(session_root),
+                'session_root_identity': service._managed_path_identity(session_root),
+                'artifact_custody': {
+                    'working-copy': {
+                        'size_bytes': len(original),
+                        'sha256': hashlib.sha256(original).hexdigest(),
+                    }
+                },
+            }
+            working_copy.write_bytes(b'foreign replacement bytes')
+
+            public = service._public_artifacts(
+                session_id='s1',
+                artifacts={'latest_working_copy_path': str(working_copy)},
+                binding=binding,
+            )
+
+            self.assertNotIn('latest_working_copy_download_path', public)
+
+    def test_artifact_path_symlink_is_rejected_before_download(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            sessions_root = Path(raw) / 'sessions'
+            session_root = sessions_root / 's1'
+            recovery_dir = session_root / 'recovery'
+            recovery_dir.mkdir(parents=True)
+            outside = Path(raw) / 'outside.hwpx'
+            outside.write_bytes(b'outside bytes')
+            recovery = recovery_dir / 'recovered.hwpx'
+            try:
+                recovery.symlink_to(outside)
+            except (OSError, NotImplementedError) as exc:
+                self.skipTest(f'symlinks unavailable: {exc}')
+
+            service = object.__new__(LocalCliService)
+            service.sessions_root = sessions_root
+            binding = {
+                'session_id': 's1',
+                'session_root_path': str(session_root),
+                'session_root_identity': service._managed_path_identity(session_root),
+                'artifacts': {'latest_recovery_path': str(recovery)},
+                'artifact_custody': {
+                    'recovery': {
+                        'size_bytes': outside.stat().st_size,
+                        'sha256': hashlib.sha256(outside.read_bytes()).hexdigest(),
+                    }
+                },
+            }
+            service._load_active_binding = lambda **_kwargs: binding  # type: ignore[method-assign]
+
+            with self.assertRaisesRegex(LocalCliServiceError, 'symlinked'):
+                service.open_artifact(kind='recovery', session_id='s1')
+
+    def test_artifact_route_streams_bound_handle_after_path_replacement(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            sessions_root = root / 'sessions'
+            session_root = sessions_root / 's1'
+            recovery = session_root / 'recovery' / 'recovered.hwpx'
+            recovery.parent.mkdir(parents=True)
+            original = b'original recovery bytes'
+            recovery.write_bytes(original)
+            binding = {
+                'session_id': 's1',
+                'session_root_path': str(session_root),
+                'session_root_identity': LocalCliService._managed_path_identity(object.__new__(LocalCliService), session_root),
+                'source_filename': 'document.hwpx',
+                'artifacts': {'latest_recovery_path': str(recovery)},
+                'artifact_custody': {
+                    'recovery': {
+                        'size_bytes': len(original),
+                        'sha256': hashlib.sha256(original).hexdigest(),
+                    }
+                },
+            }
+            service = object.__new__(LocalCliService)
+            service.sessions_root = sessions_root
+            service._load_active_binding = lambda **_kwargs: binding  # type: ignore[method-assign]
+            opened = []
+            original_open = service.open_artifact
+
+            def capture_open(**kwargs):
+                download = original_open(**kwargs)
+                opened.append(download)
+                return download
+
+            service.open_artifact = capture_open  # type: ignore[method-assign]
+            with patch('app.local_cli_router.LocalCliService', return_value=service):
+                router = build_local_cli_router(
+                    settings=SimpleNamespace(spool_root=root),
+                    interactive_sessions=object(),
+                )
+            route = next(route for route in router.routes if route.path.endswith('/artifact/{kind}'))
+            response = route.endpoint('s1', 'recovery')
+            self.assertIsInstance(response, StreamingResponse)
+
+            if os.name == 'nt':
+                # Windows share semantics keep the opened artifact from being
+                # renamed or replaced until the response has closed it.
+                status_code, body = asyncio.run(_consume_asgi_response(response))
+                self.assertEqual(status_code, 200)
+                self.assertEqual(body, original)
+                self.assertTrue(opened[0].stream.closed)
+                return
+
+            displaced = recovery.with_suffix('.validated')
+            recovery.rename(displaced)
+            recovery.write_bytes(b'foreign replacement bytes')
+            status_code, body = asyncio.run(_consume_asgi_response(response))
+
+            self.assertEqual(status_code, 200)
+            self.assertEqual(body, original)
+            self.assertEqual(len(opened), 1)
+            self.assertTrue(opened[0].stream.closed)
 
     def test_close_cleanup_removes_and_verifies_server_managed_session_root(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -1362,6 +1619,32 @@ class G22WindowsContractRepairTests(unittest.TestCase):
         self.assertIn("--expected-archive-sha256", docs)
         self.assertIn("python -m local_cli_v1.main", cli_readme)
         self.assertNotIn("/tmp/fixture", legacy_smoke)
+
+    def test_public_docs_and_runtime_text_have_no_internal_release_wording(self) -> None:
+        files = {
+            "README.md": ROOT / "README.md",
+            "TESTING.md": ROOT / "TESTING.md",
+            "docs/MCP_SETUP.md": ROOT / "docs" / "MCP_SETUP.md",
+            "docs/WINDOWS_ROLLBACK.md": ROOT / "docs" / "WINDOWS_ROLLBACK.md",
+            "app/api_server.py": ROOT / "app" / "api_server.py",
+            "app/local_cli_runtime.py": ROOT / "app" / "local_cli_runtime.py",
+            "app/worker.py": ROOT / "app" / "worker.py",
+            "scripts/smoke_cli_json_envelope_parity_static.py": ROOT / "scripts" / "smoke_cli_json_envelope_parity_static.py",
+        }
+        forbidden = {
+            "README.md": ("BOOK", "Junsung", "LJS", "TODO", "FIXME"),
+            "TESTING.md": ("BOOK", "current validation", "package evidence", "TODO", "FIXME"),
+            "docs/MCP_SETUP.md": ("BOOK", "current validation", "approval", "package evidence", "TODO", "FIXME"),
+            "docs/WINDOWS_ROLLBACK.md": ("live book installation", "BOOK", "TODO", "FIXME"),
+            "app/api_server.py": ("Jun", "Junsung", "LJS", "TODO", "FIXME"),
+            "app/local_cli_runtime.py": ("not yet", "TODO", "FIXME"),
+            "app/worker.py": ("Jun", "Junsung", "LJS", "not yet", "TODO", "FIXME"),
+            "scripts/smoke_cli_json_envelope_parity_static.py": ("Jun", "Junsung", "LJS", "TODO", "FIXME"),
+        }
+        for name, path in files.items():
+            text = path.read_text(encoding="utf-8").casefold()
+            for phrase in forbidden[name]:
+                self.assertNotIn(phrase.casefold(), text, f"{name} contains internal wording: {phrase}")
 
 class R10RuntimeReconciliationTests(unittest.TestCase):
     def test_normalizer_preserves_semantic_failure_and_aggregate_counts(self) -> None:

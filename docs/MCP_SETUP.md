@@ -1,6 +1,6 @@
 # HWPX MCP 어댑터
 
-기존 HWPX REST 서버를 MCP 클라이언트에서 호출하는 별도 프로세스입니다. 설치 프로그램이나 기존 서버의 시작 방식을 바꾸지 않습니다. 이 패키지는 로컬 개발·검증용 소스이며, 운영 배포나 BOOK 실행 승인을 뜻하지 않습니다. 검증 결과는 함께 제공되는 증거 목록을 확인하세요.
+기존 HWPX REST 서버를 MCP 클라이언트에서 호출하는 별도 프로세스입니다. 설치 프로그램이나 기존 서버의 시작 방식을 바꾸지 않습니다. 이 패키지는 로컬 개발·검증용 소스이며 운영 환경의 설치 절차를 대신하지 않습니다. 각 환경에서 실행한 검사 결과를 확인하세요.
 
 ## 연결 조건
 
@@ -54,6 +54,10 @@ $mcpProcess = Start-Process -FilePath '.mcp-venv\Scripts\python.exe' -ArgumentLi
 
 권장 순서는 `open → status → find/where → command 또는 proof → save → 다운로드 → close → status`입니다. `save` 결과의 `download_path`는 인증된 REST 다운로드 경로이며 백엔드의 서버 파일 경로가 아닙니다. 닫기는 관리 복사본과 서버 임시 산출물을 삭제하므로, 닫기 전에 해당 경로로 보관할 파일을 받으세요. 어댑터의 `proof` 폴더에 복사된 페이지 증명은 닫아도 남으므로 필요 없을 때 직접 정리합니다.
 
+관리 세션 판정에는 `metadata.local_cli_v1.opened_via == "local_cli_v1"`가 반드시 필요합니다. `bridge`나 `closed_via` 표시는 열기 출처를 대신하지 않는 추가 수명주기 정보이므로, 해당 표시만 있는 세션은 명령을 받을 수 없습니다. `state`가 `closed` 또는 `closed_cleanup_pending`인 세션은 상태 조회만 허용되며 새 명령·저장·증명·닫기 요청은 `SESSION_CLOSED`로 거부됩니다.
+
+다운로드 경로는 관리 세션 바인딩과 해당 산출물의 크기·SHA-256 기록이 모두 있고, 산출물이 같은 관리 루트의 일반 파일임을 확인한 경우에만 상태에 표시됩니다. 서버의 절대 파일 경로는 응답에 포함하지 않습니다. 전송 직전에 경로를 다시 여는 대신 관리 루트와 파일을 안전하게 확인한 파일 스트림을 먼저 열고 custody hash를 재검증하므로, 검증 뒤 파일을 바꾸거나 경로를 심은 경우에는 전송하지 않습니다. Windows에서는 응답이 끝날 때까지 열린 파일에 대한 교체도 운영체제가 막습니다.
+
 `hwpx_command`는 `context`, `selection_proof`, `readback`, `cell_format_exact`, `command_reconcile`만 받습니다. `cell_format_exact`는 기존 대상 ID, 해시, 페이지, 구역 앵커와 `confirm_layout=true`를 요구하며, 형식 선택자는 `vertical_align`, `cell_margin_mm`, `cell_margin_hu` 중 하나만 지정합니다. 셀 여백 변경은 선언된 단위로 네 변(left/right/top/bottom)을 모두 명시한 단일 네이티브 호출을 사용하고, 요청에서 독립적으로 계산한 네 변의 값과 네이티브 전후 getter가 정확히 일치해야 성공으로 기록됩니다. 유효하지 않거나 신선하지 않은 네이티브 getter, 같은 값을 다시 요청한 no-op, 요청값과 다른 여백은 거부되며, 동작 후 판정 실패는 변경 가능성을 보존합니다. 셀 정렬은 별도의 네이티브 전후 readback을 확보하지 못하면 성공으로 기록하지 않습니다. `pyhwpx_call`, `hwp_action`, 임의 Python·셸·명령 이름은 허용하지 않습니다. 이 어댑터는 기존 비변경용 `safe-schema` 자체를 확장하거나 쓰기 권한으로 해석하지 않습니다.
 
 페이지는 `1..10000`, DPI는 `72..600`으로 제한됩니다. 한 페이지를 렌더링한 결과는 전체 문서 검토 통과를 뜻하지 않습니다. 최종 문서는 모든 페이지를 Hancom 기반으로 렌더링하고 확인해야 합니다.
@@ -89,4 +93,4 @@ Remove-Item Env:HWPX_MCP_TOKEN
 .mcp-venv\Scripts\python.exe -m unittest discover -s mcp_tests -v
 ```
 
-이 테스트는 실제 소켓과 공식 SDK 클라이언트를 사용하지만 REST 백엔드는 시험용 대체 서버입니다. Hancom 실행 증거와 혼동하지 마세요. 전체 기존 검사와 네이티브 문서 실행 결과는 패키지에 동봉된 검증 목록에서 별도로 구분합니다. 설치 프로그램, BOOK, 공개 저장소 배포는 이 문서의 실행 범위가 아닙니다.
+이 테스트는 실제 소켓과 공식 SDK 클라이언트를 사용하지만 REST 백엔드는 시험용 대체 서버입니다. Hancom 실행 결과와 혼동하지 마세요. 전체 기존 검사와 네이티브 문서 실행 결과는 각각 실행 환경에서 별도로 확인합니다. 설치와 공개 배포는 이 문서의 실행 범위가 아닙니다.

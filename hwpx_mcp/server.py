@@ -117,13 +117,17 @@ class Facade:
             raise BackendFailure('SESSION_IDENTITY_MISMATCH', 'Backend session identity did not match the explicit handle.')
         metadata = record.get('metadata')
         local = metadata.get('local_cli_v1') if isinstance(metadata, dict) else None
-        # r16 replaces opened_via with bridge on commands and closed_via on
-        # close. Preserve explicit identity across that backend lifecycle.
-        if not isinstance(local, dict) or not (
-                local.get('opened_via') == 'local_cli_v1' or local.get('bridge') == 'local_cli_v1' or
-                (local.get('closed_via') == 'local_cli_v1' and record.get('state') == 'closed')):
+        # Only the local-CLI open producer establishes managed origin.  Bridge
+        # and close markers are additive lifecycle facts, never admission proof.
+        if not isinstance(local, dict) or local.get('opened_via') != 'local_cli_v1':
             raise BackendFailure('SESSION_NOT_MANAGED', 'Only server-managed local-CLI working-copy sessions are supported.')
         return value
+
+    @staticmethod
+    def _session_is_closed(value: dict[str, Any]) -> bool:
+        record = value.get('session') if isinstance(value.get('session'), dict) else {}
+        state = str(record.get('state') or '').strip().casefold()
+        return state in {'closed', 'closed_cleanup_pending'} or bool(record.get('closed_at'))
 
     async def execute(self, name, args):
         sid = getattr(args, 'session_id', None)
@@ -165,6 +169,8 @@ class Facade:
                         if live.get('session_id') == sid:
                             result = {**record, 'runtime': live}
                     elif name == 'hwpx_command':
+                        if self._session_is_closed(record):
+                            raise BackendFailure('SESSION_CLOSED', 'Closed local-CLI sessions are status-queryable but cannot receive new commands.')
                         request = args.request.model_dump(exclude_none=True)
                         if request['op'] == 'command_reconcile':
                             result = await self.request(http, 'POST', '/local-cli/command-reconcile',
@@ -178,11 +184,15 @@ class Facade:
                             result = await self.request(http, 'POST', '/local-cli/command-bundle',
                                 json={'session_id': sid, 'steps': [step.to_server_json()]})
                     elif name == 'hwpx_proof':
+                        if self._session_is_closed(record):
+                            raise BackendFailure('SESSION_CLOSED', 'Closed local-CLI sessions are status-queryable but cannot receive new commands.')
                         if args.request.kind == 'frame':
                             result = await self.request(http, 'POST', '/local-cli/screenshot', json={'session_id': sid})
                         else:
                             result = await self.page_proof(http, sid, args.request.page, args.request.dpi)
                     else:
+                        if self._session_is_closed(record):
+                            raise BackendFailure('SESSION_CLOSED', 'Closed local-CLI sessions are status-queryable but cannot receive new commands.')
                         payload = {'session_id': sid}
                         if name == 'hwpx_find':
                             payload.update(args.request.model_dump(exclude_none=True))

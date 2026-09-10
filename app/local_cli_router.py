@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from fastapi import APIRouter, File, Form, UploadFile
-from fastapi.responses import FileResponse
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from app.local_cli_service import LocalCliService, as_http_error
@@ -477,11 +477,38 @@ def build_local_cli_router(*, settings: Any, interactive_sessions: Any) -> APIRo
             raise as_http_error(exc) from exc
 
     @router.get('/local-cli/session/{session_id}/artifact/{kind}')
-    def local_cli_artifact(session_id: str, kind: str) -> FileResponse:
+    def local_cli_artifact(session_id: str, kind: str) -> StreamingResponse:
         try:
-            path, filename = service.artifact(kind=kind, session_id=session_id)
+            download = service.open_artifact(kind=kind, session_id=session_id)
         except Exception as exc:
             raise as_http_error(exc) from exc
-        return FileResponse(path, filename=filename)
+
+        filename = download.filename
+        safe_filename = (
+            filename.replace('\\', '_')
+            .replace('"', '_')
+            .replace('\r', '_')
+            .replace('\n', '_')
+        )
+        media_type = {
+            'screenshot': 'image/png',
+            'export': 'application/pdf',
+        }.get(kind, 'application/octet-stream')
+
+        def body():
+            try:
+                while True:
+                    chunk = download.stream.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    yield chunk
+            finally:
+                download.close()
+
+        return StreamingResponse(
+            body(),
+            media_type=media_type,
+            headers={'Content-Disposition': f'attachment; filename="{safe_filename}"'},
+        )
 
     return router

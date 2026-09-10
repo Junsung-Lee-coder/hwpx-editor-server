@@ -61,11 +61,15 @@ class Backend(BaseHTTPRequestHandler):
                 return self.reply({'detail': 'session not found'}, 404)
             local = {'opened_via': 'local_cli_v1'}
             if type(self).mode == 'bridge':
-                # r16 _record_local_cli_command replaces the initial marker.
+                # Command projections retain the authoritative open origin.
+                local = {'opened_via': 'local_cli_v1', 'bridge': 'local_cli_v1'}
+            elif type(self).mode == 'bridge_only':
                 local = {'bridge': 'local_cli_v1'}
             elif type(self).mode == 'unmanaged':
                 local = {'bridge': 'other-client'}
             elif type(self).mode == 'closed':
+                local = {'opened_via': 'local_cli_v1', 'closed_via': 'local_cli_v1', 'outcome': 'closed'}
+            elif type(self).mode == 'closed_only':
                 local = {'closed_via': 'local_cli_v1', 'outcome': 'closed'}
             state = 'closed' if type(self).mode == 'closed' else 'idle'
             return self.reply({'ok': True, 'session': {'session_id': SID, 'state': state,
@@ -206,12 +210,19 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(result.structured_content['result'])
         self.assertFalse(result.structured_content['error']['details']['backend']['semantic_ok'])
 
-    async def test_backend_bridge_marker_keeps_session_usable(self):
+    async def test_backend_bridge_marker_keeps_session_usable_when_origin_is_retained(self):
         Backend.mode = 'bridge'
         for name in ['status', 'where', 'save', 'close', 'status']:
             result = await self.sdk_call('hwpx_' + name, {'session_id': SID})
             self.assertFalse(result.is_error, result.structured_content)
             self.assertEqual(result.structured_content['session_id'], SID)
+
+    async def test_bridge_only_marker_rejected_before_mutation(self):
+        Backend.mode = 'bridge_only'
+        result = await self.sdk_call('hwpx_close', {'session_id': SID})
+        self.assertTrue(result.is_error)
+        self.assertEqual(result.structured_content['error']['code'], 'SESSION_NOT_MANAGED')
+        self.assertFalse(any(method == 'POST' for method, _, _ in Backend.calls))
 
     async def test_unmanaged_bridge_rejected_before_mutation(self):
         Backend.mode = 'unmanaged'
@@ -225,6 +236,20 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
         result = await self.sdk_call('hwpx_status', {'session_id': SID})
         self.assertFalse(result.is_error, result.structured_content)
         self.assertEqual(result.structured_content['result']['session']['state'], 'closed')
+
+    async def test_closed_only_marker_rejected_before_mutation(self):
+        Backend.mode = 'closed_only'
+        result = await self.sdk_call('hwpx_save', {'session_id': SID})
+        self.assertTrue(result.is_error)
+        self.assertEqual(result.structured_content['error']['code'], 'SESSION_NOT_MANAGED')
+        self.assertFalse(any(method == 'POST' for method, _, _ in Backend.calls))
+
+    async def test_closed_session_rejects_mutation_without_backend_post(self):
+        Backend.mode = 'closed'
+        result = await self.sdk_call('hwpx_save', {'session_id': SID})
+        self.assertTrue(result.is_error)
+        self.assertEqual(result.structured_content['error']['code'], 'SESSION_CLOSED')
+        self.assertFalse(any(method == 'POST' for method, _, _ in Backend.calls))
 
     async def test_lifecycle_identity_and_source_preserved(self):
         before = self.fixture.read_bytes()

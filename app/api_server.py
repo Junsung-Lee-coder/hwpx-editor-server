@@ -649,6 +649,15 @@ def _redact_interactive_status_value(value: Any, *, key: str | None = None) -> A
     return value
 
 
+def _interactive_session_has_managed_origin(session: dict[str, Any]) -> bool:
+    metadata = session.get('metadata')
+    local = metadata.get('local_cli_v1') if isinstance(metadata, dict) else None
+    if not isinstance(local, dict) or local.get('opened_via') != 'local_cli_v1':
+        return False
+    state = str(session.get('state') or '').strip().casefold()
+    return state not in {'closed', 'closed_cleanup_pending'}
+
+
 def _public_interactive_session(session: dict[str, Any]) -> dict[str, Any]:
     """Project an interactive record for external HTTP/MCP consumers."""
 
@@ -656,10 +665,14 @@ def _public_interactive_session(session: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(public, dict):
         public = {}
     session_id = str(session.get('session_id') or '').strip()
-    if session_id and session.get('source_path'):
+    if session.get('source_path') and 'source_path' not in public:
+        public['source_path'] = '<redacted>'
+    if session_id and session.get('source_path') and _interactive_session_has_managed_origin(session):
         download_path = f'/local-cli/session/{session_id}/artifact/working-copy'
         public['source_path'] = download_path
-        public['artifacts'] = {'working_copy_download_path': download_path}
+        artifacts = public.get('artifacts') if isinstance(public.get('artifacts'), dict) else {}
+        artifacts['working_copy_download_path'] = download_path
+        public['artifacts'] = artifacts
     return public
 
 
@@ -1367,7 +1380,7 @@ def interactive_session_lock(request: InteractiveLockRequest) -> InteractiveSess
 
 @app.post('/interactive/session/verify-pre', response_model=InteractiveSessionResponse)
 def interactive_session_verify_pre(request: InteractiveVerificationRequest) -> InteractiveSessionResponse:
-    # Verify-pre remains first-class because Jun wants the pass/fail verdict visible
+    # Verify-pre remains first-class so the pass/fail verdict stays visible
     # in logs/TUI output immediately, not only as nested internal evidence.
     verify_result = _build_interactive_verification_result('verify-pre', request)
     summary = request.summary or 'Pre-apply verification recorded.'

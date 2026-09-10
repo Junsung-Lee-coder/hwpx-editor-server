@@ -763,7 +763,7 @@ def _collect_post_serialization_proof_specs(metadata: Any) -> list[dict[str, Any
 
 
 # Keep worker-only deployments compatible with older live edit_ops.py builds that
-# do not yet accept the optional step_recorder hook.
+# may omit the optional step_recorder hook.
 def _apply_edit_operations_with_optional_step_recorder(
     hwp: Any,
     operations: list[dict[str, Any]],
@@ -2650,9 +2650,11 @@ def convert_with_pyhwpx(source_path: Path, output_path: Path, log_path: Path) ->
 
     try:
         # NOTE: pyhwpx and Hancom method names can differ by version.
-        # This routine intentionally tries a few plausible call patterns, then fails loudly.
-        # TODO on Jun's Windows machine: confirm the exact open/save/close API names for the installed Hancom build.
-        # TODO on Jun's Windows machine: add popup/security-dialog handling after observing real behavior.
+        # The compatibility helpers below try the supported call patterns,
+        # record the native capability result, and fail loudly when the
+        # installed Hancom build exposes none of them. Popup/security policy
+        # is configured before opening and its outcome is retained in the
+        # runtime evidence instead of being hidden behind a best-effort retry.
         hwp = create_hwp_instance_with_recovery(
             Hwp,
             log_path=log_path,
@@ -3298,7 +3300,8 @@ def handle_job(
         last_phase = format_last_phase(job_dir)
         message = (
             f'Conversion subprocess timed out after {settings.job_timeout_seconds} seconds. '
-            'TODO: add Hancom-specific popup dismissal and lingering process cleanup if needed.'
+            'The last completed phase was recorded; the configured bounded retry policy will handle this attempt. '
+            'Inspect the failure artifact before starting a manual retry.'
         )
         if last_phase:
             message = f'{message} {last_phase}'

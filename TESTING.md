@@ -21,6 +21,8 @@ python -m unittest discover -s tests -v
 
 For portable Linux validation, install the hash-pinned `requirements-portable.lock` in a temporary environment. The Windows lock file remains the installation input on Windows; do not claim that a Linux environment proves pyhwpx/Hancom behavior. These tests cover local planners, parsers, readback helpers, command-package contracts, portability, source bundles, installer contracts, and service helpers.
 
+The local CLI custody tests also cover managed-root identity replacement, symlinked artifact paths, custody hash mismatches, public route suppression for unmanaged or closed sessions, and streaming from an already validated file handle. On POSIX, the response test replaces the path after the handle is opened and requires the original bytes; on Windows, native file-sharing semantics prevent that replacement until the response closes.
+
 ## Static smoke checks
 
 The following scripts validate local CLI and command-bundle contracts without opening a document. The final envelope smoke uses an OS cache path and creates no repository fixture:
@@ -57,6 +59,8 @@ python -m unittest \
 ```
 
 Full discovery is a required source gate for this candidate. If it fails, report the exact failing test and do not relabel the result as a runtime-only PASS.
+
+The MCP adapter tests verify that `opened_via` is retained as the managed-session origin, bridge-only and closed-only markers are rejected before mutation, closed sessions remain status-queryable but cannot receive a POST, and the adapter does not expose a backend filesystem path as a download route. These are fake-backend contract tests, not Hancom execution evidence.
 
 ## Source-bundle checks
 
@@ -109,7 +113,7 @@ Do not add the resulting documents, logs, screenshots, or runtime state to Git.
 
 ## Windows installer and verifier
 
-PowerShell syntax is checked on a Windows runner. The Linux source gates can only perform static contract checks; they cannot prove scheduled-task, WinGet, COM, or native renderer behavior. Follow `docs/WINDOWS_INSTALL.md` for install and `docs/WINDOWS_VERIFY.md` for the independent read-only receipt. Use `docs/WINDOWS_ROLLBACK.md` for a disposable rollback rehearsal and never run it against the live book installation. Installer, verifier, writer, and generated `.env` use the canonical `HWP_API_TASK_NAME`, `HWP_WORKER_TASK_NAME`, `HWP_API_PORT`, `HWP_PDFTOPPM`, and `HWP_SOURCE_MANIFEST` names; legacy Poppler path aliases are compatibility-only.
+PowerShell syntax is checked on a Windows runner. The Linux source gates can only perform static contract checks; they cannot prove scheduled-task, WinGet, COM, or native renderer behavior. Follow `docs/WINDOWS_INSTALL.md` for install and `docs/WINDOWS_VERIFY.md` for the independent read-only receipt. Use `docs/WINDOWS_ROLLBACK.md` for a disposable rollback rehearsal and never run it against a live installation. Installer, verifier, writer, and generated `.env` use the canonical `HWP_API_TASK_NAME`, `HWP_WORKER_TASK_NAME`, `HWP_API_PORT`, `HWP_PDFTOPPM`, and `HWP_SOURCE_MANIFEST` names; legacy Poppler path aliases are compatibility-only.
 
 The focused Windows PowerShell 5.1 proof regression creates disposable valid, blank, and corrupt PNGs and exercises the verifier's bounded content detector without opening Hancom:
 

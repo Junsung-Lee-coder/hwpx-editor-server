@@ -84,4 +84,6 @@ The Git checkout contains source and test inputs. Git-ignored runtime state is k
 
 Keep documents and runtime state outside the repository. In particular, do not add `.hwp`, `.hwpx`, `.pdf`, `.docx`, `.pptx`, or `.xlsx` files, or files from `spool/`, `uploads/`, `output/`, `logs/`, or `backups/`. Use synthetic fixtures for local tests.
 
+Local CLI artifact responses expose route URLs rather than server filesystem paths. A route is advertised only for a server-managed session with a custody record for the artifact; the service rechecks the managed root, symlink-free path, file identity, size, and SHA-256 before opening a response stream. Download the working copy and recovery artifacts before closing the session.
+
 No license file is included in this repository.

@@ -523,7 +523,7 @@ def snapshot_live_location(
 def insert_text_at_caret(hwp: object, text: str) -> None:
     if '\n' in text or '\r' in text:
         raise LocalCliRuntimeError(
-            'Multiline hwpx type is disabled because Hancom paragraph-break insertion is not yet layout-safe. '
+            'Multiline hwpx type is disabled because Hancom paragraph-break insertion is not verified as layout-safe. '
             'Use the bounded native multiline table-cell replacement primitive instead.'
         )
     if hasattr(hwp, 'insert_text'):

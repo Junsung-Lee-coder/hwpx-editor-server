@@ -50,7 +50,7 @@ The recovery snapshot is a new native `SaveAs` output. It does not overwrite the
 
 ## Forced activation-failure rehearsal
 
-Use a disposable test directory and a synthetic fixture only. Do not run a rehearsal against the live book installation or production scheduled tasks. A safe rehearsal records:
+Use a disposable test directory and a synthetic fixture only. Do not run a rehearsal against a live installation or production scheduled tasks. A safe rehearsal records:
 
 - the pre-install task XML/root identity;
 - the candidate and backup roots;

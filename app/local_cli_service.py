@@ -8,9 +8,11 @@ import math
 import os
 import re
 import shutil
+import stat
 import threading
 import uuid
 import zipfile
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Mapping, TypeVar
 
@@ -90,6 +92,20 @@ from app.worker import save_hwp_as
 
 
 T = TypeVar('T')
+
+
+@dataclass
+class LocalCliArtifactDownload:
+    """A custody-checked stream whose bytes remain tied to one opened file."""
+
+    stream: Any
+    path: Path
+    size_bytes: int
+    sha256: str
+    filename: str = ''
+
+    def close(self) -> None:
+        self.stream.close()
 
 
 def _native_type_action_count(text: str) -> int:
@@ -1504,6 +1520,7 @@ class LocalCliService:
         *,
         session_id: str,
         artifacts: dict[str, Any] | None,
+        binding: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Expose download routes and custody metadata, never server paths."""
 
@@ -1516,7 +1533,15 @@ class LocalCliService:
             'latest_recovery_path': 'recovery',
         }
         for key, kind in route_kinds.items():
-            if isinstance(source.get(key), str) and source[key]:
+            path = source.get(key)
+            if (
+                isinstance(path, str)
+                and path
+                and (
+                    binding is None
+                    or self._artifact_projection_is_available(binding=binding, kind=kind, path=Path(path))
+                )
+            ):
                 public[key.replace('_path', '_download_path')] = self._artifact_download_path(
                     session_id=session_id,
                     kind=kind,
@@ -1549,7 +1574,12 @@ class LocalCliService:
                 continue
             if not isinstance(value, str):
                 raise LocalCliServiceError('Local CLI artifact path is invalid.', status_code=409)
-            projection[key] = str(self._verify_artifact_readback(binding, Path(value)))
+            custody = {}
+            projection[key] = str(self._verify_artifact_readback(binding, Path(value), readback=custody))
+            custody_map = binding.get('artifact_custody') if isinstance(binding.get('artifact_custody'), dict) else {}
+            prior = custody_map.get(kind) if isinstance(custody_map.get(kind), dict) else {}
+            custody_map[kind] = {**prior, **custody}
+            binding['artifact_custody'] = custody_map
         for key in ('latest_recovery_sha256', 'latest_recovery_size_bytes'):
             if source.get(key) not in (None, ''):
                 projection[key] = source[key]
@@ -1560,6 +1590,7 @@ class LocalCliService:
         *,
         session_id: str,
         steps: Any,
+        binding: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
         """Remove internal artifact paths from bounded bundle step results."""
 
@@ -1583,7 +1614,15 @@ class LocalCliService:
                 if isinstance(artifact_path, str) and artifact_path:
                     if not isinstance(artifact_kind, str) or artifact_kind not in _RECOVERY_ARTIFACT_KINDS:
                         artifact_kind = _artifact_kind_from_key(str(step.get('op') or ''))
-                    if artifact_kind in _RECOVERY_ARTIFACT_KINDS:
+                    if (
+                        artifact_kind in _RECOVERY_ARTIFACT_KINDS
+                        and binding is not None
+                        and self._artifact_projection_is_available(
+                            binding=binding,
+                            kind=artifact_kind,
+                            path=Path(artifact_path),
+                        )
+                    ):
                         result['download_path'] = self._artifact_download_path(
                             session_id=session_id,
                             kind=artifact_kind,
@@ -1592,6 +1631,7 @@ class LocalCliService:
                     result['artifacts'] = self._public_artifacts(
                         session_id=session_id,
                         artifacts=result['artifacts'],
+                        binding=binding,
                     )
                 step['result'] = result
             if 'error' in step:
@@ -1599,13 +1639,28 @@ class LocalCliService:
             public_steps.append(step)
         return public_steps
 
-    def _verify_artifact_readback(
-        self,
-        binding: dict[str, Any],
-        path: Path,
-        *,
-        expected: dict[str, Any] | None = None,
-    ) -> Path:
+    def _artifact_projection_is_available(self, *, binding: dict[str, Any], kind: str, path: Path) -> bool:
+        custody_map = binding.get('artifact_custody') if isinstance(binding.get('artifact_custody'), dict) else {}
+        expected = custody_map.get(kind)
+        if not isinstance(expected, dict):
+            return False
+        expected_size = expected.get('size_bytes')
+        expected_sha256 = expected.get('sha256')
+        if (
+            isinstance(expected_size, bool)
+            or not isinstance(expected_size, int)
+            or expected_size <= 0
+            or not isinstance(expected_sha256, str)
+            or re.fullmatch(r'[0-9a-f]{64}', expected_sha256) is None
+        ):
+            return False
+        try:
+            self._verify_artifact_readback(binding, path, expected=expected)
+        except LocalCliServiceError:
+            return False
+        return True
+
+    def _validated_artifact_path(self, binding: dict[str, Any], path: Path) -> tuple[Path, Path]:
         root_path = self._binding_session_root(binding)
         expected_root_identity = binding.get('session_root_identity')
         actual_root_identity = self._managed_path_identity(root_path)
@@ -1615,54 +1670,208 @@ class LocalCliService:
             raise LocalCliServiceError('Local CLI session root identity is missing; refusing artifact.', status_code=409)
         if actual_root_identity != expected_root_identity:
             raise LocalCliServiceError('Managed local CLI session root identity changed; refusing artifact.', status_code=409)
+        if not stat.S_ISDIR(actual_root_identity.get('mode', 0)):
+            raise LocalCliServiceError('Managed local CLI session root is not a directory.', status_code=409)
         if self._path_has_symlink_component(root_path):
             raise LocalCliServiceError('Local CLI session root path is symlinked.', status_code=409)
-        root = root_path.resolve(strict=True)
-        lexical = path.absolute()
-        lexical.relative_to(root)
+        try:
+            root = root_path.resolve(strict=True)
+            managed_root = self.sessions_root.resolve(strict=True)
+            root.relative_to(managed_root)
+        except (OSError, ValueError) as exc:
+            raise LocalCliServiceError('Local CLI session root is outside the server session store.', status_code=409) from exc
+        session_id = self._binding_session_id(binding)
+        if root.parent != managed_root or root.name != session_id:
+            raise LocalCliServiceError('Local CLI session root is not a managed session child.', status_code=409)
+        if any(part in {'.', '..'} for part in path.parts):
+            raise LocalCliServiceError('Local CLI artifact path contains traversal components.', status_code=409)
+        lexical = Path(os.path.abspath(os.fspath(path.expanduser())))
+        try:
+            relative = lexical.relative_to(root)
+        except ValueError as exc:
+            raise LocalCliServiceError('Local CLI artifact path is outside the managed session root.', status_code=409) from exc
+        if not relative.parts:
+            raise LocalCliServiceError('Local CLI artifact path is not a file.', status_code=409)
         current = root
-        for part in lexical.relative_to(root).parts:
+        for part in relative.parts:
             current = current / part
-            if current.is_symlink():
-                raise LocalCliServiceError('Local CLI artifact path is symlinked.', status_code=409)
-        resolved = lexical.resolve(strict=True)
+            try:
+                if current.is_symlink():
+                    raise LocalCliServiceError('Local CLI artifact path is symlinked.', status_code=409)
+            except OSError as exc:
+                raise LocalCliServiceError('Local CLI artifact path could not be inspected.', status_code=409) from exc
+        try:
+            resolved = lexical.resolve(strict=True)
+        except OSError as exc:
+            raise LocalCliServiceError('Local CLI artifact is not available.', status_code=404) from exc
         if resolved != lexical or not resolved.is_file():
             raise LocalCliServiceError('Local CLI artifact is not a regular managed file.', status_code=409)
-        identity_before = self._managed_path_identity(resolved)
-        if identity_before is None:
-            raise LocalCliServiceError('Local CLI artifact identity could not be verified.', status_code=409)
+        identity = self._managed_path_identity(resolved)
+        if identity is None or not stat.S_ISREG(identity.get('mode', 0)):
+            raise LocalCliServiceError('Local CLI artifact is not a regular managed file.', status_code=409)
+        return root, resolved
+
+    @staticmethod
+    def _identity_from_stat_result(stat_result: os.stat_result) -> dict[str, int]:
+        return {
+            'device': int(stat_result.st_dev),
+            'inode': int(stat_result.st_ino),
+            'mode': int(stat_result.st_mode),
+        }
+
+    def _open_artifact_fd(self, *, binding: dict[str, Any], root: Path, resolved: Path) -> int:
+        flags = os.O_RDONLY | getattr(os, 'O_BINARY', 0)
+        nofollow = getattr(os, 'O_NOFOLLOW', 0)
+        if os.name != 'nt' and getattr(os, 'O_DIRECTORY', 0) and os.open in os.supports_dir_fd:
+            directory_fd: int | None = None
+            artifact_fd: int | None = None
+            try:
+                directory_fd = os.open(
+                    os.fspath(root),
+                    flags | getattr(os, 'O_DIRECTORY', 0) | nofollow,
+                )
+                expected_root_identity = binding.get('session_root_identity')
+                root_identity = self._identity_from_stat_result(os.fstat(directory_fd))
+                if root_identity != expected_root_identity:
+                    raise LocalCliServiceError('Managed local CLI session root identity changed before artifact open.', status_code=409)
+                parts = resolved.relative_to(root).parts
+                if not parts:
+                    raise LocalCliServiceError('Local CLI artifact path is not a file.', status_code=409)
+                for part in parts[:-1]:
+                    next_fd = os.open(
+                        part,
+                        flags | getattr(os, 'O_DIRECTORY', 0) | nofollow,
+                        dir_fd=directory_fd,
+                    )
+                    os.close(directory_fd)
+                    directory_fd = next_fd
+                artifact_fd = os.open(parts[-1], flags | nofollow, dir_fd=directory_fd)
+                os.close(directory_fd)
+                directory_fd = None
+                result_fd = artifact_fd
+                artifact_fd = None
+                return result_fd
+            except LocalCliServiceError:
+                raise
+            except (OSError, ValueError) as exc:
+                raise LocalCliServiceError('Local CLI artifact could not be opened safely.', status_code=409) from exc
+            finally:
+                if directory_fd is not None:
+                    try:
+                        os.close(directory_fd)
+                    except OSError:
+                        pass
+                if artifact_fd is not None:
+                    try:
+                        os.close(artifact_fd)
+                    except OSError:
+                        pass
+        try:
+            return os.open(os.fspath(resolved), flags | nofollow)
+        except OSError as exc:
+            raise LocalCliServiceError('Local CLI artifact could not be opened safely.', status_code=409) from exc
+
+    def _open_verified_artifact(
+        self,
+        binding: dict[str, Any],
+        path: Path,
+        *,
+        expected: dict[str, Any] | None = None,
+        readback: dict[str, Any] | None = None,
+    ) -> LocalCliArtifactDownload:
+        root, resolved = self._validated_artifact_path(binding, path)
+        expected_size = expected.get('size_bytes') if isinstance(expected, dict) else None
+        expected_sha256 = expected.get('sha256') if isinstance(expected, dict) else None
         if expected is not None:
-            expected_size = expected.get('size_bytes')
-            expected_sha256 = expected.get('sha256')
             if isinstance(expected_size, bool) or not isinstance(expected_size, int) or expected_size <= 0:
                 raise LocalCliServiceError('Local CLI artifact custody size is invalid.', status_code=409)
             if not isinstance(expected_sha256, str) or re.fullmatch(r'[0-9a-f]{64}', expected_sha256) is None:
                 raise LocalCliServiceError('Local CLI artifact custody hash is invalid.', status_code=409)
+        fd = self._open_artifact_fd(binding=binding, root=root, resolved=resolved)
+        stream = None
+        try:
+            stream = os.fdopen(fd, 'rb')
+            fd = -1
+            identity_before = self._identity_from_stat_result(os.fstat(stream.fileno()))
+            if not stat.S_ISREG(identity_before.get('mode', 0)):
+                raise LocalCliServiceError('Local CLI artifact is not a regular managed file.', status_code=409)
             digest = hashlib.sha256()
             actual_size = 0
-            with resolved.open('rb') as stream:
-                for chunk in iter(lambda: stream.read(1024 * 1024), b''):
-                    actual_size += len(chunk)
-                    digest.update(chunk)
-            if self._managed_path_identity(resolved) != identity_before:
+            for chunk in iter(lambda: stream.read(1024 * 1024), b''):
+                actual_size += len(chunk)
+                digest.update(chunk)
+            actual_sha256 = digest.hexdigest()
+            if self._identity_from_stat_result(os.fstat(stream.fileno())) != identity_before:
                 raise LocalCliServiceError('Local CLI artifact changed during custody readback.', status_code=409)
-            if actual_size != expected_size or digest.hexdigest() != expected_sha256:
+            if self._managed_path_identity(self._binding_session_root(binding)) != binding.get('session_root_identity'):
+                raise LocalCliServiceError('Managed local CLI session root identity changed during artifact readback.', status_code=409)
+            if expected is not None and (actual_size != expected_size or actual_sha256 != expected_sha256):
                 raise LocalCliServiceError('Local CLI artifact changed after custody.', status_code=409)
-        return resolved
+            if readback is not None:
+                readback.update({'size_bytes': actual_size, 'sha256': actual_sha256})
+            stream.seek(0)
+            return LocalCliArtifactDownload(
+                stream=stream,
+                path=resolved,
+                size_bytes=actual_size,
+                sha256=actual_sha256,
+            )
+        except Exception:
+            if stream is not None:
+                stream.close()
+            elif fd >= 0:
+                os.close(fd)
+            raise
+
+    def _verify_artifact_readback(
+        self,
+        binding: dict[str, Any],
+        path: Path,
+        *,
+        expected: dict[str, Any] | None = None,
+        readback: dict[str, Any] | None = None,
+    ) -> Path:
+        download = self._open_verified_artifact(binding, path, expected=expected, readback=readback)
+        try:
+            return download.path
+        finally:
+            download.close()
+
+    def _artifact_spec(self, *, kind: str, session_id: str | None = None) -> tuple[dict[str, Any], Path, dict[str, Any] | None]:
+        binding = self._load_active_binding(session_id=session_id, require_live=False)
+        normalized_kind = 'working-copy' if kind == 'working_copy' else kind
+        if normalized_kind == 'working-copy':
+            path = self._working_copy_path(binding)
+        elif normalized_kind in {'export', 'screenshot', 'recovery'}:
+            artifacts = binding.get('artifacts') if isinstance(binding.get('artifacts'), dict) else {}
+            path = Path(str(artifacts.get(f'latest_{normalized_kind}_path') or ''))
+        else:
+            raise LocalCliServiceError(f'Unsupported local CLI artifact kind: {kind}', status_code=400)
+        custody_map = binding.get('artifact_custody') if isinstance(binding.get('artifact_custody'), dict) else {}
+        expected = custody_map.get(normalized_kind) if isinstance(custody_map.get(normalized_kind), dict) else None
+        return binding, path, expected
 
     def _resolve_artifact(self, *, kind: str, session_id: str | None = None) -> tuple[dict[str, Any], Path]:
-        binding = self._load_active_binding(session_id=session_id, require_live=False)
-        if kind in {'working-copy', 'working_copy'}:
-            return binding, self._verify_artifact_readback(binding, self._working_copy_path(binding))
-        artifacts = binding.get('artifacts') if isinstance(binding.get('artifacts'), dict) else {}
-        path = Path(str(artifacts.get(f'latest_{kind}_path') or ''))
-        custody_map = binding.get('artifact_custody') if isinstance(binding.get('artifact_custody'), dict) else {}
-        expected = custody_map.get(kind) if isinstance(custody_map.get(kind), dict) else None
+        binding, path, expected = self._artifact_spec(kind=kind, session_id=session_id)
         try:
             path = self._verify_artifact_readback(binding, path, expected=expected)
-        except (OSError, ValueError):
-            raise LocalCliServiceError(f'No local CLI {kind} artifact is available yet.', status_code=404)
+        except LocalCliServiceError as exc:
+            if exc.status_code == 404 and kind not in {'working-copy', 'working_copy'}:
+                raise LocalCliServiceError(f'No local CLI {kind} artifact is available yet.', status_code=404) from exc
+            raise
         return binding, path
+
+    def open_artifact(self, *, kind: str, session_id: str | None = None) -> LocalCliArtifactDownload:
+        binding, path, expected = self._artifact_spec(kind=kind, session_id=session_id)
+        if not isinstance(expected, dict):
+            raise LocalCliServiceError('Local CLI artifact custody is not available; refusing download.', status_code=409)
+        filename = self._artifact_name(
+            kind=kind,
+            source_filename=str(binding.get('source_filename') or 'document.hwpx'),
+        )
+        download = self._open_verified_artifact(binding, path, expected=expected)
+        download.filename = filename
+        return download
 
     def _resolve_live_target(self, binding: dict[str, Any], target: str) -> tuple[str, int]:
         last_find = binding.get('last_find') if isinstance(binding.get('last_find'), dict) else {}
@@ -8318,6 +8527,9 @@ class LocalCliService:
                     },
                     'artifacts': {'latest_working_copy_path': str(working_copy_path)},
                 }
+                working_copy_custody = {}
+                self._verify_artifact_readback(binding, working_copy_path, readback=working_copy_custody)
+                binding['artifact_custody'] = {'working-copy': working_copy_custody}
                 self._save_binding(binding)
                 try:
                     self.interactive_sessions.record_command(
@@ -8365,6 +8577,9 @@ class LocalCliService:
             }
             if not isinstance(binding['session_root_identity'], dict):
                 raise LocalCliServiceError('Server-managed session root identity could not be captured.', status_code=500)
+            working_copy_custody = {}
+            self._verify_artifact_readback(binding, working_copy_path, readback=working_copy_custody)
+            binding['artifact_custody'] = {'working-copy': working_copy_custody}
             binding = self._update_live_binding(binding, location=location, dirty=False)
             return {
                 'ok': True,
@@ -8811,6 +9026,12 @@ class LocalCliService:
             )
         except Exception:
             pass
+        public_artifacts = self._public_artifacts(
+            session_id=session_id,
+            artifacts=binding.get('artifacts') if isinstance(binding.get('artifacts'), dict) else {},
+            binding=binding,
+        )
+        recovery_download_path = public_artifacts.get('latest_recovery_download_path')
         return {
             'ok': bool(semantic_ok) if isinstance(semantic_ok, bool) else state == 'completed_after_timeout',
             'reconciled': True,
@@ -8819,19 +9040,16 @@ class LocalCliService:
             'command': acknowledged,
             'binding_generation': binding.get('command_generation'),
             'working_copy_dirty': binding.get('working_copy_dirty'),
-            'artifacts': self._public_artifacts(
-                session_id=session_id,
-                artifacts=binding.get('artifacts') if isinstance(binding.get('artifacts'), dict) else {},
-            ),
-            'recovery_artifact_path': self._artifact_download_path(session_id=session_id, kind='recovery'),
+            'artifacts': public_artifacts,
+            'recovery_artifact_path': recovery_download_path,
             'recovery_artifact': {
-                'download_path': self._artifact_download_path(session_id=session_id, kind='recovery'),
+                'download_path': recovery_download_path,
                 **{
                     key: recovery['artifact'].get(key)
                     for key in ('sha256', 'size_bytes')
                     if recovery['artifact'].get(key) not in (None, '')
                 },
-            } if isinstance(recovery.get('artifact'), dict) else None,
+            } if isinstance(recovery.get('artifact'), dict) and recovery_download_path else None,
             'cleanup_pending': cleanup_pending,
             'semantic_ok': semantic_ok,
             'dirty_source': dirty_source,
@@ -8899,7 +9117,7 @@ class LocalCliService:
         artifacts = (active_binding or {}).get('artifacts') if isinstance(active_binding, dict) else None
         artifacts = artifacts if isinstance(artifacts, dict) else {}
         public_artifacts = (
-            self._public_artifacts(session_id=session_id, artifacts=artifacts)
+            self._public_artifacts(session_id=session_id, artifacts=artifacts, binding=active_binding)
             if session_id
             else {}
         )
@@ -11166,11 +11384,13 @@ class LocalCliService:
             'steps': self._public_bundle_steps(
                 session_id=self._binding_session_id(binding),
                 steps=result.get('steps'),
+                binding=binding,
             ),
             'warnings': result.get('warnings') if isinstance(result.get('warnings'), list) else [],
             'artifacts': self._public_artifacts(
                 session_id=self._binding_session_id(binding),
                 artifacts=artifacts,
+                binding=binding,
             ),
             **self._compact_state_payload(location=location),
         }
@@ -11225,6 +11445,8 @@ class LocalCliService:
                 raise LocalCliRuntimeError('Saved working-copy readback failed.') from exc
             if working_copy_size <= 0:
                 raise LocalCliRuntimeError('Native save produced an empty working copy.')
+            working_copy_custody = {}
+            self._verify_artifact_readback(binding, working_copy_path, readback=working_copy_custody)
             location = snapshot_live_location(
                 hwp=handle.hwp,
                 source_filename=handle.source_filename,
@@ -11234,6 +11456,7 @@ class LocalCliService:
                 'location': location,
                 'ordinary_save_confirmed': True,
                 'working_copy_size_bytes': working_copy_size,
+                'working_copy_custody': working_copy_custody,
             }
 
         result = self._execute_live(binding=binding, command_name='save', task_label='local_cli.save', handler=_handler)
@@ -11250,6 +11473,11 @@ class LocalCliService:
             fresh_sequence_matches=True,
             ordinary_save_confirmed=result.get('ordinary_save_confirmed') is True,
         )
+        working_copy_custody = result.get('working_copy_custody')
+        if isinstance(working_copy_custody, dict):
+            custody_map = binding.get('artifact_custody') if isinstance(binding.get('artifact_custody'), dict) else {}
+            custody_map['working-copy'] = working_copy_custody
+            binding['artifact_custody'] = custody_map
         binding = self._update_live_binding(
             binding,
             location=location,

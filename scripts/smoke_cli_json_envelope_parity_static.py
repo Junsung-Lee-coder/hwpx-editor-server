@@ -175,7 +175,7 @@ def main() -> int:
                 how='static contract sample',
                 changed='none',
                 proof='none',
-                next_step='reload Windows API only when Jun explicitly asks',
+                next_step='reload the Windows API only after operator authorization',
                 warnings=['static sample only'],
                 blocked_reason='running Windows API not checked in static smoke',
             )
