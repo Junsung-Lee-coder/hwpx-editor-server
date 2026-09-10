@@ -787,6 +787,34 @@ class G22RuntimeFinalizationRepairTests(unittest.TestCase):
 
 
 class G22ManagedFixtureCleanupTests(unittest.TestCase):
+    def test_working_copy_artifact_rejects_replaced_session_root(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            sessions_root = Path(raw) / 'sessions'
+            session_root = sessions_root / 's1'
+            original_working_copy = session_root / 'working' / 'working-copy.hwpx'
+            original_working_copy.parent.mkdir(parents=True)
+            original_working_copy.write_bytes(b'original working-copy bytes')
+
+            service = object.__new__(LocalCliService)
+            service.sessions_root = sessions_root
+            binding = {
+                'session_id': 's1',
+                'session_root_path': str(session_root),
+                'session_root_identity': service._managed_path_identity(session_root),
+                'working_copy_path': str(original_working_copy),
+            }
+
+            session_root.rename(sessions_root / 's1-original')
+            replacement_working_copy = session_root / 'working' / 'working-copy.hwpx'
+            replacement_working_copy.parent.mkdir(parents=True)
+            replacement_working_copy.write_bytes(b'foreign replacement bytes')
+            service._load_active_binding = lambda **_kwargs: binding  # type: ignore[method-assign]
+
+            with self.assertRaisesRegex(LocalCliServiceError, 'identity changed'):
+                service._resolve_artifact(kind='working-copy', session_id='s1')
+
+            self.assertEqual(replacement_working_copy.read_bytes(), b'foreign replacement bytes')
+
     def test_close_cleanup_removes_and_verifies_server_managed_session_root(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw) / 'sessions'

@@ -1606,7 +1606,18 @@ class LocalCliService:
         *,
         expected: dict[str, Any] | None = None,
     ) -> Path:
-        root = self._binding_session_root(binding).resolve(strict=True)
+        root_path = self._binding_session_root(binding)
+        expected_root_identity = binding.get('session_root_identity')
+        actual_root_identity = self._managed_path_identity(root_path)
+        if actual_root_identity is None:
+            raise LocalCliServiceError('Local CLI session root identity could not be verified.', status_code=409)
+        if not isinstance(expected_root_identity, dict):
+            raise LocalCliServiceError('Local CLI session root identity is missing; refusing artifact.', status_code=409)
+        if actual_root_identity != expected_root_identity:
+            raise LocalCliServiceError('Managed local CLI session root identity changed; refusing artifact.', status_code=409)
+        if self._path_has_symlink_component(root_path):
+            raise LocalCliServiceError('Local CLI session root path is symlinked.', status_code=409)
+        root = root_path.resolve(strict=True)
         lexical = path.absolute()
         lexical.relative_to(root)
         current = root
