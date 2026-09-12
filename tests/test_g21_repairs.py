@@ -317,6 +317,318 @@ class ProjectionSequenceRepairTests(unittest.TestCase):
             self.assertEqual(persisted['native_command_sequence'], 1)
 
 
+class ServicePendingReconciliationTruthTests(unittest.TestCase):
+    """Pending reconcile replies are observations, never success results (T1/T6)."""
+
+    SESSION_ID = 'session-pending'
+    COMMAND_ID = 'session-pending:command-1'
+
+    def _service(self, root: Path) -> LocalCliService:
+        service = LocalCliService.__new__(LocalCliService)
+        service.root = root / 'local_cli_v1'
+        service.sessions_root = service.root / 'sessions'
+        service.active_binding_path = service.root / 'active_binding.json'
+        service.root.mkdir(parents=True, exist_ok=True)
+        service.sessions_root.mkdir(parents=True, exist_ok=True)
+        service._closed_session_ids = set()
+        service._closed_session_ids_lock = threading.Lock()
+        service.runtime_manager = type(
+            'Runtime',
+            (),
+            {'latest_command_sequence': lambda self, session_id, **kwargs: 1},
+        )()
+        return service
+
+    def _binding(self, session_root: Path) -> dict[str, object]:
+        return {
+            'session_id': self.SESSION_ID,
+            'session_root_path': str(session_root),
+            'session_root_identity': None,
+            'working_copy_path': str(session_root / 'working' / 'working-copy.hwpx'),
+            'source_filename': 'document.hwpx',
+            'command_generation': 1,
+            'native_command_sequence': 1,
+            'pending_command': {
+                'command_id': self.COMMAND_ID,
+                'command': 'command-bundle',
+                'sequence': 1,
+            },
+        }
+
+    @staticmethod
+    def _pending_status() -> dict[str, object]:
+        command_id = 'session-pending:command-1'
+        return {
+            'command_id': command_id,
+            'command': 'command-bundle',
+            'sequence': 1,
+            'state': 'timed_out_pending_reconciliation',
+            'timed_out': True,
+            'reconcilable': True,
+            'reconciled': False,
+            'recovery': {'state': 'quarantined'},
+            'result': {'ok': False, 'dirty': True, 'cache_fresh': False},
+        }
+
+    @staticmethod
+    def _late_terminal_saving_status() -> dict[str, object]:
+        command_id = 'session-pending:command-1'
+        return {
+            'command_id': command_id,
+            'command': 'command-bundle',
+            'sequence': 2,
+            'state': 'completed_after_timeout',
+            'timed_out': True,
+            'reconcilable': True,
+            'reconciled': False,
+            'recovery': {'state': 'saving'},
+        }
+
+    @staticmethod
+    def _saving_custody() -> dict[str, object]:
+        return {
+            'reconciliation_data': {
+                'version': 1,
+                'session_id': 'session-pending',
+                'command_id': 'session-pending:command-1',
+                'sequence': 2,
+                'semantic_ok': True,
+                'delta_dirty': False,
+                'document_modified_before_recovery': False,
+                'may_have_mutated': False,
+                'step_count': 1,
+                'failed_step_count': 0,
+                'recovery': {'state': 'saving'},
+            },
+        }
+
+    def _prepare(self, temp_dir: str) -> tuple[LocalCliService, Path]:
+        root = Path(temp_dir)
+        service = self._service(root)
+        session_root = service.sessions_root / self.SESSION_ID
+        (session_root / 'working').mkdir(parents=True)
+        binding = self._binding(session_root)
+        binding['session_root_identity'] = service._managed_path_identity(session_root)
+        binding['_expected_command_generation'] = 0
+        service._save_binding(binding)
+        return service, session_root
+
+    def _assert_pending_projection(self, result: dict[str, object]) -> None:
+        self.assertIs(result['ok'], False)
+        self.assertIs(result['reconciled'], False)
+        self.assertEqual(result['reconciliation'], 'pending')
+        self.assertEqual(result['session_id'], self.SESSION_ID)
+        self.assertEqual(result['command']['command_id'], self.COMMAND_ID)
+        serialized = json.dumps(result)
+        self.assertNotIn('reconciliation_data', serialized)
+        self.assertNotIn('recovery_artifact', serialized)
+
+    def test_pending_execution_is_not_success(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            service, session_root = self._prepare(temp_dir)
+            calls: list[str] = []
+
+            class Runtime:
+                def has_session(self, session_id: str) -> bool:
+                    return True
+
+                def latest_command_sequence(self, session_id: str, **kwargs: object) -> int:
+                    return 1
+
+                def command_status(self, session_id: str, command_id: str | None = None, **kwargs: object) -> dict[str, object]:
+                    # The service wraps this lookup in a broad except; a raise
+                    # would silently fall back to an unknown state.  Returning
+                    # the pending status is the production-shaped projection.
+                    calls.append('command_status')
+                    return ServicePendingReconciliationTruthTests._pending_status()
+
+                def reconcile_command(self, session_id: str, command_id: str, **kwargs: object) -> dict[str, object]:
+                    calls.append('reconcile_command')
+                    raise AssertionError('pending execution must not start a recovery request')
+
+                def command_custody(self, session_id: str, command_id: str, **kwargs: object) -> dict[str, object]:
+                    calls.append('command_custody')
+                    raise AssertionError('pending execution must not read late custody')
+
+                def acknowledge_reconciliation(self, session_id: str, command_id: str, **kwargs: object) -> dict[str, object]:
+                    calls.append('acknowledge_reconciliation')
+                    raise AssertionError('pending execution must not be acknowledged')
+
+                def close_session(self, session_id: str, **kwargs: object) -> None:
+                    calls.append('close_session')
+                    raise AssertionError('pending execution must not close the session')
+
+            service.runtime_manager = Runtime()
+            result = service.reconcile_command(command_id=self.COMMAND_ID, session_id=self.SESSION_ID)
+
+            self._assert_pending_projection(result)
+            self.assertIs(result['command']['timed_out'], True)
+            self.assertEqual(result['command']['result'], {'ok': False, 'dirty': True, 'cache_fresh': False})
+            self.assertNotIn('reconcile_command', calls)
+            self.assertNotIn('command_custody', calls)
+            self.assertNotIn('acknowledge_reconciliation', calls)
+            self.assertNotIn('close_session', calls)
+            binding = service._read_binding(session_id=self.SESSION_ID)
+            assert binding is not None
+            self.assertEqual(binding.get('pending_command', {}).get('command_id'), self.COMMAND_ID)
+            self.assertTrue(session_root.exists())
+
+    def test_pending_after_manager_refresh_is_not_success(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            service, _ = self._prepare(temp_dir)
+            calls: list[str] = []
+
+            class Runtime:
+                def __init__(self) -> None:
+                    self.reconcile_calls = 0
+
+                def has_session(self, session_id: str) -> bool:
+                    return True
+
+                def latest_command_sequence(self, session_id: str, **kwargs: object) -> int:
+                    return 2
+
+                def command_status(self, session_id: str, command_id: str | None = None, **kwargs: object) -> dict[str, object]:
+                    calls.append('command_status')
+                    status = ServicePendingReconciliationTruthTests._late_terminal_saving_status()
+                    status['sequence'] = 1
+                    return status
+
+                def reconcile_command(self, session_id: str, command_id: str, **kwargs: object) -> dict[str, object]:
+                    calls.append('reconcile_command')
+                    self.reconcile_calls += 1
+                    return ServicePendingReconciliationTruthTests._pending_status()
+
+                def command_custody(self, session_id: str, command_id: str, **kwargs: object) -> dict[str, object]:
+                    calls.append('command_custody')
+                    raise AssertionError('still-pending refresh must not read late custody')
+
+                def acknowledge_reconciliation(self, session_id: str, command_id: str, **kwargs: object) -> dict[str, object]:
+                    calls.append('acknowledge_reconciliation')
+                    raise AssertionError('still-pending refresh must not be acknowledged')
+
+                def close_session(self, session_id: str, **kwargs: object) -> None:
+                    calls.append('close_session')
+                    raise AssertionError('still-pending refresh must not close the session')
+
+            runtime = Runtime()
+            service.runtime_manager = runtime
+            result = service.reconcile_command(command_id=self.COMMAND_ID, session_id=self.SESSION_ID)
+
+            self._assert_pending_projection(result)
+            self.assertEqual(result['command']['state'], 'timed_out_pending_reconciliation')
+            self.assertEqual(runtime.reconcile_calls, 1)
+            self.assertNotIn('acknowledge_reconciliation', calls)
+            self.assertNotIn('close_session', calls)
+            binding = service._read_binding(session_id=self.SESSION_ID)
+            assert binding is not None
+            self.assertEqual(binding.get('pending_command', {}).get('command_id'), self.COMMAND_ID)
+
+    def test_recovery_saving_is_not_success(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            service, _ = self._prepare(temp_dir)
+            calls: list[str] = []
+
+            class Runtime:
+                def has_session(self, session_id: str) -> bool:
+                    return True
+
+                def latest_command_sequence(self, session_id: str, **kwargs: object) -> int:
+                    return 2
+
+                def command_status(self, session_id: str, command_id: str | None = None, **kwargs: object) -> dict[str, object]:
+                    calls.append('command_status')
+                    return ServicePendingReconciliationTruthTests._late_terminal_saving_status()
+
+                def reconcile_command(self, session_id: str, command_id: str, **kwargs: object) -> dict[str, object]:
+                    calls.append('reconcile_command')
+                    return ServicePendingReconciliationTruthTests._late_terminal_saving_status()
+
+                def command_custody(self, session_id: str, command_id: str, **kwargs: object) -> dict[str, object]:
+                    calls.append('command_custody')
+                    return ServicePendingReconciliationTruthTests._saving_custody()
+
+                def acknowledge_reconciliation(self, session_id: str, command_id: str, **kwargs: object) -> dict[str, object]:
+                    calls.append('acknowledge_reconciliation')
+                    raise AssertionError('saving recovery must not be acknowledged')
+
+                def close_session(self, session_id: str, **kwargs: object) -> None:
+                    calls.append('close_session')
+                    raise AssertionError('saving recovery must not close the session')
+
+            service.runtime_manager = Runtime()
+            result = service.reconcile_command(command_id=self.COMMAND_ID, session_id=self.SESSION_ID)
+
+            self._assert_pending_projection(result)
+            self.assertEqual(result['command']['recovery']['state'], 'saving')
+            binding = service._read_binding(session_id=self.SESSION_ID)
+            assert binding is not None
+            self.assertEqual(binding.get('pending_command', {}).get('command_id'), self.COMMAND_ID)
+
+    def test_permanently_pending_recovery_observation_never_acknowledges(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            service, session_root = self._prepare(temp_dir)
+            calls: list[str] = []
+
+            class Runtime:
+                def __init__(self) -> None:
+                    self.reconcile_calls = 0
+
+                def has_session(self, session_id: str) -> bool:
+                    return True
+
+                def latest_command_sequence(self, session_id: str, **kwargs: object) -> int:
+                    return 2
+
+                def command_status(self, session_id: str, command_id: str | None = None, **kwargs: object) -> dict[str, object]:
+                    calls.append('command_status')
+                    return ServicePendingReconciliationTruthTests._pending_status()
+
+                def reconcile_command(self, session_id: str, command_id: str, **kwargs: object) -> dict[str, object]:
+                    # Native recovery request itself ended without a terminal
+                    # outcome: the same command stays unchanged and pending.
+                    calls.append('reconcile_command')
+                    self.reconcile_calls += 1
+                    return ServicePendingReconciliationTruthTests._pending_status()
+
+                def command_custody(self, session_id: str, command_id: str, **kwargs: object) -> dict[str, object]:
+                    calls.append('command_custody')
+                    raise AssertionError('unchanged pending command has no late custody')
+
+                def acknowledge_reconciliation(self, session_id: str, command_id: str, **kwargs: object) -> dict[str, object]:
+                    calls.append('acknowledge_reconciliation')
+                    raise AssertionError('pending recovery observation must never acknowledge')
+
+                def close_session(self, session_id: str, **kwargs: object) -> None:
+                    calls.append('close_session')
+                    raise AssertionError('pending recovery observation must not close the session')
+
+                def execute(self, **kwargs: object) -> dict[str, object]:
+                    calls.append('execute')
+                    raise AssertionError('pending recovery observation must not enqueue work')
+
+            runtime = Runtime()
+            service.runtime_manager = runtime
+            first = service.reconcile_command(command_id=self.COMMAND_ID, session_id=self.SESSION_ID)
+            second = service.reconcile_command(command_id=self.COMMAND_ID, session_id=self.SESSION_ID)
+
+            self._assert_pending_projection(first)
+            self._assert_pending_projection(second)
+            self.assertEqual(first['command']['command_id'], second['command']['command_id'])
+            self.assertEqual(self.COMMAND_ID, second['command']['command_id'])
+            # The first lookup was already pending, so no late-terminal
+            # recovery request was ever eligible, and the second observation
+            # of the same unchanged command must not queue one either.
+            self.assertEqual(runtime.reconcile_calls, 0)
+            self.assertNotIn('execute', calls)
+            self.assertNotIn('acknowledge_reconciliation', calls)
+            self.assertNotIn('close_session', calls)
+            binding = service._read_binding(session_id=self.SESSION_ID)
+            assert binding is not None
+            self.assertEqual(binding.get('pending_command', {}).get('command_id'), self.COMMAND_ID)
+            self.assertTrue(session_root.exists())
+
+
 class ServiceReconciliationRepairTests(unittest.TestCase):
     def test_reconciliation_is_exposed_by_the_existing_router_contract(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

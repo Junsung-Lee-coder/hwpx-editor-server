@@ -48,6 +48,16 @@ The local-CLI backend quarantines a document when a native command exceeds its w
 
 The recovery snapshot is a new native `SaveAs` output. It does not overwrite the source file or silently replace the working copy. A native save that returns anything other than an affirmative success result, produces no regular nonempty file, or changes during custody verification is a recovery failure. A hung or dirty native process remains fenced; do not kill it merely because the client-side timeout elapsed.
 
+## Truthful cleanup and native limitations
+
+The runtime needs a visible Hancom window on a logged-in interactive Windows desktop; minimized or unfocused windows, a locked or disconnected desktop, and background-only operation are not supported.
+
+The Hancom document is created with `new=True`, but that argument does not establish exclusive ownership of a new native process before COM activation takes effect. A construction error can therefore arrive after an unrelated Hancom object was contacted or a process was started. The construction helper makes one attempt and reports the original failure; it does not retry, because a retry could turn that failure into an apparent success. When no native handle was returned, automated cleanup stays `unconfirmed` even if the Python call ended without an exception, and cleanup is `confirmed` only after a returned handle was closed and an applicable COM teardown succeeded.
+
+A pending reconciliation reply uses HTTP 200 with `ok=false`, `reconciled=false`, and `reconciliation="pending"`. It is an observation, not a success: the native outcome is unknown, nothing was replayed, and the same command ID is preserved. Ordinary status queries can succeed while the native command they describe is still pending.
+
+Recovery observation is bounded. After a timed-out command, allow one recovery request with a caller wait of at most 125 seconds, then stop automated observation. If the outcome is unresolved, preserve the session binding, logs, and existing artifacts for operator review; the bound does not guarantee that the native process has terminated, and no cleanup is confirmed while its result is unknown.
+
 ## Forced activation-failure rehearsal
 
 Use a disposable test directory and a synthetic fixture only. Do not run a rehearsal against a live installation or production scheduled tasks. A safe rehearsal records:

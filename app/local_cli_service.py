@@ -8721,7 +8721,7 @@ class LocalCliService:
         state = str(status.get('state') or 'unknown')
         if state == 'timed_out_pending_reconciliation':
             return {
-                'ok': True,
+                'ok': False,
                 'reconciled': False,
                 'reconciliation': 'pending',
                 'session_id': self._binding_session_id(binding),
@@ -8749,7 +8749,7 @@ class LocalCliService:
             state = str(status.get('state') or 'unknown')
             if state == 'timed_out_pending_reconciliation':
                 return {
-                    'ok': True,
+                    'ok': False,
                     'reconciled': False,
                     'reconciliation': 'pending',
                     'session_id': self._binding_session_id(binding),
@@ -8810,7 +8810,7 @@ class LocalCliService:
             raise LocalCliServiceError('Late command recovery attempt identity is missing.', status_code=409)
         if recovery_state == 'saving':
             return {
-                'ok': True,
+                'ok': False,
                 'reconciled': False,
                 'reconciliation': 'pending',
                 'session_id': self._binding_session_id(binding),

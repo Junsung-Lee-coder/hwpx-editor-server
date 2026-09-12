@@ -2069,13 +2069,19 @@ def create_hwp_instance_with_recovery(
     detail: str,
     max_attempts: int = 2,
 ) -> object:
+    # A single visible attempt is the honest product behavior: retrying after
+    # this boundary can turn a failure that may already have allocated a COM
+    # process into an apparent success.  The compatibility parameter is kept
+    # but every positive value is capped to one effective attempt; zero
+    # (or negative) keeps the existing no-attempt failure behavior.
+    effective_max_attempts = max_attempts if max_attempts <= 0 else 1
     last_exc: Exception | None = None
-    for attempt in range(1, max_attempts + 1):
+    for attempt in range(1, effective_max_attempts + 1):
         update_runtime_status(
             log_path,
             phase=phase,
             detail=detail,
-            extra={'hwp_start_attempt': attempt, 'hwp_start_max_attempts': max_attempts},
+            extra={'hwp_start_attempt': attempt, 'hwp_start_max_attempts': effective_max_attempts},
         )
         try:
             hwp, automation = create_visible_hwp_instance(Hwp)
@@ -2085,7 +2091,7 @@ def create_hwp_instance_with_recovery(
                 detail=detail,
                 extra={
                     'hwp_start_attempt': attempt,
-                    'hwp_start_max_attempts': max_attempts,
+                    'hwp_start_max_attempts': effective_max_attempts,
                     'hwp_automation': automation,
                 },
                 append_history=True,
@@ -2099,7 +2105,7 @@ def create_hwp_instance_with_recovery(
         except Exception as exc:
             last_exc = exc
             recovery = {'attempt': attempt, 'exception': repr(exc)}
-            if attempt < max_attempts:
+            if attempt < effective_max_attempts:
                 recovery['kill_hwp_runtime'] = kill_hwp_runtime()
                 update_runtime_status(
                     log_path,

@@ -55,6 +55,16 @@ status -> open -> find/where/select -> edit -> render proof -> save -> close
 
 Work on managed copies. Review rendered proof before treating a mutation as complete; page count alone is not validation.
 
+## Hancom automation limits
+
+The runtime needs a visible Hancom window on a logged-in Windows desktop. Minimized windows, an unfocused window, a locked or disconnected desktop, and background-only operation are not supported, and no successful response certifies them.
+
+The runtime constructs the Hancom object with `new=True`, but that argument does not establish exclusive ownership of a new native process before COM activation takes effect. An error from a constructor call may therefore arrive after an unrelated Hancom object was contacted or a process was started, and a later automated cleanup step cannot confirm anything about a process this code never received a handle for. The construction helper makes one attempt and reports the original failure instead of retrying.
+
+A pending reconciliation reply answers with `ok=false`, `reconciled=false`, and `reconciliation="pending"` while the HTTP status stays 200. That reply is an observation, not a success: the native outcome is unknown, nothing was replayed, and the command keeps its identity. Ordinary status queries can succeed while the command they describe is still pending, so a query success never means the edit succeeded.
+
+Keep the session and command IDs and the original document when a command times out. Observation is bounded: one recovery request with a caller wait of at most 125 seconds, then automated observation stops. If the outcome is still unresolved, the binding, logs, and existing artifacts are preserved for an operator decision; these limits do not guarantee that the native process has ended.
+
 ## Layout
 
 - `app/` — HTTP routes, runtime state, Hancom worker, editing operations, command packages, and artifact handling.

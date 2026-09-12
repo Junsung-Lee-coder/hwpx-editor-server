@@ -206,8 +206,9 @@ def _construct_probe_hwp(Hwp: Any) -> tuple[Any, str]:
     # A TypeError from a native COM constructor is not proof that only the
     # signature was wrong: pyhwpx may already have launched HWP before its
     # Python wrapper raises.  Inspect a Python-visible signature first and make
-    # one construction attempt.  Every candidate explicitly requests a new
-    # native instance so a running unrelated HWP object cannot be adopted.
+    # one construction attempt.  Every candidate passes new=True, but that
+    # argument alone does not prove exclusive ownership of a new native
+    # process: a success here is not an ownership guarantee.
     try:
         signature = inspect.signature(Hwp)
     except (TypeError, ValueError):
@@ -258,13 +259,21 @@ def _probe_hwp_automation() -> dict[str, Any]:
         details['traceback'] = _bounded_error(traceback.format_exc())
         return details
     finally:
+        cleanup_state = 'unconfirmed'
         if hwp is not None:
             try:
                 _close_probe_hwp(hwp)
                 details['probe_closed'] = True
+                cleanup_state = 'confirmed'
             except Exception as exc:
                 cleanup_errors.append(f'probe close: {_bounded_error(exc)}')
                 details['probe_closed'] = False
+                cleanup_state = 'failed'
+        else:
+            # No native handle was returned, so this process neither received
+            # nor could release anything: cleanup stays unconfirmed even when
+            # the Python call itself ends without an exception.
+            details['probe_closed'] = False
         if pythoncom is not None and coinitialized:
             try:
                 pythoncom.CoUninitialize()
@@ -272,13 +281,15 @@ def _probe_hwp_automation() -> dict[str, Any]:
             except Exception as exc:
                 cleanup_errors.append(f'COM uninitialize: {_bounded_error(exc)}')
                 details['com_uninitialized'] = False
+                cleanup_state = 'failed'
         if cleanup_errors:
             details['ok'] = False
             details['cleanup_ok'] = False
             details['cleanup_errors'] = cleanup_errors
             details['detail'] = '; '.join(cleanup_errors)
-        else:
+        elif cleanup_state == 'confirmed':
             details['cleanup_ok'] = True
+        details['cleanup_state'] = cleanup_state
         details['probe_succeeded'] = probe_succeeded
 
 

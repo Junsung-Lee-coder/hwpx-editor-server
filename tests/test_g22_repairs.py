@@ -1802,6 +1802,46 @@ class R10RuntimeReconciliationTests(unittest.TestCase):
         self.assertIn('/local-cli/session/{session_id}/artifact/recovery', setup)
         self.assertIn('복구 전에는 원본 문서나 서버 관리 복사본을 직접 삭제하지 마세요.', setup)
 
+    def test_honest_native_limitation_documentation(self) -> None:
+        readme = (ROOT / 'README.md').read_text(encoding='utf-8')
+        rollback = (ROOT / 'docs' / 'WINDOWS_ROLLBACK.md').read_text(encoding='utf-8')
+        setup = (ROOT / 'docs' / 'MCP_SETUP.md').read_text(encoding='utf-8')
+
+        # Pre-effect uncertainty and the missing new=True guarantee are stated
+        # in every public guide, in audience language, without internal labels.
+        for text in (readme, rollback, setup):
+            self.assertIn('new=True', text)
+            self.assertIn('독점 소유권' if text is setup else 'exclusive ownership', text)
+
+        # Pending reconciliation answers are non-success, HTTP 200 kept.
+        self.assertIn('ok=false', setup)
+        self.assertIn('ok=false', rollback)
+        self.assertIn('HTTP 200', rollback)
+
+        # A visible-foreground requirement and explicit unsupported
+        # environments are stated, so no minimized/background capability is
+        # implied anywhere.
+        for text in (readme, rollback, setup):
+            self.assertIn('visible', text) if text is not setup else self.assertIn('보이게', text)
+            self.assertIn('background', text) if text is not setup else self.assertIn('백그라운드', text)
+
+        # The finite observation bound replaces indefinite repeat querying,
+        # with the retained-state warning when the bound is reached.
+        self.assertIn('125', setup)
+        self.assertIn('125', rollback)
+        self.assertIn('보존', setup)
+        self.assertIn('preserve', rollback)
+
+        # No internal workflow labels may leak into the new prose.  Installer
+        # terms such as a candidate root are legitimate product vocabulary, so
+        # only repair/review labels are excluded here.
+        for text in (readme, rollback, setup):
+            self.assertNotIn('R39', text)
+            self.assertNotIn('reviewer', text.lower())
+            self.assertNotIn('repair generation', text.lower())
+            self.assertNotIn('verdict', text.lower())
+            self.assertNotIn('acceptance criterion', text.lower())
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -84,6 +84,8 @@ class Backend(BaseHTTPRequestHandler):
         type(self).calls.append(('POST', self.path, body))
         if self.path == '/local-cli/open':
             return self.reply({'ok': True, 'session_id': SID, 'working_copy_id': SID, 'source_filename': 'fixture.hwpx'})
+        # A status lookup is an observation of the command journal, not a
+        # recovery trigger, so it stays a plain projection of the backend.
         if self.path in ['/local-cli/where', '/local-cli/find', '/local-cli/save', '/local-cli/close', '/local-cli/command-bundle', '/local-cli/command-reconcile', '/local-cli/screenshot']:
             if type(self).mode == 'delay':
                 time.sleep(2)
@@ -92,6 +94,22 @@ class Backend(BaseHTTPRequestHandler):
             if type(self).mode == 'semantic_failure' and self.path == '/local-cli/command-reconcile':
                 return self.reply({'ok': False, 'semantic_ok': False, 'session_id': SID,
                                    'command_id': 'cmd-owned', 'state': 'failed_after_timeout'})
+            if type(self).mode == 'pending_reconcile' and self.path == '/local-cli/command-reconcile':
+                # Exact production-shaped service pending reply after the
+                # honesty correction: HTTP 200, ok=false, all identifiers kept.
+                return self.reply({'ok': False, 'reconciled': False, 'reconciliation': 'pending',
+                                   'session_id': SID,
+                                   'command': {'command_id': 'cmd-owned', 'command': 'command-bundle',
+                                               'sequence': 1, 'state': 'timed_out_pending_reconciliation',
+                                               'timed_out': True, 'reconcilable': True, 'reconciled': False,
+                                               'recovery': {'state': 'quarantined'}}})
+            if type(self).mode == 'saving_reconcile' and self.path == '/local-cli/command-reconcile':
+                return self.reply({'ok': False, 'reconciled': False, 'reconciliation': 'pending',
+                                   'session_id': SID,
+                                   'command': {'command_id': 'cmd-owned', 'command': 'command-bundle',
+                                               'sequence': 1, 'state': 'completed_after_timeout',
+                                               'timed_out': True, 'reconcilable': True, 'reconciled': False,
+                                               'recovery': {'state': 'saving'}}})
             return self.reply({'ok': True, 'session_id': SID, 'command_id': 'cmd-owned', 'state': 'succeeded'})
         return self.reply({'detail': 'not found'}, 404)
 
@@ -435,6 +453,55 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(result.is_error)
         self.assertEqual(Backend.calls[-1], ('POST', '/local-cli/command-reconcile',
                          {'session_id': SID, 'command_id': 'cmd-owned'}))
+
+    async def test_sdk_pending_reconciliation_is_error(self):
+        Backend.mode = 'pending_reconcile'
+        result = await self.sdk_call('hwpx_command', {'session_id': SID,
+            'request': {'op': 'command_reconcile', 'command_id': 'cmd-owned'}})
+        self.assertTrue(result.is_error)
+        structured = result.structured_content
+        self.assertFalse(structured['ok'])
+        self.assertIsNone(structured['result'])
+        self.assertEqual(structured['error']['code'], 'BACKEND_REJECTED')
+        backend = structured['error']['details']['backend']
+        self.assertEqual(structured['error']['details']['http_status'], 200)
+        self.assertIs(backend['ok'], False)
+        self.assertIs(backend['reconciled'], False)
+        self.assertEqual(backend['reconciliation'], 'pending')
+        self.assertEqual(backend['session_id'], SID)
+        self.assertEqual(backend['command']['command_id'], 'cmd-owned')
+        # The projection is a bounded observation: exactly one POST, and no
+        # extra mutation/save/close call may ride along on the failure path.
+        posts = [c for c in Backend.calls if c[0] == 'POST']
+        self.assertEqual(len(posts), 1)
+        self.assertEqual(posts[0][1], '/local-cli/command-reconcile')
+        self.assertEqual(json.loads(result.content[0].text), structured)
+
+    async def test_sdk_recovery_saving_is_error(self):
+        Backend.mode = 'saving_reconcile'
+        result = await self.sdk_call('hwpx_command', {'session_id': SID,
+            'request': {'op': 'command_reconcile', 'command_id': 'cmd-owned'}})
+        self.assertTrue(result.is_error)
+        structured = result.structured_content
+        self.assertFalse(structured['ok'])
+        self.assertIsNone(structured['result'])
+        self.assertEqual(structured['error']['code'], 'BACKEND_REJECTED')
+        backend = structured['error']['details']['backend']
+        self.assertEqual(structured['error']['details']['http_status'], 200)
+        self.assertIs(backend['ok'], False)
+        self.assertEqual(backend['command']['recovery']['state'], 'saving')
+        self.assertEqual(len([c for c in Backend.calls if c[0] == 'POST']), 1)
+
+    async def test_sdk_pending_text_structured_parity(self):
+        Backend.mode = 'pending_reconcile'
+        result = await self.sdk_call('hwpx_command', {'session_id': SID,
+            'request': {'op': 'command_reconcile', 'command_id': 'cmd-owned'}})
+        self.assertTrue(result.is_error)
+        self.assertEqual(json.loads(result.content[0].text), result.structured_content)
+        backend = result.structured_content['error']['details']['backend']
+        nested_command = backend['command']
+        self.assertEqual(backend['session_id'], SID)
+        self.assertEqual(nested_command['command_id'], 'cmd-owned')
 
     async def test_backend_false_http_200(self):
         from hwpx_mcp.server import Facade, Settings, BackendFailure
