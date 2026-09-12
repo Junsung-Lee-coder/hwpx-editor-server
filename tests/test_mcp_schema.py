@@ -4,7 +4,8 @@ import unittest
 
 from pydantic import ValidationError
 
-from hwpx_mcp.schema import CellFormatStep
+from hwpx_mcp.schema import CellFormatStep, MODELS
+from app.cell_margins_get_models import CellMarginsGetRequest
 
 
 _BASE = {
@@ -34,6 +35,9 @@ class McpSchemaTests(unittest.TestCase):
     def test_rejects_non_positive_margin(self) -> None:
         with self.assertRaises(ValidationError):
             CellFormatStep.model_validate({**_BASE, 'cell_margin_mm': 0.0})
+
+    def test_getter_model_registered_and_shared_with_rest(self) -> None:
+        self.assertIs(MODELS['hwpx_cell_margins_get'], CellMarginsGetRequest)
 
 
 if __name__ == '__main__':

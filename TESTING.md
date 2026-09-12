@@ -19,7 +19,7 @@ After installing the locked Windows dependencies in a Windows virtual environmen
 python -m unittest discover -s tests -v
 ```
 
-For portable Linux validation, install the hash-pinned `requirements-portable.lock` in a temporary environment. The Windows lock file remains the installation input on Windows; do not claim that a Linux environment proves pyhwpx/Hancom behavior. These tests cover local planners, parsers, readback helpers, command-package contracts, portability, source bundles, installer contracts, and service helpers.
+For portable Linux validation, install the hash-pinned `requirements-portable.lock` in a temporary environment. The Windows lock file remains the installation input on Windows; do not claim that a Linux environment proves pyhwpx/Hancom behavior. These tests cover local planners, parsers, readback helpers, command-package contracts, portability, source bundles, installer contracts, service helpers, the targeted four-margin getter (`tests/test_cell_margins_get.py`), and the shared MCP schema (`tests/test_mcp_schema.py`).
 
 The local CLI custody tests also cover managed-root identity replacement, symlinked artifact paths, custody hash mismatches, public route suppression for unmanaged or closed sessions, and streaming from an already validated file handle. On POSIX, the response test replaces the path after the handle is opened and requires the original bytes; on Windows, native file-sharing semantics prevent that replacement until the response closes.
 
@@ -60,7 +60,7 @@ python -m unittest \
 
 Full discovery is a required source gate for this candidate. If it fails, report the exact failing test and do not relabel the result as a runtime-only PASS.
 
-The MCP adapter tests verify that `opened_via` is retained as the managed-session origin, bridge-only and closed-only markers are rejected before mutation, closed sessions remain status-queryable but cannot receive a POST, and the adapter does not expose a backend filesystem path as a download route. These are fake-backend contract tests, not Hancom execution evidence.
+The MCP adapter tests verify that `opened_via` is retained as the managed-session origin, bridge-only and closed-only markers are rejected before mutation, closed sessions remain status-queryable but cannot receive a POST, and the adapter does not expose a backend filesystem path as a download route. The `hwpx_cell_margins_get` cases cover tenth-tool discovery, the canonical request body, a fully proven positive result, and the reject paths for a fabricated success, a missing margin side, cached provenance, a restore failure, and a timed-out read. These are fake-backend contract tests, not Hancom execution evidence.
 
 ## Source-bundle checks
 

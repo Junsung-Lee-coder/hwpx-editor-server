@@ -4,6 +4,8 @@ from __future__ import annotations
 from typing import Annotated, Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from app.cell_margins_get_models import CellMarginsGetRequest
+
 SessionId = Annotated[str, Field(pattern=r'^[a-f0-9]{32}$')]
 Text = Annotated[str, Field(min_length=1, max_length=16384)]
 Label = Annotated[str, Field(min_length=1, max_length=80)]
@@ -133,4 +135,5 @@ MODELS = {
     'hwpx_health': Health, 'hwpx_open': Open, 'hwpx_status': Session,
     'hwpx_find': Find, 'hwpx_where': Session, 'hwpx_command': Command,
     'hwpx_proof': Proof, 'hwpx_save': Session, 'hwpx_close': Session,
+    'hwpx_cell_margins_get': CellMarginsGetRequest,
 }

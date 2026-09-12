@@ -196,7 +196,10 @@ class Facade:
                         payload = {'session_id': sid}
                         if name == 'hwpx_find':
                             payload.update(args.request.model_dump(exclude_none=True))
-                        result = await self.request(http, 'POST', '/local-cli/' + name.removeprefix('hwpx_'), json=payload)
+                        if name == 'hwpx_cell_margins_get':
+                            result = await self.cell_margins_get(http, sid, args)
+                        else:
+                            result = await self.request(http, 'POST', '/local-cli/' + name.removeprefix('hwpx_'), json=payload)
                     returned_sid = result.get('session_id')
                     if returned_sid is not None and returned_sid != sid:
                         raise BackendFailure('SESSION_IDENTITY_MISMATCH', 'Backend result identity did not match the requested handle.')
@@ -212,6 +215,75 @@ class Facade:
             return envelope(name, sid=sid, error={'code': 'LOCAL_INPUT_OR_ARTIFACT_ERROR', 'message': 'Input or artifact processing failed; no automatic replay was attempted.', 'details': {}})
         finally:
             self.serial.release()
+
+    async def cell_margins_get(self, http, sid, args):
+        """One canonical POST plus full positive-response validation.
+
+        A fabricated ``ok=true`` backend body with missing or mismatched
+        getter proof is BACKEND_INVALID_RESPONSE, never a success.
+        """
+
+        from app.cell_margins_get_models import canonical_cell_margins_request_sha256
+
+        request_sha256 = canonical_cell_margins_request_sha256(args)
+        result = await self.request(http, 'POST', '/local-cli/cell-margins-get',
+                                    json=args.model_dump(mode='json'))
+        if not isinstance(result.get('ok'), bool):
+            raise BackendFailure('BACKEND_INVALID_RESPONSE',
+                                 'Getter response is missing a valid positive flag.')
+        if result.get('session_id') != sid or result.get('document_id') != sid:
+            raise BackendFailure('SESSION_IDENTITY_MISMATCH',
+                                 'Getter response identity did not match the requested handle.')
+        if result.get('request_sha256') != request_sha256:
+            raise BackendFailure('BACKEND_INVALID_RESPONSE',
+                                 'Getter response digest does not bind the submitted request.')
+        if result.get('document_generation') is None or result.get('working_copy_file') is None:
+            raise BackendFailure('BACKEND_INVALID_RESPONSE',
+                                 'Getter response is missing its observation basis.')
+        state = result.get('state')
+        if not isinstance(state, dict):
+            raise BackendFailure('BACKEND_INVALID_RESPONSE',
+                                 'Getter response is missing its state projection.')
+        if result.get('ok') is True:
+            if (result.get('ok') is not True or result.get('semantic_ok') is not True
+                    or result.get('read_only') is not True
+                    or result.get('dirty') is not False
+                    or result.get('may_have_mutated') is not False
+                    or result.get('mutation_may_have_persisted') is not False
+                    or result.get('margins_hu') is None
+                    or state.get('document_state_unchanged') is not True
+                    or state.get('navigation_restored') is not True
+                    or state.get('mutation_attempted') is not False
+                    or state.get('document_modified_before') is not state.get('document_modified_after')
+                    or result.get('observation') is not None
+                    or result.get('error') is not None):
+                raise BackendFailure('BACKEND_INVALID_RESPONSE',
+                                     'Getter success response violates positive invariants.')
+            margins = result['margins_hu']
+            if not isinstance(margins, dict) or set(margins) != {'left', 'right', 'top', 'bottom'}:
+                raise BackendFailure('BACKEND_INVALID_RESPONSE',
+                                     'Getter response must carry exactly four margin sides.')
+            for side, value in margins.items():
+                if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0:
+                    raise BackendFailure('BACKEND_INVALID_RESPONSE',
+                                         'Getter margin values must be finite nonnegative numbers.',
+                                         {'side': side})
+            provenance = result.get('provenance')
+            if (not isinstance(provenance, dict)
+                    or provenance.get('cache_used') is not False
+                    or provenance.get('refresh_succeeded') is not True
+                    or provenance.get('refresh_method') != 'HAction.GetDefault'):
+                raise BackendFailure('BACKEND_INVALID_RESPONSE',
+                                     'Getter provenance must show one fresh native refresh.')
+            command = result.get('command')
+            if (not isinstance(command, dict)
+                    or not isinstance(command.get('command_id'), str) or not command['command_id']
+                    or isinstance(command.get('sequence'), bool)
+                    or not isinstance(command.get('sequence'), int) or command['sequence'] <= 0
+                    or command.get('state') != 'succeeded'):
+                raise BackendFailure('BACKEND_INVALID_RESPONSE',
+                                     'Getter success requires a submitted succeeded command.')
+        return result
 
     async def page_proof(self, http, sid, page, dpi):
         result = await self.request(http, 'POST', '/local-cli/export', json={'session_id': sid})
@@ -335,9 +407,11 @@ def build_app(settings: Settings | None = None):
                 'hwpx_proof': 'Native frame or one PDF-rendered page. Single-page proof does not establish full-document visual QA.',
                 'hwpx_save': 'Save the managed working copy only; retrieve its download artifact before close.',
                 'hwpx_close': 'Close the explicit managed session and remove its managed artifacts. Download wanted output first.',
+                'hwpx_cell_margins_get': 'One exact-target four-side cell-margin observation in the existing live managed session; navigation is restored and no cache, persistence or freshness guarantee is implied.',
             }[name], input_schema=model.model_json_schema(), output_schema=Envelope.model_json_schema(),
-            annotations=types.ToolAnnotations(read_only_hint=name == 'hwpx_health',
-                destructive_hint=name != 'hwpx_health', idempotent_hint=name == 'hwpx_health', open_world_hint=False)))
+            annotations=types.ToolAnnotations(read_only_hint=name in {'hwpx_health', 'hwpx_cell_margins_get'},
+                destructive_hint=name not in {'hwpx_health', 'hwpx_cell_margins_get'},
+                idempotent_hint=name == 'hwpx_health', open_world_hint=False)))
 
     async def list_tools(ctx, params):
         return types.ListToolsResult(tools=descriptors)

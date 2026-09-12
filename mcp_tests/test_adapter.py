@@ -84,9 +84,17 @@ class Backend(BaseHTTPRequestHandler):
         type(self).calls.append(('POST', self.path, body))
         if self.path == '/local-cli/open':
             return self.reply({'ok': True, 'session_id': SID, 'working_copy_id': SID, 'source_filename': 'fixture.hwpx'})
+        if self.path == '/local-cli/cell-margins-get':
+            if type(self).mode == 'delay':
+                time.sleep(2)
+            body = getattr(type(self), 'getter_body', None)
+            if body is None:
+                return self.reply({'ok': False, 'session_id': SID,
+                                   'error': {'code': 'DOCUMENT_STATE_UNAVAILABLE', 'message': 'no observation', 'details': {}}})
+            return self.reply(body)
         # A status lookup is an observation of the command journal, not a
         # recovery trigger, so it stays a plain projection of the backend.
-        if self.path in ['/local-cli/where', '/local-cli/find', '/local-cli/save', '/local-cli/close', '/local-cli/command-bundle', '/local-cli/command-reconcile', '/local-cli/screenshot']:
+        if self.path in ['/local-cli/where', '/local-cli/find', '/local-cli/save', '/local-cli/close', '/local-cli/command-bundle', '/local-cli/command-reconcile', '/local-cli/screenshot', '/local-cli/cell-margins-get']:
             if type(self).mode == 'delay':
                 time.sleep(2)
             if type(self).mode == 'failure':
@@ -165,6 +173,7 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         Backend.calls = []
         Backend.mode = 'normal'
+        Backend.getter_body = None
 
     def client(self):
         return Client(streamable_http_client(self.url, http_client=self.http), mode=VERSION)
@@ -204,7 +213,7 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(set(result['capabilities']), {'tools'})
         response, payload = await self.raw()
         tools = payload['result']['tools']
-        self.assertEqual([t['name'] for t in tools], sorted('hwpx_' + x for x in ['health','open','status','find','where','command','proof','save','close']))
+        self.assertEqual([t['name'] for t in tools], sorted('hwpx_' + x for x in ['health','open','status','find','where','command','proof','save','close','cell_margins_get']))
         for tool in tools:
             Draft202012Validator.check_schema(tool['inputSchema'])
             Draft202012Validator.check_schema(tool['outputSchema'])
@@ -604,6 +613,195 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
             fields.update(changes)
             with self.assertRaises(ValueError):
                 Settings(**fields)
+
+    # ---- hwpx_cell_margins_get: tenth-tool adapter contract -----------------
+
+    GETTER_REQUEST = {
+        'session_id': SID,
+        'request': {
+            'document_id': SID,
+            'expected_document_generation': 'local-cli/live-document/v1:' + SID + ':sha256:' + 'c' * 64,
+            'target_id': 'ctrl/0/tbl/1',
+            'expected_hash': 'sha256:' + 'a' * 24,
+            'expected_page': 1,
+            'expected_cell_page': 1,
+            'page_from': 1,
+            'page_to': 1,
+            'cell_pos': [0, 5, 3],
+            'cell_addr': [1, 2],
+            'section_anchor': 'R3_EDIT_TARGET',
+        },
+    }
+
+    @staticmethod
+    def getter_success_body(overrides=None):
+        import hashlib as _hashlib
+        from app.cell_margins_get_models import (CellMarginsGetRequest,
+                                                 canonical_cell_margins_request_sha256)
+        request = dict(AdapterTests.GETTER_REQUEST['request'])
+        request_sha256 = canonical_cell_margins_request_sha256(
+            CellMarginsGetRequest.model_validate(AdapterTests.GETTER_REQUEST))
+        body = {
+            'schema_version': 'local-cli/cell-margins-get/v1',
+            'operation': 'cell_margins_get',
+            'ok': True,
+            'semantic_ok': True,
+            'session_id': SID,
+            'document_id': SID,
+            'read_only': True,
+            'dirty': False,
+            'may_have_mutated': False,
+            'mutation_may_have_persisted': False,
+            'request_sha256': request_sha256,
+            'document_generation': request['expected_document_generation'],
+            'working_copy_file': {'sha256': 'sha256:' + 'e' * 64, 'size_bytes': 10,
+                                  'basis': 'managed-on-disk-copy-not-live-format-state'},
+            'target': {
+                'target_id': request['target_id'],
+                'proof_hash': request['expected_hash'],
+                'ctrl_inst_id': '1',
+                'anchor_page': request['expected_page'],
+                'cell_page': request['expected_cell_page'],
+                'cell_pos': request['cell_pos'],
+                'cell_addr': request['cell_addr'],
+                'page_from': request['page_from'],
+                'page_to': request['page_to'],
+                'section_anchor_sha256': 'sha256:' + _hashlib.sha256(request['section_anchor'].encode()).hexdigest(),
+                'section_binding': 'literal-in-target-cell-paragraph',
+            },
+            'unit': 'hwpunit',
+            'units_per_inch': 7200,
+            'side_order': ['left', 'right', 'top', 'bottom'],
+            'margins_hu': {'left': 510, 'right': 510, 'top': 141, 'bottom': 141},
+            'provenance': {
+                'source': 'HParameterSet.HShapeObject.ShapeTableCell.Margin*',
+                'refresh_action': 'TablePropertyDialog',
+                'refresh_method': 'HAction.GetDefault',
+                'refresh_succeeded': True,
+                'cache_used': False,
+                'observed_at_utc': '2026-09-13T00:00:00+00:00',
+                'target_verified_before': True,
+                'target_verified_after': True,
+            },
+            'state': {
+                'document_modified_before': False,
+                'document_modified_after': False,
+                'binding_dirty_before': False,
+                'binding_dirty_after': False,
+                'document_state_unchanged': True,
+                'navigation_restored': True,
+                'selection_cache_invalidated': False,
+                'mutation_attempted': False,
+            },
+            'observation': None,
+            'error': None,
+            'command': {'command_id': 'cmd-get-1', 'sequence': 3, 'state': 'succeeded'},
+        }
+        if overrides:
+            for key, value in overrides.items():
+                if isinstance(value, dict) and isinstance(body.get(key), dict):
+                    body[key].update(value)
+                else:
+                    body[key] = value
+        return body
+
+    async def test_getter_canonical_body_and_success(self):
+        Backend.getter_body = self.getter_success_body()
+        result = await self.sdk_call('hwpx_cell_margins_get', self.GETTER_REQUEST)
+        self.assertFalse(result.is_error, result)
+        post = [x for x in Backend.calls if x[0] == 'POST'][-1]
+        self.assertEqual(post[1], '/local-cli/cell-margins-get')
+        self.assertEqual(post[2]['session_id'], SID)
+        self.assertEqual(post[2]['request']['target_id'], 'ctrl/0/tbl/1')
+        self.assertEqual(post[2]['request']['cell_addr'], [1, 2])
+        self.assertEqual(result.structured_content['result']['margins_hu']['left'], 510)
+        self.assertIs(result.structured_content['result']['ok'], True)
+        self.assertEqual(json.loads(result.content[0].text), result.structured_content)
+        self.assertEqual(len([c for c in Backend.calls if c[0] == 'POST']), 1)
+
+    async def test_getter_invalid_arguments_never_reach_backend(self):
+        from app.cell_margins_get_models import CellMarginsGetRequest
+        request = CellMarginsGetRequest.model_validate(self.GETTER_REQUEST)
+        for field, value in {
+            'expected_page': 0,
+            'cell_pos': [0],
+            'section_anchor': '',
+        }.items():
+            broken = json.loads(json.dumps(self.GETTER_REQUEST))
+            broken['request'][field] = value
+            result = await self.sdk_call('hwpx_cell_margins_get', broken)
+            self.assertTrue(result.is_error)
+        self.assertEqual([c for c in Backend.calls if c[0] == 'POST'], [])
+
+    async def test_getter_fabricated_success_rejected(self):
+        body = self.getter_success_body()
+        body['request_sha256'] = 'sha256:' + '0' * 64
+        Backend.getter_body = body
+        result = await self.sdk_call('hwpx_cell_margins_get', self.GETTER_REQUEST)
+        self.assertTrue(result.is_error)
+        self.assertEqual(result.structured_content['error']['code'], 'BACKEND_INVALID_RESPONSE')
+
+    async def test_getter_missing_side_rejected(self):
+        body = self.getter_success_body()
+        del body['margins_hu']['top']
+        Backend.getter_body = body
+        result = await self.sdk_call('hwpx_cell_margins_get', self.GETTER_REQUEST)
+        self.assertTrue(result.is_error)
+        self.assertEqual(result.structured_content['error']['code'], 'BACKEND_INVALID_RESPONSE')
+
+    async def test_getter_cached_provenance_rejected(self):
+        body = self.getter_success_body({'provenance': {'cache_used': True}})
+        Backend.getter_body = body
+        result = await self.sdk_call('hwpx_cell_margins_get', self.GETTER_REQUEST)
+        self.assertTrue(result.is_error)
+
+    async def test_getter_restore_failure_is_named_error(self):
+        Backend.getter_body = {
+            'schema_version': 'local-cli/cell-margins-get/v1',
+            'operation': 'cell_margins_get',
+            'ok': False,
+            'semantic_ok': False,
+            'session_id': SID,
+            'document_id': SID,
+            'read_only': True,
+            'dirty': None,
+            'may_have_mutated': False,
+            'mutation_may_have_persisted': False,
+            'observation': None,
+            'error': {'code': 'NAVIGATION_RESTORE_FAILED',
+                      'message': 'The original caret position could not be restored.',
+                      'details': {'mutation_attempted': False}},
+            'command': None,
+        }
+        result = await self.sdk_call('hwpx_cell_margins_get', self.GETTER_REQUEST)
+        self.assertTrue(result.is_error)
+        # Deterministic getter failures stay bounded backend rejections at the
+        # adapter; the stable code rides in the preserved backend evidence.
+        self.assertEqual(result.structured_content['error']['code'], 'BACKEND_REJECTED')
+        self.assertEqual(result.structured_content['error']['details']['backend']['error']['code'],
+                         'NAVIGATION_RESTORE_FAILED')
+
+    async def test_getter_http200_false_is_backend_rejected(self):
+        Backend.getter_body = None
+        result = await self.sdk_call('hwpx_cell_margins_get', self.GETTER_REQUEST)
+        self.assertTrue(result.is_error)
+        self.assertEqual(result.structured_content['error']['code'], 'BACKEND_REJECTED')
+
+    async def test_getter_closed_session_rejected_before_post(self):
+        Backend.getter_body = self.getter_success_body()
+        Backend.mode = 'closed'
+        result = await self.sdk_call('hwpx_cell_margins_get', self.GETTER_REQUEST)
+        self.assertTrue(result.is_error)
+        self.assertEqual(result.structured_content['error']['code'], 'SESSION_CLOSED')
+        self.assertEqual([c for c in Backend.calls if c[0] == 'POST'], [])
+
+    async def test_getter_timeout_stays_outcome_unknown(self):
+        Backend.getter_body = self.getter_success_body()
+        Backend.mode = 'delay'
+        result = await self.sdk_call('hwpx_cell_margins_get', self.GETTER_REQUEST)
+        self.assertTrue(result.is_error)
+        self.assertEqual(result.structured_content['error']['code'], 'BACKEND_OUTCOME_UNKNOWN')
+        self.assertEqual(len([c for c in Backend.calls if c[0] == 'POST']), 1)
 
 
 if __name__ == '__main__':

@@ -9,6 +9,7 @@ from fastapi import APIRouter, File, Form, UploadFile
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
+from app.cell_margins_get_models import CellMarginsGetRequest
 from app.local_cli_service import LocalCliService, as_http_error
 
 
@@ -501,6 +502,13 @@ def build_local_cli_router(*, settings: Any, interactive_sessions: Any, service:
     def local_cli_where(request: LocalCliCloseRequest) -> dict[str, Any]:
         try:
             return service.where(session_id=request.session_id)
+        except Exception as exc:
+            raise as_http_error(exc) from exc
+
+    @router.post('/local-cli/cell-margins-get')
+    def local_cli_cell_margins_get(request: CellMarginsGetRequest) -> dict[str, Any]:
+        try:
+            return service.cell_margins_get(session_id=request.session_id, request=request)
         except Exception as exc:
             raise as_http_error(exc) from exc
 

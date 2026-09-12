@@ -49,6 +49,7 @@ $mcpProcess = Start-Process -FilePath '.mcp-venv\Scripts\python.exe' -ArgumentLi
 | `hwpx_proof` | `session_id`, `request.kind`: `frame` 또는 `page`. 페이지 방식은 `page`와 선택 항목 `dpi` 사용 |
 | `hwpx_save` | `session_id`. 관리 복사본 저장 |
 | `hwpx_close` | `session_id`. 다운로드가 끝난 뒤 문서를 닫고 서버의 관리 복사본·임시 산출물 삭제 |
+| `hwpx_cell_margins_get` | `session_id`, `request`. 아래 설명과 같이 표 셀 네 변의 여백을 새로 읽어 반환 |
 
 열기 결과의 `session_id`를 이후 모든 호출의 최상위 필드로 전달하세요. 중첩 `request`에 세션 ID를 넣으면 거부합니다. `document_id`는 이 관리 복사본의 ID이며, 원본 파일의 해시나 전역 문서 번호가 아닙니다. 닫은 뒤에도 명시적인 세션 ID로 상태 기록을 조회할 수 있습니다.
 
@@ -59,6 +60,12 @@ $mcpProcess = Start-Process -FilePath '.mcp-venv\Scripts\python.exe' -ArgumentLi
 다운로드 경로는 관리 세션 바인딩과 해당 산출물의 크기·SHA-256 기록이 모두 있고, 산출물이 같은 관리 루트의 일반 파일임을 확인한 경우에만 상태에 표시됩니다. 서버의 절대 파일 경로는 응답에 포함하지 않습니다. 전송 직전에 경로를 다시 여는 대신 관리 루트와 파일을 안전하게 확인한 파일 스트림을 먼저 열고 custody hash를 재검증하므로, 검증 뒤 파일을 바꾸거나 경로를 심은 경우에는 전송하지 않습니다. Windows에서는 응답이 끝날 때까지 열린 파일에 대한 교체도 운영체제가 막습니다.
 
 `hwpx_command`는 `context`, `selection_proof`, `readback`, `cell_format_exact`, `command_reconcile`만 받습니다. `cell_format_exact`는 기존 대상 ID, 해시, 페이지, 구역 앵커와 `confirm_layout=true`를 요구하며, 형식 선택자는 `vertical_align`, `cell_margin_mm`, `cell_margin_hu` 중 하나만 지정합니다. 셀 여백 변경은 선언된 단위로 네 변(left/right/top/bottom)을 모두 명시한 단일 네이티브 호출을 사용하고, 요청에서 독립적으로 계산한 네 변의 값과 네이티브 전후 getter가 정확히 일치해야 성공으로 기록됩니다. 유효하지 않거나 신선하지 않은 네이티브 getter, 같은 값을 다시 요청한 no-op, 요청값과 다른 여백은 거부되며, 동작 후 판정 실패는 변경 가능성을 보존합니다. 셀 정렬은 별도의 네이티브 전후 readback을 확보하지 못하면 성공으로 기록하지 않습니다. `pyhwpx_call`, `hwp_action`, 임의 Python·셸·명령 이름은 허용하지 않습니다. 이 어댑터는 기존 비변경용 `safe-schema` 자체를 확장하거나 쓰기 권한으로 해석하지 않습니다.
+
+`hwpx_cell_margins_get`는 셀 서식을 바꾸지 않고 표 셀 네 변의 여백을 읽는 독립 도구입니다. `hwpx_find`가 돌려준 문서 생성 값, `hwpx_command`의 `readback`이 돌려준 컨트롤 목록의 대상 ID·해시·앵커 페이지, 그리고 같은 세션에서 새로 확인한 셀 위치를 `request`에 모두 담아야 합니다. 요청 필드는 `document_id`(세션 ID와 같은 32자리 소문자 16진수), `expected_document_generation`, `target_id`, `expected_hash`, `expected_page`, `expected_cell_page`, `page_from`, `page_to`, `cell_pos`, `cell_addr`, `section_anchor`이며 `max_controls`(기본 100)만 선택 항목입니다. 값은 JSON 배열로 직접 전달합니다. `cell_pos`는 네이티브 위치 3개 값, `cell_addr`는 0부터 시작하는 `[열, 행]`이고 A1이 `[0, 0]`입니다. A1 표기 문자열, 숫자 문자열, 다른 필드, 기본값 대체는 모두 거부합니다. `section_anchor`는 요청한 셀 문단에 문자 그대로 한 번만 나타나는 문장 조각이어야 합니다. 찾기 결과의 `section` 표시(`live-text`)는 메타데이터일 뿐 앵커 문구가 아니므로 그대로 쓰면 거부됩니다.
+
+읽는 순서는 다음과 같습니다. 먼저 세션과 문서, 디스크 관리 복사본의 크기·SHA-256이 요청과 일치하는지 확인하고, 네이티브 텍스트를 새로 읽어 생성 값을 다시 계산해 요청 값과 비교합니다. 컨트롤 목록에서 대상 표를 정확히 하나만 고른 뒤 해시와 앵커 페이지를 맞춰 보고, 캐럿을 요청 위치로 한 번 옮겨 셀 주소, 바로 위 표, 렌더링 페이지, 문단 안의 앵커를 같은 시점에 확인합니다. 그다음 `HAction.GetDefault('TablePropertyDialog')`로 네이티브 값을 새로 읽어 왼쪽·오른쪽·위·아래 순서의 hwpunit 값을 돌려줍니다. mm 표시가 필요하면 `hwpunit × 25.4 ÷ 7200`으로 바꿀 수 있지만, 비교는 반환된 네이티브 값으로 합니다. 값을 읽은 뒤에는 문서·표·셀·페이지·생성 값이 그대로인지 다시 확인하고, 캐럿을 원래 위치로 되돌린 뒤 문서 변경 상태가 읽기 전과 같은지 확인합니다. 이 확인 중 하나라도 어긋나면 실패로 처리하고 값을 돌려주지 않습니다. 이미 수정된 문서에서도 `true → true`로 그대로면 성공하며, 이 도구가 변경을 만들었다는 뜻은 아닙니다.
+
+이 도구는 결과를 캐시하지 않고, 읽기 성공이 저장·다시 열기 뒤의 값이라는 보장도 하지 않습니다. 저장 전 값과 다시 연 뒤 값을 비교하려면 `open → read → save → download → close → reopen → 새 대상으로 read` 순서로 각각 새 요청을 만들어 비교하세요. 시간 초과 뒤에는 이 도구를 다시 실행하지 말고 `hwpx_status`로 명령 상태를 확인한 뒤 `command_reconcile`로 결과를 확인합니다. 셀 안에 앵커 문구가 없는 빈 셀이나, 컨트롤 목록에 잡히지 않는 표, 선택 상태가 남아 있는 문서는 이 도구의 대상이 아닙니다.
 
 페이지는 `1..10000`, DPI는 `72..600`으로 제한됩니다. 한 페이지를 렌더링한 결과는 전체 문서 검토 통과를 뜻하지 않습니다. 최종 문서는 모든 페이지를 Hancom 기반으로 렌더링하고 확인해야 합니다.
 
