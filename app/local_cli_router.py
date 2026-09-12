@@ -9,7 +9,7 @@ from fastapi import APIRouter, File, Form, UploadFile
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-from app.cell_margins_get_models import CellMarginsGetRequest
+from app.models import CellMarginsGetRequest
 from app.local_cli_service import LocalCliService, as_http_error
 
 

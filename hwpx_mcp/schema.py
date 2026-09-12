@@ -4,7 +4,7 @@ from __future__ import annotations
 from typing import Annotated, Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from app.cell_margins_get_models import CellMarginsGetRequest
+from app.models import CellMarginsGetRequest
 
 SessionId = Annotated[str, Field(pattern=r'^[a-f0-9]{32}$')]
 Text = Annotated[str, Field(min_length=1, max_length=16384)]

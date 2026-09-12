@@ -5,7 +5,7 @@ import unittest
 from pydantic import ValidationError
 
 from hwpx_mcp.schema import CellFormatStep, MODELS
-from app.cell_margins_get_models import CellMarginsGetRequest
+from app.models import CellMarginsGetRequest
 
 
 _BASE = {

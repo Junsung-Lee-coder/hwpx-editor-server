@@ -17,7 +17,7 @@ from typing import Any
 
 from pydantic import ValidationError
 
-from app.cell_margins_get_models import (
+from app.models import (
     CellMarginsGetRequest,
     canonical_cell_margins_request_sha256,
 )
@@ -568,7 +568,7 @@ class CellMarginsGetServiceWalkTests(unittest.TestCase):
         basis = dict(_proof_basis(), ctrl_inst_id='no-inst')
         request = valid_target_request(expected_hash=proof_hash(basis))
         target_dict = dict(request.request.model_dump(mode='json'), target_id='ctrl/0/tbl/no-inst')
-        from app.cell_margins_get_models import CellMarginsGetTarget
+        from app.models import CellMarginsGetTarget
         resolver_target = CellMarginsGetTarget.model_validate(target_dict)
         with self.assertRaises(LocalCliCellMarginsGetError) as raised:
             service._cell_margins_resolve_target(hwp, target=resolver_target)

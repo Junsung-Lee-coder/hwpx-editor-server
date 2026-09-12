@@ -79,7 +79,7 @@ from app.local_cli_runtime import (
     save_document,
     snapshot_live_location,
 )
-from app.cell_margins_get_models import CellMarginsGetRequest, CellMarginsGetTarget, canonical_cell_margins_request_sha256
+from app.models import CellMarginsGetRequest, CellMarginsGetTarget, canonical_cell_margins_request_sha256
 from app.local_cli_type_guard import type_insert_guard_reason
 from app.command_packages.runtime import get_command_package_registry
 from app.raw_readback import RawReadbackMismatch, build_raw_target_readback

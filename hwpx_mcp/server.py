@@ -223,7 +223,7 @@ class Facade:
         getter proof is BACKEND_INVALID_RESPONSE, never a success.
         """
 
-        from app.cell_margins_get_models import canonical_cell_margins_request_sha256
+        from app.models import canonical_cell_margins_request_sha256
 
         request_sha256 = canonical_cell_margins_request_sha256(args)
         result = await self.request(http, 'POST', '/local-cli/cell-margins-get',

@@ -636,7 +636,7 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
     @staticmethod
     def getter_success_body(overrides=None):
         import hashlib as _hashlib
-        from app.cell_margins_get_models import (CellMarginsGetRequest,
+        from app.models import (CellMarginsGetRequest,
                                                  canonical_cell_margins_request_sha256)
         request = dict(AdapterTests.GETTER_REQUEST['request'])
         request_sha256 = canonical_cell_margins_request_sha256(
@@ -720,7 +720,7 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len([c for c in Backend.calls if c[0] == 'POST']), 1)
 
     async def test_getter_invalid_arguments_never_reach_backend(self):
-        from app.cell_margins_get_models import CellMarginsGetRequest
+        from app.models import CellMarginsGetRequest
         request = CellMarginsGetRequest.model_validate(self.GETTER_REQUEST)
         for field, value in {
             'expected_page': 0,
