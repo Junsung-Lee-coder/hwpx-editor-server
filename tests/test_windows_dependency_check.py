@@ -53,6 +53,33 @@ class WindowsDependencyCheckTests(unittest.TestCase):
         self.assertEqual(["annotated_types"], report["import_failures"])
         self.assertEqual(["annotated_types", "fastapi"], sorted(imported))
 
+    def test_verify_dependencies_discovers_pyhwpx_without_importing_it(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            lock = Path(raw) / "requirements-windows.lock"
+            lock.write_text("pyhwpx==1.6.6\n", encoding="utf-8")
+            imported: list[str] = []
+            discovered: list[str] = []
+
+            def importer(name: str) -> object:
+                imported.append(name)
+                raise AssertionError("pyhwpx must not execute during hosted dependency checks")
+
+            def module_finder(name: str) -> object:
+                discovered.append(name)
+                return object()
+
+            report = checker.verify_dependencies(
+                lock,
+                version_lookup=lambda _name: "1.6.6",
+                importer=importer,
+                module_finder=module_finder,
+            )
+
+        self.assertTrue(report["ok"])
+        self.assertEqual([], imported)
+        self.assertEqual(["pyhwpx"], discovered)
+        self.assertEqual(["pyhwpx"], report["discovery_only_imports"])
+
 
 if __name__ == "__main__":
     unittest.main()

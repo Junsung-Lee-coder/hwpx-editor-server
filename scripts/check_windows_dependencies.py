@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import importlib
 import importlib.metadata
+import importlib.util
 import json
 import re
 import sys
@@ -62,6 +63,7 @@ _DISTRIBUTION_IMPORTS = {
     "watchfiles": "watchfiles",
     "websockets": "websockets",
 }
+_DISCOVERY_ONLY_IMPORTS = frozenset({"pyhwpx"})
 _LOCKED_REQUIREMENT = re.compile(
     r"^\s*([A-Za-z0-9][A-Za-z0-9_.-]*)==([^\s\\#]+)"
 )
@@ -101,6 +103,7 @@ def verify_dependencies(
     *,
     version_lookup: Callable[[str], str] = importlib.metadata.version,
     importer: Callable[[str], object] = importlib.import_module,
+    module_finder: Callable[[str], object | None] = importlib.util.find_spec,
 ) -> dict[str, object]:
     path = Path(lock_path).expanduser().resolve()
     locked = parse_locked_requirements(path)
@@ -129,7 +132,11 @@ def verify_dependencies(
     )
     for module in checked_imports:
         try:
-            importer(module)
+            if module in _DISCOVERY_ONLY_IMPORTS:
+                if module_finder(module) is None:
+                    raise ModuleNotFoundError(module)
+            else:
+                importer(module)
         except Exception as exc:  # pragma: no cover - exact exceptions vary by platform
             import_failures.append(module)
             import_errors[module] = type(exc).__name__
@@ -140,6 +147,7 @@ def verify_dependencies(
         "lock_path": str(path),
         "locked_distribution_count": len(locked),
         "checked_import_count": len(checked_imports),
+        "discovery_only_imports": sorted(_DISCOVERY_ONLY_IMPORTS.intersection(checked_imports)),
         "missing_distributions": missing_distributions,
         "version_mismatches": version_mismatches,
         "import_failures": import_failures,
