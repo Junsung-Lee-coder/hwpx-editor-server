@@ -104,8 +104,28 @@ jobs:
           # explicit allowance does not turn a required native G12 skip into a
           # release acceptance result.
           $runner = Join-Path $PWD 'tests\windows\run_windows_suite.ps1'
-          & $runner -AllowRequiredSkipForStaticCi
-          if ($LASTEXITCODE -ne 0) { throw "PowerShell contract suite failed: $runner" }
+          $outputRoot = Join-Path $env:RUNNER_TEMP ('hwpx-windows-suite-' + [Guid]::NewGuid().ToString('N'))
+          & $runner -OutputRoot $outputRoot -AllowRequiredSkipForStaticCi
+          $suiteExit = $LASTEXITCODE
+          if ($suiteExit -ne 0) {
+            $resultPath = Join-Path $outputRoot 'suite-result.json'
+            if (Test-Path -LiteralPath $resultPath -PathType Leaf) {
+              $result = Get-Content -LiteralPath $resultPath -Raw | ConvertFrom-Json
+              $failures = @($result.suites | Where-Object { -not [bool]$_.accepted } | ForEach-Object {
+                [ordered]@{
+                  name = [string]$_.name
+                  output_status = [string]$_.output_status
+                  disposition = [string]$_.disposition
+                  exit_code = $_.exit_code
+                  timed_out = [bool]$_.timed_out
+                  stdout_capture_complete = [bool]$_.stdout_capture_complete
+                  stderr_capture_complete = [bool]$_.stderr_capture_complete
+                }
+              })
+              Write-Host ('WINDOWS_SUITE_FAILURES=' + ($failures | ConvertTo-Json -Compress))
+            }
+            throw "PowerShell contract suite failed: $runner"
+          }
       - name: Verify installer scripts are source-only
         shell: pwsh
         run: |

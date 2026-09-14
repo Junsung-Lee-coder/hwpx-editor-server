@@ -98,4 +98,6 @@ Keep documents and runtime state outside the repository. In particular, do not a
 
 Local CLI artifact responses expose route URLs rather than server filesystem paths. A route is advertised only for a server-managed session with a custody record for the artifact; the service rechecks the managed root, symlink-free path, file identity, size, and SHA-256 before opening a response stream. Download the working copy and recovery artifacts before closing the session.
 
-No license file is included in this repository.
+## License
+
+Licensed under the [MIT License](LICENSE).
