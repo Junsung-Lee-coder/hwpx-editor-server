@@ -1324,6 +1324,13 @@ class WindowsInstallerContractTests(unittest.TestCase):
         self.assertIn("g12_outer_timeout_seconds", runner)
         self.assertIn("terminal_crash_matrix_timeout_seconds", runner)
 
+    def test_windows_suite_runner_sets_explicit_terminal_exit_status(self) -> None:
+        runner = (ROOT / "tests" / "windows" / "run_windows_suite.ps1").read_text(encoding="utf-8")
+        terminal = runner[runner.index("$result | ConvertTo-Json") :]
+
+        self.assertIn("if (-not $result.process_exit_accepted) { exit 1 }", terminal)
+        self.assertTrue(terminal.rstrip().endswith("exit 0"))
+
     def test_windows_suite_runner_accepts_zero_argument_suites(self) -> None:
         runner = (ROOT / "tests" / "windows" / "run_windows_suite.ps1").read_text(encoding="utf-8")
         invoke = runner[runner.index("function Invoke-BoundedSuiteProcess") : runner.index("function Get-OutputStatus")]

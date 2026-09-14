@@ -374,4 +374,5 @@ $result = [ordered]@{
 $resultPath = Join-Path $OutputRoot 'suite-result.json'
 $result | ConvertTo-Json -Depth 40 | Set-Content -LiteralPath $resultPath -Encoding UTF8
 Write-Output ("WINDOWS_SUITE_STATUS={0};RESULT={1};RUNNER_SHA256={2}" -f $(if ($result.overall_pass) { 'PASS' } else { 'FAIL' }), $resultPath, $runnerSha256)
-if (-not $result.overall_pass -and -not $result.process_exit_accepted) { exit 1 }
+if (-not $result.process_exit_accepted) { exit 1 }
+exit 0
