@@ -80,6 +80,15 @@ class WindowsDependencyCheckTests(unittest.TestCase):
         self.assertEqual(["pyhwpx"], discovered)
         self.assertEqual(["pyhwpx"], report["discovery_only_imports"])
 
+    def test_windows_ci_runs_only_windows_specific_python_contracts(self) -> None:
+        workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+        windows_job = workflow.split("  windows-contracts:", maxsplit=1)[1]
+
+        self.assertNotIn("unittest discover -s tests", windows_job)
+        self.assertIn("tests.test_windows_dependency_check", windows_job)
+        self.assertIn("tests.test_windows_installer_contracts", windows_job)
+        self.assertIn("tests.test_native_acceptance_predicates", windows_job)
+
 
 if __name__ == "__main__":
     unittest.main()

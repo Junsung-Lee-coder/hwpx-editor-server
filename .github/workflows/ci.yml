@@ -87,8 +87,12 @@ jobs:
               throw ("PowerShell parse failed for {0}: {1}" -f $file.FullName, (($errors | ForEach-Object Message) -join '; '))
             }
           }
-      - name: Run contract tests
-        run: python -m unittest discover -s tests -p 'test_*.py' -v
+      - name: Run Windows-specific Python contract tests
+        run: >-
+          python -m unittest -v
+          tests.test_windows_dependency_check
+          tests.test_windows_installer_contracts
+          tests.test_native_acceptance_predicates
       - name: Run function-style tests
         run: python scripts/run_function_style_tests.py
       - name: Run PowerShell 5.1 contract tests
