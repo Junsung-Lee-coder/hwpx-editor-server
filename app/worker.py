@@ -35,7 +35,19 @@ from app.logging_utils import configure_logger
 from app.native_actions import get_native_capabilities
 from app.observation import ensure_viewer_session, observe_job
 from app.queue_db import QueueDB
-from app.readiness import build_runtime_readiness_snapshot, write_runtime_readiness_snapshot
+from app.readiness import (
+    DEFAULT_HEARTBEAT_INTERVAL_SECONDS,
+    build_current_run_not_ready_snapshot,
+    build_runtime_readiness_snapshot,
+    current_worker_identity,
+    new_readiness_run_id,
+    ReadinessOwnershipError,
+    readiness_matches_current_worker,
+    resolve_candidate_generation,
+    touch_runtime_readiness_heartbeat,
+    write_runtime_readiness_snapshot,
+    load_runtime_readiness_snapshot,
+)
 from app.runtime_state import (
     _load_json_artifact,
     _normalize_workflow_mode,
@@ -751,7 +763,7 @@ def _collect_post_serialization_proof_specs(metadata: Any) -> list[dict[str, Any
 
 
 # Keep worker-only deployments compatible with older live edit_ops.py builds that
-# do not yet accept the optional step_recorder hook.
+# may omit the optional step_recorder hook.
 def _apply_edit_operations_with_optional_step_recorder(
     hwp: Any,
     operations: list[dict[str, Any]],
@@ -1936,23 +1948,35 @@ def configure_hwp_automation(hwp: object) -> dict[str, Any]:
     }
 
 
-def _instantiate_hwp_without_builtin_register_module(Hwp: Callable[..., object]) -> tuple[object, str]:
+def _select_hwp_constructor(Hwp: Callable[..., object]) -> tuple[dict[str, object], str]:
     constructor_attempts = (
-        ({'visible': True, 'register_module': False}, 'Hwp(visible=True, register_module=False)'),
-        ({'register_module': False}, 'Hwp(register_module=False)'),
-        ({'visible': True}, 'Hwp(visible=True)'),
-        ({}, 'Hwp()'),
+        (
+            {'new': True, 'visible': True, 'register_module': False},
+            'Hwp(new=True, visible=True, register_module=False)',
+        ),
+        ({'new': True, 'register_module': False}, 'Hwp(new=True, register_module=False)'),
+        ({'new': True, 'visible': True}, 'Hwp(new=True, visible=True)'),
+        ({'new': True}, 'Hwp(new=True)'),
     )
-    last_type_error: TypeError | None = None
+    try:
+        signature = inspect.signature(Hwp)
+    except (TypeError, ValueError):
+        # Opaque COM callables are invoked exactly once with the safest form.
+        return constructor_attempts[0]
     for kwargs, label in constructor_attempts:
         try:
-            return Hwp(**kwargs), label
-        except TypeError as exc:
-            last_type_error = exc
+            signature.bind(**kwargs)
+        except TypeError:
             continue
-    if last_type_error is not None:
-        raise last_type_error
-    raise RuntimeError('Failed to construct pyhwpx Hwp instance.')
+        return kwargs, label
+    raise RuntimeError('pyhwpx Hwp constructor exposes no supported new-instance signature.')
+
+
+def _instantiate_hwp_without_builtin_register_module(Hwp: Callable[..., object]) -> tuple[object, str]:
+    kwargs, label = _select_hwp_constructor(Hwp)
+    # Do not retry after invocation: a TypeError may have followed native
+    # allocation, leaving an owned COM process that cannot be safely rebound.
+    return Hwp(**kwargs), label
 
 
 def create_visible_hwp_instance(Hwp: Callable[..., object]) -> tuple[object, dict[str, Any]]:
@@ -1974,28 +1998,19 @@ def close_hwp_instance(hwp: object | None) -> None:
 
 
 def kill_hwp_runtime() -> dict[str, Any]:
-    result: dict[str, Any] = {'platform': sys.platform}
-    if sys.platform != 'win32':
-        return result
-    try:
-        proc = subprocess.run(
-            ['taskkill', '/IM', 'Hwp.exe', '/F'],
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=15,
-        )
-        result.update(
-            {
-                'returncode': proc.returncode,
-                'stdout': (proc.stdout or '').strip().splitlines()[:5],
-                'stderr': (proc.stderr or '').strip().splitlines()[:5],
-            }
-        )
-    except Exception as exc:
-        result['exception'] = repr(exc)
-    time.sleep(2.0)
-    return result
+    """Report that broad native cleanup was intentionally not attempted.
+
+    A process-name-wide ``taskkill`` can terminate an unrelated user's HWP
+    session.  Native cleanup must instead be performed by the owner that has a
+    task-bound process identity; this worker has no such identity at this
+    boundary, so it fails closed and preserves every existing HWP process.
+    """
+
+    return {
+        'platform': sys.platform,
+        'attempted': False,
+        'reason': 'task_owned_process_identity_required',
+    }
 
 
 def perform_native_export_preflight(
@@ -2054,13 +2069,19 @@ def create_hwp_instance_with_recovery(
     detail: str,
     max_attempts: int = 2,
 ) -> object:
+    # A single visible attempt is the honest product behavior: retrying after
+    # this boundary can turn a failure that may already have allocated a COM
+    # process into an apparent success.  The compatibility parameter is kept
+    # but every positive value is capped to one effective attempt; zero
+    # (or negative) keeps the existing no-attempt failure behavior.
+    effective_max_attempts = max_attempts if max_attempts <= 0 else 1
     last_exc: Exception | None = None
-    for attempt in range(1, max_attempts + 1):
+    for attempt in range(1, effective_max_attempts + 1):
         update_runtime_status(
             log_path,
             phase=phase,
             detail=detail,
-            extra={'hwp_start_attempt': attempt, 'hwp_start_max_attempts': max_attempts},
+            extra={'hwp_start_attempt': attempt, 'hwp_start_max_attempts': effective_max_attempts},
         )
         try:
             hwp, automation = create_visible_hwp_instance(Hwp)
@@ -2070,7 +2091,7 @@ def create_hwp_instance_with_recovery(
                 detail=detail,
                 extra={
                     'hwp_start_attempt': attempt,
-                    'hwp_start_max_attempts': max_attempts,
+                    'hwp_start_max_attempts': effective_max_attempts,
                     'hwp_automation': automation,
                 },
                 append_history=True,
@@ -2084,7 +2105,7 @@ def create_hwp_instance_with_recovery(
         except Exception as exc:
             last_exc = exc
             recovery = {'attempt': attempt, 'exception': repr(exc)}
-            if attempt < max_attempts:
+            if attempt < effective_max_attempts:
                 recovery['kill_hwp_runtime'] = kill_hwp_runtime()
                 update_runtime_status(
                     log_path,
@@ -2635,9 +2656,11 @@ def convert_with_pyhwpx(source_path: Path, output_path: Path, log_path: Path) ->
 
     try:
         # NOTE: pyhwpx and Hancom method names can differ by version.
-        # This routine intentionally tries a few plausible call patterns, then fails loudly.
-        # TODO on Jun's Windows machine: confirm the exact open/save/close API names for the installed Hancom build.
-        # TODO on Jun's Windows machine: add popup/security-dialog handling after observing real behavior.
+        # The compatibility helpers below try the supported call patterns,
+        # record the native capability result, and fail loudly when the
+        # installed Hancom build exposes none of them. Popup/security policy
+        # is configured before opening and its outcome is retained in the
+        # runtime evidence instead of being hidden behind a best-effort retry.
         hwp = create_hwp_instance_with_recovery(
             Hwp,
             log_path=log_path,
@@ -3128,7 +3151,39 @@ def _worker_runtime_path(value: Any, *, field_name: str) -> Path:
     return (Path.cwd() / path).resolve()
 
 
-def handle_job(job: dict) -> None:
+def claim_job_for_execution(
+    worker_name: str,
+    run_id: str,
+    candidate_generation: str,
+) -> dict | None:
+    """Claim and immediately fence a job before starting native work."""
+    job = db.claim_next_job(
+        worker_name,
+        run_id=run_id,
+        candidate_generation=candidate_generation,
+    )
+    if job is None:
+        return None
+    if db.worker_lease_matches(worker_name, run_id, candidate_generation):
+        return job
+    db.requeue_claimed_job_if_owned(
+        job['job_id'],
+        worker_name=worker_name,
+        run_id=run_id,
+        candidate_generation=candidate_generation,
+        error='Worker lease was replaced before native execution started.',
+    )
+    logger.warning('Worker lease changed after claiming job %s; native execution was not started.', job['job_id'])
+    return None
+
+
+def handle_job(
+    job: dict,
+    *,
+    worker_name: str,
+    run_id: str,
+    candidate_generation: str,
+) -> None:
     """Run one queued job in a child process and translate failures into queue state."""
     job_id = job['job_id']
     task_type = job.get('task_type') or 'convert'
@@ -3155,7 +3210,24 @@ def handle_job(job: dict) -> None:
             )
         raise RuntimeError(f'Unsupported task_type: {task_type}')
 
-    db.touch_heartbeat(job_id)
+    if not db.worker_lease_matches(worker_name, run_id, candidate_generation):
+        db.requeue_claimed_job_if_owned(
+            job_id,
+            worker_name=worker_name,
+            run_id=run_id,
+            candidate_generation=candidate_generation,
+            error='Worker lease was replaced before native execution started.',
+        )
+        logger.warning('Job %s lease was replaced before native execution started.', job_id)
+        return
+    if not db.touch_heartbeat_if_owned(
+        job_id,
+        worker_name=worker_name,
+        run_id=run_id,
+        candidate_generation=candidate_generation,
+    ):
+        logger.warning('Job %s is no longer owned by the claimed worker; native execution was not started.', job_id)
+        return
     logger.info('Processing job %s (%s)', job_id, source_path.name)
 
     try:
@@ -3163,7 +3235,14 @@ def handle_job(job: dict) -> None:
         # while this wrapper owns queue bookkeeping, logs, and bounded recovery decisions.
         retry_used = False
         result = _run_child()
-        db.touch_heartbeat(job_id)
+        if not db.touch_heartbeat_if_owned(
+            job_id,
+            worker_name=worker_name,
+            run_id=run_id,
+            candidate_generation=candidate_generation,
+        ):
+            logger.warning('Job %s claim changed while native execution was running; result was discarded.', job_id)
+            return
 
         if result.stdout:
             logger.info('Job %s stdout: %s', job_id, result.stdout.strip())
@@ -3193,7 +3272,14 @@ def handle_job(job: dict) -> None:
                 append_history=True,
             )
             result = _run_child()
-            db.touch_heartbeat(job_id)
+            if not db.touch_heartbeat_if_owned(
+                job_id,
+                worker_name=worker_name,
+                run_id=run_id,
+                candidate_generation=candidate_generation,
+            ):
+                logger.warning('Job %s claim changed during retry; result was discarded.', job_id)
+                return
             if result.stdout:
                 logger.info('Job %s retry stdout: %s', job_id, result.stdout.strip())
             if result.stderr:
@@ -3201,8 +3287,15 @@ def handle_job(job: dict) -> None:
             error_text = (result.stderr or result.stdout or error_text).strip()
 
         if result.returncode == 0 and output_path.exists():
-            db.mark_succeeded(job_id)
-            logger.info('Job %s succeeded%s', job_id, ' after bounded retry' if retry_used else '')
+            if db.mark_succeeded_if_owned(
+                job_id,
+                worker_name=worker_name,
+                run_id=run_id,
+                candidate_generation=candidate_generation,
+            ):
+                logger.info('Job %s succeeded%s', job_id, ' after bounded retry' if retry_used else '')
+            else:
+                logger.warning('Job %s claim changed before success was recorded.', job_id)
             return
 
         raise RuntimeError(error_text)
@@ -3213,7 +3306,8 @@ def handle_job(job: dict) -> None:
         last_phase = format_last_phase(job_dir)
         message = (
             f'Conversion subprocess timed out after {settings.job_timeout_seconds} seconds. '
-            'TODO: add Hancom-specific popup dismissal and lingering process cleanup if needed.'
+            'The last completed phase was recorded; the configured bounded retry policy will handle this attempt. '
+            'Inspect the failure artifact before starting a manual retry.'
         )
         if last_phase:
             message = f'{message} {last_phase}'
@@ -3224,9 +3318,23 @@ def handle_job(job: dict) -> None:
         attempts = int(current['attempts']) if current else 1
         max_attempts = int(current['max_attempts']) if current else settings.max_attempts
         if attempts < max_attempts:
-            db.requeue_job(job_id, message)
+            if not db.requeue_claimed_job_if_owned(
+                job_id,
+                worker_name=worker_name,
+                run_id=run_id,
+                candidate_generation=candidate_generation,
+                error=message,
+            ):
+                logger.warning('Job %s claim changed before timeout recovery was recorded.', job_id)
         else:
-            db.mark_failed(job_id, message)
+            if not db.mark_failed_if_owned(
+                job_id,
+                message,
+                worker_name=worker_name,
+                run_id=run_id,
+                candidate_generation=candidate_generation,
+            ):
+                logger.warning('Job %s claim changed before timeout failure was recorded.', job_id)
 
     except Exception as exc:
         # Generic failures still preserve last-phase evidence before the queue state changes.
@@ -3241,17 +3349,106 @@ def handle_job(job: dict) -> None:
         attempts = int(current['attempts']) if current else 1
         max_attempts = int(current['max_attempts']) if current else settings.max_attempts
         if attempts < max_attempts:
-            db.requeue_job(job_id, str(exc))
+            if not db.requeue_claimed_job_if_owned(
+                job_id,
+                worker_name=worker_name,
+                run_id=run_id,
+                candidate_generation=candidate_generation,
+                error=str(exc),
+            ):
+                logger.warning('Job %s claim changed before failure recovery was recorded.', job_id)
         else:
-            db.mark_failed(job_id, str(exc))
+            if not db.mark_failed_if_owned(
+                job_id,
+                str(exc),
+                worker_name=worker_name,
+                run_id=run_id,
+                candidate_generation=candidate_generation,
+            ):
+                logger.warning('Job %s claim changed before failure was recorded.', job_id)
+
+
+def readiness_heartbeat(
+    stop_event: threading.Event,
+    *,
+    run_id: str,
+    candidate_generation: str | None,
+    interval_seconds: float = DEFAULT_HEARTBEAT_INTERVAL_SECONDS,
+) -> None:
+    """Keep the current worker's readiness lease alive during long jobs."""
+
+    while not stop_event.wait(interval_seconds):
+        current = load_runtime_readiness_snapshot()
+        if not isinstance(current, dict):
+            continue
+        if current.get('run_id') != run_id or current.get('candidate_generation') != candidate_generation:
+            continue
+        try:
+            write_runtime_readiness_snapshot(
+                touch_runtime_readiness_heartbeat(current),
+                expected_run_id=run_id,
+            )
+        except ReadinessOwnershipError:
+            logger.warning('Runtime readiness ownership moved to a newer worker run.')
+            return
+        except Exception:
+            logger.exception('Unable to refresh runtime readiness heartbeat.')
 
 
 def worker_loop() -> int:
-    readiness_snapshot = build_runtime_readiness_snapshot(probe_hwp=True)
-    write_runtime_readiness_snapshot(readiness_snapshot)
-    if not bool(readiness_snapshot.get('ready')):
+    run_id = new_readiness_run_id()
+    worker_identity = current_worker_identity()
+    candidate_generation = resolve_candidate_generation()
+    # Replace any predecessor PASS before the slow Hancom/COM probe starts.
+    # This prevents an API/verifier restart from accepting a stale worker.
+    probing_snapshot = build_current_run_not_ready_snapshot(
+        run_id=run_id,
+        candidate_generation=candidate_generation,
+        worker_identity=worker_identity,
+    )
+    write_runtime_readiness_snapshot(probing_snapshot)
+    readiness_snapshot = build_runtime_readiness_snapshot(
+        probe_hwp=True,
+        run_id=run_id,
+        candidate_generation=candidate_generation,
+        worker_identity=worker_identity,
+    )
+    try:
+        write_runtime_readiness_snapshot(readiness_snapshot, expected_run_id=run_id)
+    except ReadinessOwnershipError:
+        logger.error('Worker readiness ownership was replaced during the Hancom probe.')
+        return 2
+    final_readiness = load_runtime_readiness_snapshot()
+    if not bool(readiness_snapshot.get('ready')) or not readiness_matches_current_worker(
+        final_readiness,
+        candidate_generation=candidate_generation,
+        run_id=run_id,
+    ):
         logger.error('Worker readiness failed before polling: %s', readiness_snapshot.get('summary'))
         return 2
+    if not isinstance(candidate_generation, str) or not candidate_generation:
+        logger.error('Worker candidate generation is not bound; refusing to acquire a queue lease.')
+        return 2
+    db.acquire_worker_lease(
+        settings.worker_name,
+        run_id,
+        candidate_generation,
+        int(worker_identity['pid']),
+        str(worker_identity['start_identity']),
+    )
+
+    readiness_stop_event = threading.Event()
+    readiness_heartbeat_thread = threading.Thread(
+        target=readiness_heartbeat,
+        kwargs={
+            'stop_event': readiness_stop_event,
+            'run_id': run_id,
+            'candidate_generation': candidate_generation,
+        },
+        name='runtime-readiness-heartbeat',
+        daemon=True,
+    )
+    readiness_heartbeat_thread.start()
 
     recovered = db.recover_stale_running_jobs(settings.job_stale_seconds)
     if recovered:
@@ -3259,11 +3456,24 @@ def worker_loop() -> int:
 
     logger.info('Worker started. Polling every %s seconds.', settings.poll_interval_seconds)
     while True:
-        job = db.claim_next_job(settings.worker_name)
+        current_readiness = load_runtime_readiness_snapshot()
+        if not readiness_matches_current_worker(
+            current_readiness,
+            candidate_generation=candidate_generation,
+            run_id=run_id,
+        ):
+            logger.error('Worker readiness ownership is no longer current; stopping worker.')
+            return 2
+        job = claim_job_for_execution(settings.worker_name, run_id, candidate_generation)
         if job is None:
             time.sleep(settings.poll_interval_seconds)
             continue
-        handle_job(job)
+        handle_job(
+            job,
+            worker_name=settings.worker_name,
+            run_id=run_id,
+            candidate_generation=candidate_generation,
+        )
 
 
 def process_one_command(

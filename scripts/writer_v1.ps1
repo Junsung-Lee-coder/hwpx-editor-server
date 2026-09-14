@@ -1,26 +1,81 @@
 param(
     [ValidateSet('install', 'api', 'worker', 'start', 'stop', 'status')]
     [string]$Action = 'status',
-    [switch]$SkipInstall
+    [switch]$SkipInstall,
+    [Nullable[int]]$ApiPort
 )
 
 $ErrorActionPreference = 'Stop'
 
-$Root = Split-Path -Parent $PSScriptRoot
+$SourceRoot = Split-Path -Parent $PSScriptRoot
+$PackagedRoot = Join-Path $SourceRoot '.hwpx-install'
+$Root = if (Test-Path -LiteralPath (Join-Path $PackagedRoot '.hwpx-install.json') -PathType Leaf) { $PackagedRoot } else { $SourceRoot }
+$commonPath = Join-Path $PSScriptRoot 'windows_install_common.psm1'
+Import-Module $commonPath -Force
+
+# Capture the root/marker object identities before any action admission, then
+# revalidate them after the shared lifecycle lock is held. A startup race with
+# PreserveMove must not select one generation and mutate another.
+$writerRootIdentity = Get-PathObjectIdentity -Path $Root -RequireExisting
+$writerMarkerIdentity = $null
+
+# Bind every child runtime to the exact installed generation.  The installer
+# writes this marker only after the candidate manifest has been verified; the
+# Python worker then repeats the manifest readback before publishing PASS.
+$candidateMarkerPath = Join-Path $Root '.hwpx-install.json'
+if (Test-Path -LiteralPath $candidateMarkerPath -PathType Leaf) {
+    $writerMarkerIdentity = Get-PathObjectIdentity -Path $candidateMarkerPath -RequireExisting
+    $candidateMarkerCapture = Read-BoundedText -Path $candidateMarkerPath -MaxChars 262144
+    if ($candidateMarkerCapture.truncated) { throw "Candidate marker is too large: $candidateMarkerPath" }
+    $candidateMarker = ConvertFrom-Json -InputObject ([string]$candidateMarkerCapture.text)
+    $candidateGeneration = [string]$candidateMarker.candidate_generation
+    if ([string]::IsNullOrWhiteSpace($candidateGeneration)) {
+        throw "Candidate marker does not contain candidate_generation: $candidateMarkerPath"
+    }
+    $env:HWP_CANDIDATE_GENERATION = $candidateGeneration
+}
+
+function Get-WriterEnvSetting {
+    param([Parameter(Mandatory = $true)][string]$Name)
+    $envPath = Join-Path $Root '.env'
+    if (-not (Test-Path -LiteralPath $envPath -PathType Leaf)) { return $null }
+    $capture = Read-BoundedText -Path $envPath -MaxChars 65536
+    if ($capture.truncated) { throw "Environment configuration is too large: $envPath" }
+    foreach ($line in @([string]$capture.text -split "`r?`n")) {
+        if ($line -match ('^\s*' + [regex]::Escape($Name) + '\s*=\s*(.*?)\s*(?:#.*)?$')) {
+            return [string]$matches[1]
+        }
+    }
+    return $null
+}
+
 $VenvPython = Join-Path $Root '.venv\Scripts\python.exe'
-$ConfiguredPython = $env:HWPX_PYTHON
+$ConfiguredPython = if (-not [string]::IsNullOrWhiteSpace($env:HWP_PYTHON)) { $env:HWP_PYTHON } else { Get-WriterEnvSetting -Name 'HWP_PYTHON' }
 $SpoolRoot = Join-Path $Root 'spool'
 $LogsRoot = Join-Path $SpoolRoot 'logs'
 $ReadinessPath = Join-Path $SpoolRoot 'readiness\worker_ready.json'
 $ViewerSessionPath = Join-Path $SpoolRoot 'observation\viewer_session.json'
 $LaunchStatusPath = Join-Path $LogsRoot 'writer_v1.launch_status.json'
 $LauncherLogPath = Join-Path $LogsRoot 'writer_v1.launcher.log'
-$ApiPort = 8765
-$ApiHealthUri = 'http://127.0.0.1:8765/health'
-$RuntimeReadinessUri = 'http://127.0.0.1:8765/runtime-readiness'
-$ViewerSessionUri = 'http://127.0.0.1:8765/observation-viewer/session'
-$ApiTaskName = if ([string]::IsNullOrWhiteSpace($env:HWPX_API_TASK_NAME)) { 'hwpx-editor-api' } else { $env:HWPX_API_TASK_NAME }
-$WorkerTaskName = if ([string]::IsNullOrWhiteSpace($env:HWPX_WORKER_TASK_NAME)) { 'hwpx-editor-worker' } else { $env:HWPX_WORKER_TASK_NAME }
+$requestedApiPort = $ApiPort
+if ($null -eq $requestedApiPort -and -not [string]::IsNullOrWhiteSpace($env:HWP_API_PORT)) {
+    $environmentPort = 0
+    if (-not [int]::TryParse($env:HWP_API_PORT, [ref]$environmentPort)) {
+        throw "HWP_API_PORT is not a valid integer: $env:HWP_API_PORT"
+    }
+    $requestedApiPort = $environmentPort
+}
+$configuredPort = Resolve-ApiPort -InstallRoot $Root -RequestedApiPort $requestedApiPort
+$ApiPort = $configuredPort
+$env:HWP_API_PORT = [string]$ApiPort
+$ApiHealthUri = "http://127.0.0.1:$ApiPort/health"
+$RuntimeReadinessUri = "http://127.0.0.1:$ApiPort/runtime-readiness"
+$ViewerSessionUri = "http://127.0.0.1:$ApiPort/observation-viewer/session"
+$ApiTaskName = if ([string]::IsNullOrWhiteSpace($env:HWP_API_TASK_NAME)) { $envTask = Get-WriterEnvSetting -Name 'HWP_API_TASK_NAME'; if ([string]::IsNullOrWhiteSpace($envTask)) { 'hwpx-editor-api' } else { $envTask } } else { $env:HWP_API_TASK_NAME }
+$WorkerTaskName = if ([string]::IsNullOrWhiteSpace($env:HWP_WORKER_TASK_NAME)) { $envTask = Get-WriterEnvSetting -Name 'HWP_WORKER_TASK_NAME'; if ([string]::IsNullOrWhiteSpace($envTask)) { 'hwpx-editor-worker' } else { $envTask } } else { $env:HWP_WORKER_TASK_NAME }
+$TaskPath = if ([string]::IsNullOrWhiteSpace($env:HWP_TASK_PATH)) { Get-WriterEnvSetting -Name 'HWP_TASK_PATH' } else { $env:HWP_TASK_PATH }
+if ([string]::IsNullOrWhiteSpace($TaskPath)) { $TaskPath = '\' }
+$TaskPath = Assert-CanonicalScheduledTaskPath -TaskPath $TaskPath
 $InteractiveTaskNameByRole = @{
     api = $ApiTaskName
     worker = $WorkerTaskName
@@ -74,11 +129,51 @@ function Get-InteractiveTaskRegistration {
     }
 
     try {
-        return Get-ScheduledTask -TaskName $taskName -ErrorAction Stop
+        return Get-ScheduledTaskExact -TaskName $taskName -TaskPath $TaskPath
     }
     catch {
         return $null
     }
+}
+
+function Assert-WriterTaskIdentity {
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateSet('api', 'worker')]
+        [string]$Role,
+        [Parameter(Mandatory = $true)]
+        [object]$Task
+    )
+
+    $identity = Get-ScheduledTaskIdentity -TaskName ([string]$Task.TaskName) -TaskPath $TaskPath
+    if (-not $identity.exists) { throw "writer_v1 $Role task readback disappeared: $($Task.TaskName)" }
+    $expectedRoot = Get-CanonicalPath -Path $Root -RequireExisting
+    $expectedPython = Join-Path $expectedRoot '.venv\Scripts\python.exe'
+    if (-not (Test-Path -LiteralPath $expectedPython -PathType Leaf)) { $expectedPython = Resolve-PythonExe }
+    $expectedArguments = if ($Role -eq 'api') { '-m app.api_server' } else { '-m app.worker' }
+    $triggerUser = if ($identity.trigger_user -is [array]) { [string]$identity.trigger_user[0] } else { [string]$identity.trigger_user }
+    $compatible = $false
+    try {
+        $compatible = (
+            (Get-CanonicalPath -Path ([string]$identity.working_directory) -RequireExisting) -eq $expectedRoot -and
+            (Get-CanonicalPath -Path ([string]$identity.execute) -RequireExisting) -eq (Get-CanonicalPath -Path $expectedPython -RequireExisting) -and
+            [string]$identity.arguments -eq $expectedArguments -and
+            [string]$identity.action_type -eq 'Exec' -and
+            [int]$identity.action_count -eq 1 -and
+            [int]$identity.xml_action_count -eq 1 -and
+            [int]$identity.xml_exec_action_count -eq 1 -and
+            [string]$identity.trigger_type -eq 'LogonTrigger' -and
+            (Test-ScheduledTaskLogonTypeEquivalent -Actual $identity.logon_type -Expected 'Interactive') -and
+            (Test-ScheduledTaskRunLevelEquivalent -Actual $identity.run_level -Expected 'Limited') -and
+            [string]$identity.start_when_available -ieq 'true' -and
+            (Test-CanonicalTaskSettings -Identity $identity) -and
+            (Test-WindowsPrincipalEquivalent -Actual $identity.principal -Expected $triggerUser) -and
+            -not [string]::IsNullOrWhiteSpace([string]$identity.task_identity_hash)
+        )
+    }
+    catch { $compatible = $false }
+    if (-not $compatible) { throw "writer_v1 $Role scheduled task identity does not match the installed candidate runtime." }
+    return $identity
 }
 
 function Start-InteractiveTaskLaunch {
@@ -93,6 +188,7 @@ function Start-InteractiveTaskLaunch {
     if ($null -eq $task) {
         throw "writer_v1 $Role launch requires an interactive desktop session. No scheduled task is registered for session-0 delegation."
     }
+    $taskIdentity = Assert-WriterTaskIdentity -Role $Role -Task $task
 
     if ($task.State -eq 'Running') {
         $context = [ordered]@{
@@ -101,6 +197,8 @@ function Start-InteractiveTaskLaunch {
             task_name = $task.TaskName
             task_path = $task.TaskPath
             session_id = $sessionId
+            task_identity_hash = $taskIdentity.task_identity_hash
+            owned = $false
         }
         Write-LauncherEvent -Message "writer_v1 $Role reusing interactive scheduled task because the current session is non-interactive" -Context $context
         return $context
@@ -113,6 +211,8 @@ function Start-InteractiveTaskLaunch {
         task_name = $task.TaskName
         task_path = $task.TaskPath
         session_id = $sessionId
+        task_identity_hash = $taskIdentity.task_identity_hash
+        owned = $true
     }
     Write-LauncherEvent -Message "writer_v1 $Role delegated to interactive scheduled task because the current session is non-interactive" -Context $context
     return $context
@@ -139,9 +239,7 @@ function Write-JsonFile {
         New-Item -ItemType Directory -Force -Path $parent | Out-Null
     }
 
-    $json = $Payload | ConvertTo-Json -Depth 12
-    $utf8 = New-Object System.Text.UTF8Encoding($false)
-    [System.IO.File]::WriteAllText($Path, [string]$json, $utf8)
+    Write-JsonReceipt -Path $Path -Value $Payload | Out-Null
 }
 
 function Read-JsonFile {
@@ -152,7 +250,9 @@ function Read-JsonFile {
     }
 
     try {
-        return Get-Content -Path $Path -Raw -Encoding UTF8 | ConvertFrom-Json
+        $capture = Read-BoundedText -Path $Path -MaxChars 262144
+        if ($capture.truncated) { return $null }
+        return ConvertFrom-Json -InputObject ([string]$capture.text)
     }
     catch {
         return $null
@@ -161,11 +261,11 @@ function Read-JsonFile {
 
 function Resolve-PythonExe {
     $candidates = @()
-    if (-not [string]::IsNullOrWhiteSpace($ConfiguredPython)) {
-        $candidates += $ConfiguredPython
-    }
     if (Test-Path $VenvPython) {
         $candidates += $VenvPython
+    }
+    if (-not [string]::IsNullOrWhiteSpace($ConfiguredPython)) {
+        $candidates += $ConfiguredPython
     }
     $pathPython = Get-Command python.exe -ErrorAction SilentlyContinue
     if ($null -ne $pathPython -and -not [string]::IsNullOrWhiteSpace([string]$pathPython.Source)) {
@@ -176,17 +276,27 @@ function Resolve-PythonExe {
             return (Resolve-Path $candidate).Path
         }
     }
-    throw 'Python executable not found. Set HWPX_PYTHON, create .venv, or ensure python.exe is on PATH.'
+    throw 'Python executable not found. Set HWP_PYTHON, create .venv, or ensure python.exe is on PATH.'
 }
 
 function Ensure-Install {
     Push-Location $Root
     try {
+        Ensure-WriterDirectories
         $pythonExe = Resolve-PythonExe
-        & $pythonExe -m pip install --upgrade pip
-        & $pythonExe -m pip install -r requirements.txt
-        if (-not (Test-Path '.env') -and (Test-Path 'sample-config.env')) {
-            Copy-Item 'sample-config.env' '.env'
+        $requirementsPath = Join-Path $Root 'requirements-windows.lock'
+        if (-not (Test-Path -LiteralPath $requirementsPath -PathType Leaf)) {
+            throw "Hash-pinned Windows dependency lock is missing: $requirementsPath"
+        }
+        $nativeResult = Invoke-NativeChecked -FilePath $pythonExe -Arguments @('-m', 'pip', 'install', '--disable-pip-version-check', '--require-hashes', '-r', $requirementsPath) -WorkingDirectory $Root -AllowNonZero
+        if (-not $nativeResult.accepted) {
+            throw "Hash-pinned dependency installation failed with exit code $($nativeResult.exit_code)."
+        }
+        Write-JsonReceipt -Path $LaunchStatusPath -Value $nativeResult | Out-Null
+        if (-not (Test-Path '.env') -and (Test-Path 'config.example')) {
+            $templateContent = [System.IO.File]::ReadAllText((Get-Item 'config.example').FullName)
+            $templateContent = [regex]::Replace($templateContent, '(?m)^\s*HWP_API_PORT\s*=.*$', "HWP_API_PORT=$ApiPort")
+            [System.IO.File]::WriteAllText((Join-Path $Root '.env'), $templateContent, (New-Object System.Text.UTF8Encoding($false)))
         }
     }
     finally {
@@ -228,6 +338,38 @@ function Get-RoleConfig {
     )
 
     return $RoleConfig[$Role]
+}
+
+function ConvertTo-WindowsProcessArgument {
+    param([AllowNull()][object]$Value)
+    $text = if ($null -eq $Value) { '' } else { [string]$Value }
+    if ($text.Length -gt 0 -and $text -notmatch '[\s"]') { return $text }
+    $builder = New-Object System.Text.StringBuilder
+    [void]$builder.Append('"')
+    $slashes = 0
+    foreach ($character in $text.ToCharArray()) {
+        if ($character -eq [char]92) {
+            $slashes++
+            continue
+        }
+        if ($character -eq [char]34) {
+            if ($slashes -gt 0) { [void]$builder.Append(('\' * ($slashes * 2 + 1)) -join '') }
+            [void]$builder.Append('"')
+            $slashes = 0
+            continue
+        }
+        if ($slashes -gt 0) { [void]$builder.Append(('\' * $slashes) -join '') }
+        [void]$builder.Append($character)
+        $slashes = 0
+    }
+    if ($slashes -gt 0) { [void]$builder.Append(('\' * ($slashes * 2)) -join '') }
+    [void]$builder.Append('"')
+    return $builder.ToString()
+}
+
+function ConvertTo-WindowsProcessArgumentList {
+    param([AllowNull()][object[]]$Values)
+    return [string]::Join(' ', @($Values | ForEach-Object { ConvertTo-WindowsProcessArgument -Value $_ }))
 }
 
 function Get-ProcessState {
@@ -274,6 +416,121 @@ function Get-ProcessState {
     }
 }
 
+function Get-WriterProcessIdentity {
+    param([Parameter(Mandatory = $true)][int]$ProcessIdValue)
+    if ($ProcessIdValue -le 0) { return $null }
+    $row = Get-CimInstance Win32_Process -Filter "ProcessId = $ProcessIdValue" -ErrorAction SilentlyContinue
+    if ($null -eq $row) { return $null }
+    $process = Get-Process -Id $ProcessIdValue -ErrorAction SilentlyContinue
+    if ($null -eq $process) { return $null }
+    $executablePath = [string]$row.ExecutablePath
+    if ([string]::IsNullOrWhiteSpace($executablePath)) { return $null }
+    try { $canonicalExecutable = Get-CanonicalPath -Path $executablePath -RequireExisting } catch { return $null }
+    $commandLine = Limit-Text -Value ([string]$row.CommandLine) -MaxChars 4096
+    $startedAt = $null
+    try { $startedAt = $process.StartTime.ToUniversalTime().ToString('o') } catch { }
+    if ([string]::IsNullOrWhiteSpace($startedAt)) { $startedAt = [string]$row.CreationDate }
+    return [ordered]@{
+        process_id = [int]$ProcessIdValue
+        pid = [int]$ProcessIdValue
+        process_name = [string]$row.Name
+        executable_path = $canonicalExecutable
+        command_line = $commandLine
+        command_line_hash = Get-TextSha256 -Value $commandLine
+        tracked_start_time = $startedAt
+        creation_date = [string]$row.CreationDate
+        root = $Root
+    }
+}
+
+function Test-WriterProcessIdentity {
+    param(
+        [Parameter(Mandatory = $true)][ValidateSet('api', 'worker')][string]$Role,
+        [Parameter(Mandatory = $true)][int]$ProcessIdValue,
+        [Parameter(Mandatory = $true)][object]$ExpectedIdentity,
+        [switch]$Bootstrap
+    )
+    try {
+        $actual = Get-WriterProcessIdentity -ProcessIdValue $ProcessIdValue
+        if ($null -eq $actual) { return $false }
+        $expectedPid = [int](Get-OptionalPropertyValue -Object $ExpectedIdentity -Name 'process_id')
+        if ($expectedPid -ne $ProcessIdValue -or [int]$actual.process_id -ne $expectedPid) { return $false }
+        $expectedExecutable = [string](Get-OptionalPropertyValue -Object $ExpectedIdentity -Name 'executable_path')
+        if ([string]::IsNullOrWhiteSpace($expectedExecutable) -or (Get-CanonicalPath -Path $expectedExecutable -RequireExisting) -ne [string]$actual.executable_path) { return $false }
+        $expectedStart = [string](Get-OptionalPropertyValue -Object $ExpectedIdentity -Name 'tracked_start_time')
+        if (-not [string]::IsNullOrWhiteSpace($expectedStart) -and $expectedStart -ne [string]$actual.tracked_start_time) { return $false }
+        $expectedHash = [string](Get-OptionalPropertyValue -Object $ExpectedIdentity -Name 'command_line_hash')
+        if ([string]::IsNullOrWhiteSpace($expectedHash) -or $expectedHash -ne [string]$actual.command_line_hash) { return $false }
+        $line = [string]$actual.command_line
+        if (-not (Test-CommandLinePathToken -CommandLine $line -Path $Root)) { return $false }
+        if ($Bootstrap) {
+            $processName = [string](Get-OptionalPropertyValue -Object $ExpectedIdentity -Name 'process_name')
+            if ($processName -match '(?i)(?:powershell|pwsh)') {
+                if ($line -notmatch '(?i)(?:powershell|pwsh)(?:\.exe)?') { return $false }
+                if ($line -notmatch '(?i)(?:-File|writer_v1\.ps1)') { return $false }
+            }
+            elseif (-not (Test-CommandLineModuleToken -CommandLine $line -ModuleName ([string](Get-RoleConfig -Role $Role).EntryModule))) {
+                return $false
+            }
+        }
+        else {
+            $entryModule = [string](Get-RoleConfig -Role $Role).EntryModule
+            if (-not (Test-CommandLineModuleToken -CommandLine $line -ModuleName $entryModule)) { return $false }
+        }
+        return $true
+    }
+    catch {
+        return $false
+    }
+}
+
+function Get-WriterProcessIdentityWithRetry {
+    param(
+        [Parameter(Mandatory = $true)][int]$ProcessIdValue,
+        [ValidateRange(1, 100)][int]$Attempts = 20
+    )
+    for ($attempt = 0; $attempt -lt $Attempts; $attempt++) {
+        $identity = Get-WriterProcessIdentity -ProcessIdValue $ProcessIdValue
+        if ($null -ne $identity) { return $identity }
+        Start-Sleep -Milliseconds 50
+    }
+    return $null
+}
+
+function Test-WriterKillCandidate {
+    param(
+        [Parameter(Mandatory = $true)][int]$CandidatePid,
+        [Parameter(Mandatory = $true)][int]$TrustedRootPid,
+        [Parameter(Mandatory = $true)][ValidateSet('api', 'worker')][string]$Role,
+        [Parameter(Mandatory = $true)][object]$PidInfo,
+        [int[]]$TrustedPids = @()
+    )
+    $trackedPid = [int](Get-OptionalPropertyValue -Object $PidInfo -Name 'pid')
+    $bootstrapPid = [int](Get-OptionalPropertyValue -Object $PidInfo -Name 'bootstrap_pid')
+    if ($CandidatePid -eq $trackedPid) {
+        $expected = Get-OptionalPropertyValue -Object $PidInfo -Name 'process_identity'
+        return ($null -ne $expected -and (Test-WriterProcessIdentity -Role $Role -ProcessIdValue $CandidatePid -ExpectedIdentity $expected))
+    }
+    if ($CandidatePid -eq $bootstrapPid) {
+        $expected = Get-OptionalPropertyValue -Object $PidInfo -Name 'bootstrap_process_identity'
+        return ($null -ne $expected -and (Test-WriterProcessIdentity -Role $Role -ProcessIdValue $CandidatePid -ExpectedIdentity $expected -Bootstrap))
+    }
+    $rows = @(Get-ProcessTreeSnapshot -RootPid $TrustedRootPid)
+    $byPid = @{}
+    foreach ($row in $rows) { $byPid[[int]$row.process_id] = $row }
+    if (-not $byPid.ContainsKey($CandidatePid)) { return $false }
+    $line = [string]$byPid[$CandidatePid].command_line
+    if ([string]::IsNullOrWhiteSpace($line) -or -not (Test-CommandLinePathToken -CommandLine $line -Path $Root)) { return $false }
+    if (-not (Test-CommandLineModuleToken -CommandLine $line -ModuleName ([string](Get-RoleConfig -Role $Role).EntryModule)) -and $CandidatePid -ne $TrustedRootPid) { return $false }
+    $cursor = $CandidatePid
+    for ($depth = 0; $depth -le $rows.Count; $depth++) {
+        if ($cursor -eq $TrustedRootPid -or $cursor -in $TrustedPids) { return $true }
+        if (-not $byPid.ContainsKey($cursor)) { return $false }
+        $cursor = [int]$byPid[$cursor].parent_process_id
+    }
+    return $false
+}
+
 function Read-RolePidInfo {
     param(
         [Parameter(Mandatory = $true)]
@@ -316,6 +573,14 @@ function Clear-StaleRolePidFile {
     $process = Get-Process -Id $pidValue -ErrorAction SilentlyContinue
     if ($null -eq $process) {
         Remove-Item -Path $config.PidPath -Force -ErrorAction SilentlyContinue
+        return
+    }
+    $expectedIdentity = Get-OptionalPropertyValue -Object $pidInfo -Name 'process_identity'
+    if ($null -eq $expectedIdentity -or -not (Test-WriterProcessIdentity -Role $Role -ProcessIdValue $pidValue -ExpectedIdentity $expectedIdentity)) {
+        # A stale/tampered PID file is not authority to stop the live process.
+        # Removing only the writer-owned metadata lets a future launch recover
+        # without touching a PID-reused or otherwise unrelated process.
+        Remove-Item -Path $config.PidPath -Force -ErrorAction SilentlyContinue
     }
 }
 
@@ -333,6 +598,15 @@ function Set-RolePidFile {
     )
 
     $config = Get-RoleConfig -Role $Role
+    $processIdentity = Get-WriterProcessIdentity -ProcessIdValue $TrackedPid
+    $bootstrapIdentity = Get-WriterProcessIdentity -ProcessIdValue $BootstrapPid
+    if ($null -eq $processIdentity -or $null -eq $bootstrapIdentity) {
+        throw "writer_v1 $Role could not capture stable process identity before writing the PID record."
+    }
+    if (-not (Test-WriterProcessIdentity -Role $Role -ProcessIdValue $TrackedPid -ExpectedIdentity $processIdentity) -or
+        -not (Test-WriterProcessIdentity -Role $Role -ProcessIdValue $BootstrapPid -ExpectedIdentity $bootstrapIdentity -Bootstrap)) {
+        throw "writer_v1 $Role process identity did not match the selected runtime before writing the PID record."
+    }
     $payload = [ordered]@{
         schema_version = 'writer-v1-role-pid/v1'
         role = $Role
@@ -344,6 +618,13 @@ function Set-RolePidFile {
         started_at = Get-UtcTimestamp
         root = $Root
         entry_module = $config.EntryModule
+        process_identity = $processIdentity
+        bootstrap_process_identity = $bootstrapIdentity
+        process_identity_schema = 'writer-v1-process-identity/v1'
+        tracked_start_time = $processIdentity.tracked_start_time
+        bootstrap_start_time = $bootstrapIdentity.tracked_start_time
+        command_line_hash = $processIdentity.command_line_hash
+        bootstrap_command_line_hash = $bootstrapIdentity.command_line_hash
     }
     Write-JsonFile -Path $config.PidPath -Payload $payload
 }
@@ -504,6 +785,83 @@ function Get-ProcessTreeIds {
     )
 }
 
+function Stop-WriterOwnedLaunchTree {
+    param(
+        [Parameter(Mandatory = $true)][ValidateSet('api', 'worker')][string]$Role,
+        [Parameter(Mandatory = $true)][object]$Launch,
+        [ValidateRange(1, 120)][int]$TimeoutSeconds = 15
+    )
+
+    $rootPid = 0
+    try { $rootPid = [int](Get-OptionalPropertyValue -Object $Launch -Name 'pid') } catch { $rootPid = 0 }
+    $expectedIdentity = Get-OptionalPropertyValue -Object $Launch -Name 'process_identity'
+    if ($rootPid -le 0 -or $null -eq $expectedIdentity) {
+        throw "writer_v1 $Role launch ledger is missing an authenticated bootstrap process identity."
+    }
+
+    $rootProcess = Get-Process -Id $rootPid -ErrorAction SilentlyContinue
+    if ($null -eq $rootProcess) {
+        return [ordered]@{ role = $Role; root_pid = $rootPid; root_missing = $true; released = $true; stopped_pids = @() }
+    }
+    if (-not (Test-WriterProcessIdentity -Role $Role -ProcessIdValue $rootPid -ExpectedIdentity $expectedIdentity -Bootstrap)) {
+        throw "writer_v1 $Role cleanup refused to terminate a replaced bootstrap PID $rootPid."
+    }
+
+    $initialTree = @(Get-ProcessTreeSnapshot -RootPid $rootPid)
+    if ($initialTree.Count -eq 0) {
+        throw "writer_v1 $Role cleanup could not establish the owned bootstrap process tree: $rootPid"
+    }
+    $moduleName = [string](Get-RoleConfig -Role $Role).EntryModule
+    $stopped = New-Object System.Collections.ArrayList
+    foreach ($row in @($initialTree | Sort-Object -Property depth -Descending)) {
+        $candidatePid = [int]$row.process_id
+        $currentRoot = Get-WriterProcessIdentityWithRetry -ProcessIdValue $rootPid -Attempts 3
+        if ($null -eq $currentRoot -or -not (Test-WriterProcessIdentity -Role $Role -ProcessIdValue $rootPid -ExpectedIdentity $expectedIdentity -Bootstrap)) {
+            throw "writer_v1 $Role cleanup bootstrap identity changed at the stop boundary: $rootPid"
+        }
+        $currentTree = @(Get-ProcessTreeSnapshot -RootPid $rootPid)
+        $currentRow = $currentTree | Where-Object { [int]$_.process_id -eq $candidatePid } | Select-Object -First 1
+        if ($null -eq $currentRow) { continue }
+        $candidateProcess = Get-Process -Id $candidatePid -ErrorAction SilentlyContinue
+        if ($null -eq $candidateProcess) { continue }
+        if ($candidatePid -ne $rootPid) {
+            $line = [string]$currentRow.command_line
+            if ([string]::IsNullOrWhiteSpace($line) -or
+                -not (Test-CommandLinePathToken -CommandLine $line -Path $Root) -or
+                -not (Test-CommandLineModuleToken -CommandLine $line -ModuleName $moduleName)) {
+                throw "writer_v1 $Role cleanup refused to terminate an unverified descendant PID $candidatePid."
+            }
+        }
+        try {
+            $candidateProcess.Refresh()
+            if ($candidateProcess.HasExited) { continue }
+            Stop-Process -InputObject $candidateProcess -Force -ErrorAction Stop
+            $candidateProcess.WaitForExit(5000) | Out-Null
+            [void]$stopped.Add($candidatePid)
+        }
+        catch {
+            throw "writer_v1 $Role owned-launch cleanup failed for PID ${candidatePid}: $($_.Exception.Message)"
+        }
+    }
+
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    do {
+        $remainingTree = @(Get-ProcessTreeSnapshot -RootPid $rootPid)
+        if ($remainingTree.Count -eq 0) {
+            return [ordered]@{ role = $Role; root_pid = $rootPid; root_missing = $false; released = $true; stopped_pids = @($stopped) }
+        }
+        Start-Sleep -Milliseconds 100
+    } while ((Get-Date) -lt $deadline)
+    return [ordered]@{
+        role = $Role
+        root_pid = $rootPid
+        root_missing = $false
+        released = $false
+        stopped_pids = @($stopped)
+        remaining_pids = @($remainingTree | ForEach-Object { [int]$_.process_id })
+    }
+}
+
 function Get-ListeningProcessIds {
     param([int]$Port)
 
@@ -579,7 +937,9 @@ function Resolve-RoleTrackedPid {
             $descendants |
                 Where-Object {
                     $commandLine = [string]$_.command_line
-                    (-not [string]::IsNullOrWhiteSpace($commandLine)) -and ($commandLine -like "*$modulePattern*")
+                    (-not [string]::IsNullOrWhiteSpace($commandLine)) -and
+                    ($commandLine -like "*$modulePattern*") -and
+                    (Test-CommandLinePathToken -CommandLine $commandLine -Path $Root)
                 } |
                 Sort-Object depth, process_id -Descending
         )
@@ -996,7 +1356,7 @@ function Show-Status {
     Write-Host ("writer_root: {0}" -f $Root)
     Write-Host ("launch_status: {0}" -f $LaunchStatusPath)
     Write-Host ("launcher_log: {0}" -f $LauncherLogPath)
-    Write-Host ("fixed_port: {0}" -f $ApiPort)
+    Write-Host ("api_port: {0}" -f $ApiPort)
     if ($snapshot.port_listeners.Count -gt 0) {
         Write-Host 'port_listeners:'
         $snapshot.port_listeners | ConvertTo-Json -Depth 6
@@ -1148,18 +1508,32 @@ function Start-RoleProcess {
         $Role,
         '-SkipInstall'
     )
+    $serializedArguments = ConvertTo-WindowsProcessArgumentList -Values $arguments
 
     $process = Start-Process -FilePath 'powershell.exe' `
-        -ArgumentList $arguments `
+        -ArgumentList $serializedArguments `
         -WorkingDirectory $Root `
         -WindowStyle Hidden `
         -RedirectStandardOutput $config.StdoutPath `
         -RedirectStandardError $config.StderrPath `
         -PassThru
 
+    $processIdentity = Get-WriterProcessIdentityWithRetry -ProcessIdValue ([int]$process.Id)
+    if ($null -eq $processIdentity) {
+        try {
+            $process.Refresh()
+            if (-not $process.HasExited) { $process.Kill() }
+            $process.WaitForExit(5000) | Out-Null
+        }
+        catch { }
+        throw "writer_v1 $Role bootstrap process identity could not be captured: $($process.Id)"
+    }
+
     return [ordered]@{
         role = $Role
+        owned = $true
         pid = $process.Id
+        process_identity = $processIdentity
         stdout_log = $config.StdoutPath
         stderr_log = $config.StderrPath
         python_log = $config.PythonLogPath
@@ -1211,9 +1585,32 @@ function Invoke-PackagedStart {
     $state = 'ok'
     $message = 'writer_v1 start completed; API health is reachable'
     if (-not (Test-WriterHealthPayload -HealthResult $healthAfter)) {
-        $state = 'degraded'
-        $message = 'writer_v1 start launched background processes but API health did not become ready within 20 seconds'
-        Write-LauncherEvent -Message $message -Level 'WARN' -Context @{ started = @($started); skipped = @($skipped); health = $healthAfter }
+        $cleanupErrors = New-Object System.Collections.ArrayList
+        foreach ($launch in @($started)) {
+            if ($launch.PSObject.Properties.Name -contains 'owned' -and -not [bool]$launch.owned) {
+                continue
+            }
+            $launchedRole = [string]$launch.role
+            try {
+                # The role pid file is written by the child bootstrap and may
+                # not exist yet when readiness fails.  Always clean the
+                # invocation-owned bootstrap tree first; Stop-RoleProcess then
+                # handles a separately tracked service process if it survived.
+                $ownedLaunchResult = Stop-WriterOwnedLaunchTree -Role $launchedRole -Launch $launch -TimeoutSeconds 15
+                if (-not [bool]$ownedLaunchResult.released) {
+                    throw "owned bootstrap tree remained: $($ownedLaunchResult.remaining_pids -join ',')"
+                }
+                Stop-RoleProcess -Role $launchedRole -TimeoutSeconds 15 | Out-Null
+            }
+            catch {
+                [void]$cleanupErrors.Add("$launchedRole cleanup failed: $($_.Exception.Message)")
+            }
+        }
+        $cleanupSuffix = if ($cleanupErrors.Count -gt 0) { '; ' + ($cleanupErrors -join '; ') } else { '' }
+        $message = 'writer_v1 start failed: API health did not become ready within 20 seconds' + $cleanupSuffix
+        Write-LauncherEvent -Message $message -Level 'ERROR' -Context @{ started = @($started); skipped = @($skipped); health = $healthAfter; cleanup_errors = @($cleanupErrors) }
+        Write-LaunchSnapshot -ActionName 'start' -State 'failed' -Message $message -Extra @{ started = @($started); skipped = @($skipped); cleanup_errors = @($cleanupErrors) } | Out-Null
+        throw $message
     }
     else {
         Write-LauncherEvent -Message $message -Context @{ started = @($started); skipped = @($skipped); health = $healthAfter }
@@ -1256,6 +1653,18 @@ function Stop-RoleProcess {
 
     $trackedState = Get-ProcessState -ProcessIdValue $trackedPid
     $bootstrapState = Get-ProcessState -ProcessIdValue $bootstrapPid
+    if ($trackedState.running) {
+        $trackedIdentity = Get-OptionalPropertyValue -Object $pidInfo -Name 'process_identity'
+        if ($null -eq $trackedIdentity -or -not (Test-WriterProcessIdentity -Role $Role -ProcessIdValue $trackedPid -ExpectedIdentity $trackedIdentity)) {
+            throw "writer_v1 stop refused to terminate $Role tracked_pid=$trackedPid because its recorded process identity no longer matches."
+        }
+    }
+    if ($bootstrapState.running) {
+        $bootstrapIdentity = Get-OptionalPropertyValue -Object $pidInfo -Name 'bootstrap_process_identity'
+        if ($null -eq $bootstrapIdentity -or -not (Test-WriterProcessIdentity -Role $Role -ProcessIdValue $bootstrapPid -ExpectedIdentity $bootstrapIdentity -Bootstrap)) {
+            throw "writer_v1 stop refused to terminate $Role bootstrap_pid=$bootstrapPid because its recorded process identity no longer matches."
+        }
+    }
     if (-not $trackedState.running -and -not $bootstrapState.running) {
         if ($statusBefore.pid_file_exists) {
             Clear-RolePidFile -Role $Role -Force
@@ -1294,9 +1703,21 @@ function Stop-RoleProcess {
         if ($null -eq $candidateProcess) {
             continue
         }
+        $trustedRootPid = if ($candidatePid -in $bootstrapTreePids) { [int]$bootstrapPid } else { [int]$trackedPid }
+        if (-not (Test-WriterKillCandidate -CandidatePid ([int]$candidatePid) -TrustedRootPid $trustedRootPid -Role $Role -PidInfo $pidInfo -TrustedPids @($bootstrapPid, $trackedPid))) {
+            throw "writer_v1 stop refused to terminate an unverified $Role process PID $candidatePid."
+        }
 
         try {
-            Stop-Process -Id $candidatePid -Force -ErrorAction Stop
+            $candidateProcess.Refresh()
+            if ($candidateProcess.HasExited) { continue }
+            # Bind termination to this refreshed Process object, not a
+            # reusable PID lookup performed earlier in the loop.
+            if (-not (Test-WriterKillCandidate -CandidatePid ([int]$candidateProcess.Id) -TrustedRootPid $trustedRootPid -Role $Role -PidInfo $pidInfo -TrustedPids @($bootstrapPid, $trackedPid))) {
+                throw "writer_v1 process identity changed at the stop boundary: $candidatePid"
+            }
+            Stop-Process -InputObject $candidateProcess -Force -ErrorAction Stop
+            $candidateProcess.WaitForExit(5000) | Out-Null
             [void]$stoppedProcesses.Add([ordered]@{ pid = $candidatePid; process_name = $candidateProcess.ProcessName })
         }
         catch {
@@ -1362,41 +1783,59 @@ function Invoke-PackagedStop {
     Show-Status
 }
 
-switch ($Action) {
-    'install' {
-        Ensure-Install
-        Ensure-WriterDirectories
-        Write-LauncherEvent -Message 'writer_v1 install complete' -Context @{ root = $Root }
-        Write-LaunchSnapshot -ActionName 'install' -State 'ok' -Message 'writer_v1 install complete' | Out-Null
-        Write-Host "writer_v1 install complete: $Root"
+$writerLifecycleLock = $null
+try {
+    if ($Action -in @('install', 'api', 'worker', 'start', 'stop', 'status')) {
+        $writerLifecycleLock = Enter-InstallLifecycleLock `
+            -InstallRoot $Root `
+            -TaskNames @($ApiTaskName, $WorkerTaskName) `
+            -ApiPort $ApiPort `
+            -Role 'writer' `
+            -TimeoutSeconds 120
     }
-    'api' {
-        if (Test-WriterSessionZeroLaunch) {
-            $delegated = Start-InteractiveTaskLaunch -Role 'api'
-            $message = 'writer_v1 api delegated to interactive scheduled task because the current session is non-interactive'
-            Write-LaunchSnapshot -ActionName 'api' -State 'delegated' -Message $message -Extra @{ delegated = $delegated } | Out-Null
-            Write-Host $message
-            break
+    Assert-PathObjectIdentity -Path $Root -ExpectedIdentity $writerRootIdentity | Out-Null
+    if ($writerMarkerIdentity) {
+        Assert-PathObjectIdentity -Path $candidateMarkerPath -ExpectedIdentity $writerMarkerIdentity | Out-Null
+    }
+    switch ($Action) {
+        'install' {
+            Ensure-Install
+            Ensure-WriterDirectories
+            Write-LauncherEvent -Message 'writer_v1 install complete' -Context @{ root = $Root }
+            Write-LaunchSnapshot -ActionName 'install' -State 'ok' -Message 'writer_v1 install complete' | Out-Null
+            Write-Host "writer_v1 install complete: $Root"
         }
-        Invoke-WriterRole -Role 'api'
-    }
-    'worker' {
-        if (Test-WriterSessionZeroLaunch) {
-            $delegated = Start-InteractiveTaskLaunch -Role 'worker'
-            $message = 'writer_v1 worker delegated to interactive scheduled task because the current session is non-interactive'
-            Write-LaunchSnapshot -ActionName 'worker' -State 'delegated' -Message $message -Extra @{ delegated = $delegated } | Out-Null
-            Write-Host $message
-            break
+        'api' {
+            if (Test-WriterSessionZeroLaunch) {
+                $delegated = Start-InteractiveTaskLaunch -Role 'api'
+                $message = 'writer_v1 api delegated to interactive scheduled task because the current session is non-interactive'
+                Write-LaunchSnapshot -ActionName 'api' -State 'delegated' -Message $message -Extra @{ delegated = $delegated } | Out-Null
+                Write-Host $message
+                break
+            }
+            Invoke-WriterRole -Role 'api'
         }
-        Invoke-WriterRole -Role 'worker'
+        'worker' {
+            if (Test-WriterSessionZeroLaunch) {
+                $delegated = Start-InteractiveTaskLaunch -Role 'worker'
+                $message = 'writer_v1 worker delegated to interactive scheduled task because the current session is non-interactive'
+                Write-LaunchSnapshot -ActionName 'worker' -State 'delegated' -Message $message -Extra @{ delegated = $delegated } | Out-Null
+                Write-Host $message
+                break
+            }
+            Invoke-WriterRole -Role 'worker'
+        }
+        'start' {
+            Invoke-PackagedStart
+        }
+        'stop' {
+            Invoke-PackagedStop
+        }
+        'status' {
+            Show-Status
+        }
     }
-    'start' {
-        Invoke-PackagedStart
-    }
-    'stop' {
-        Invoke-PackagedStop
-    }
-    'status' {
-        Show-Status
-    }
+}
+finally {
+    Exit-InstallLifecycleLock -Lock $writerLifecycleLock
 }

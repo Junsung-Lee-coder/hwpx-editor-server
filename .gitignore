@@ -10,6 +10,7 @@ __pycache__/
 
 # Runtime state and generated output
 spool/
+receipts/
 uploads/
 output/
 logs/
@@ -48,8 +49,36 @@ Thumbs.db
 # Credentials, keys, and local overrides
 credentials.json
 service-account.json
+id_rsa
+id_dsa
+id_ecdsa
+id_ed25519
+authorized_keys
+known_hosts
+credentials
+secrets
+secrets.json
+secret.json
+token
+tokens.json
+cookie
+cookies.json
+private_key
+private-key
+*credential*
+*secret*
+*password*
+*passwd*
+*token*
+*cookie*
 *.pem
 *.key
+*.p12
+*.pfx
+*.crt
+*.cer
+*.der
+*.kdbx
 config.local.*
 config.override.*
 local.settings.*
@@ -67,6 +96,11 @@ tmp/
 temp/
 staging/
 archives/
+source-bundle/
+artifacts/
+.hwpx-install/
+.hwpx-install.candidate-*/
+.hwpx-install.backup-*/
 *.tar
 *.zip
 *.gz

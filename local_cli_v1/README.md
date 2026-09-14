@@ -34,19 +34,34 @@ Bundle output parsing and user-facing formatting now live locally. Commands that
 ## Useful commands
 
 ```text
-hwpx status
-hwpx open <file>
-hwpx find <text>
-hwpx where [--json]
-hwpx context [--json]
-hwpx selected-text-proof [--json]
-hwpx bundle-list
-hwpx bundle-dump <bundle-name> [args...]
-hwpx tx-preview <out.json> --recipe <name> [args...]
-hwpx tx-commit <plan.json>
-hwpx export-proof-range --pages <range> --out-dir <dir>
-hwpx save
-hwpx close
+python -m local_cli_v1.main status
+python -m local_cli_v1.main open <file>
+python -m local_cli_v1.main command-reconcile --command-id <id> [--session-id <id>]
+python -m local_cli_v1.main find <text>
+python -m local_cli_v1.main where [--json]
+python -m local_cli_v1.main context [--json]
+python -m local_cli_v1.main selected-text-proof [--json]
+python -m local_cli_v1.main bundle-list
+python -m local_cli_v1.main bundle-dump <bundle-name> [args...]
+python -m local_cli_v1.main tx-preview <out.json> --recipe <name> [args...]
+python -m local_cli_v1.main tx-commit <plan.json>
+python -m local_cli_v1.main export-proof-range --pages <range> --out-dir <dir>
+python -m local_cli_v1.main native-border-readback --pre-quit <pre.json> --persisted <reopened.json> --target-identity <target.json> --out <readback.json>
+python -m local_cli_v1.main proof-packet --out-dir <packet-dir>
+python -m local_cli_v1.main save
+python -m local_cli_v1.main close
 ```
+
+`command-reconcile` is the only retry/close handoff for a timed-out native
+command. It reads the durable server journal, waits while the native call is
+still pending, and commits the late result before normal commands are admitted.
+
+`native-border-readback` is a local evidence-only command. It reads the native
+value maps captured before save/quit and after reopening, binds them to the
+installed module-root marker plus verified `source-manifest.json` and target
+identity, atomically writes the `local-cli/native-border-readback/v1` artifact,
+and records its path in local CLI state. Run `proof-packet` afterward to copy
+and hash the bound artifact; the command never mutates the document or calls
+the API.
 
 The API base URL is selected by `--base-url`, the cached URL from `hwpx open`, `HWPX_BASE_URL`, then the local loopback default. Keep local configuration outside Git.

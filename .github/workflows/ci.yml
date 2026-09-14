@@ -1,0 +1,121 @@
+name: Source and Windows contracts
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  portable-source:
+    name: Portable source gates
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: '3.13'
+      - name: Install pinned portable test dependencies
+        run: python -m pip install --disable-pip-version-check --require-hashes -r requirements-portable.lock
+      - name: Compile source
+        run: python -m compileall -q app local_cli_v1 scripts tests
+      - name: Run static smoke checks
+        shell: bash
+        run: |
+          set -euo pipefail
+          for script in \
+            smoke_cli_workflow_status_static.py \
+            smoke_local_cli_health_static.py \
+            smoke_output_parser_static.py \
+            smoke_command_bundle_static.py \
+            smoke_command_packages_static.py \
+            smoke_native_table_command_static.py \
+            smoke_export_proof_range_clamp_static.py \
+            smoke_find_context_static.py \
+            smoke_cli_json_envelope_parity_static.py \
+            smoke_readback_diff_static.py \
+            smoke_readback_schema_static.py \
+            smoke_selection_proof_static.py \
+            smoke_text_table_cleanup_static.py \
+            smoke_cli_envelope_static.py; do
+            python "scripts/$script"
+          done
+      - name: Run publication unit gate
+        run: >-
+          python -m unittest
+          tests.test_local_cli_status_payload
+          tests.test_raw_target_readback
+          tests.test_readback_command_status
+          tests.test_readback_diff
+          tests.test_table_scoped_cell_and_list_primitives
+          tests.test_table4_anchor_range_replace_bundle
+      - name: Run full source discovery
+        run: python -m unittest discover -s tests -p 'test_*.py' -v
+      - name: Run function-style tests
+        run: python scripts/run_function_style_tests.py
+
+  windows-contracts:
+    name: Windows parser and dependency contracts
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: '3.13'
+      - name: Install locked Windows dependencies
+        run: python -m pip install --disable-pip-version-check --require-hashes -r requirements-windows.lock
+      - name: Verify final dependency and import completeness
+        run: python scripts/check_windows_dependencies.py --lock requirements-windows.lock --json
+      - name: Compile source
+        run: python -m compileall -q app local_cli_v1 scripts tests
+      - name: Parse PowerShell scripts
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          foreach ($file in (Get-ChildItem -LiteralPath scripts -File | Where-Object { $_.Extension -in @('.ps1', '.psm1') })) {
+            $tokens = $null
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile($file.FullName, [ref]$tokens, [ref]$errors) | Out-Null
+            if ($errors.Count -gt 0) {
+              throw ("PowerShell parse failed for {0}: {1}" -f $file.FullName, (($errors | ForEach-Object Message) -join '; '))
+            }
+          }
+      - name: Run contract tests
+        run: python -m unittest discover -s tests -p 'test_*.py' -v
+      - name: Run function-style tests
+        run: python scripts/run_function_style_tests.py
+      - name: Run PowerShell 5.1 contract tests
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # run_windows_suite.ps1 owns the suite-manifest.json/eligible checks;
+          # test_g23_native_helper_repairs.ps1 remains a required manifest member. CI is parser-only, so its
+          # explicit allowance does not turn a required native G12 skip into a
+          # release acceptance result.
+          $runner = Join-Path $PWD 'tests\windows\run_windows_suite.ps1'
+          & $runner -AllowRequiredSkipForStaticCi
+          if ($LASTEXITCODE -ne 0) { throw "PowerShell contract suite failed: $runner" }
+      - name: Verify installer scripts are source-only
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $forbiddenPatterns = @(
+            'BOOK-[A-Z0-9]{10}'
+            'sample-config\.env'
+          )
+          $sourceFiles = @(git ls-files)
+          if ($LASTEXITCODE -ne 0) { throw 'git ls-files failed during the publication scan' }
+          foreach ($file in $sourceFiles) {
+            if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { continue }
+            $text = [System.IO.File]::ReadAllText((Resolve-Path -LiteralPath $file).Path)
+            foreach ($pattern in $forbiddenPatterns) {
+              if ([regex]::IsMatch($text, $pattern)) { throw "Forbidden source pattern $pattern in $file" }
+            }
+          }
