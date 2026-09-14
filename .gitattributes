@@ -1,0 +1,6 @@
+# Keep source-bundle bytes stable across Linux and Windows checkouts.
+* text=auto eol=lf
+*.png binary
+*.pdf binary
+*.hwp binary
+*.hwpx binary
