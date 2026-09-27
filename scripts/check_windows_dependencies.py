@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import importlib
 import importlib.metadata
+import importlib.util
 import json
 import re
 import sys
@@ -62,6 +63,12 @@ _DISTRIBUTION_IMPORTS = {
     "watchfiles": "watchfiles",
     "websockets": "websockets",
 }
+# Top-level modules whose import executes Hancom COM initialization. This check
+# is a distribution/importability inventory and must not require the Hancom
+# runtime, so these are located with importlib.util.find_spec (which does not
+# execute a top-level package) instead of being imported. Version checks for
+# their distributions stay strict.
+_SPEC_ONLY_IMPORTS = frozenset({"pyhwpx"})
 _LOCKED_REQUIREMENT = re.compile(
     r"^\s*([A-Za-z0-9][A-Za-z0-9_.-]*)==([^\s\\#]+)"
 )
@@ -101,6 +108,7 @@ def verify_dependencies(
     *,
     version_lookup: Callable[[str], str] = importlib.metadata.version,
     importer: Callable[[str], object] = importlib.import_module,
+    spec_finder: Callable[[str], object | None] = importlib.util.find_spec,
 ) -> dict[str, object]:
     path = Path(lock_path).expanduser().resolve()
     locked = parse_locked_requirements(path)
@@ -127,9 +135,14 @@ def verify_dependencies(
             for module in (module if isinstance(module, (tuple, list)) else (module,))
         }
     )
+    spec_only_imports = [module for module in checked_imports if module in _SPEC_ONLY_IMPORTS]
     for module in checked_imports:
         try:
-            importer(module)
+            if module in _SPEC_ONLY_IMPORTS:
+                if spec_finder(module) is None:
+                    raise ModuleNotFoundError(module)
+            else:
+                importer(module)
         except Exception as exc:  # pragma: no cover - exact exceptions vary by platform
             import_failures.append(module)
             import_errors[module] = type(exc).__name__
@@ -144,6 +157,7 @@ def verify_dependencies(
         "version_mismatches": version_mismatches,
         "import_failures": import_failures,
         "import_errors": import_errors,
+        "spec_only_imports": spec_only_imports,
     }
 
 
@@ -171,6 +185,7 @@ def main(argv: list[str] | None = None) -> int:
             "version_mismatches": [],
             "import_failures": [],
             "import_errors": {},
+            "spec_only_imports": [],
             "error": str(exc),
         }
         print(json.dumps(report, ensure_ascii=True, sort_keys=True))
