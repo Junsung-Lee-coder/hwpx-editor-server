@@ -141,5 +141,27 @@ class PyhwpxSpecOnlyImportTests(unittest.TestCase):
         self.assertEqual({"fastapi": "com_error"}, report["import_errors"])
 
 
+class WindowsHostedCiScopeTests(unittest.TestCase):
+    def test_hosted_windows_selects_contracts_and_portable_keeps_full_discovery(self) -> None:
+        workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+        portable, windows = workflow.split("  windows-contracts:", maxsplit=1)
+        self.assertIn("unittest discover -s tests -p 'test_*.py' -v", portable)
+        self.assertIn("Run Windows-specific Python contract tests", windows)
+        self.assertNotIn("unittest discover -s tests", windows)
+        for module in (
+            "tests.test_windows_dependency_check",
+            "tests.test_windows_installer_contracts",
+            "tests.test_native_acceptance_predicates",
+        ):
+            self.assertIn(module, windows)
+
+    def test_windows_suite_returns_explicit_success_only_for_accepted_rows(self) -> None:
+        runner = (ROOT / "tests" / "windows" / "run_windows_suite.ps1").read_text(encoding="utf-8")
+        self.assertIn("process_exit_accepted = ($unacceptedRows.Count -eq 0)", runner)
+        self.assertTrue(
+            runner.rstrip().endswith("if (-not $result.process_exit_accepted) { exit 1 }\nexit 0")
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
