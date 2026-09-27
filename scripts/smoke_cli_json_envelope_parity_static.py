@@ -70,6 +70,7 @@ def main() -> int:
     original_download_to_path = cli_main.download_to_path
     original_load_state = cli_main.load_state
     original_save_state = cli_main.save_state
+    original_update_state = cli_main.update_state
     original_artifact_destination = cli_main._artifact_destination
     state = {
         'base_url': 'http://fixture.local',
@@ -95,7 +96,29 @@ def main() -> int:
             state.clear()
             state.update(new_state)
 
-        def fake_artifact_destination(kind: str, *, page: int | None = None) -> Path:
+        def fake_update_state(updater, path=None, **kwargs):  # noqa: ANN001
+            current_generation = int(state.get('state_generation', 0))
+            expected_generation = kwargs.get('expected_generation')
+            expected_session_id = kwargs.get('expected_session_id')
+            if expected_generation is not None:
+                require(int(expected_generation) == current_generation, 'parity smoke state generation conflict')
+            if expected_session_id is not None:
+                require(state.get('session_id') == expected_session_id, 'parity smoke state session conflict')
+            updated = updater(dict(state))
+            require(isinstance(updated, dict), 'parity smoke state updater did not return an object')
+            updated['state_generation'] = current_generation + 1
+            state.clear()
+            state.update(updated)
+            return dict(state)
+
+        def fake_artifact_destination(
+            kind: str,
+            *,
+            page: int | None = None,
+            out: Path | None = None,
+            out_dir: Path | None = None,
+            state: dict[str, object] | None = None,
+        ) -> Path:
             require(kind == 'export', f'unexpected artifact kind in parity smoke: {kind}')
             return next(destinations)
 
@@ -128,6 +151,7 @@ def main() -> int:
             cli_main.download_to_path = fake_download_to_path
             cli_main.load_state = fake_load_state
             cli_main.save_state = fake_save_state
+            cli_main.update_state = fake_update_state
             cli_main._artifact_destination = fake_artifact_destination
 
             rc, stdout, stderr = run_cli(['export', '--json'])
@@ -151,7 +175,7 @@ def main() -> int:
                 how='static contract sample',
                 changed='none',
                 proof='none',
-                next_step='reload Windows API only when Jun explicitly asks',
+                next_step='reload the Windows API only after operator authorization',
                 warnings=['static sample only'],
                 blocked_reason='running Windows API not checked in static smoke',
             )
@@ -162,6 +186,7 @@ def main() -> int:
             cli_main.download_to_path = original_download_to_path
             cli_main.load_state = original_load_state
             cli_main.save_state = original_save_state
+            cli_main.update_state = original_update_state
             cli_main._artifact_destination = original_artifact_destination
 
     print('ok: cli JSON envelope export parity static smoke')

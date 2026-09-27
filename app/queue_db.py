@@ -29,11 +29,21 @@ CREATE TABLE IF NOT EXISTS jobs (
     attempts INTEGER NOT NULL DEFAULT 0,
     max_attempts INTEGER NOT NULL DEFAULT 1,
     worker_name TEXT,
+    claim_run_id TEXT,
+    claim_candidate_generation TEXT,
     error TEXT,
     file_size_bytes INTEGER NOT NULL DEFAULT 0,
     content_type TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_jobs_status_created_at ON jobs(status, created_at);
+CREATE TABLE IF NOT EXISTS worker_leases (
+    worker_name TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL,
+    candidate_generation TEXT NOT NULL,
+    worker_pid INTEGER NOT NULL,
+    worker_start_identity TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
 """
 
 
@@ -55,6 +65,8 @@ class QueueDB:
                 'task_type': "TEXT NOT NULL DEFAULT 'convert'",
                 'instructions_path': 'TEXT',
                 'edited_output_path': 'TEXT',
+                'claim_run_id': 'TEXT',
+                'claim_candidate_generation': 'TEXT',
             }
             for column, ddl in missing_columns.items():
                 if column not in existing:
@@ -130,40 +142,176 @@ class QueueDB:
             row = conn.execute('SELECT COUNT(*) AS count FROM jobs WHERE status = ?', (status.value,)).fetchone()
         return int(row['count'])
 
-    def claim_next_job(self, worker_name: str) -> Optional[Dict[str, Any]]:
+    def acquire_worker_lease(
+        self,
+        worker_name: str,
+        run_id: str,
+        candidate_generation: str,
+        worker_pid: int,
+        worker_start_identity: str,
+    ) -> bool:
+        """Publish the worker generation used by the transactional claim."""
+        if not all(isinstance(value, str) and value.strip() for value in (worker_name, run_id, candidate_generation, worker_start_identity)):
+            raise ValueError('Worker lease identity fields must be non-empty strings.')
+        if isinstance(worker_pid, bool) or not isinstance(worker_pid, int) or worker_pid <= 0:
+            raise ValueError('Worker lease PID must be a positive integer.')
         now = utc_now()
         with self.connection() as conn:
             conn.execute('BEGIN IMMEDIATE')
+            conn.execute(
+                """
+                INSERT INTO worker_leases (
+                    worker_name, run_id, candidate_generation, worker_pid,
+                    worker_start_identity, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(worker_name) DO UPDATE SET
+                    run_id = excluded.run_id,
+                    candidate_generation = excluded.candidate_generation,
+                    worker_pid = excluded.worker_pid,
+                    worker_start_identity = excluded.worker_start_identity,
+                    updated_at = excluded.updated_at
+                """,
+                (worker_name, run_id, candidate_generation, worker_pid, worker_start_identity, now),
+            )
+        return True
+
+    def renew_worker_lease(self, worker_name: str, run_id: str, candidate_generation: str) -> bool:
+        """Refresh only the currently owned worker lease."""
+        now = utc_now()
+        with self.connection() as conn:
+            updated = conn.execute(
+                """
+                UPDATE worker_leases
+                SET updated_at = ?
+                WHERE worker_name = ? AND run_id = ? AND candidate_generation = ?
+                """,
+                (now, worker_name, run_id, candidate_generation),
+            )
+        return updated.rowcount == 1
+
+    def worker_lease_matches(self, worker_name: str, run_id: str, candidate_generation: str) -> bool:
+        """Return whether the persisted lease still names this worker run."""
+        with self.connection() as conn:
             row = conn.execute(
                 """
+                SELECT 1 FROM worker_leases
+                WHERE worker_name = ? AND run_id = ? AND candidate_generation = ?
+                """,
+                (worker_name, run_id, candidate_generation),
+            ).fetchone()
+        return row is not None
+
+    def claim_next_job(
+        self,
+        worker_name: str,
+        *,
+        run_id: str | None = None,
+        candidate_generation: str | None = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Claim one job only if the supplied worker generation still owns its lease."""
+        if (run_id is None) != (candidate_generation is None):
+            raise ValueError('run_id and candidate_generation must be supplied together.')
+        now = utc_now()
+        with self.connection() as conn:
+            conn.execute('BEGIN IMMEDIATE')
+            lease_clause = ''
+            lease_parameters: tuple[str, ...] = ()
+            if run_id is not None and candidate_generation is not None:
+                lease_clause = """
+                    AND EXISTS (
+                        SELECT 1 FROM worker_leases lease
+                        WHERE lease.worker_name = ?
+                          AND lease.run_id = ?
+                          AND lease.candidate_generation = ?
+                    )
+                """
+                lease_parameters = (worker_name, run_id, candidate_generation)
+            row = conn.execute(
+                f"""
                 SELECT * FROM jobs
                 WHERE status = ? AND attempts < max_attempts
+                {lease_clause}
                 ORDER BY created_at ASC
                 LIMIT 1
                 """,
-                (JobStatus.queued.value,),
+                (JobStatus.queued.value, *lease_parameters),
             ).fetchone()
             if row is None:
                 return None
 
-            conn.execute(
-                """
+            update_parameters: tuple[Any, ...] = (
+                JobStatus.running.value,
+                now,
+                now,
+                now,
+                worker_name,
+                run_id,
+                candidate_generation,
+                row['job_id'],
+                JobStatus.queued.value,
+                *lease_parameters,
+            )
+            updated = conn.execute(
+                f"""
                 UPDATE jobs
                 SET status = ?, updated_at = ?, started_at = COALESCE(started_at, ?),
-                    last_heartbeat = ?, attempts = attempts + 1, worker_name = ?, error = NULL
-                WHERE job_id = ?
+                    last_heartbeat = ?, attempts = attempts + 1, worker_name = ?,
+                    claim_run_id = ?, claim_candidate_generation = ?, error = NULL
+                WHERE job_id = ? AND status = ?
+                {lease_clause}
                 """,
-                (
-                    JobStatus.running.value,
-                    now,
-                    now,
-                    now,
-                    worker_name,
-                    row['job_id'],
-                ),
+                update_parameters,
             )
+            if updated.rowcount != 1:
+                return None
             refreshed = conn.execute('SELECT * FROM jobs WHERE job_id = ?', (row['job_id'],)).fetchone()
         return dict(refreshed) if refreshed else None
+
+    def requeue_claimed_job_if_owned(
+        self,
+        job_id: str,
+        *,
+        worker_name: str,
+        run_id: str,
+        candidate_generation: str,
+        error: str,
+    ) -> bool:
+        """Release only the exact claim sealed by one worker run.
+
+        The lease row may already name a successor by the time the stale worker
+        notices the replacement.  The claim token on the job lets that stale
+        worker release its own claim without touching a successor's claim.
+        """
+        if not all(
+            isinstance(value, str) and value.strip()
+            for value in (job_id, worker_name, run_id, candidate_generation, error)
+        ):
+            raise ValueError('Claim release fields must be non-empty strings.')
+        now = utc_now()
+        with self.connection() as conn:
+            conn.execute('BEGIN IMMEDIATE')
+            updated = conn.execute(
+                """
+                UPDATE jobs
+                SET status = ?, updated_at = ?, error = ?, started_at = NULL,
+                    finished_at = NULL, worker_name = NULL,
+                    claim_run_id = NULL, claim_candidate_generation = NULL,
+                    last_heartbeat = NULL
+                WHERE job_id = ? AND status = ? AND worker_name = ?
+                  AND claim_run_id = ? AND claim_candidate_generation = ?
+                """,
+                (
+                    JobStatus.queued.value,
+                    now,
+                    error,
+                    job_id,
+                    JobStatus.running.value,
+                    worker_name,
+                    run_id,
+                    candidate_generation,
+                ),
+            )
+        return updated.rowcount == 1
 
     def touch_heartbeat(self, job_id: str) -> None:
         now = utc_now()
@@ -172,6 +320,41 @@ class QueueDB:
                 'UPDATE jobs SET last_heartbeat = ?, updated_at = ? WHERE job_id = ?',
                 (now, now, job_id),
             )
+
+    def touch_heartbeat_if_owned(
+        self,
+        job_id: str,
+        *,
+        worker_name: str,
+        run_id: str,
+        candidate_generation: str,
+    ) -> bool:
+        """Refresh a heartbeat only for the exact sealed claim owner."""
+        if not all(
+            isinstance(value, str) and value.strip()
+            for value in (job_id, worker_name, run_id, candidate_generation)
+        ):
+            raise ValueError('Claim heartbeat fields must be non-empty strings.')
+        now = utc_now()
+        with self.connection() as conn:
+            updated = conn.execute(
+                """
+                UPDATE jobs
+                SET last_heartbeat = ?, updated_at = ?
+                WHERE job_id = ? AND status = ? AND worker_name = ?
+                  AND claim_run_id = ? AND claim_candidate_generation = ?
+                """,
+                (
+                    now,
+                    now,
+                    job_id,
+                    JobStatus.running.value,
+                    worker_name,
+                    run_id,
+                    candidate_generation,
+                ),
+            )
+        return updated.rowcount == 1
 
     def mark_succeeded(self, job_id: str) -> None:
         now = utc_now()
@@ -185,6 +368,42 @@ class QueueDB:
                 (JobStatus.succeeded.value, now, now, job_id),
             )
 
+    def mark_succeeded_if_owned(
+        self,
+        job_id: str,
+        *,
+        worker_name: str,
+        run_id: str,
+        candidate_generation: str,
+    ) -> bool:
+        """Complete a job only while its exact claim is still present."""
+        if not all(
+            isinstance(value, str) and value.strip()
+            for value in (job_id, worker_name, run_id, candidate_generation)
+        ):
+            raise ValueError('Claim completion fields must be non-empty strings.')
+        now = utc_now()
+        with self.connection() as conn:
+            updated = conn.execute(
+                """
+                UPDATE jobs
+                SET status = ?, updated_at = ?, finished_at = ?, error = NULL
+                WHERE job_id = ? AND status = ? AND worker_name = ?
+                  AND claim_run_id = ? AND claim_candidate_generation = ?
+                """,
+                (
+                    JobStatus.succeeded.value,
+                    now,
+                    now,
+                    job_id,
+                    JobStatus.running.value,
+                    worker_name,
+                    run_id,
+                    candidate_generation,
+                ),
+            )
+        return updated.rowcount == 1
+
     def mark_failed(self, job_id: str, error: str) -> None:
         now = utc_now()
         with self.connection() as conn:
@@ -197,6 +416,44 @@ class QueueDB:
                 (JobStatus.failed.value, now, now, error, job_id),
             )
 
+    def mark_failed_if_owned(
+        self,
+        job_id: str,
+        error: str,
+        *,
+        worker_name: str,
+        run_id: str,
+        candidate_generation: str,
+    ) -> bool:
+        """Fail a job only while its exact claim is still present."""
+        if not all(
+            isinstance(value, str) and value.strip()
+            for value in (job_id, error, worker_name, run_id, candidate_generation)
+        ):
+            raise ValueError('Claim failure fields must be non-empty strings.')
+        now = utc_now()
+        with self.connection() as conn:
+            updated = conn.execute(
+                """
+                UPDATE jobs
+                SET status = ?, updated_at = ?, finished_at = ?, error = ?
+                WHERE job_id = ? AND status = ? AND worker_name = ?
+                  AND claim_run_id = ? AND claim_candidate_generation = ?
+                """,
+                (
+                    JobStatus.failed.value,
+                    now,
+                    now,
+                    error,
+                    job_id,
+                    JobStatus.running.value,
+                    worker_name,
+                    run_id,
+                    candidate_generation,
+                ),
+            )
+        return updated.rowcount == 1
+
     def requeue_job(self, job_id: str, error: str) -> None:
         now = utc_now()
         with self.connection() as conn:
@@ -204,7 +461,8 @@ class QueueDB:
                 """
                 UPDATE jobs
                 SET status = ?, updated_at = ?, error = ?, started_at = NULL, finished_at = NULL,
-                    worker_name = NULL, last_heartbeat = NULL
+                    worker_name = NULL, claim_run_id = NULL,
+                    claim_candidate_generation = NULL, last_heartbeat = NULL
                 WHERE job_id = ?
                 """,
                 (JobStatus.queued.value, now, error, job_id),
@@ -231,6 +489,7 @@ class QueueDB:
                         """
                         UPDATE jobs
                         SET status = ?, updated_at = ?, started_at = NULL, worker_name = NULL,
+                            claim_run_id = NULL, claim_candidate_generation = NULL,
                             error = ?, last_heartbeat = NULL
                         WHERE job_id = ?
                         """,

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import ntpath
 import os
+import re
 import shutil
 import time
 import uuid
@@ -23,6 +24,7 @@ from app.interactive_session_manager import (
 )
 from app.logging_utils import configure_logger
 from app.local_cli_router import build_local_cli_router
+from app.local_cli_service import LocalCliService
 from app.command_packages.runtime import get_command_package_registry
 
 from app.models import (
@@ -49,7 +51,12 @@ from app.models import (
 )
 from app.observation import ensure_viewer_session, latest_frame_metadata_path, latest_frame_path, load_viewer_session
 from app.queue_db import QueueDB
-from app.readiness import build_plain_readiness_failure, load_runtime_readiness_snapshot
+from app.readiness import (
+    build_plain_readiness_failure,
+    load_runtime_readiness_snapshot,
+    readiness_matches_current_worker,
+    resolve_candidate_generation,
+)
 from app.services.job_artifacts import (
     load_job_metadata_json as load_job_artifact_metadata_json,
     read_json_if_exists as _read_json_if_exists,
@@ -71,14 +78,24 @@ db = QueueDB(settings.db_path)
 logger = configure_logger('hwp.api', settings.log_level, settings.logs_root / 'api.log')
 interactive_sessions = InteractiveSessionManager(settings)
 app = FastAPI(title='Windows HWPX Converter Pilot', version='0.2.0')
-app.include_router(build_local_cli_router(settings=settings, interactive_sessions=interactive_sessions))
+local_cli_service = LocalCliService(settings=settings, interactive_sessions=interactive_sessions)
+app.include_router(
+    build_local_cli_router(
+        settings=settings,
+        interactive_sessions=interactive_sessions,
+        service=local_cli_service,
+    )
+)
 
 ensure_viewer_session()
 
 
 def require_runtime_readiness_or_503(task_label: str) -> dict[str, Any]:
     snapshot = load_runtime_readiness_snapshot()
-    if not isinstance(snapshot, dict) or not bool(snapshot.get('ready')):
+    if not readiness_matches_current_worker(
+        snapshot,
+        candidate_generation=resolve_candidate_generation(),
+    ):
         raise HTTPException(status_code=503, detail=build_plain_readiness_failure(task_label))
     return snapshot
 
@@ -379,7 +396,16 @@ def runtime_readiness() -> JSONResponse:
     snapshot = load_runtime_readiness_snapshot()
     if snapshot is None:
         return JSONResponse({'ok': False, 'ready': False, 'detail': build_plain_readiness_failure('runtime')}, status_code=503)
-    status_code = 200 if bool(snapshot.get('ready')) else 503
+    current = readiness_matches_current_worker(
+        snapshot,
+        candidate_generation=resolve_candidate_generation(),
+    )
+    status_code = 200 if current else 503
+    if not current:
+        snapshot = dict(snapshot)
+        snapshot['ready'] = False
+        snapshot['status'] = 'not_ready'
+        snapshot['freshness_error'] = 'worker, candidate generation, or heartbeat is stale.'
     return JSONResponse(snapshot, status_code=status_code)
 
 
@@ -593,8 +619,129 @@ def _interactive_http_error(exc: InteractiveSessionError, *, status_code: int = 
     return HTTPException(status_code=status_code, detail=str(exc))
 
 
-def _interactive_response(session: dict[str, Any]) -> InteractiveSessionResponse:
-    return InteractiveSessionResponse(session=session)
+_PRIVATE_INTERACTIVE_PATH_KEYS = {
+    'path', 'paths', 'source_path', 'document_path', 'working_copy_path',
+    'artifact_path', 'artifact_paths', 'manifest_path', 'output_path',
+    'session_state_path', 'session_events_path', 'operator_status_path',
+    'verify_evidence_retention_path', 'evidence_dir', 'directory', 'root',
+    'working_directory',
+}
+_ABSOLUTE_PATH_IN_STATUS = re.compile(r'(?i)(?:[a-z]:[\\/]|\\\\|/(?:home|srv|tmp|var)/)')
+
+
+def _redact_interactive_status_value(value: Any, *, key: str | None = None) -> Any:
+    """Remove server paths from public interactive status without mutating state."""
+
+    folded_key = str(key or '').casefold()
+    if folded_key in _PRIVATE_INTERACTIVE_PATH_KEYS or (
+        folded_key.endswith('_path') and not folded_key.endswith('_download_path')
+    ):
+        return None
+    if isinstance(value, dict):
+        return {
+            str(child_key): _redact_interactive_status_value(child_value, key=str(child_key))
+            for child_key, child_value in value.items()
+            if str(child_key).casefold() not in _PRIVATE_INTERACTIVE_PATH_KEYS
+            and not (
+                str(child_key).casefold().endswith('_path')
+                and not str(child_key).casefold().endswith('_download_path')
+            )
+        }
+    if isinstance(value, list):
+        return [_redact_interactive_status_value(item) for item in value]
+    if isinstance(value, str):
+        if re.match(r'^[A-Za-z][A-Za-z0-9+.-]*://', value):
+            return value
+        if _ABSOLUTE_PATH_IN_STATUS.search(value):
+            return '<redacted>'
+    return value
+
+
+def _interactive_session_has_managed_origin(
+    session: dict[str, Any],
+    *,
+    artifact_service: Any | None = None,
+) -> bool:
+    """Return whether the managed service proves a working-copy route."""
+
+    session_id = str(session.get('session_id') or '').strip()
+    if not session_id:
+        return False
+    service = artifact_service if artifact_service is not None else local_cli_service
+    try:
+        projection = service.public_artifact_projection(session_id=session_id, session=session)
+    except Exception:
+        return False
+    return isinstance(projection, dict) and isinstance(
+        projection.get('latest_working_copy_download_path'),
+        str,
+    )
+
+
+def _strip_untrusted_artifact_routes(value: Any) -> Any:
+    if isinstance(value, dict):
+        result: dict[str, Any] = {}
+        for key, child in value.items():
+            folded_key = str(key).casefold()
+            if (
+                folded_key == 'download_path'
+                or folded_key.endswith('_download_path')
+                or folded_key in {'latest_recovery_sha256', 'latest_recovery_size_bytes'}
+            ):
+                continue
+            result[str(key)] = _strip_untrusted_artifact_routes(child)
+        return result
+    if isinstance(value, list):
+        return [_strip_untrusted_artifact_routes(item) for item in value]
+    return value
+
+
+def _public_interactive_session(
+    session: dict[str, Any],
+    *,
+    artifact_service: Any | None = None,
+) -> dict[str, Any]:
+    """Project an interactive record for external HTTP/MCP consumers."""
+
+    public = _redact_interactive_status_value(session)
+    if not isinstance(public, dict):
+        public = {}
+    session_id = str(session.get('session_id') or '').strip()
+    if session.get('source_path') and 'source_path' not in public:
+        public['source_path'] = '<redacted>'
+    artifacts = _strip_untrusted_artifact_routes(public.get('artifacts'))
+    if not isinstance(artifacts, dict):
+        artifacts = {}
+    service = artifact_service if artifact_service is not None else local_cli_service
+    authoritative: dict[str, Any] = {}
+    if session_id:
+        try:
+            projection = service.public_artifact_projection(session_id=session_id, session=session)
+            if isinstance(projection, dict):
+                authoritative = {
+                    str(key): value
+                    for key, value in projection.items()
+                    if str(key).casefold().endswith('_download_path')
+                    and isinstance(value, str)
+                }
+        except Exception:
+            authoritative = {}
+    artifacts.update(authoritative)
+    public['artifacts'] = artifacts
+    download_path = authoritative.get('latest_working_copy_download_path')
+    if session_id and session.get('source_path') and isinstance(download_path, str):
+        public['source_path'] = download_path
+    return public
+
+
+def _interactive_response(
+    session: dict[str, Any],
+    *,
+    artifact_service: Any | None = None,
+) -> InteractiveSessionResponse:
+    return InteractiveSessionResponse(
+        session=_public_interactive_session(session, artifact_service=artifact_service),
+    )
 
 
 def _load_json_dict(path: Path) -> dict[str, Any] | None:
@@ -1297,7 +1444,7 @@ def interactive_session_lock(request: InteractiveLockRequest) -> InteractiveSess
 
 @app.post('/interactive/session/verify-pre', response_model=InteractiveSessionResponse)
 def interactive_session_verify_pre(request: InteractiveVerificationRequest) -> InteractiveSessionResponse:
-    # Verify-pre remains first-class because Jun wants the pass/fail verdict visible
+    # Verify-pre remains first-class so the pass/fail verdict stays visible
     # in logs/TUI output immediately, not only as nested internal evidence.
     verify_result = _build_interactive_verification_result('verify-pre', request)
     summary = request.summary or 'Pre-apply verification recorded.'

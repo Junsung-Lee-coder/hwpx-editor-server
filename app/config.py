@@ -3,7 +3,7 @@ from __future__ import annotations
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import field_validator
+from pydantic import AliasChoices, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -12,11 +12,19 @@ class Settings(BaseSettings):
         env_file='.env',
         env_prefix='HWP_',
         extra='ignore',
+        populate_by_name=True,
     )
 
     api_host: str = '127.0.0.1'
     api_port: int = 8765
     spool_root: Path = Path('./spool')
+    pdftoppm_path: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices('HWP_PDFTOPPM', 'HWP_PDFTOPPM_PATH'),
+    )
+    source_manifest: Path | None = None
+    api_task_name: str = 'hwpx-editor-api'
+    worker_task_name: str = 'hwpx-editor-worker'
     allowed_extensions: str = '.hwpx,.hwp'
     max_upload_mb: int = 50
     poll_interval_seconds: int = 3
@@ -30,6 +38,13 @@ class Settings(BaseSettings):
     # These map to the registry-backed module alias that suppresses the file-path/security confirmation.
     security_module_dll: str = 'FilePathCheckDLL'
     security_module_name: str = 'FilePathCheckerModule'
+
+    @field_validator('api_port')
+    @classmethod
+    def _validate_api_port(cls, value: int) -> int:
+        if not 1 <= value <= 65535:
+            raise ValueError('api_port must be between 1 and 65535')
+        return value
 
     @field_validator('spool_root', mode='before')
     @classmethod

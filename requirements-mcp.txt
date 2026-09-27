@@ -1,0 +1,6 @@
+# Optional separate-process adapter, not an installer/runtime dependency.
+# Official SDK tag v2.1.1: 0921d94a74db900dccd2d534842aa7b6160542d2
+mcp==2.1.1
+# Page proof reuses the existing local CLI and Pillow/Poppler implementation.
+requests>=2.32,<3.0
+pillow>=11.2,<12.0

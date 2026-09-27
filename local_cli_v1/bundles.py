@@ -160,6 +160,8 @@ _STEP_KEYS: dict[str, frozenset[str]] = {
             'cell_margin_hu',
             'cell_margin_mm',
             'vertical_align',
+            'fill_color',
+            'border',
             'confirm_layout',
             'max_controls',
         }
@@ -1751,6 +1753,8 @@ def _build_cell_format_exact(argv: Sequence[str]) -> BundleSpec:
     format_group.add_argument('--cell-margin-hu', type=float, help='Set all current target-cell margins to this exact HWPUNIT value')
     format_group.add_argument('--cell-margin-mm', type=float, help='Set all current target-cell margins to this exact millimeter value')
     format_group.add_argument('--vertical-align', choices=('top', 'center', 'middle', 'bottom'), help='Apply native table-cell vertical alignment')
+    format_group.add_argument('--fill-color', help='Apply an exact six-digit RGB fill color such as #12ABEF')
+    format_group.add_argument('--border', choices=('none',), help='Remove all borders from the exact target cell')
     parser.add_argument('--confirm-layout', action='store_true', required=True, help='Required explicit confirmation for one-cell formatting mutation')
     args = _parse_bundle_args(parser, argv)
     fields, target_id, _expected_hash, expected_page = _exact_control_target_fields(args)
@@ -1765,6 +1769,15 @@ def _build_cell_format_exact(argv: Sequence[str]) -> BundleSpec:
             raise BundleError('--cell-margin-mm is outside the safe range.')
         fields['cell_margin_mm'] = float(args.cell_margin_mm)
         op_summary = f'cell_margin_mm={float(args.cell_margin_mm):g}'
+    elif args.fill_color is not None:
+        fill_color = str(args.fill_color).strip().upper()
+        if re.fullmatch(r'#[0-9A-F]{6}', fill_color) is None:
+            raise BundleError('--fill-color must be a six-digit hex color like #12ABEF.')
+        fields['fill_color'] = fill_color
+        op_summary = f'fill_color={fill_color}'
+    elif args.border is not None:
+        fields['border'] = str(args.border)
+        op_summary = f'border={args.border}'
     else:
         vertical_align = 'center' if args.vertical_align == 'middle' else str(args.vertical_align)
         fields['vertical_align'] = vertical_align
@@ -1773,8 +1786,8 @@ def _build_cell_format_exact(argv: Sequence[str]) -> BundleSpec:
         name='cell-format-exact',
         summary='Apply exactly one pre-proven target-cell format change; fail closed on target/hash/page/scope mismatch.',
         where=f'Table target {target_id!r} inside requested section/page scope, expected page {expected_page}.',
-        how='Runs read-only where, then one `cell_format_exact` primitive that enters the exact matching table cell and applies documented pyhwpx cell-margin or native TableVAlign action.',
-        changed='Mutates one target table cell format only if target id, proof_hash, expected page, and page/scope checks all match; server returns pre/post metrics where available.',
+        how='Runs read-only where, then one `cell_format_exact` primitive that enters the exact matching table cell and applies one documented pyhwpx cell-margin call with all four sides explicit in HWPUNIT, or one native TableVAlign action.',
+        changed='Mutates one target table cell format only if target id, proof_hash, expected page, page/scope checks, and fresh valid four-side readback all match; server returns pre/post metrics and fails closed on any missing or mismatched native evidence.',
         steps=(
             _where_step('where:before-cell-format'),
             _step('cell_format_exact', 'mutate:cell-format-exact', **fields),
@@ -2263,7 +2276,7 @@ def bundle_help(name: str) -> str:
     if bundle_name == 'section-control-move-resize-exact':
         return 'usage: hwpx bundle-dump --with-meta section-control-move-resize-exact (--section-anchor TEXT | --page-from N [--page-to N]) --target-id ID --expected-hash HASH --expected-page N [--scale-percent PCT] [--move-dx-mm MM] [--move-dy-mm MM] --confirm-layout\n       moves/resizes one exact pre-proven control only after target/hash/page/scope proof matches'
     if bundle_name == 'cell-format-exact':
-        return 'usage: hwpx bundle-dump --with-meta cell-format-exact (--section-anchor TEXT | --page-from N [--page-to N]) --target-id ID --expected-hash HASH --expected-page N (--cell-margin-hu HU | --cell-margin-mm MM | --vertical-align top|center|middle|bottom) --confirm-layout\n       applies one exact pre-proven target-cell format change only after target/hash/page/scope proof matches'
+        return 'usage: hwpx bundle-dump --with-meta cell-format-exact (--section-anchor TEXT | --page-from N [--page-to N]) --target-id ID --expected-hash HASH --expected-page N (--cell-margin-hu HU | --cell-margin-mm MM | --vertical-align top|center|middle|bottom | --fill-color #RRGGBB | --border none) --confirm-layout\n       applies one exact pre-proven target-cell margin, alignment, fill, or border change only after target/hash/page/scope proof matches'
     if bundle_name == 'table-column-width-exact':
         return 'usage: hwpx bundle-dump --with-meta table-column-width-exact (--section-anchor TEXT | --page-from N [--page-to N]) --target-id ID --expected-hash HASH --expected-page N --expected-preimage-sha256 SHA256 --expected-cell-inventory-hash SHA256 --expected-document-text-hash SHA256 --expected-text-char-count N --expected-nonempty-line-count N --expected-div0-count N --expected-rows N --expected-cols N --expected-total-width-mm MM --expected-table-height-mm MM --expected-control-count N --expected-bindata-manifest-hash SHA256 --requested-widths-mm MM [MM ...] --confirm-layout\n       guarded native pyhwpx.set_col_width(widths_mm, as_=mm) with exact preimage, table, text, control, BinData, fixed-total, readback, and unsaved rollback proof'
     raise BundleError(f'No help registered for bundle {name!r}')

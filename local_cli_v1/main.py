@@ -4,6 +4,7 @@ import argparse
 import datetime as _dt
 import hashlib
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -48,6 +49,7 @@ from .output_parser import (
 )
 from .readback_diff import format_readback_diff_human, load_readback_manifest, summarize_readback_diff
 from .gate_verdict import load_manifest as load_gate_manifest, summarize_gate_verdict
+from .proof_packet import ProofPacketError, build_proof_packet, seal_native_border_readback
 from .safe_schema import build_safe_agent_schema
 from .static_inspector import (
     build_field_fill_plan,
@@ -57,8 +59,10 @@ from .static_inspector import (
     output_format_policy,
     quick_render_static,
 )
-from .state import clear_state, clear_session_binding, default_state_path, load_state, save_state
+from .state import StatePersistenceError, clear_state, clear_session_binding, default_state_path, load_state, save_state, update_state
 from .transport import ApiError, DEFAULT_BASE_URL, download_to_path, get_json, post_file, post_json
+from app.config import get_settings
+from app.poppler import PopplerResolutionError, resolve_pdftoppm
 
 
 NO_MUTATION_TEXT = '수정 안 됨 / no mutation performed'
@@ -86,6 +90,7 @@ _ensure_utf8_stdio()
 LOCAL_METADATA_NOTES: dict[str, str] = {
     'help': 'local workflow guidance; no server call',
     'command-status': 'local parser + bundle registry migration metadata; no runtime probe',
+
     'safe-schema': 'local read-only safe operation schema for agents; exposes only read/render/info/planning/gate commands and denies mutation/XML/ZIP/BinData patch paths',
     'bundle-list': 'local bundle registry metadata; no server call',
     'bundles': 'alias of bundle-list; local bundle registry metadata; no server call',
@@ -97,6 +102,8 @@ LOCAL_METADATA_NOTES: dict[str, str] = {
     'bundle-compose': 'alias of create-bundle; writes explicit command-bundle JSON without executing it',
     'state': 'local cache inspection only; no server call or document mutation',
     'reset-state': 'local cache reset only; no server call or document mutation',
+    'proof-packet': 'copies cached delivery/proof artifacts and writes hashes; no server call; no document mutation',
+    'native-border-readback': 'seals candidate-bound native pre-quit and post-reopen border values into local evidence; no server call or document mutation',
     'readback-diff': 'local read-only source-vs-candidate readback manifest diff prioritized for font, size, native table, inside/outside-table, and control/image drift; bounded compact output with optional raw artifact',
     'static-info': 'local read-only secondary HWPX package/static inventory; no mutation; Hancom-native corroboration required before QA PASS',
     'static-read': 'local read-only secondary HWPX package/static text/table/header/footer/footnote/equation/image inventory; no mutation; Hancom-native corroboration required',
@@ -108,6 +115,7 @@ LOCAL_METADATA_NOTES: dict[str, str] = {
 }
 
 DIRECT_ROUTE_NOTES: dict[str, str] = {
+    'command-reconcile': 'durable timed-out native command reconciliation through the server route; no retry is admitted until terminal outcome',
     'open': 'lifecycle/session binding still uses direct route; original file remains untouched',
     'status': 'operator digest still uses direct status route plus local route probe',
     'session-health': 'runtime/route probe uses direct status/probe calls; not a document mutation',
@@ -266,13 +274,34 @@ def build_parser() -> argparse.ArgumentParser:
     safe_schema_parser = subparsers.add_parser('safe-schema', help='Show non-mutating agent-safe command schema')
     safe_schema_parser.add_argument('--json', action='store_true', help='Print safe schema JSON')
     subparsers.add_parser('command-status', help='Show command states: bundle-backed / direct-backlog / disabled')
+    command_reconcile_parser = subparsers.add_parser(
+        'command-reconcile',
+        help='Reconcile one durable timed-out native command before retrying or closing a session',
+    )
+    command_reconcile_parser.add_argument('--command-id', required=True)
+    command_reconcile_parser.add_argument('--session-id', default=None)
+    command_reconcile_parser.add_argument('--json', action='store_true', help='Print reconciliation JSON')
 
     open_parser = subparsers.add_parser('open', help='Open a local HWP/HWPX file into a live server session')
     open_parser.add_argument('file', type=Path)
+    open_parser.add_argument('--json', action='store_true', help='Print the structured lifecycle response')
 
-    subparsers.add_parser('status', help='Show thin runtime status')
+    status_parser = subparsers.add_parser('status', help='Show thin runtime status')
+    status_parser.add_argument('--json', action='store_true', help='Print the structured runtime status JSON')
     subparsers.add_parser('session-health', aliases=['bundle-health'], help='Check cached session and command-bundle route health')
     subparsers.add_parser('state', help='Show cached local session and artifact state')
+    proof_packet_parser = subparsers.add_parser('proof-packet', help='Collect cached proof artifacts without a server call or document mutation')
+    proof_packet_parser.add_argument('--out-dir', type=Path, required=True, help='Destination directory for the proof packet')
+    proof_packet_parser.add_argument('--json', action='store_true', help='Print the packet manifest as JSON')
+    native_border_parser = subparsers.add_parser(
+        'native-border-readback',
+        help='Seal candidate-bound native border values read before save/quit and after reopen',
+    )
+    native_border_parser.add_argument('--pre-quit', type=Path, required=True, help='JSON object containing the native value readback before save/quit')
+    native_border_parser.add_argument('--persisted', type=Path, required=True, help='JSON object containing the native value readback after reopening the saved document')
+    native_border_parser.add_argument('--target-identity', type=Path, required=True, help='JSON object identifying the selected native target')
+    native_border_parser.add_argument('--out', type=Path, required=True, help='Exact output path for the candidate-bound readback artifact')
+    native_border_parser.add_argument('--json', action='store_true', help='Print the sealed artifact envelope as JSON')
     subparsers.add_parser('reset-state', help='Clear the cached local CLI state file without calling the server')
 
     find_parser = subparsers.add_parser('find', help='Find text in the active working copy')
@@ -281,6 +310,9 @@ def build_parser() -> argparse.ArgumentParser:
     find_parser.add_argument('--with-page', action='store_true', help='Include page-candidate fields and approximation warnings')
     find_parser.add_argument('--around', type=int, default=0, choices=range(0, 6), help='Include N before/after text blocks for each match')
     find_parser.add_argument('--proof-match', type=int, help='Return one read-only match proof by 1-based match index')
+    find_parser.add_argument('--proof-out-dir', type=Path, help='Directory for rendered proof pages; defaults next to the source')
+    find_parser.add_argument('--dpi', type=int, default=160, help='Render DPI for --proof-match')
+    find_parser.add_argument('--contact-sheet', action='store_true', help='Create a proof contact sheet when rendering --proof-match')
 
     info_parser = subparsers.add_parser('info', help='Show nearby context for a match')
     info_parser.add_argument('target')
@@ -637,7 +669,8 @@ def build_parser() -> argparse.ArgumentParser:
     qa_parser.add_argument('--source-hash', help='Expected/forbidden source SHA256 freshness guard')
     qa_parser.add_argument('--out-dir', type=Path, required=True, help='Output directory for QA PDF and manifest')
     qa_parser.add_argument('--json', action='store_true', help='Print QA manifest JSON')
-    subparsers.add_parser('save', help='Save the active working copy and download it locally')
+    save_parser = subparsers.add_parser('save', help='Save the active working copy and download it locally')
+    save_parser.add_argument('--out', type=Path, help='Exact local destination path; no collision suffix is added')
     subparsers.add_parser('working-copy', help='Download the latest saved working copy without re-saving')
     subparsers.add_parser('undo', help='Undo the most recent live document change')
     subparsers.add_parser('redo', help='Redo the most recently undone live document change')
@@ -666,15 +699,20 @@ def build_parser() -> argparse.ArgumentParser:
     )
     page_screenshot_parser.add_argument('--page', type=int, default=1, help='1-based page number to render')
     page_screenshot_parser.add_argument('--dpi', type=int, default=160, help='render DPI')
+    page_screenshot_parser.add_argument('--out', type=Path, help='Exact PNG destination path')
+    page_screenshot_parser.add_argument('--out-dir', type=Path, help='Directory for the default page proof filename')
     page_screenshot_parser.add_argument('--json', action='store_true', help='Print the stable JSON envelope')
 
     export_parser = subparsers.add_parser('export', help='Export the active working copy to PDF')
+    export_parser.add_argument('--out', type=Path, help='Exact PDF destination path')
     export_parser.add_argument('--bundle-proof', action='store_true', help='Use the bundle-backed export_pdf proof slice instead of the legacy direct export route')
     export_parser.add_argument('--json', action='store_true', help='Print the stable JSON envelope')
-    subparsers.add_parser('close', help='Close the active live document session')
+    close_parser = subparsers.add_parser('close', help='Close the active live document session')
+    close_parser.add_argument('--json', action='store_true', help='Print the structured lifecycle response')
 
     type_parser = subparsers.add_parser('type', help='Replace the selection, or insert text at the caret')
     type_parser.add_argument('text')
+    type_parser.add_argument('--insert-at-caret', action='store_true', help='Explicitly insert without using a cached selection')
 
     for command_name, help_text, position in (
         ('insert-before-anchor', 'Insert text before a text anchor using one live anchor resolution', 'before-anchor'),
@@ -869,6 +907,275 @@ def _state_session_id() -> str | None:
     return str(session_id) if session_id else None
 
 
+def _state_cas_snapshot() -> tuple[dict[str, Any], int, str | None]:
+    state = load_state()
+    return (
+        state,
+        int(state.get('state_generation', 0)),
+        str(state.get('session_id') or '').strip() or None,
+    )
+
+
+def _candidate_root_has_reparse_component(root: Path) -> bool:
+    current = Path(root)
+    while True:
+        try:
+            if current.is_symlink():
+                return True
+            attributes = int(getattr(current.lstat(), 'st_file_attributes', 0))
+            if attributes & 0x400:
+                return True
+        except OSError:
+            if not current.exists():
+                current = current.parent
+                if current == Path(root).anchor:
+                    return False
+                continue
+            return True
+        parent = current.parent
+        if parent == current:
+            return False
+        current = parent
+
+
+def _read_candidate_identity(root: Path | None = None) -> dict[str, Any]:
+    """Read and verify the install marker against the installed source bytes.
+
+    The default root is derived from this installed module, never from the
+    caller's working directory.  The marker and source manifest are both
+    untrusted metadata, so the manifest hash and every declared source file
+    are checked before any identity is returned to callers.
+    """
+
+    raw_module_root = (root if root is not None else Path(__file__).parent.parent).expanduser()
+    if _candidate_root_has_reparse_component(raw_module_root):
+        return {}
+    module_root = raw_module_root.absolute()
+    marker_path = module_root / '.hwpx-install.json'
+    manifest_path = module_root / 'source-manifest.json'
+    try:
+        if (
+            not marker_path.is_file()
+            or marker_path.is_symlink()
+            or marker_path.stat().st_size > 64 * 1024
+            or not manifest_path.is_file()
+            or manifest_path.is_symlink()
+            or manifest_path.stat().st_size > 8 * 1024 * 1024
+        ):
+            return {}
+        marker = json.loads(marker_path.read_text(encoding='utf-8'))
+        manifest_bytes = manifest_path.read_bytes()
+        manifest = json.loads(manifest_bytes.decode('utf-8-sig'))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return {}
+    if not isinstance(marker, dict) or not isinstance(manifest, dict):
+        return {}
+    if marker.get('schema_version') != 'hwpx/windows-install-marker/v1':
+        return {}
+    repository = marker.get('repository')
+    commit = marker.get('commit')
+    tree = marker.get('tree')
+    manifest_sha256 = marker.get('source_manifest_sha256')
+    if not all(isinstance(value, str) and value.strip() for value in (repository, commit, tree, manifest_sha256)):
+        return {}
+    repository_text = str(repository).strip()
+    commit_text = str(commit).strip()
+    tree_text = str(tree).strip()
+    manifest_text = str(manifest_sha256).strip().lower()
+    if not all((
+        re.fullmatch(r'[0-9A-Fa-f]{40}', commit_text),
+        re.fullmatch(r'[0-9A-Fa-f]{40}', tree_text),
+        re.fullmatch(r'[0-9A-Fa-f]{64}', manifest_text),
+    )):
+        return {}
+    if hashlib.sha256(manifest_bytes).hexdigest() != manifest_text:
+        return {}
+    if any(
+        manifest.get(field) != expected
+        for field, expected in (
+            ('repository', repository_text),
+            ('commit', commit_text),
+            ('tree', tree_text),
+        )
+    ):
+        return {}
+    files = manifest.get('files')
+    file_count = manifest.get('file_count')
+    if manifest.get('schema_version') != 'hwpx/source-bundle/v1' or not isinstance(files, list):
+        return {}
+    if len(files) > 2048 or not isinstance(file_count, int) or file_count != len(files):
+        return {}
+    seen_paths: set[str] = set()
+    module_root_resolved = module_root.resolve()
+    for entry in files:
+        if not isinstance(entry, dict):
+            return {}
+        relative = entry.get('path')
+        declared_size = entry.get('size')
+        declared_hash = entry.get('sha256')
+        if (
+            not isinstance(relative, str)
+            or not relative.strip()
+            or '\\' in relative
+            or not isinstance(declared_size, int)
+            or declared_size < 0
+            or not isinstance(declared_hash, str)
+            or not re.fullmatch(r'[0-9A-Fa-f]{64}', declared_hash)
+        ):
+            return {}
+        relative_path = Path(relative)
+        if relative_path.is_absolute() or '..' in relative_path.parts:
+            return {}
+        normalized = relative_path.as_posix()
+        if normalized in seen_paths:
+            return {}
+        seen_paths.add(normalized)
+        installed_path = module_root / relative_path
+        try:
+            installed_resolved = installed_path.resolve()
+            installed_resolved.relative_to(module_root_resolved)
+            current = module_root
+            for part in relative_path.parts:
+                current = current / part
+                if current.is_symlink():
+                    return {}
+            if not installed_resolved.is_file() or installed_resolved.stat().st_size != declared_size:
+                return {}
+            if _sha256_file(installed_resolved) != declared_hash.lower():
+                return {}
+        except (OSError, ValueError):
+            return {}
+    identity_source = manifest.get('identity_source')
+    identity_verified = manifest.get('identity_verified')
+    if (
+        identity_source not in {'git', 'asserted-gitless'}
+        or not isinstance(identity_verified, bool)
+        or (identity_source == 'git' and not identity_verified)
+        or (identity_source == 'asserted-gitless' and identity_verified)
+    ):
+        return {}
+    marker_generation = marker.get('candidate_generation')
+    expected_generation = f'{commit_text}:{tree_text}:{manifest_text}'
+    if marker_generation is not None and marker_generation != expected_generation:
+        return {}
+    return {
+        'repository': repository_text,
+        'commit': commit_text,
+        'tree': tree_text,
+        'manifest_sha256': manifest_text,
+        'source_manifest_sha256': manifest_text,
+        'candidate_generation': expected_generation,
+        'identity_source': identity_source,
+        'identity_verified': identity_verified,
+        'candidate_identity_authenticated': identity_source == 'git' and identity_verified is True,
+    }
+
+
+def _read_required_json_mapping(path: Path, *, label: str, max_bytes: int = 64 * 1024) -> dict[str, Any]:
+    source = path.expanduser().resolve()
+    try:
+        if not source.is_file():
+            raise ProofPacketError(f'{label} JSON file was not found: {source}')
+        if source.stat().st_size > max_bytes:
+            raise ProofPacketError(f'{label} JSON file exceeds the bounded size limit: {source}')
+        payload = json.loads(source.read_bytes().decode('utf-8-sig'))
+    except ProofPacketError:
+        raise
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise ProofPacketError(f'{label} JSON file could not be read safely: {source}') from exc
+    if not isinstance(payload, dict):
+        raise ProofPacketError(f'{label} JSON file must contain an object: {source}')
+    return payload
+
+
+def _record_native_border_readback(
+    *,
+    pre_quit_path: Path,
+    persisted_path: Path,
+    target_identity_path: Path,
+    destination: Path,
+) -> dict[str, Any]:
+    identity = _read_candidate_identity()
+    state_before_border, border_expected_generation, border_expected_session = _state_cas_snapshot()
+    if not identity:
+        raise ProofPacketError('native border readback requires a complete installed candidate identity marker bound to the installed module root')
+    pre_quit_source = pre_quit_path.expanduser().resolve()
+    persisted_source = persisted_path.expanduser().resolve()
+    target_source = target_identity_path.expanduser().resolve()
+    output = destination.expanduser().resolve()
+    if output in {pre_quit_source, persisted_source, target_source}:
+        raise ProofPacketError('native border readback output must not overwrite an input JSON file')
+    pre_quit = _read_required_json_mapping(pre_quit_source, label='pre-quit readback')
+    persisted = _read_required_json_mapping(persisted_source, label='persisted readback')
+    target_identity = _read_required_json_mapping(target_source, label='target identity')
+    sealed = seal_native_border_readback(
+        destination=output,
+        candidate_generation=identity['candidate_generation'],
+        source_manifest_sha256=identity['manifest_sha256'],
+        target_identity=target_identity,
+        pre_quit_readback=pre_quit,
+        persisted_readback=persisted,
+    )
+    updated_state = update_state(
+        lambda state: {
+            **state,
+            'repository': identity['repository'],
+            'commit': identity['commit'],
+            'tree': identity['tree'],
+            'manifest_sha256': identity['manifest_sha256'],
+            'source_manifest_sha256': identity['manifest_sha256'],
+            'candidate_generation': identity['candidate_generation'],
+            'target_identity': target_identity,
+            'native_border_target_identity': target_identity,
+            'last_native_border_readback_path': str(output),
+        },
+        expected_generation=border_expected_generation,
+        expected_session_id=border_expected_session,
+    )
+    return {
+        'schema_version': 'local-cli/native-border-readback-command/v1',
+        'ok': True,
+        'command': 'native-border-readback',
+        'artifact_path': str(output),
+        'proof_binding': {
+            'candidate_generation': identity['candidate_generation'],
+            'source_manifest_sha256': identity['manifest_sha256'],
+            'target_identity': target_identity,
+            'session_id': updated_state.get('session_id'),
+        },
+        'artifact': sealed,
+    }
+
+
+def _with_lifecycle_identity(payload: dict[str, Any], *, base_url: str, command: str) -> dict[str, Any]:
+    """Add cached session identity to command output used by native acceptance."""
+
+    state = load_state()
+    result = dict(payload)
+    session_id = state.get('session_id')
+    result.update({
+        'base_url': base_url,
+        'command': command,
+        'session_id': session_id,
+        'working_copy_id': result.get('working_copy_id') or session_id,
+        'source_path': state.get('source_path'),
+        'managed_fixture': state.get('source_path'),
+        'live_session_bound': True,
+    })
+    result.update(_read_candidate_identity())
+    return result
+
+
+def _with_status_identity(payload: dict[str, Any]) -> dict[str, Any]:
+    result = dict(payload)
+    result.update({
+        'schema_version': 'local-cli/status/v1',
+        'command': 'status',
+    })
+    result.update(_read_candidate_identity())
+    return result
+
+
 def _resolve_base_url(explicit_base_url: str | None) -> str:
     if explicit_base_url and explicit_base_url.strip():
         return explicit_base_url.rstrip('/')
@@ -937,11 +1244,18 @@ def _read_manifest_data(manifest_path: Path | None) -> dict[str, Any] | None:
         return None
 
 
-def _artifact_envelope(*, role: str, path: Path, next_step: str, manifest_path: Path | None = None) -> dict[str, Any]:
+def _artifact_envelope(
+    *,
+    role: str,
+    path: Path,
+    next_step: str,
+    manifest_path: Path | None = None,
+    command: str | None = None,
+) -> dict[str, Any]:
     proof = str(path)
     if manifest_path is not None:
         proof = f'{path} (manifest: {manifest_path})'
-    return build_envelope(
+    envelope = build_envelope(
         where=str(path),
         how=role,
         changed='artifact written/downloaded; original source file untouched by local CLI',
@@ -952,10 +1266,14 @@ def _artifact_envelope(*, role: str, path: Path, next_step: str, manifest_path: 
         manifest_path=manifest_path,
         manifest_data=_read_manifest_data(manifest_path),
     )
+    envelope.update(_read_candidate_identity())
+    if command:
+        envelope['command'] = command
+    return envelope
 
 
-def _print_artifact_result(*, role: str, path: Path, next_step: str, manifest_path: Path | None = None, json_output: bool = False) -> None:
-    envelope = _artifact_envelope(role=role, path=path, next_step=next_step, manifest_path=manifest_path)
+def _print_artifact_result(*, role: str, path: Path, next_step: str, manifest_path: Path | None = None, json_output: bool = False, command: str | None = None) -> None:
+    envelope = _artifact_envelope(role=role, path=path, next_step=next_step, manifest_path=manifest_path, command=command)
     print(dumps_envelope_json(envelope) if json_output else format_human_envelope(envelope))
 
 
@@ -1003,7 +1321,12 @@ def _print_status(payload: dict[str, Any]) -> None:
         print(f"route error: {payload.get('route_error')}")
     if payload.get('server_primitive_version'):
         print(f"server primitives: {payload.get('server_primitive_version')}")
-
+    if payload.get('command_package_op_count') is not None:
+        print(f"command packages: {payload.get('command_package_op_count')} ops")
+    if payload.get('command_package_ops'):
+        print(f"command package sample: {', '.join(str(item) for item in payload.get('command_package_ops')[:8])}")
+    if payload.get('command_package_revision'):
+        print(f"command package revision: {payload.get('command_package_revision')}")
 
 def _probe_command_bundle_route(base_url: str) -> dict[str, Any]:
     """Return route health without needing an active document session."""
@@ -1051,8 +1374,10 @@ def _print_session_health(base_url: str) -> None:
         print(f'runtime: unknown ({exc.message})')
     route = _probe_command_bundle_route(base_url)
     print(f"command-bundle route: {'active' if route.get('command_bundle_route_active') else 'unavailable'}")
-    if route.get('error'):
-        print(f"route error: {route.get('error')}")
+    if route.get('probe_status'):
+        print(f"command-bundle probe: {route.get('probe_status')}")
+    if route.get('route_error') or route.get('error'):
+        print(f"route error: {route.get('route_error') or route.get('error')}")
     if route.get('server_primitive_version'):
         print(f"server primitives: {route.get('server_primitive_version')}")
 
@@ -1086,17 +1411,21 @@ def _print_matches(payload: dict[str, Any]) -> None:
         section = Path(str(match.get('section') or '')).name
         paragraph = match.get('section_paragraph_index')
         excerpt = str(match.get('excerpt') or '').strip()
+        line = f'{number}. [{section}:{paragraph}]'
         page_candidate = match.get('page_candidate')
-        page = f'page~{page_candidate}' if page_candidate not in (None, '') else 'page~?'
+        if page_candidate not in (None, ''):
+            line += f' page~{page_candidate}'
         table = match.get('table') if isinstance(match.get('table'), dict) else {}
-        if match.get('inside_table'):
-            scope = f"table {table.get('cell_addr') or '?'}"
-        else:
-            scope = 'outside-table'
+        if match.get('inside_table') is True:
+            line += f" table {table.get('cell_addr') or '?'}"
+        elif match.get('inside_table') is False or table:
+            line += ' outside-table'
         digest = str(match.get('normalized_hash') or '')
         if digest.startswith('sha256:'):
-            digest = digest[:19]
-        print(f'{number}. [{section}:{paragraph}] {page} {scope} {digest} {excerpt}'.rstrip())
+            line += f' {digest[:19]}'
+        if excerpt:
+            line += f' {excerpt}'
+        print(line)
         headings = match.get('nearby_headings') if isinstance(match.get('nearby_headings'), list) else []
         if headings:
             print(f"   heading: {' > '.join(str(item) for item in headings[-3:])}")
@@ -1455,17 +1784,20 @@ def _execute_named_bundle(
     base_url: str,
     bundle_name: str,
     bundle_args: list[str] | None = None,
+    *,
+    session_id: str | None = None,
 ) -> tuple[Any, dict[str, Any]]:
     """Build a local bundle, send strict steps JSON, and return raw server output."""
 
     spec = build_named_bundle(bundle_name, bundle_args or [])
     request_payload = spec.server_payload()
-    request_payload['session_id'] = _state_session_id()
+    request_payload['session_id'] = _state_session_id() if session_id is None else session_id
     return spec, post_json(base_url, '/local-cli/command-bundle', request_payload)
 
 
 def _reopen_fresh_session(base_url: str, source_hwp: Path | None) -> dict[str, Any]:
     state = load_state()
+    state_generation = int(state.get('state_generation', 0))
     source = source_hwp or (Path(str(state.get('source_path'))).expanduser() if state.get('source_path') else None)
     if source is None:
         raise ApiError('--fresh-session requires --source-hwp or a cached source path from `hwpx open`.')
@@ -1475,23 +1807,45 @@ def _reopen_fresh_session(base_url: str, source_hwp: Path | None) -> dict[str, A
     suffix = source.suffix.lower()
     if suffix not in {'.hwp', '.hwpx'}:
         raise ApiError(f'Fresh-session source must be .hwp or .hwpx, got: {suffix or "<none>"}')
-    existing_session_id = _state_session_id()
+    existing_session_id = str(state.get('session_id') or '').strip() or None
     if existing_session_id:
         status = get_json(base_url, '/local-cli/status')
         if status.get('live_session_bound'):
             if status.get('working_copy_dirty'):
                 raise ApiError('Refusing --fresh-session while the active live session is dirty. Save/close it first.')
             post_json(base_url, '/local-cli/close', {'session_id': existing_session_id})
-            clear_session_binding()
+            clear_session_binding(
+                expected_generation=state_generation,
+                expected_session_id=existing_session_id,
+            )
+            state = load_state()
+            state_generation = int(state.get('state_generation', 0))
+        else:
+            clear_session_binding(
+                expected_generation=state_generation,
+                expected_session_id=existing_session_id,
+            )
+            state = load_state()
+            state_generation = int(state.get('state_generation', 0))
+    else:
+        # Clear stale non-session fields through the same locked transaction so
+        # the subsequent open cannot overwrite a concurrently changed state.
+        clear_session_binding(expected_generation=state_generation)
+        state = load_state()
+        state_generation = int(state.get('state_generation', 0))
+    reopen_expected_session = str(state.get('session_id') or '').strip() or None
     payload = post_file(base_url, '/local-cli/open', field_name='file', file_path=source)
-    save_state(
-        {
+    update_state(
+        lambda _state: {
             'base_url': base_url,
             'session_id': payload.get('session_id'),
             'source_filename': payload.get('source_filename') or source.name,
             'source_path': str(source),
             'fresh_session_reopened_at': _dt.datetime.now(_dt.timezone.utc).isoformat(),
-        }
+            **_read_candidate_identity(),
+        },
+        expected_generation=state_generation,
+        expected_session_id=reopen_expected_session,
     )
     return {
         'requested': True,
@@ -1545,10 +1899,38 @@ def _print_cell_replace_payload(payload: dict[str, Any]) -> None:
     _print_current_state(payload)
 
 
-def _artifact_destination(kind: str, *, page: int | None = None) -> Path:
-    state = load_state()
-    source_path_raw = state.get('source_path')
-    source_filename = str(state.get('source_filename') or 'document.hwpx')
+def _find_proof_out_dir(state: dict[str, Any], *, match_number: int, page: int) -> Path:
+    source_path = Path(str(state.get('source_path') or state.get('source_filename') or 'document.hwpx')).expanduser()
+    base = source_path.parent / f'{source_path.stem}-find-match-{match_number:03d}-page-{page:03d}'
+    if not base.exists():
+        return base
+    for index in range(2, 1000):
+        candidate = base.with_name(f'{base.name}-{index}')
+        if not candidate.exists():
+            return candidate
+    return base
+
+
+def _artifact_destination(
+    kind: str,
+    *,
+    page: int | None = None,
+    out: Path | None = None,
+    out_dir: Path | None = None,
+    state: dict[str, Any] | None = None,
+) -> Path:
+    """Return a portable artifact destination with explicit-output precedence.
+
+    ``--out`` is an exact caller contract and is never auto-suffixed.  When
+    ``--out-dir`` is supplied only the default filename is derived from the
+    cached source state and collision suffixing remains enabled.
+    """
+
+    if out is not None:
+        return out.expanduser()
+    cached_state = state if state is not None else load_state()
+    source_path_raw = cached_state.get('source_path')
+    source_filename = str(cached_state.get('source_filename') or 'document.hwpx')
     source_filename_path = Path(source_filename)
     if source_path_raw:
         source_path = Path(str(source_path_raw)).expanduser()
@@ -1559,6 +1941,8 @@ def _artifact_destination(kind: str, *, page: int | None = None) -> Path:
         parent = Path.cwd()
         stem = source_filename_path.stem
         source_suffix = source_filename_path.suffix or '.hwpx'
+    if out_dir is not None:
+        parent = out_dir.expanduser()
 
     if kind == 'screenshot':
         candidate = parent / f'{stem}-screenshot.png'
@@ -1574,7 +1958,6 @@ def _artifact_destination(kind: str, *, page: int | None = None) -> Path:
 
     if not candidate.exists():
         return candidate
-
     base_stem = candidate.stem
     suffix = candidate.suffix
     for index in range(2, 1000):
@@ -1584,12 +1967,44 @@ def _artifact_destination(kind: str, *, page: int | None = None) -> Path:
     return candidate
 
 
-def _download_artifact(payload: dict[str, Any], *, kind: str, base_url: str) -> Path:
+def _download_artifact(
+    payload: dict[str, Any],
+    *,
+    kind: str,
+    base_url: str,
+    out: Path | None = None,
+    out_dir: Path | None = None,
+) -> Path:
     artifact_url = payload.get('download_path')
     if not isinstance(artifact_url, str) or not artifact_url.strip():
         raise ApiError(f'{kind} did not return a download path.')
-    destination = _artifact_destination(kind)
+    destination = _artifact_destination(kind, out=out, out_dir=out_dir)
     return download_to_path(base_url, artifact_url, destination)
+
+
+def _resolve_pdftoppm(
+    *,
+    explicit: str | Path | None = None,
+    path_entries: list[str | Path] | None = None,
+    winget_roots: list[str | Path] | None = None,
+) -> Path:
+    configured = explicit
+    if configured is None:
+        try:
+            configured = get_settings().pdftoppm_path
+        except Exception:
+            configured = None
+    try:
+        result = resolve_pdftoppm(
+            explicit=configured,
+            path_entries=path_entries,
+            winget_roots=winget_roots,
+        )
+    except PopplerResolutionError as exc:
+        raise ApiError(str(exc)) from exc
+    if not result.ok or result.path is None:
+        raise ApiError(result.detail)
+    return result.path
 
 
 def _positive_int(value: int, *, name: str) -> int:
@@ -1599,9 +2014,10 @@ def _positive_int(value: int, *, name: str) -> int:
 
 
 def _render_pdf_page_to_png(input_pdf: Path, destination: Path, *, page: int, dpi: int) -> Path:
-    pdftoppm = shutil.which('pdftoppm')
-    if not pdftoppm:
-        raise ApiError('pdftoppm not found in PATH. Install poppler-utils to use page screenshots.')
+    try:
+        pdftoppm = _resolve_pdftoppm()
+    except ApiError as exc:
+        raise ApiError(f'PDF renderer unavailable: {exc}') from exc
     page = _positive_int(page, name='page')
     dpi = _positive_int(dpi, name='dpi')
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -1856,13 +2272,37 @@ def _maybe_create_contact_sheet(page_pngs: list[Path], out_dir: Path) -> Path | 
 def _write_artifact_manifest(kind: str, output_path: Path, *, extra: dict[str, Any] | None = None) -> Path:
     state = load_state()
     manifest_path = output_path.with_name(f'{output_path.stem}.manifest.json')
+    source_path = state.get('source_path')
+    candidate_identity = _read_candidate_identity()
+    source_sha256 = None
+    if source_path:
+        try:
+            source_candidate = Path(str(source_path)).expanduser()
+            if source_candidate.is_file():
+                source_sha256 = _sha256_file(source_candidate)
+        except OSError:
+            source_sha256 = None
+    output_bytes = None
+    output_sha256 = None
+    try:
+        if output_path.is_file():
+            output_bytes = output_path.stat().st_size
+            output_sha256 = _sha256_file(output_path)
+    except OSError:
+        output_bytes = None
+        output_sha256 = None
     manifest = {
         'schema_version': 'local-cli/artifact-manifest/v1',
         'kind': kind,
-        'source_hwp_path': state.get('source_path'),
+        'source_hwp_path': source_path,
+        'source_hwp_sha256': source_sha256,
         'session_id': _state_session_id(),
+        'working_copy_id': _state_session_id(),
+        'candidate_identity': candidate_identity or None,
         'created_at': _dt.datetime.now(_dt.timezone.utc).isoformat(),
         'output_path': str(output_path),
+        'output_bytes': output_bytes,
+        'output_sha256': output_sha256,
     }
     if extra:
         manifest.update(extra)
@@ -1886,7 +2326,13 @@ def _first_step_result_by_op(raw_payload: dict[str, Any], op: str) -> dict[str, 
 
 
 def _export_pdf_via_bundle(base_url: str) -> tuple[Path, Path]:
-    spec, raw_payload = _execute_named_bundle(base_url, 'export-proof-range', [])
+    _state_before_export, export_expected_generation, export_expected_session = _state_cas_snapshot()
+    spec, raw_payload = _execute_named_bundle(
+        base_url,
+        'export-proof-range',
+        [],
+        session_id=export_expected_session,
+    )
     export_result = _first_step_result_by_op(raw_payload, 'export_pdf')
     download_path = export_result.get('download_path')
     if not isinstance(download_path, str) or not download_path.strip():
@@ -1905,12 +2351,87 @@ def _export_pdf_via_bundle(base_url: str) -> tuple[Path, Path]:
             'route': '/local-cli/command-bundle',
         },
     )
-    state = load_state()
-    state['last_export_path'] = str(destination)
-    state['last_export_manifest_path'] = str(manifest_path)
-    state['last_export_route'] = 'command-bundle:export_pdf'
-    save_state(state)
+    update_state(
+        lambda state: {
+            **state,
+            'last_export_path': str(destination),
+            'last_export_manifest_path': str(manifest_path),
+            'last_export_route': 'command-bundle:export_pdf',
+        },
+        expected_generation=export_expected_generation,
+        expected_session_id=export_expected_session,
+    )
     return destination, manifest_path
+
+
+def _record_export_proof_manifest_state(state: dict[str, Any], manifest: dict[str, Any]) -> dict[str, Any]:
+    """Project export-proof output paths into CLI state for proof-packet collection."""
+
+    updated = dict(state)
+    # Export proof is generation-scoped.  Do not merge optional fields from a
+    # prior export: an export with no rendered pages must not leave an older
+    # screenshot/contact sheet eligible for proof-packet collection.
+    for key in (
+        'last_export_path',
+        'last_export_manifest_path',
+        'last_export_proof_manifest_path',
+        'last_export_proof_dir',
+        'last_export_proof_contact_sheet_path',
+        'last_export_proof_page_paths',
+        'last_export_proof_generation',
+        'last_export_proof_export_sha256',
+        'last_export_proof_manifest_sha256',
+        'last_export_proof_session_id',
+        'last_export_proof_target_identity',
+        'last_export_proof_proof_generation',
+        'last_export_proof_candidate_identity',
+        'last_export_proof_contact_sheet_sha256',
+        'last_page_screenshot_path',
+        'last_page_screenshot_manifest_path',
+        'last_page_screenshot_page',
+        'last_page_screenshot_dpi',
+    ):
+        updated.pop(key, None)
+    exported_pdf = manifest.get('exported_pdf_path')
+    manifest_path = manifest.get('manifest_path')
+    if exported_pdf:
+        updated['last_export_path'] = str(exported_pdf)
+    export_generation = manifest.get('export_generation')
+    if export_generation:
+        updated['last_export_proof_generation'] = str(export_generation)
+    exported_pdf_sha256 = manifest.get('exported_pdf_sha256')
+    if exported_pdf_sha256:
+        updated['last_export_proof_export_sha256'] = str(exported_pdf_sha256)
+    if manifest_path:
+        manifest_path_text = str(Path(str(manifest_path)).expanduser())
+        updated['last_export_manifest_path'] = manifest_path_text
+        updated['last_export_proof_manifest_path'] = manifest_path_text
+        updated['last_export_proof_dir'] = str(Path(manifest_path_text).parent)
+        manifest_file = Path(manifest_path_text)
+        if manifest_file.is_file():
+            updated['last_export_proof_manifest_sha256'] = f'sha256:{_sha256_file(manifest_file)}'
+    if manifest.get('session_id'):
+        updated['last_export_proof_session_id'] = str(manifest['session_id'])
+    if manifest.get('proof_generation'):
+        updated['last_export_proof_proof_generation'] = str(manifest['proof_generation'])
+    if isinstance(manifest.get('candidate_identity'), dict):
+        updated['last_export_proof_candidate_identity'] = dict(manifest['candidate_identity'])
+    if isinstance(manifest.get('target_identity'), dict):
+        updated['last_export_proof_target_identity'] = dict(manifest['target_identity'])
+    contact_sheet = manifest.get('contact_sheet_path')
+    if contact_sheet:
+        updated['last_export_proof_contact_sheet_path'] = str(contact_sheet)
+        contact_sheet_file = Path(str(contact_sheet)).expanduser()
+        if contact_sheet_file.is_file():
+            updated['last_export_proof_contact_sheet_sha256'] = f'sha256:{_sha256_file(contact_sheet_file)}'
+    page_paths: list[str] = []
+    pages = manifest.get('pages') if isinstance(manifest.get('pages'), list) else []
+    for item in pages:
+        if isinstance(item, dict) and item.get('png_path'):
+            page_paths.append(str(item['png_path']))
+    if page_paths:
+        updated['last_export_proof_page_paths'] = page_paths
+    return updated
 
 
 def _render_export_proof_manifest(
@@ -1926,6 +2447,8 @@ def _render_export_proof_manifest(
     all_pages: bool = False,
     contact_sheet_requested: bool = False,
     fresh_session: dict[str, Any] | None = None,
+    target_identity: dict[str, Any] | None = None,
+    proof_generation: str | None = None,
 ) -> dict[str, Any]:
     if dpi <= 0:
         raise ApiError('--dpi must be a positive integer.')
@@ -1936,6 +2459,8 @@ def _render_export_proof_manifest(
     if not isinstance(download_path, str) or not download_path.strip():
         raise ApiError('export-proof-range bundle did not return an export download_path.')
     pdf_path = download_to_path(base_url, download_path, out_dir / 'source.pdf')
+    exported_pdf_sha256 = f'sha256:{_sha256_file(pdf_path)}'
+    export_generation = f'local-cli-export/v1:{exported_pdf_sha256}'
     section_derivation: dict[str, Any] | None = None
     current_pdf_page_count, page_count_source = _pdf_page_count(pdf_path)
     if pages is None:
@@ -1972,16 +2497,19 @@ def _render_export_proof_manifest(
             {
                 'page': page,
                 'png_path': str(png_path),
+                'png_sha256': f'sha256:{_sha256_file(png_path)}',
                 'token_hits': token_hits,
                 'text_extraction_available': page_text is not None,
             }
         )
     contact_sheet = _maybe_create_contact_sheet(png_paths, out_dir) if (contact_sheet_requested or section_anchor) else None
     state = load_state()
+    candidate_identity = _read_candidate_identity()
     manifest = {
         'schema_version': 'local-cli/export-proof-range/v1',
         'ok': True,
         'source_hwp_path': state.get('source_path'),
+        'candidate_identity': candidate_identity or None,
         'session_id': _state_session_id(),
         'created_at': _dt.datetime.now(_dt.timezone.utc).isoformat(),
         'pages_requested': pages_requested,
@@ -1992,13 +2520,23 @@ def _render_export_proof_manifest(
         'section_derivation': section_derivation,
         'dpi': dpi,
         'exported_pdf_path': str(pdf_path),
+        'exported_pdf_sha256': exported_pdf_sha256,
+        'export_generation': export_generation,
         'current_pdf_page_count': current_pdf_page_count,
         'page_count_source': page_count_source,
         'page_count_is_validation_proof': False,
         'warnings': warnings,
         'server_export_artifact_path': export_result.get('artifact_path'),
         'contact_sheet_path': str(contact_sheet) if contact_sheet else None,
+        'contact_sheet_sha256': f'sha256:{_sha256_file(contact_sheet)}' if contact_sheet else None,
         'anchors': anchors,
+        'target_identity': {
+            'section_anchor': section_anchor,
+            'until_anchor': until_anchor,
+            'pages_effective': pages_effective,
+            'proof_match_identity': dict(target_identity) if isinstance(target_identity, dict) else None,
+        },
+        'proof_generation': proof_generation,
         'fresh_session': fresh_session or {'requested': False},
         'text_extraction_available': text_extraction_available,
         'pages': rendered_pages,
@@ -2234,27 +2772,45 @@ def _run_section_control_move_resize_exact(
     return manifest
 
 
-def _page_screenshot(*, base_url: str, page: int, dpi: int) -> Path:
+def _page_screenshot(
+    *,
+    base_url: str,
+    page: int,
+    dpi: int,
+    out: Path | None = None,
+    out_dir: Path | None = None,
+) -> Path:
     # Page proof is deliberately separate from live screenshot: it exports the
     # working copy to PDF and renders a document page, so it cannot replace the
     # live Hancom full-frame/caret proof returned by `hwpx screenshot`.
     page = _positive_int(page, name='page')
     dpi = _positive_int(dpi, name='dpi')
-    payload = post_json(base_url, '/local-cli/export', {'session_id': _state_session_id()})
+    _state_before_screenshot, screenshot_expected_generation, screenshot_expected_session = _state_cas_snapshot()
+    payload = post_json(base_url, '/local-cli/export', {'session_id': screenshot_expected_session})
     artifact_url = payload.get('download_path')
     if not isinstance(artifact_url, str) or not artifact_url.strip():
         raise ApiError('page screenshot export did not return a download path.')
     with tempfile.TemporaryDirectory(prefix='hwpx-page-screenshot-pdf-') as tmp_dir_raw:
         tmp_pdf = Path(tmp_dir_raw) / 'source.pdf'
         download_to_path(base_url, artifact_url, tmp_pdf)
-        destination = _artifact_destination('page-screenshot', page=page)
+        destination = _artifact_destination('page-screenshot', page=page, out=out, out_dir=out_dir)
         _render_pdf_page_to_png(tmp_pdf, destination, page=page, dpi=dpi)
-    state = load_state()
-    state['last_page_screenshot_path'] = str(destination)
-    state['last_page_screenshot_page'] = page
-    state['last_page_screenshot_dpi'] = dpi
-    state['last_page_screenshot_manifest_path'] = str(_write_artifact_manifest('page-screenshot', destination, extra={'page': page, 'dpi': dpi}))
-    save_state(state)
+    screenshot_manifest_path = _write_artifact_manifest(
+        'page-screenshot',
+        destination,
+        extra={'page': page, 'requested_page': page, 'dpi': dpi},
+    )
+    update_state(
+        lambda state: {
+            **state,
+            'last_page_screenshot_path': str(destination),
+            'last_page_screenshot_page': page,
+            'last_page_screenshot_dpi': dpi,
+            'last_page_screenshot_manifest_path': str(screenshot_manifest_path),
+        },
+        expected_generation=screenshot_expected_generation,
+        expected_session_id=screenshot_expected_session,
+    )
     return destination
 
 
@@ -2275,6 +2831,23 @@ def main(argv: list[str] | None = None) -> int:
             _print_command_status()
             return 0
 
+        if args.command == 'command-reconcile':
+            payload = post_json(
+                base_url,
+                '/local-cli/command-reconcile',
+                {
+                    'command_id': args.command_id,
+                    'session_id': args.session_id or _state_session_id(),
+                },
+            )
+            if args.json:
+                print(json.dumps(payload, ensure_ascii=False, indent=2))
+            else:
+                print(f"command reconciliation: {payload.get('reconciliation', 'unknown')}")
+                print(f"command_id: {args.command_id}")
+                print(f"session_id: {payload.get('session_id') or args.session_id or _state_session_id() or 'unknown'}")
+            return 0
+
         if args.command == 'safe-schema':
             payload = build_safe_agent_schema(build_command_status(parser))
             if args.json:
@@ -2291,17 +2864,40 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == 'open':
             if not args.file.exists() or not args.file.is_file():
                 raise ApiError(f'Local file not found: {args.file}')
+            state_before_open = load_state()
+            open_expected_generation = int(state_before_open.get('state_generation', 0))
+            open_expected_session = str(state_before_open.get('session_id') or '').strip() or None
             payload = post_file(base_url, '/local-cli/open', field_name='file', file_path=args.file)
             session_id = payload.get('session_id')
             source_filename = payload.get('source_filename') or args.file.name
-            save_state(
-                {
+            candidate_identity = _read_candidate_identity()
+            update_state(
+                lambda _state: {
                     'base_url': base_url,
                     'session_id': session_id,
                     'source_filename': source_filename,
                     'source_path': str(args.file.resolve()),
-                }
+                    **candidate_identity,
+                },
+                expected_generation=open_expected_generation,
+                expected_session_id=open_expected_session,
             )
+            if args.json:
+                print(json.dumps({
+                    'schema_version': 'local-cli/lifecycle/v1',
+                    'ok': bool(payload.get('ok', True)),
+                    'command': 'open',
+                    'base_url': base_url,
+                    'managed_fixture': str(args.file.resolve()),
+                    'source_path': str(args.file.resolve()),
+                    'source_filename': source_filename,
+                    'session_id': session_id,
+                    'working_copy_id': payload.get('working_copy_id') or session_id,
+                    'live_session_bound': True,
+                    **candidate_identity,
+                    'response': payload,
+                }, ensure_ascii=False, indent=2))
+                return 0
             _print_lifecycle_result(
                 where=f'source={args.file.resolve()}; session={session_id or "unknown"}; active document={source_filename}',
                 how='direct /local-cli/open upload into a server-managed working copy',
@@ -2314,7 +2910,11 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == 'status':
             payload = get_json(base_url, '/local-cli/status')
             payload.update(_probe_command_bundle_route(base_url))
-            _print_status(payload)
+            payload = _with_status_identity(payload)
+            if args.json:
+                print(json.dumps(payload, ensure_ascii=False, indent=2))
+            else:
+                _print_status(payload)
             return 0
 
         if args.command in {'session-health', 'bundle-health'}:
@@ -2325,6 +2925,34 @@ def main(argv: list[str] | None = None) -> int:
             _print_state()
             return 0
 
+        if args.command == 'proof-packet':
+            try:
+                manifest = build_proof_packet(out_dir=args.out_dir, state=load_state(), state_path=default_state_path())
+            except ProofPacketError as exc:
+                raise ApiError(str(exc)) from exc
+            if args.json:
+                print(json.dumps(manifest, ensure_ascii=False, indent=2))
+            else:
+                print(f"proof packet: {manifest.get('packet_dir')}")
+                print(f"manifest: {manifest.get('manifest_path')}")
+            return 0
+
+        if args.command == 'native-border-readback':
+            try:
+                manifest = _record_native_border_readback(
+                    pre_quit_path=args.pre_quit,
+                    persisted_path=args.persisted,
+                    target_identity_path=args.target_identity,
+                    destination=args.out,
+                )
+            except ProofPacketError as exc:
+                raise ApiError(str(exc)) from exc
+            if args.json:
+                print(json.dumps(manifest, ensure_ascii=False, indent=2))
+            else:
+                print(f"native border readback: {manifest.get('artifact_path')}")
+            return 0
+
         if args.command == 'reset-state':
             state_path = default_state_path()
             clear_state(state_path)
@@ -2332,21 +2960,73 @@ def main(argv: list[str] | None = None) -> int:
             return 0
 
         if args.command == 'find':
+            state_before_find, find_expected_generation, find_expected_session = _state_cas_snapshot()
             request = {
                 'query': args.text,
-                'session_id': _state_session_id(),
+                'session_id': find_expected_session,
                 'around': args.around,
-                'with_page': args.with_page,
+                'with_page': args.with_page or args.proof_match is not None,
                 'proof_match': args.proof_match,
             }
             payload = post_json(base_url, '/local-cli/find', request)
             state = load_state()
-            state['last_find_query'] = args.text
-            save_state(state)
+            if args.proof_match is not None:
+                proof = payload.get('proof_match') if isinstance(payload.get('proof_match'), dict) else None
+                page_value = proof.get('page') if proof else None
+                if not isinstance(page_value, int) or page_value <= 0:
+                    page_value = proof.get('page_candidate') if proof else None
+                if not isinstance(page_value, int) or page_value <= 0:
+                    raise ApiError(
+                        f'proof match {args.proof_match} has no usable page evidence; rerun find with --with-page or use a native page proof.'
+                    )
+                proof_out_dir = (args.proof_out_dir or _find_proof_out_dir(state, match_number=args.proof_match, page=page_value)).expanduser()
+                bundle_args = [
+                    '--pages', str(page_value),
+                    '--dpi', str(args.dpi),
+                    '--out-dir', str(proof_out_dir),
+                ]
+                if args.contact_sheet:
+                    bundle_args.append('--contact-sheet')
+                bundle_args.extend(['--anchor', args.text])
+                _spec, proof_payload = _execute_named_bundle(base_url, 'export-proof-range', bundle_args)
+                proof_manifest = _render_export_proof_manifest(
+                    base_url=base_url,
+                    raw_payload=proof_payload,
+                    pages=[page_value],
+                    dpi=args.dpi,
+                    out_dir=proof_out_dir,
+                    anchors=[args.text],
+                    contact_sheet_requested=bool(args.contact_sheet),
+                    target_identity=(proof.get('identity') if isinstance(proof, dict) and isinstance(proof.get('identity'), dict) else None),
+                    proof_generation=(str(proof.get('proof_generation')) if isinstance(proof, dict) and proof.get('proof_generation') else None),
+                )
+            if args.proof_match is not None:
+                update_state(
+                    lambda current: _record_export_proof_manifest_state(
+                        {**current, 'last_find_query': args.text},
+                        proof_manifest,
+                    ),
+                    expected_generation=find_expected_generation,
+                    expected_session_id=find_expected_session,
+                )
+            else:
+                update_state(
+                    lambda current: {**current, 'last_find_query': args.text},
+                    expected_generation=find_expected_generation,
+                    expected_session_id=find_expected_session,
+                )
             if args.json:
-                print(json.dumps(payload, ensure_ascii=False, indent=2))
+                output = dict(payload)
+                if args.proof_match is not None:
+                    output['proof_manifest'] = proof_manifest
+                print(json.dumps(output, ensure_ascii=False, indent=2))
             else:
                 _print_matches(payload)
+                if args.proof_match is not None:
+                    print(f"proof match: {args.proof_match}")
+                    print(f"proof page: {page_value}")
+                    print(f"manifest: {proof_manifest.get('manifest_path')}")
+                    print(f"hwpx proof-packet --out-dir {proof_manifest.get('out_dir') or proof_out_dir}")
             return 0
 
         if args.command == 'info':
@@ -2408,10 +3088,14 @@ def main(argv: list[str] | None = None) -> int:
                     file=sys.stderr,
                 )
                 payload = post_json(base_url, '/local-cli/where', {'session_id': _state_session_id()})
-                _print_where(payload)
+                if args.json:
+                    print(json.dumps(_with_lifecycle_identity(payload, base_url=base_url, command='where'), ensure_ascii=False, indent=2))
+                else:
+                    _print_where(payload)
                 return 0
             if args.json:
-                _print_bundle_payload(payload, json_output=True)
+                normalized = normalize_command_bundle(payload)
+                print(json.dumps(_with_lifecycle_identity(normalized, base_url=base_url, command='where'), ensure_ascii=False, indent=2))
             else:
                 print(format_where_bundle_human(payload))
             return 0
@@ -2947,11 +3631,14 @@ def main(argv: list[str] | None = None) -> int:
             return 0
 
         if args.command == 'save':
-            payload = post_json(base_url, '/local-cli/save', {'session_id': _state_session_id()})
-            destination = _download_artifact(payload, kind='working-copy', base_url=base_url)
-            state = load_state()
-            state['last_saved_working_copy_path'] = str(destination)
-            save_state(state)
+            _state_before_save, save_expected_generation, save_expected_session = _state_cas_snapshot()
+            payload = post_json(base_url, '/local-cli/save', {'session_id': save_expected_session})
+            destination = _download_artifact(payload, kind='working-copy', base_url=base_url, out=getattr(args, 'out', None))
+            update_state(lambda state: {
+                **state,
+                'last_saved_working_copy_path': str(destination),
+                'last_saved_working_copy_sha256': f'sha256:{_sha256_file(destination)}',
+            }, expected_generation=save_expected_generation, expected_session_id=save_expected_session)
             _print_artifact_result(
                 role='saved working copy',
                 path=destination,
@@ -2960,7 +3647,8 @@ def main(argv: list[str] | None = None) -> int:
             return 0
 
         if args.command == 'working-copy':
-            session_id = _state_session_id()
+            _state_before_working_copy, working_copy_expected_generation, working_copy_expected_session = _state_cas_snapshot()
+            session_id = working_copy_expected_session
             if not session_id:
                 raise ApiError('No active local CLI session is open.')
             destination = download_to_path(
@@ -2968,9 +3656,11 @@ def main(argv: list[str] | None = None) -> int:
                 f'/local-cli/session/{session_id}/artifact/working-copy',
                 _artifact_destination('working-copy'),
             )
-            state = load_state()
-            state['last_saved_working_copy_path'] = str(destination)
-            save_state(state)
+            update_state(lambda state: {
+                **state,
+                'last_saved_working_copy_path': str(destination),
+                'last_saved_working_copy_sha256': f'sha256:{_sha256_file(destination)}',
+            }, expected_generation=working_copy_expected_generation, expected_session_id=working_copy_expected_session)
             _print_artifact_result(
                 role='downloaded saved working copy',
                 path=destination,
@@ -3010,7 +3700,7 @@ def main(argv: list[str] | None = None) -> int:
 
         if args.command == 'screenshot':
             if args.mode == 'page':
-                destination = _page_screenshot(base_url=base_url, page=args.page, dpi=args.dpi)
+                destination = _page_screenshot(base_url=base_url, page=args.page, dpi=args.dpi, out=getattr(args, 'out', None), out_dir=getattr(args, 'out_dir', None))
                 manifest_raw = load_state().get('last_page_screenshot_manifest_path')
                 manifest_path = Path(str(manifest_raw)) if manifest_raw else None
                 _print_artifact_result(
@@ -3019,13 +3709,17 @@ def main(argv: list[str] | None = None) -> int:
                     manifest_path=manifest_path,
                     next_step='review visible target text/layout/no clipping; then save/report if proof passes.',
                     json_output=bool(args.json),
+                    command='page-screenshot',
                 )
                 return 0
-            payload = post_json(base_url, '/local-cli/screenshot', {'session_id': _state_session_id()})
+            _state_before_screenshot, screenshot_expected_generation, screenshot_expected_session = _state_cas_snapshot()
+            payload = post_json(base_url, '/local-cli/screenshot', {'session_id': screenshot_expected_session})
             destination = _download_artifact(payload, kind='screenshot', base_url=base_url)
-            state = load_state()
-            state['last_screenshot_path'] = str(destination)
-            save_state(state)
+            update_state(
+                lambda state: {**state, 'last_screenshot_path': str(destination)},
+                expected_generation=screenshot_expected_generation,
+                expected_session_id=screenshot_expected_session,
+            )
             _print_artifact_result(
                 role='live editor proof',
                 path=destination,
@@ -3035,7 +3729,7 @@ def main(argv: list[str] | None = None) -> int:
             return 0
 
         if args.command == 'page-screenshot':
-            destination = _page_screenshot(base_url=base_url, page=args.page, dpi=args.dpi)
+            destination = _page_screenshot(base_url=base_url, page=args.page, dpi=args.dpi, out=getattr(args, 'out', None), out_dir=getattr(args, 'out_dir', None))
             manifest_raw = load_state().get('last_page_screenshot_manifest_path')
             manifest_path = Path(str(manifest_raw)) if manifest_raw else None
             _print_artifact_result(
@@ -3044,6 +3738,7 @@ def main(argv: list[str] | None = None) -> int:
                 manifest_path=manifest_path,
                 next_step='review visible target text/layout/no clipping; then save/report if proof passes.',
                 json_output=bool(args.json),
+                command='page-screenshot',
             )
             return 0
 
@@ -3051,8 +3746,9 @@ def main(argv: list[str] | None = None) -> int:
             if args.bundle_proof:
                 destination, manifest_path = _export_pdf_via_bundle(base_url)
             else:
-                payload = post_json(base_url, '/local-cli/export', {'session_id': _state_session_id()})
-                destination = _download_artifact(payload, kind='export', base_url=base_url)
+                _state_before_export, export_expected_generation, export_expected_session = _state_cas_snapshot()
+                payload = post_json(base_url, '/local-cli/export', {'session_id': export_expected_session})
+                destination = _download_artifact(payload, kind='export', base_url=base_url, out=getattr(args, 'out', None))
                 manifest_path = _write_artifact_manifest(
                     'export',
                     destination,
@@ -3062,11 +3758,16 @@ def main(argv: list[str] | None = None) -> int:
                         'route': '/local-cli/export',
                     },
                 )
-                state = load_state()
-                state['last_export_path'] = str(destination)
-                state['last_export_manifest_path'] = str(manifest_path)
-                state['last_export_route'] = 'direct:/local-cli/export'
-                save_state(state)
+                update_state(
+                    lambda state: {
+                        **state,
+                        'last_export_path': str(destination),
+                        'last_export_manifest_path': str(manifest_path),
+                        'last_export_route': 'direct:/local-cli/export',
+                    },
+                    expected_generation=export_expected_generation,
+                    expected_session_id=export_expected_session,
+                )
             _print_artifact_result(
                 role='exported PDF proof source',
                 path=destination,
@@ -3078,10 +3779,33 @@ def main(argv: list[str] | None = None) -> int:
 
         if args.command == 'close':
             state = load_state()
+            close_expected_generation = int(state.get('state_generation', 0))
             session_id = _state_session_id()
             active_document = state.get('source_filename') or 'active live document'
-            post_json(base_url, '/local-cli/close', {'session_id': session_id})
-            clear_session_binding()
+            candidate_identity = _read_candidate_identity()
+            close_payload = post_json(base_url, '/local-cli/close', {'session_id': session_id})
+            status_after = get_json(base_url, '/local-cli/status')
+            clear_session_binding(
+                expected_generation=close_expected_generation,
+                expected_session_id=session_id,
+            )
+            if args.json:
+                print(json.dumps({
+                    'schema_version': 'local-cli/lifecycle/v1',
+                    'ok': bool(close_payload.get('ok', True)),
+                    'command': 'close',
+                    'base_url': base_url,
+                    'source_path': state.get('source_path'),
+                    'source_filename': active_document,
+                    'session_id': session_id,
+                    'working_copy_id': close_payload.get('working_copy_id') or session_id,
+                    'live_session_bound': bool(status_after.get('live_session_bound')),
+                    'close_confirmed': not bool(status_after.get('live_session_bound')),
+                    **candidate_identity,
+                    'response': close_payload,
+                    'status_after': status_after,
+                }, ensure_ascii=False, indent=2))
+                return 0
             _print_lifecycle_result(
                 where=f'{active_document}; session={session_id or "unknown"}',
                 how='direct /local-cli/close lifecycle route',
@@ -3092,7 +3816,15 @@ def main(argv: list[str] | None = None) -> int:
             return 0
 
         if args.command == 'type':
-            payload = post_json(base_url, '/local-cli/type', {'text': args.text, 'session_id': _state_session_id()})
+            payload = post_json(
+                base_url,
+                '/local-cli/type',
+                {
+                    'text': args.text,
+                    'session_id': _state_session_id(),
+                    'allow_insert_at_caret': bool(args.insert_at_caret),
+                },
+            )
             _print_command_payload(payload)
             return 0
 
@@ -3361,7 +4093,7 @@ def main(argv: list[str] | None = None) -> int:
             payload = post_json(base_url, '/local-cli/command-bundle', request_payload)
             _print_bundle_payload(payload, json_output=args.json)
             return 0
-    except (ApiError, BundleError) as exc:
+    except (ApiError, BundleError, StatePersistenceError) as exc:
         message = exc.message if isinstance(exc, ApiError) else str(exc)
         print(f'error: {message}', file=sys.stderr)
         print('next: run `hwpx status` to confirm runtime/session, or `hwpx help workflow` for the safe edit+proof loop.', file=sys.stderr)

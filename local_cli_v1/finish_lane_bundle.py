@@ -6,7 +6,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from .state import load_state, save_state
+from .state import load_state, update_state
 from .transport import ApiError, DEFAULT_BASE_URL, download_to_path, get_json, post_json
 
 
@@ -133,16 +133,20 @@ def main(argv: list[str] | None = None) -> int:
         ]
         _write_text(bundle_dir / 'SUMMARY.txt', '\n'.join(summary_lines) + '\n')
 
-        updated_state = dict(state)
-        updated_state['base_url'] = base_url
-        updated_state['last_saved_working_copy_path'] = str(edited_copy_path)
-        updated_state['last_screenshot_path'] = str(screenshot_path)
-        updated_state['last_export_path'] = str(pdf_path)
-        updated_state['last_finish_lane_bundle_path'] = str(bundle_dir)
-        if closed_ok:
-            updated_state.pop('session_id', None)
-            updated_state.pop('last_find_query', None)
-        save_state(updated_state)
+        def _update_finished_state(current: dict[str, Any]) -> dict[str, Any]:
+            current.update({
+                'base_url': base_url,
+                'last_saved_working_copy_path': str(edited_copy_path),
+                'last_screenshot_path': str(screenshot_path),
+                'last_export_path': str(pdf_path),
+                'last_finish_lane_bundle_path': str(bundle_dir),
+            })
+            if closed_ok:
+                current.pop('session_id', None)
+                current.pop('last_find_query', None)
+            return current
+
+        update_state(_update_finished_state)
 
         manifest = {
             'schema_version': 'local-cli-finish-lane-bundle/v1',

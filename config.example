@@ -14,3 +14,12 @@ HWP_RETENTION_DAYS=7
 HWP_WORKER_NAME=hwpx-worker
 HWP_SECURITY_MODULE_DLL=FilePathCheckDLL
 HWP_SECURITY_MODULE_NAME=FilePathCheckerModule
+# Optional executable/package overrides used by the Windows installer/writer.
+HWP_PYTHON=
+# Optional absolute Poppler renderer path; installer records a resolved path here for new installs.
+HWP_PDFTOPPM=
+HWP_WINGET_ROOTS=
+HWP_POPPLER_PACKAGE_ID=oschwartz10612.Poppler
+HWP_API_TASK_NAME=hwpx-editor-api
+HWP_WORKER_TASK_NAME=hwpx-editor-worker
+HWP_SOURCE_MANIFEST=

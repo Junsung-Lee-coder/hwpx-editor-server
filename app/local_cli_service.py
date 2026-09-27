@@ -1,17 +1,24 @@
 from __future__ import annotations
 
+import copy
+import inspect
 import json
 import hashlib
 import math
+import os
 import re
 import shutil
+import stat
+import threading
 import uuid
 import zipfile
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Mapping, TypeVar
 
 from fastapi import HTTPException, UploadFile
 
+from app.atomic_json import atomic_write_json, path_lock, read_json_object
 from app.edit_ops import (
     EditOperationError,
     _build_find_candidates,
@@ -25,6 +32,7 @@ from app.edit_ops import (
     _get_pos,
     _get_current_paragraph_text_at_cursor,
     _get_selected_pos,
+    _get_selection_mode,
     _get_selected_text,
     _move_after_selection,
     _move_doc_begin,
@@ -51,10 +59,16 @@ from app.local_cli_document import (
     resolve_match_target,
 )
 from app.local_cli_runtime import (
+    _RECOVERY_STATES,
+    _RECOVERY_ARTIFACT_KINDS,
+    _artifact_kind_from_key,
+    _bounded_journal_value,
     LocalCliRuntimeError,
     LocalCliRuntimeHandle,
+    LocalCliRuntimeTimeoutError,
     apply_char_style,
     capture_screenshot_artifact,
+    read_command_journal,
     create_table_at_cursor,
     ensure_session_layout,
     export_document_pdf,
@@ -65,13 +79,35 @@ from app.local_cli_runtime import (
     save_document,
     snapshot_live_location,
 )
+from app.models import CellMarginsGetRequest, CellMarginsGetTarget, canonical_cell_margins_request_sha256
+from app.local_cli_type_guard import type_insert_guard_reason
 from app.command_packages.runtime import get_command_package_registry
 from app.raw_readback import RawReadbackMismatch, build_raw_target_readback
-from app.readiness import build_plain_readiness_failure, load_runtime_readiness_snapshot, utc_now_iso
+from app.readiness import (
+    build_plain_readiness_failure,
+    load_runtime_readiness_snapshot,
+    readiness_matches_current_worker,
+    resolve_candidate_generation,
+    utc_now_iso,
+)
 from app.worker import save_hwp_as
 
 
 T = TypeVar('T')
+
+
+@dataclass
+class LocalCliArtifactDownload:
+    """A custody-checked stream whose bytes remain tied to one opened file."""
+
+    stream: Any
+    path: Path
+    size_bytes: int
+    sha256: str
+    filename: str = ''
+
+    def close(self) -> None:
+        self.stream.close()
 
 
 def _native_type_action_count(text: str) -> int:
@@ -81,6 +117,227 @@ def _native_type_action_count(text: str) -> int:
 _LIVE_HEADING_SPLIT_RE = re.compile(r'[·ㆍ•:：\-–—,，/|]')
 _IMAGE_ALLOWED_SUFFIXES = {'.png', '.jpg', '.jpeg', '.bmp'}
 _IMAGE_SAFE_STEM_RE = re.compile(r'[^A-Za-z0-9._() -]+')
+_CELL_MARGIN_KEYS = ('left', 'right', 'top', 'bottom')
+
+
+def _cell_margins_safe_attr(hwp: Any, name: str) -> Any:
+    """Attribute read that never raises; mirrors the runtime's safe accessor."""
+
+    try:
+        return getattr(hwp, name)
+    except Exception:
+        return None
+
+
+def _cell_margins_ctrl_summary(ctrl: Any) -> dict[str, Any] | None:
+    """Bounded control summary carrying the exact instance identity."""
+
+    if ctrl is None:
+        return None
+    payload: dict[str, Any] = {}
+    for attr in ('CtrlID', 'UserDesc'):
+        value = _cell_margins_safe_attr(ctrl, attr)
+        if value not in (None, ''):
+            payload[attr] = value
+    inst_id = _cell_margins_safe_attr(ctrl, 'CtrlInstID')
+    if isinstance(inst_id, str) and inst_id:
+        payload['CtrlInstID'] = inst_id
+    return payload or None
+
+
+def _safe_hwp_value(hwp: Any, name: str) -> Any:
+    """Read a native attribute; call zero-argument methods, never fabricate values."""
+
+    try:
+        value = getattr(hwp, name)
+    except Exception:
+        return None
+    if callable(value):
+        try:
+            return value()
+        except Exception:
+            return None
+    return value
+
+
+def _safe_parent_ctrl_summary(hwp: Any) -> dict[str, Any] | None:
+    """Direct ParentCtrl summary with exact CtrlInstID when the runtime exposes one."""
+
+    parent_ctrl = _cell_margins_safe_attr(hwp, 'ParentCtrl')
+    return _cell_margins_ctrl_summary(parent_ctrl)
+
+
+def _normalize_cell_margin_readback(value: Any) -> dict[str, int | float] | None:
+    if not isinstance(value, Mapping):
+        return None
+    normalized: dict[str, int | float] = {}
+    for key in _CELL_MARGIN_KEYS:
+        raw = value.get(key)
+        if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+            return None
+        numeric = float(raw)
+        if not math.isfinite(numeric) or numeric < 0:
+            return None
+        normalized[key] = int(numeric) if numeric.is_integer() else numeric
+    return normalized
+
+
+def _normalize_vertical_align_readback(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, Mapping) or value.get('available') is not True:
+        return None
+    raw_value = value.get('value')
+    raw_name = value.get('name')
+    names = {0: 'top', 1: 'center', 2: 'bottom'}
+    if isinstance(raw_value, bool) or not isinstance(raw_value, int) or raw_value not in names:
+        return None
+    if raw_name != names[raw_value]:
+        return None
+    return {'value': raw_value, 'name': raw_name}
+
+
+def _valid_cell_addr(value: Any) -> bool:
+    return (
+        isinstance(value, (list, tuple))
+        and len(value) == 2
+        and all(isinstance(item, int) and not isinstance(item, bool) and item >= 0 for item in value)
+    )
+
+
+def _normalize_cell_addr_value(value: Any) -> list[int] | None:
+    if _valid_cell_addr(value):
+        return [int(value[0]), int(value[1])]
+    if not isinstance(value, str):
+        return None
+    match = re.fullmatch(r'([A-Za-z]+)([1-9][0-9]*)', value.strip())
+    if match is None:
+        return None
+    column = 0
+    for char in match.group(1).upper():
+        column = column * 26 + (ord(char) - ord('A') + 1)
+    return [column - 1, int(match.group(2)) - 1]
+
+
+def _valid_numeric_readback(value: Any) -> bool:
+    return (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(float(value))
+    )
+
+
+def _require_observed_cell_format_mutation(
+    operation: str,
+    before_metrics: Mapping[str, Any],
+    after_metrics: Mapping[str, Any],
+    changed_metrics: Mapping[str, Any],
+    *,
+    expected_vertical_align: str | None = None,
+    expected_cell_margin_hu: Mapping[str, Any] | None = None,
+    expected_cell_addr: Any = None,
+) -> None:
+    """Reject format commands whose target property was not observed changing.
+
+    Native action return values alone are not persistence evidence.  The
+    supported format selectors therefore require an exact, valid before/after
+    getter.  The expected value is derived from the request, never from the
+    observed post-action value.
+    """
+    def fail(message: str) -> None:
+        raise LocalCliMutationError(
+            message,
+            mutation_may_have_persisted=True,
+            rollback={'attempted': False, 'succeeded': False},
+        )
+
+    if operation == 'set-cell-margin':
+        before_margin = _normalize_cell_margin_readback(before_metrics.get('cell_margin_hu'))
+        after_margin = _normalize_cell_margin_readback(after_metrics.get('cell_margin_hu'))
+        if before_margin is None or after_margin is None:
+            fail(
+                'cell_format_exact has no usable native four-side cell-margin readback; '
+                f'before={before_metrics.get("cell_margin_hu")!r}; after={after_metrics.get("cell_margin_hu")!r}'
+            )
+        before_addr = _normalize_cell_addr_value(before_metrics.get('cell_addr'))
+        after_addr = _normalize_cell_addr_value(after_metrics.get('cell_addr'))
+        expected_addr = _normalize_cell_addr_value(expected_cell_addr) if expected_cell_addr is not None else None
+        if (
+            before_addr is None
+            or after_addr is None
+            or before_addr != after_addr
+            or (expected_cell_addr is not None and (expected_addr is None or before_addr != expected_addr))
+        ):
+            fail(
+                'cell_format_exact did not preserve a valid same target cell identity; '
+                f'before={before_metrics.get("cell_addr")!r}; after={after_metrics.get("cell_addr")!r}; '
+                f'expected={expected_cell_addr!r}'
+            )
+        if before_margin == after_margin:
+            fail(
+                'cell_format_exact did not observe changed cell_margin_hu after mutation; '
+                f'before={before_margin!r}; after={after_margin!r}'
+            )
+        if expected_cell_margin_hu is not None:
+            expected_margin = _normalize_cell_margin_readback(expected_cell_margin_hu)
+            if expected_margin is None:
+                fail(
+                    f'cell_format_exact expected cell-margin value is invalid: {expected_cell_margin_hu!r}'
+                )
+            if after_margin != expected_margin:
+                fail(
+                    'cell_format_exact cell-margin readback mismatched the requested value; '
+                    f'requested={expected_margin!r}; after={after_margin!r}'
+                )
+        changed_margin = changed_metrics.get('cell_margin_hu')
+        if isinstance(changed_margin, Mapping) and (
+            changed_margin.get('before') != before_metrics.get('cell_margin_hu')
+            or changed_margin.get('after') != after_metrics.get('cell_margin_hu')
+        ):
+            fail(
+                'cell_format_exact cell-margin change record does not match native readback; '
+                f'changed={changed_margin!r}; before={before_margin!r}; after={after_margin!r}'
+            )
+        return
+    if operation != 'vertical-align':
+        return
+
+    before_vertical = before_metrics.get('vertical_align')
+    after_vertical = after_metrics.get('vertical_align')
+    normalized_before = _normalize_vertical_align_readback(before_vertical)
+    normalized_after = _normalize_vertical_align_readback(after_vertical)
+    if normalized_before is None:
+        fail(
+            'cell_format_exact vertical alignment has no usable native before readback; '
+            f'before={before_vertical!r}'
+        )
+    if normalized_after is None:
+        fail(
+            'cell_format_exact vertical alignment has no usable native after readback; '
+            f'after={after_vertical!r}'
+        )
+    before_addr = _normalize_cell_addr_value(before_metrics.get('cell_addr'))
+    after_addr = _normalize_cell_addr_value(after_metrics.get('cell_addr'))
+    expected_addr = _normalize_cell_addr_value(expected_cell_addr) if expected_cell_addr is not None else None
+    if (
+        before_addr is None
+        or after_addr is None
+        or before_addr != after_addr
+        or (expected_cell_addr is not None and (expected_addr is None or before_addr != expected_addr))
+    ):
+        fail(
+            'cell_format_exact did not preserve a valid same target cell identity; '
+            f'before={before_metrics.get("cell_addr")!r}; after={after_metrics.get("cell_addr")!r}; '
+            f'expected={expected_cell_addr!r}'
+        )
+    if normalized_before['value'] == normalized_after['value']:
+        fail(
+            'cell_format_exact did not observe changed vertical alignment after mutation; '
+            f'before={before_vertical!r}; after={after_vertical!r}'
+        )
+    if expected_vertical_align and normalized_after['name'] != expected_vertical_align:
+        fail(
+            'cell_format_exact vertical alignment readback mismatched the requested value; '
+            f'requested={expected_vertical_align!r}; after={after_vertical!r}'
+        )
 
 
 def _remove_visible_spaces(value: str) -> str:
@@ -264,6 +521,25 @@ class LocalCliServiceError(RuntimeError):
         self.status_code = status_code
 
 
+class LocalCliMutationError(LocalCliRuntimeError):
+    """A native mutation failed after it may have changed document state."""
+
+    def __init__(self, message: str, *, mutation_may_have_persisted: bool, rollback: dict[str, Any]):
+        super().__init__(message)
+        self.mutation_may_have_persisted = mutation_may_have_persisted
+        self.rollback = rollback
+
+
+class LocalCliCellMarginsGetError(LocalCliRuntimeError):
+    """A deterministic getter precondition failed; carries one stable public code."""
+
+    def __init__(self, code: str, message: str, details: dict[str, Any] | None = None):
+        super().__init__(message)
+        self.code = code
+        self.details = details or {}
+        self.primary_code = code
+
+
 class LocalCliService:
     def __init__(self, *, settings: Any, interactive_sessions: Any):
         self.settings = settings
@@ -273,8 +549,13 @@ class LocalCliService:
         self.sessions_root = self.root / 'sessions'
         self.active_binding_path = self.root / 'active_binding.json'
         self.command_packages = get_command_package_registry()
+        self._closed_session_ids: set[str] = set()
+        self._closed_session_ids_lock = threading.Lock()
         self.root.mkdir(parents=True, exist_ok=True)
         self.sessions_root.mkdir(parents=True, exist_ok=True)
+        # Exact managed custody binding reused by the cell-margins getter's
+        # on-disk readback; populated per-call (see cell_margins_get).
+        self._cell_margins_custody_binding: dict[str, Any] = {}
 
     def _binding_path(self, session_id: str) -> Path:
         return self.sessions_root / session_id / 'binding.json'
@@ -283,29 +564,152 @@ class LocalCliService:
         return self.sessions_root / session_id
 
     def _read_json(self, path: Path) -> dict[str, Any] | None:
-        if not path.exists():
-            return None
         try:
-            payload = json.loads(path.read_text(encoding='utf-8'))
-        except Exception:
-            return None
-        return payload if isinstance(payload, dict) else None
+            return read_json_object(path)
+        except ValueError as exc:
+            raise LocalCliServiceError(
+                f'Local CLI binding JSON could not be read safely: {path}',
+                status_code=500,
+            ) from exc
 
     def _write_json(self, path: Path, payload: dict[str, Any]) -> None:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding='utf-8')
+        try:
+            atomic_write_json(path, payload)
+        except Exception as exc:
+            raise LocalCliServiceError(
+                f'Local CLI binding JSON could not be persisted atomically: {path}',
+                status_code=500,
+            ) from exc
 
     def _binding_session_id(self, binding: dict[str, Any]) -> str:
         session_id = str(binding.get('session_id') or '').strip()
         if not session_id:
             raise LocalCliServiceError('Local CLI session binding is missing session_id.', status_code=500)
+        if (
+            len(session_id) > 128
+            or session_id != str(binding.get('session_id') or '')
+            or session_id in {'.', '..'}
+            or re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]{0,127}', session_id) is None
+        ):
+            raise LocalCliServiceError('Local CLI session_id is not a safe binding-path identifier.', status_code=500)
         return session_id
+
+    def _parse_binding_generation(self, value: Any, *, default: int = 0) -> int:
+        raw = default if value is None else value
+        try:
+            generation = int(raw)
+        except (TypeError, ValueError) as exc:
+            raise LocalCliServiceError('Local CLI binding generation is invalid.', status_code=500) from exc
+        if generation < 0:
+            raise LocalCliServiceError('Local CLI binding generation is invalid.', status_code=500)
+        return generation
+
+    def _mark_session_closed(self, session_id: str) -> None:
+        closed_ids = getattr(self, '_closed_session_ids', None)
+        if closed_ids is None:
+            closed_ids = set()
+            self._closed_session_ids = closed_ids
+        lock = getattr(self, '_closed_session_ids_lock', None)
+        if lock is None:
+            lock = threading.Lock()
+            self._closed_session_ids_lock = lock
+        with lock:
+            closed_ids.add(session_id)
+
+    def _is_session_closed(self, session_id: str) -> bool:
+        closed_ids = getattr(self, '_closed_session_ids', set())
+        lock = getattr(self, '_closed_session_ids_lock', None)
+        if lock is None:
+            return session_id in closed_ids
+        with lock:
+            return session_id in closed_ids
 
     def _binding_session_root(self, binding: dict[str, Any]) -> Path:
         raw = str(binding.get('session_root_path') or '').strip()
         if raw:
             return Path(raw)
         return self._default_session_root(self._binding_session_id(binding))
+
+    def _managed_path_identity(self, path: Path) -> dict[str, int] | None:
+        """Return a no-follow filesystem identity for a server-owned root."""
+
+        try:
+            stat_result = os.stat(path, follow_symlinks=False)
+        except OSError:
+            return None
+        return {
+            'device': int(stat_result.st_dev),
+            'inode': int(stat_result.st_ino),
+            'mode': int(stat_result.st_mode),
+        }
+
+    def _path_has_symlink_component(self, path: Path) -> bool:
+        """Check every lexical component without resolving through it."""
+
+        lexical = Path(os.path.abspath(os.fspath(path.expanduser())))
+        current = Path(lexical.anchor)
+        for part in lexical.parts[1:]:
+            current = current / part
+            try:
+                if current.is_symlink():
+                    return True
+            except OSError:
+                return True
+        return False
+
+    def _cleanup_managed_session_root(self, binding: dict[str, Any]) -> dict[str, Any]:
+        """Delete one owned session root and verify the exact root is gone."""
+
+        raw_path = str(binding.get('session_root_path') or '').strip()
+        session_id = self._binding_session_id(binding)
+        if not raw_path or not session_id:
+            raise LocalCliServiceError('Managed local CLI session root identity is incomplete.', status_code=500)
+        root = Path(raw_path).expanduser()
+        try:
+            canonical_root = root.resolve(strict=False)
+            canonical_parent = self.sessions_root.resolve(strict=True)
+            canonical_root.relative_to(canonical_parent)
+        except (OSError, ValueError) as exc:
+            raise LocalCliServiceError('Managed local CLI session root is outside the server session store.', status_code=500) from exc
+        if (
+            canonical_root == canonical_parent
+            or canonical_root.parent != canonical_parent
+            or canonical_root.name != session_id
+            or root.is_symlink()
+            or self.sessions_root.is_symlink()
+            or any(part in {'.', '..'} for part in root.parts)
+            or root.parent.is_symlink()
+            or self._path_has_symlink_component(self.sessions_root)
+            or self._path_has_symlink_component(root)
+            or root.parent.resolve(strict=True) != canonical_parent
+        ):
+            raise LocalCliServiceError('Managed local CLI session root is not a removable child directory.', status_code=500)
+        for ancestor in (canonical_parent, canonical_root):
+            if ancestor.is_symlink():
+                raise LocalCliServiceError('Managed local CLI session root contains a symlink.', status_code=500)
+        expected_identity = binding.get('session_root_identity')
+        actual_identity = self._managed_path_identity(canonical_root)
+        if actual_identity is None:
+            raise LocalCliServiceError(
+                'Managed local CLI session root is missing; cleanup ownership cannot be verified.',
+                status_code=409,
+            )
+        if not isinstance(expected_identity, dict) or actual_identity != expected_identity:
+            raise LocalCliServiceError('Managed local CLI session root identity changed; refusing cleanup.', status_code=409)
+        identity_at_delete = self._managed_path_identity(canonical_root)
+        if identity_at_delete != expected_identity:
+            raise LocalCliServiceError('Managed local CLI session root identity changed before cleanup.', status_code=409)
+        actual_identity = identity_at_delete
+        shutil.rmtree(canonical_root)
+        if canonical_root.exists() or canonical_root.is_symlink():
+            raise LocalCliServiceError('Managed local CLI session root remained after cleanup.', status_code=500)
+        return {
+            'path': str(canonical_root),
+            'removed': True,
+            'verified': True,
+            'already_absent': False,
+            'object_identity': actual_identity,
+        }
 
     def _read_binding(self, *, session_id: str | None = None) -> dict[str, Any] | None:
         if session_id:
@@ -314,30 +718,205 @@ class LocalCliService:
 
     def _save_binding(self, binding: dict[str, Any]) -> dict[str, Any]:
         session_id = self._binding_session_id(binding)
-        self._write_json(self._binding_path(session_id), binding)
-        self._write_json(self.active_binding_path, binding)
+        session_path = self._binding_path(session_id)
+        expected_raw = binding.get('_expected_command_generation', binding.get('command_generation', 0))
+        expected_generation = self._parse_binding_generation(expected_raw)
+        native_sequence_present = 'native_command_sequence' in binding
+        expected_native_raw = binding.get('_expected_native_command_sequence')
+        expected_native_sequence = (
+            self._parse_binding_generation(expected_native_raw)
+            if expected_native_raw is not None
+            else None
+        )
+        native_sequence = self._parse_binding_generation(binding.get('native_command_sequence', 0))
+        payload = dict(binding)
+        payload.pop('_expected_command_generation', None)
+        payload.pop('_expected_native_command_sequence', None)
+        base_binding = payload.pop('_binding_base', None)
+        with path_lock(self.root / '.binding-state.lock'):
+            current = self._read_json(session_path)
+            if self._is_session_closed(session_id):
+                raise LocalCliServiceError(
+                    'Local CLI binding was cleared for this closed session; refusing to resurrect it.',
+                    status_code=409,
+                )
+            current_generation = self._parse_binding_generation((current or {}).get('command_generation', 0))
+            current_native_sequence = self._parse_binding_generation((current or {}).get('native_command_sequence', 0))
+            if current is not None and 'native_command_sequence' in current and not native_sequence_present:
+                raise LocalCliServiceError(
+                    'Local CLI binding projection is missing the native command sequence; refusing a stale write.',
+                    status_code=409,
+                )
+            if current is None and expected_generation != 0:
+                raise LocalCliServiceError(
+                    'Local CLI binding was cleared while this command was running; refusing to resurrect a stale generation.',
+                    status_code=409,
+                )
+            if native_sequence_present:
+                if expected_native_sequence is None:
+                    expected_native_sequence = current_native_sequence
+                if current is None and expected_native_sequence != 0:
+                    raise LocalCliServiceError(
+                        'Local CLI binding was cleared while a native command was running; refusing a stale sequence.',
+                        status_code=409,
+                    )
+                if current is not None and current_native_sequence != expected_native_sequence:
+                    raise LocalCliServiceError(
+                        'Local CLI native command sequence conflict; refusing a stale projection.',
+                        status_code=409,
+                    )
+                latest_sequence_getter = getattr(self.runtime_manager, 'latest_command_sequence', None)
+                if callable(latest_sequence_getter):
+                    try:
+                        latest_sequence = int(
+                            latest_sequence_getter(
+                                session_id,
+                                session_root=self._binding_session_root(binding),
+                            )
+                        )
+                    except Exception:
+                        latest_sequence = 0
+                    if latest_sequence > native_sequence:
+                        raise LocalCliServiceError(
+                            'Local CLI native command sequence is stale; refusing an older projection.',
+                            status_code=409,
+                        )
+            if current is not None and current_generation != expected_generation:
+                if not isinstance(base_binding, dict):
+                    raise LocalCliServiceError(
+                        'Local CLI binding generation conflict; refusing to overwrite a newer native command result.',
+                        status_code=409,
+                    )
+                # The native command queue may have advanced while this
+                # request was extracting its post-command location. Merge
+                # only fields this request actually changed onto the newer
+                # committed binding; never replay its stale full snapshot.
+                changed = {
+                    key: copy.deepcopy(value)
+                    for key, value in payload.items()
+                    if base_binding.get(key) != value
+                }
+                payload = dict(current)
+                payload.update(changed)
+                expected_generation = current_generation
+            active = self._read_json(self.active_binding_path)
+            if active is not None:
+                active_session_id = str(active.get('session_id') or '').strip()
+                if active_session_id and active_session_id != session_id:
+                    raise LocalCliServiceError(
+                        'Local CLI active binding belongs to another session; refusing to overwrite it.',
+                        status_code=409,
+                    )
+                active_generation = self._parse_binding_generation(active.get('command_generation', 0))
+                if active_session_id == session_id and active_generation != expected_generation:
+                    raise LocalCliServiceError(
+                        'Local CLI active binding generation conflict; refusing a stale projection.',
+                        status_code=409,
+                    )
+            payload['command_generation'] = expected_generation + 1
+            if native_sequence_present:
+                payload['native_command_sequence'] = native_sequence
+            previous_session = current
+            previous_active = active
+            try:
+                self._write_json(session_path, payload)
+                self._write_json(self.active_binding_path, payload)
+                session_readback = self._read_json(session_path)
+                active_readback = self._read_json(self.active_binding_path)
+                if session_readback != payload or active_readback != payload:
+                    raise LocalCliServiceError(
+                        'Local CLI binding projection readback did not match the committed generation.',
+                        status_code=500,
+                    )
+            except Exception as exc:
+                # The two projections are one logical commit. If the second
+                # replace or either readback fails, restore both preimages
+                # under the same lock rather than leaving a split generation.
+                try:
+                    for projection_path, previous in (
+                        (session_path, previous_session),
+                        (self.active_binding_path, previous_active),
+                    ):
+                        if previous is None:
+                            if projection_path.exists():
+                                projection_path.unlink()
+                            if projection_path.exists():
+                                raise OSError(f'Binding rollback left a projection behind: {projection_path}')
+                        else:
+                            self._write_json(projection_path, previous)
+                except Exception as rollback_exc:
+                    raise LocalCliServiceError(
+                        'Local CLI binding commit failed and projection rollback was incomplete.',
+                        status_code=500,
+                    ) from rollback_exc
+                if isinstance(exc, LocalCliServiceError):
+                    raise
+                raise LocalCliServiceError(
+                    'Local CLI binding projection commit failed; previous generation was restored.',
+                    status_code=500,
+                ) from exc
+        binding.clear()
+        binding.update(payload)
         return binding
 
-    def _clear_binding(self, *, binding: dict[str, Any] | None = None, session_id: str | None = None) -> None:
+    def _clear_binding(
+        self,
+        *,
+        binding: dict[str, Any] | None = None,
+        session_id: str | None = None,
+        force: bool = False,
+    ) -> None:
         resolved_session_id = session_id
         if resolved_session_id is None and isinstance(binding, dict):
             resolved_session_id = str(binding.get('session_id') or '').strip() or None
+        expected_generation: int | None = None
+        if isinstance(binding, dict) and '_expected_command_generation' in binding:
+            expected_generation = self._parse_binding_generation(binding['_expected_command_generation'])
+        elif isinstance(binding, dict) and 'command_generation' in binding:
+            expected_generation = self._parse_binding_generation(binding['command_generation'])
+        expected_native_sequence: int | None = None
+        if isinstance(binding, dict) and 'native_command_sequence' in binding:
+            expected_native_sequence = self._parse_binding_generation(binding['native_command_sequence'])
 
-        if resolved_session_id:
-            binding_path = self._binding_path(resolved_session_id)
-            if binding_path.exists():
-                binding_path.unlink()
+        with path_lock(self.root / '.binding-state.lock'):
+            if session_id is None and binding is None:
+                if self.active_binding_path.exists():
+                    self.active_binding_path.unlink()
+                return
 
-        active = self._read_json(self.active_binding_path)
-        if session_id is None and binding is None:
-            if self.active_binding_path.exists():
-                self.active_binding_path.unlink()
-            return
-        if not isinstance(active, dict):
-            return
-        active_session_id = str(active.get('session_id') or '').strip()
-        if not resolved_session_id or active_session_id == resolved_session_id:
-            if self.active_binding_path.exists():
+            current = self._read_json(self._binding_path(str(resolved_session_id))) if resolved_session_id else None
+            if isinstance(current, dict):
+                current_generation = self._parse_binding_generation(current.get('command_generation', 0))
+                current_native_sequence = self._parse_binding_generation(current.get('native_command_sequence', 0))
+                generation_matches = force or expected_generation is None or current_generation == expected_generation
+                sequence_matches = (
+                    expected_native_sequence is None
+                    or current_native_sequence == expected_native_sequence
+                    if 'native_command_sequence' in current
+                    else expected_native_sequence is None
+                )
+                if generation_matches and sequence_matches:
+                    binding_path = self._binding_path(str(resolved_session_id))
+                    if binding_path.exists():
+                        binding_path.unlink()
+
+            active = self._read_json(self.active_binding_path)
+            if not isinstance(active, dict):
+                return
+            active_session_id = str(active.get('session_id') or '').strip()
+            active_generation = self._parse_binding_generation(active.get('command_generation', 0))
+            active_native_sequence = self._parse_binding_generation(active.get('native_command_sequence', 0))
+            if (
+                (not resolved_session_id or active_session_id == resolved_session_id)
+                and (force or expected_generation is None or active_generation == expected_generation)
+                and (
+                    expected_native_sequence is None
+                    or active_native_sequence == expected_native_sequence
+                    if 'native_command_sequence' in active
+                    else expected_native_sequence is None
+                )
+                and self.active_binding_path.exists()
+            ):
                 self.active_binding_path.unlink()
 
     def _record_session_close(
@@ -367,14 +946,81 @@ class LocalCliService:
         *,
         summary: str = 'Local CLI live document session is no longer available.',
         outcome: str = 'stale',
-    ) -> None:
+    ) -> bool:
         session_id = self._binding_session_id(binding)
+        if (
+            self._binding_has_pending_reconciliation(binding)
+            or binding.get('document_session_state') in {
+                'reconciled', 'reconciled_cleanup_pending', 'closed_cleanup_pending'
+            }
+            or isinstance(binding.get('artifact_custody'), dict)
+        ):
+            return False
+        # A missing runtime is not proof that the managed document was
+        # released.  Preserve its binding/root so a restart or operator can
+        # inspect the last custody evidence instead of deleting the only copy.
+        has_session = getattr(self.runtime_manager, 'has_session', None)
+        if callable(has_session):
+            try:
+                if not has_session(session_id):
+                    return False
+            except Exception:
+                return False
         try:
             self.runtime_manager.close_session(session_id)
         except Exception:
-            pass
+            # Do not remove the managed session root while native/COM teardown
+            # is uncertain.  The binding remains the ownership record for a
+            # later retry or operator inspection.
+            return False
+        try:
+            self._cleanup_managed_session_root(binding)
+        except Exception:
+            # Retain the binding when ownership cleanup cannot be proven; a
+            # later reconciliation/operator pass must still be able to find
+            # the server-managed root.
+            return False
         self._record_session_close(session_id=session_id, summary=summary, outcome=outcome)
         self._clear_binding(binding=binding)
+        self._mark_session_closed(session_id)
+        return True
+
+    def _command_status_for_binding(
+        self,
+        binding: dict[str, Any],
+        command_id: str | None = None,
+    ) -> dict[str, Any]:
+        session_id = self._binding_session_id(binding)
+        session_root = self._binding_session_root(binding)
+        try:
+            return self.runtime_manager.command_status(
+                session_id,
+                command_id,
+                session_root=session_root,
+            )
+        except Exception:
+            try:
+                return read_command_journal(session_root, command_id)
+            except Exception:
+                return {
+                    'command_id': command_id,
+                    'state': 'unknown',
+                    'reconcilable': False,
+                }
+
+    def _binding_has_pending_reconciliation(self, binding: dict[str, Any]) -> bool:
+        pending = binding.get('pending_command') if isinstance(binding.get('pending_command'), dict) else None
+        if not pending:
+            return False
+        command_id = str(pending.get('command_id') or '').strip()
+        if not command_id:
+            return True
+        # The persisted binding pointer is authoritative until this service
+        # has projected the terminal result and removed it.  A journal entry
+        # may already be marked reconciled after a retry, but clearing the
+        # pointer before the binding projection is still unsafe: a projection
+        # failure must keep normal work and cleanup blocked.
+        return True
 
     def _looks_like_stale_live_session_error(self, exc: Exception) -> bool:
         message = str(exc).lower()
@@ -411,8 +1057,51 @@ class LocalCliService:
                 handler=_handler,
                 timeout=timeout,
             )
+        except LocalCliRuntimeTimeoutError as exc:
+            # A probe timeout owns a real native command just like an edit
+            # timeout.  Project its identity before any stale cleanup so the
+            # operator can reconcile the late result and no session can be
+            # deleted/reused while COM work is still in flight.
+            try:
+                command_status = self.runtime_manager.command_status(session_id, exc.command_id)
+            except Exception:
+                command_status = {'command_id': exc.command_id, 'state': exc.command_state}
+            try:
+                current_sequence = self._parse_binding_generation(binding.get('native_command_sequence', 0))
+            except LocalCliServiceError:
+                current_sequence = 0
+            try:
+                command_sequence = max(current_sequence, int(command_status.get('sequence', current_sequence)))
+            except (TypeError, ValueError):
+                command_sequence = current_sequence
+            pending = {
+                'command_id': exc.command_id,
+                'command': 'health_probe',
+                'sequence': command_sequence,
+                'state': command_status.get('state', exc.command_state),
+                'timed_out_at': utc_now_iso(),
+            }
+            binding['native_command_sequence'] = command_sequence
+            binding['pending_command'] = pending
+            binding['document_session_state'] = 'timed_out_pending_reconciliation'
+            binding['live_session_bound'] = True
+            binding['updated_at'] = utc_now_iso()
+            self._save_binding(binding)
+            try:
+                self.interactive_sessions.record_command(
+                    'health_probe',
+                    session_id=session_id,
+                    state='pending',
+                    summary='health_probe timed out; awaiting native reconciliation',
+                    payload={'command_id': exc.command_id, 'sequence': command_sequence},
+                    metadata={'local_cli_v1': {'reconciliation_pending': True}},
+                    live_runtime={'reconciliation_pending': True, 'pending_command': dict(pending)},
+                )
+            except Exception:
+                pass
+            return False
         except LocalCliRuntimeError as exc:
-            if self._looks_like_stale_live_session_error(exc) or 'timed out' in str(exc).lower():
+            if self._looks_like_stale_live_session_error(exc):
                 self._cleanup_stale_binding(
                     binding,
                     summary='Local CLI live session became stale after the Hancom bridge stopped responding.',
@@ -420,6 +1109,24 @@ class LocalCliService:
                 )
             return False
 
+        try:
+            current_sequence = self._parse_binding_generation(binding.get('native_command_sequence', 0))
+        except LocalCliServiceError:
+            current_sequence = 0
+        command_sequence: int | None = None
+        try:
+            command_status = self.runtime_manager.command_status(session_id)
+            command_sequence = int(command_status.get('sequence'))
+        except (AttributeError, TypeError, ValueError, LocalCliRuntimeError):
+            latest_sequence_getter = getattr(self.runtime_manager, 'latest_command_sequence', None)
+            if callable(latest_sequence_getter):
+                try:
+                    command_sequence = int(latest_sequence_getter(session_id))
+                except (TypeError, ValueError, LocalCliRuntimeError):
+                    command_sequence = None
+        if command_sequence is not None and command_sequence >= current_sequence:
+            binding['_expected_native_command_sequence'] = current_sequence
+            binding['native_command_sequence'] = command_sequence
         if isinstance(location, dict):
             binding = self._update_live_binding(binding, location=location)
             self._save_binding(binding)
@@ -433,6 +1140,19 @@ class LocalCliService:
             raise LocalCliServiceError('No active local CLI document is open.', status_code=404)
 
         resolved_session_id = self._binding_session_id(binding)
+        if require_live and self._binding_has_pending_reconciliation(binding):
+            pending = binding.get('pending_command') if isinstance(binding.get('pending_command'), dict) else {}
+            command_id = str(pending.get('command_id') or '').strip()
+            raise LocalCliServiceError(
+                'A native local CLI command is awaiting reconciliation; '
+                f'use command-reconcile for command_id={command_id}.',
+                status_code=409,
+            )
+        if require_live and binding.get('live_session_bound') is False:
+            raise LocalCliServiceError(
+                'The local CLI session is no longer live; close it and open a new managed copy.',
+                status_code=409,
+            )
         if require_live and not self.runtime_manager.has_session(resolved_session_id):
             self._cleanup_stale_binding(binding)
             raise LocalCliServiceError('Live local CLI session is unavailable. Re-open the document.', status_code=409)
@@ -444,7 +1164,10 @@ class LocalCliService:
 
     def _require_ready_runtime(self, task_label: str) -> dict[str, Any]:
         snapshot = self._runtime_snapshot()
-        if not snapshot or not bool(snapshot.get('ready')):
+        if not readiness_matches_current_worker(
+            snapshot,
+            candidate_generation=resolve_candidate_generation(),
+        ):
             raise LocalCliServiceError(build_plain_readiness_failure(task_label), status_code=503)
         return snapshot
 
@@ -815,7 +1538,8 @@ class LocalCliService:
         cursor = location.get('cursor') if isinstance(location.get('cursor'), dict) else None
         binding['last_live_location'] = location
         binding['last_cursor_snapshot'] = cursor
-        binding['document_session_state'] = 'open'
+        if not self._binding_has_pending_reconciliation(binding):
+            binding['document_session_state'] = 'open'
         binding['live_session_bound'] = self.runtime_manager.has_session(self._binding_session_id(binding))
         if isinstance(cursor, dict):
             binding = self._update_binding_from_snapshot(binding, cursor, clear_last_find=clear_last_find)
@@ -846,20 +1570,445 @@ class LocalCliService:
             return f'{stem}.pdf'
         if kind in {'working-copy', 'working_copy'}:
             return f'{stem}-edited{suffix}'
+        if kind == 'recovery':
+            return f'{stem}-recovered{suffix}'
         raise LocalCliServiceError(f'Unsupported local CLI artifact kind: {kind}', status_code=400)
 
     def _artifact_download_path(self, *, session_id: str, kind: str) -> str:
         return f'/local-cli/session/{session_id}/artifact/{kind}'
 
-    def _resolve_artifact(self, *, kind: str, session_id: str | None = None) -> tuple[dict[str, Any], Path]:
+    def _public_artifacts(
+        self,
+        *,
+        session_id: str,
+        artifacts: dict[str, Any] | None,
+        binding: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Expose download routes and custody metadata, never server paths."""
+
+        source = artifacts if isinstance(artifacts, dict) else {}
+        public: dict[str, Any] = {}
+        route_kinds = {
+            'latest_working_copy_path': 'working-copy',
+            'latest_export_path': 'export',
+            'latest_screenshot_path': 'screenshot',
+            'latest_recovery_path': 'recovery',
+        }
+        for key, kind in route_kinds.items():
+            path = source.get(key)
+            if (
+                isinstance(path, str)
+                and path
+                and (
+                    binding is None
+                    or self._artifact_projection_is_available(binding=binding, kind=kind, path=Path(path))
+                )
+            ):
+                public[key.replace('_path', '_download_path')] = self._artifact_download_path(
+                    session_id=session_id,
+                    kind=kind,
+                )
+        for key in ('latest_recovery_sha256', 'latest_recovery_size_bytes'):
+            value = source.get(key)
+            if value not in (None, ''):
+                public[key] = value
+        return public
+
+    def public_artifact_projection(
+        self,
+        *,
+        session_id: str,
+        session: dict[str, Any] | None = None,
+    ) -> dict[str, str]:
+        """Return routes proven by the current managed session binding.
+
+        Interactive session metadata is caller-controlled state.  The public
+        projection therefore reads both server-owned binding projections,
+        requires them to identify the same session and generation, and lets
+        the existing custody/readback checks decide which artifact kinds are
+        downloadable.
+        """
+
+        resolved_session_id = str(session_id or '').strip()
+        if re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]{0,127}', resolved_session_id) is None:
+            return {}
+        if isinstance(session, dict):
+            record_session_id = str(session.get('session_id') or '').strip()
+            if record_session_id != resolved_session_id:
+                return {}
+            record_state = str(session.get('state') or '').strip().casefold()
+            if record_state in {'closed', 'closed_cleanup_pending'}:
+                return {}
+            source_path = session.get('source_path')
+        else:
+            source_path = None
+
+        try:
+            binding = self._read_binding(session_id=resolved_session_id)
+            active_binding = self._read_binding()
+            if not isinstance(binding, dict) or not isinstance(active_binding, dict):
+                return {}
+            if self._binding_session_id(binding) != resolved_session_id:
+                return {}
+            if self._binding_session_id(active_binding) != resolved_session_id:
+                return {}
+            if binding != active_binding:
+                return {}
+            if self._is_session_closed(resolved_session_id):
+                return {}
+            binding_state = str(binding.get('document_session_state') or '').strip().casefold()
+            if binding_state in {'closed', 'closed_cleanup_pending', 'stale'}:
+                return {}
+            if source_path:
+                working_copy_path = str(binding.get('working_copy_path') or '').strip()
+                if not working_copy_path:
+                    return {}
+                source_lexical = os.path.normcase(os.path.normpath(os.path.abspath(os.fspath(source_path))))
+                working_lexical = os.path.normcase(os.path.normpath(os.path.abspath(working_copy_path)))
+                if source_lexical != working_lexical:
+                    return {}
+            artifacts = binding.get('artifacts') if isinstance(binding.get('artifacts'), dict) else {}
+            authoritative_artifacts = dict(artifacts)
+            if 'latest_working_copy_path' not in authoritative_artifacts:
+                working_copy_path = binding.get('working_copy_path')
+                if isinstance(working_copy_path, str) and working_copy_path:
+                    authoritative_artifacts['latest_working_copy_path'] = working_copy_path
+            projected = self._public_artifacts(
+                session_id=resolved_session_id,
+                artifacts=authoritative_artifacts,
+                binding=binding,
+            )
+            return {
+                key: value
+                for key, value in projected.items()
+                if key.endswith('_download_path') and isinstance(value, str)
+            }
+        except (LocalCliServiceError, OSError, TypeError, ValueError):
+            # Public status must fail closed when the binding is malformed or
+            # disappears during reconciliation; it must never fall back to
+            # caller-provided metadata.
+            return {}
+
+    def _validated_artifact_projection(
+        self,
+        *,
+        binding: dict[str, Any],
+        artifacts: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        """Keep only artifact paths proven to be children of this session root."""
+
+        source = artifacts if isinstance(artifacts, dict) else {}
+        projection: dict[str, Any] = {}
+        path_kinds = {
+            'latest_working_copy_path': 'working-copy',
+            'latest_export_path': 'export',
+            'latest_screenshot_path': 'screenshot',
+            'latest_recovery_path': 'recovery',
+        }
+        for key, kind in path_kinds.items():
+            value = source.get(key)
+            if value in (None, ''):
+                continue
+            if not isinstance(value, str):
+                raise LocalCliServiceError('Local CLI artifact path is invalid.', status_code=409)
+            custody = {}
+            projection[key] = str(self._verify_artifact_readback(binding, Path(value), readback=custody))
+            custody_map = binding.get('artifact_custody') if isinstance(binding.get('artifact_custody'), dict) else {}
+            prior = custody_map.get(kind) if isinstance(custody_map.get(kind), dict) else {}
+            custody_map[kind] = {**prior, **custody}
+            binding['artifact_custody'] = custody_map
+        for key in ('latest_recovery_sha256', 'latest_recovery_size_bytes'):
+            if source.get(key) not in (None, ''):
+                projection[key] = source[key]
+        return projection
+
+    def _public_bundle_steps(
+        self,
+        *,
+        session_id: str,
+        steps: Any,
+        binding: dict[str, Any] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Remove internal artifact paths from bounded bundle step results."""
+
+        if not isinstance(steps, list):
+            return []
+        public_steps: list[dict[str, Any]] = []
+        for raw_step in steps:
+            if not isinstance(raw_step, dict):
+                continue
+            step = _bounded_journal_value(raw_step)
+            if not isinstance(step, dict):
+                continue
+            raw_result = raw_step.get('result')
+            if isinstance(raw_result, dict):
+                artifact_path = raw_result.get('artifact_path')
+                artifact_kind = raw_result.get('artifact_kind')
+                result = _bounded_journal_value(raw_result)
+                if not isinstance(result, dict):
+                    result = {}
+                result.pop('artifact_path', None)
+                if isinstance(artifact_path, str) and artifact_path:
+                    if not isinstance(artifact_kind, str) or artifact_kind not in _RECOVERY_ARTIFACT_KINDS:
+                        artifact_kind = _artifact_kind_from_key(str(step.get('op') or ''))
+                    if (
+                        artifact_kind in _RECOVERY_ARTIFACT_KINDS
+                        and binding is not None
+                        and self._artifact_projection_is_available(
+                            binding=binding,
+                            kind=artifact_kind,
+                            path=Path(artifact_path),
+                        )
+                    ):
+                        result['download_path'] = self._artifact_download_path(
+                            session_id=session_id,
+                            kind=artifact_kind,
+                        )
+                if isinstance(result.get('artifacts'), dict):
+                    result['artifacts'] = self._public_artifacts(
+                        session_id=session_id,
+                        artifacts=result['artifacts'],
+                        binding=binding,
+                    )
+                step['result'] = result
+            if 'error' in step:
+                step['error'] = 'native command step failed'
+            public_steps.append(step)
+        return public_steps
+
+    def _artifact_projection_is_available(self, *, binding: dict[str, Any], kind: str, path: Path) -> bool:
+        custody_map = binding.get('artifact_custody') if isinstance(binding.get('artifact_custody'), dict) else {}
+        expected = custody_map.get(kind)
+        if not isinstance(expected, dict):
+            return False
+        expected_size = expected.get('size_bytes')
+        expected_sha256 = expected.get('sha256')
+        if (
+            isinstance(expected_size, bool)
+            or not isinstance(expected_size, int)
+            or expected_size <= 0
+            or not isinstance(expected_sha256, str)
+            or re.fullmatch(r'[0-9a-f]{64}', expected_sha256) is None
+        ):
+            return False
+        try:
+            self._verify_artifact_readback(binding, path, expected=expected)
+        except LocalCliServiceError:
+            return False
+        return True
+
+    def _validated_artifact_path(self, binding: dict[str, Any], path: Path) -> tuple[Path, Path]:
+        root_path = self._binding_session_root(binding)
+        expected_root_identity = binding.get('session_root_identity')
+        actual_root_identity = self._managed_path_identity(root_path)
+        if actual_root_identity is None:
+            raise LocalCliServiceError('Local CLI session root identity could not be verified.', status_code=409)
+        if not isinstance(expected_root_identity, dict):
+            raise LocalCliServiceError('Local CLI session root identity is missing; refusing artifact.', status_code=409)
+        if actual_root_identity != expected_root_identity:
+            raise LocalCliServiceError('Managed local CLI session root identity changed; refusing artifact.', status_code=409)
+        if not stat.S_ISDIR(actual_root_identity.get('mode', 0)):
+            raise LocalCliServiceError('Managed local CLI session root is not a directory.', status_code=409)
+        if self._path_has_symlink_component(root_path):
+            raise LocalCliServiceError('Local CLI session root path is symlinked.', status_code=409)
+        try:
+            root = root_path.resolve(strict=True)
+            managed_root = self.sessions_root.resolve(strict=True)
+            root.relative_to(managed_root)
+        except (OSError, ValueError) as exc:
+            raise LocalCliServiceError('Local CLI session root is outside the server session store.', status_code=409) from exc
+        session_id = self._binding_session_id(binding)
+        if root.parent != managed_root or root.name != session_id:
+            raise LocalCliServiceError('Local CLI session root is not a managed session child.', status_code=409)
+        if any(part in {'.', '..'} for part in path.parts):
+            raise LocalCliServiceError('Local CLI artifact path contains traversal components.', status_code=409)
+        lexical = Path(os.path.abspath(os.fspath(path.expanduser())))
+        try:
+            relative = lexical.relative_to(root)
+        except ValueError as exc:
+            raise LocalCliServiceError('Local CLI artifact path is outside the managed session root.', status_code=409) from exc
+        if not relative.parts:
+            raise LocalCliServiceError('Local CLI artifact path is not a file.', status_code=409)
+        current = root
+        for part in relative.parts:
+            current = current / part
+            try:
+                if current.is_symlink():
+                    raise LocalCliServiceError('Local CLI artifact path is symlinked.', status_code=409)
+            except OSError as exc:
+                raise LocalCliServiceError('Local CLI artifact path could not be inspected.', status_code=409) from exc
+        try:
+            resolved = lexical.resolve(strict=True)
+        except OSError as exc:
+            raise LocalCliServiceError('Local CLI artifact is not available.', status_code=404) from exc
+        if resolved != lexical or not resolved.is_file():
+            raise LocalCliServiceError('Local CLI artifact is not a regular managed file.', status_code=409)
+        identity = self._managed_path_identity(resolved)
+        if identity is None or not stat.S_ISREG(identity.get('mode', 0)):
+            raise LocalCliServiceError('Local CLI artifact is not a regular managed file.', status_code=409)
+        return root, resolved
+
+    @staticmethod
+    def _identity_from_stat_result(stat_result: os.stat_result) -> dict[str, int]:
+        return {
+            'device': int(stat_result.st_dev),
+            'inode': int(stat_result.st_ino),
+            'mode': int(stat_result.st_mode),
+        }
+
+    def _open_artifact_fd(self, *, binding: dict[str, Any], root: Path, resolved: Path) -> int:
+        flags = os.O_RDONLY | getattr(os, 'O_BINARY', 0)
+        nofollow = getattr(os, 'O_NOFOLLOW', 0)
+        if os.name != 'nt' and getattr(os, 'O_DIRECTORY', 0) and os.open in os.supports_dir_fd:
+            directory_fd: int | None = None
+            artifact_fd: int | None = None
+            try:
+                directory_fd = os.open(
+                    os.fspath(root),
+                    flags | getattr(os, 'O_DIRECTORY', 0) | nofollow,
+                )
+                expected_root_identity = binding.get('session_root_identity')
+                root_identity = self._identity_from_stat_result(os.fstat(directory_fd))
+                if root_identity != expected_root_identity:
+                    raise LocalCliServiceError('Managed local CLI session root identity changed before artifact open.', status_code=409)
+                parts = resolved.relative_to(root).parts
+                if not parts:
+                    raise LocalCliServiceError('Local CLI artifact path is not a file.', status_code=409)
+                for part in parts[:-1]:
+                    next_fd = os.open(
+                        part,
+                        flags | getattr(os, 'O_DIRECTORY', 0) | nofollow,
+                        dir_fd=directory_fd,
+                    )
+                    os.close(directory_fd)
+                    directory_fd = next_fd
+                artifact_fd = os.open(parts[-1], flags | nofollow, dir_fd=directory_fd)
+                os.close(directory_fd)
+                directory_fd = None
+                result_fd = artifact_fd
+                artifact_fd = None
+                return result_fd
+            except LocalCliServiceError:
+                raise
+            except (OSError, ValueError) as exc:
+                raise LocalCliServiceError('Local CLI artifact could not be opened safely.', status_code=409) from exc
+            finally:
+                if directory_fd is not None:
+                    try:
+                        os.close(directory_fd)
+                    except OSError:
+                        pass
+                if artifact_fd is not None:
+                    try:
+                        os.close(artifact_fd)
+                    except OSError:
+                        pass
+        try:
+            return os.open(os.fspath(resolved), flags | nofollow)
+        except OSError as exc:
+            raise LocalCliServiceError('Local CLI artifact could not be opened safely.', status_code=409) from exc
+
+    def _open_verified_artifact(
+        self,
+        binding: dict[str, Any],
+        path: Path,
+        *,
+        expected: dict[str, Any] | None = None,
+        readback: dict[str, Any] | None = None,
+    ) -> LocalCliArtifactDownload:
+        root, resolved = self._validated_artifact_path(binding, path)
+        expected_size = expected.get('size_bytes') if isinstance(expected, dict) else None
+        expected_sha256 = expected.get('sha256') if isinstance(expected, dict) else None
+        if expected is not None:
+            if isinstance(expected_size, bool) or not isinstance(expected_size, int) or expected_size <= 0:
+                raise LocalCliServiceError('Local CLI artifact custody size is invalid.', status_code=409)
+            if not isinstance(expected_sha256, str) or re.fullmatch(r'[0-9a-f]{64}', expected_sha256) is None:
+                raise LocalCliServiceError('Local CLI artifact custody hash is invalid.', status_code=409)
+        fd = self._open_artifact_fd(binding=binding, root=root, resolved=resolved)
+        stream = None
+        try:
+            stream = os.fdopen(fd, 'rb')
+            fd = -1
+            identity_before = self._identity_from_stat_result(os.fstat(stream.fileno()))
+            if not stat.S_ISREG(identity_before.get('mode', 0)):
+                raise LocalCliServiceError('Local CLI artifact is not a regular managed file.', status_code=409)
+            digest = hashlib.sha256()
+            actual_size = 0
+            for chunk in iter(lambda: stream.read(1024 * 1024), b''):
+                actual_size += len(chunk)
+                digest.update(chunk)
+            actual_sha256 = digest.hexdigest()
+            if self._identity_from_stat_result(os.fstat(stream.fileno())) != identity_before:
+                raise LocalCliServiceError('Local CLI artifact changed during custody readback.', status_code=409)
+            if self._managed_path_identity(self._binding_session_root(binding)) != binding.get('session_root_identity'):
+                raise LocalCliServiceError('Managed local CLI session root identity changed during artifact readback.', status_code=409)
+            if expected is not None and (actual_size != expected_size or actual_sha256 != expected_sha256):
+                raise LocalCliServiceError('Local CLI artifact changed after custody.', status_code=409)
+            if readback is not None:
+                readback.update({'size_bytes': actual_size, 'sha256': actual_sha256})
+            stream.seek(0)
+            return LocalCliArtifactDownload(
+                stream=stream,
+                path=resolved,
+                size_bytes=actual_size,
+                sha256=actual_sha256,
+            )
+        except Exception:
+            if stream is not None:
+                stream.close()
+            elif fd >= 0:
+                os.close(fd)
+            raise
+
+    def _verify_artifact_readback(
+        self,
+        binding: dict[str, Any],
+        path: Path,
+        *,
+        expected: dict[str, Any] | None = None,
+        readback: dict[str, Any] | None = None,
+    ) -> Path:
+        download = self._open_verified_artifact(binding, path, expected=expected, readback=readback)
+        try:
+            return download.path
+        finally:
+            download.close()
+
+    def _artifact_spec(self, *, kind: str, session_id: str | None = None) -> tuple[dict[str, Any], Path, dict[str, Any] | None]:
         binding = self._load_active_binding(session_id=session_id, require_live=False)
-        if kind in {'working-copy', 'working_copy'}:
-            return binding, self._working_copy_path(binding)
-        artifacts = binding.get('artifacts') if isinstance(binding.get('artifacts'), dict) else {}
-        path = Path(str(artifacts.get(f'latest_{kind}_path') or ''))
-        if not path.exists() or not path.is_file():
-            raise LocalCliServiceError(f'No local CLI {kind} artifact is available yet.', status_code=404)
+        normalized_kind = 'working-copy' if kind == 'working_copy' else kind
+        if normalized_kind == 'working-copy':
+            path = self._working_copy_path(binding)
+        elif normalized_kind in {'export', 'screenshot', 'recovery'}:
+            artifacts = binding.get('artifacts') if isinstance(binding.get('artifacts'), dict) else {}
+            path = Path(str(artifacts.get(f'latest_{normalized_kind}_path') or ''))
+        else:
+            raise LocalCliServiceError(f'Unsupported local CLI artifact kind: {kind}', status_code=400)
+        custody_map = binding.get('artifact_custody') if isinstance(binding.get('artifact_custody'), dict) else {}
+        expected = custody_map.get(normalized_kind) if isinstance(custody_map.get(normalized_kind), dict) else None
+        return binding, path, expected
+
+    def _resolve_artifact(self, *, kind: str, session_id: str | None = None) -> tuple[dict[str, Any], Path]:
+        binding, path, expected = self._artifact_spec(kind=kind, session_id=session_id)
+        try:
+            path = self._verify_artifact_readback(binding, path, expected=expected)
+        except LocalCliServiceError as exc:
+            if exc.status_code == 404 and kind not in {'working-copy', 'working_copy'}:
+                raise LocalCliServiceError(f'No local CLI {kind} artifact is available yet.', status_code=404) from exc
+            raise
         return binding, path
+
+    def open_artifact(self, *, kind: str, session_id: str | None = None) -> LocalCliArtifactDownload:
+        binding, path, expected = self._artifact_spec(kind=kind, session_id=session_id)
+        if not isinstance(expected, dict):
+            raise LocalCliServiceError('Local CLI artifact custody is not available; refusing download.', status_code=409)
+        filename = self._artifact_name(
+            kind=kind,
+            source_filename=str(binding.get('source_filename') or 'document.hwpx'),
+        )
+        download = self._open_verified_artifact(binding, path, expected=expected)
+        download.filename = filename
+        return download
 
     def _resolve_live_target(self, binding: dict[str, Any], target: str) -> tuple[str, int]:
         last_find = binding.get('last_find') if isinstance(binding.get('last_find'), dict) else {}
@@ -1214,6 +2363,7 @@ class LocalCliService:
                 'matched_query': candidate,
                 'match_strategy': 'native-exact',
                 'snapshot': snapshot,
+                'paragraph_text_normalized': _normalize_visible_text(paragraph_text),
                 'selected_text': selected.get('selected_text'),
                 'selected_text_normalized': selected.get('selected_text_normalized'),
                 'safe_for_type': not boundary_risk,
@@ -1248,6 +2398,7 @@ class LocalCliService:
                         'matched_query': candidate,
                         'match_strategy': 'paragraph-context-fallback',
                         'snapshot': expanded_snapshot,
+                        'paragraph_text_normalized': normalized_paragraph,
                         'selected_text': expanded_selected.get('selected_text'),
                         'selected_text_normalized': expanded_selected.get('selected_text_normalized'),
                         'context_proof': {
@@ -1264,6 +2415,7 @@ class LocalCliService:
                 'matched_query': candidate,
                 'match_strategy': 'anchor-fallback',
                 'snapshot': snapshot,
+                'paragraph_text_normalized': normalized_paragraph,
                 'selected_text': selected.get('selected_text'),
                 'selected_text_normalized': selected.get('selected_text_normalized'),
                 'safe_for_type': False,
@@ -1301,7 +2453,59 @@ class LocalCliService:
             deduped.append(key)
         return deduped
 
-    def _find_live_match(self, hwp: Any, *, query: str, occurrence: int) -> dict[str, Any]:
+    def _live_match_matches_target(
+        self,
+        match: Mapping[str, Any],
+        *,
+        target_identity: Mapping[str, Any] | None,
+    ) -> bool:
+        """Require live cursor evidence to identify the selected paragraph."""
+
+        if not target_identity:
+            return True
+        raw_snapshot = match.get('snapshot')
+        snapshot = raw_snapshot if isinstance(raw_snapshot, Mapping) else {}
+        observed_pos = snapshot.get('pos')
+        expected_pos = target_identity.get('live_position') or target_identity.get('position')
+        if isinstance(expected_pos, (list, tuple)) and len(expected_pos) >= 2:
+            if not isinstance(observed_pos, (list, tuple)) or len(observed_pos) < 2:
+                return False
+            try:
+                if (int(observed_pos[0]), int(observed_pos[1])) != (int(expected_pos[0]), int(expected_pos[1])):
+                    return False
+            except (TypeError, ValueError):
+                return False
+        else:
+            # A paragraph hash is not an occurrence identity.  In particular,
+            # identical paragraphs at different positions must not allow the
+            # first native match to satisfy a later static proof target.
+            return False
+
+        expected_hash = str(
+            target_identity.get('paragraph_normalized_hash')
+            or target_identity.get('normalized_hash')
+            or ''
+        ).strip().lower()
+        if not expected_hash:
+            return isinstance(expected_pos, (list, tuple)) and len(expected_pos) >= 2
+        paragraph_text = str(match.get('paragraph_text_normalized') or '').strip()
+        observed_hash = ''
+        if paragraph_text:
+            observed_hash = 'sha256:' + hashlib.sha256(paragraph_text.casefold().encode('utf-8')).hexdigest()
+        if observed_hash:
+            return observed_hash == expected_hash
+        # A stable live position is required even when paragraph text cannot
+        # be read back; the position is the occurrence binding.
+        return isinstance(expected_pos, (list, tuple)) and len(expected_pos) >= 2
+
+    def _find_live_match(
+        self,
+        hwp: Any,
+        *,
+        query: str,
+        occurrence: int,
+        target_identity: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
         if not isinstance(query, str) or not query.strip():
             raise LocalCliServiceError('target must not be empty', status_code=400)
         if occurrence <= 0:
@@ -1317,6 +2521,9 @@ class LocalCliService:
             while find_method(candidate, direction='Forward', MatchCase=1, WholeWordOnly=0):
                 match = self._capture_verified_live_match(hwp, query=query, candidate=candidate)
                 if match is not None:
+                    if not self._live_match_matches_target(match, target_identity=target_identity):
+                        _move_after_selection(hwp)
+                        continue
                     count += 1
                     if count == occurrence:
                         match['occurrence'] = occurrence
@@ -1388,6 +2595,10 @@ class LocalCliService:
                     identity['table_cell_addr'] = match['table'].get('cell_addr')
                 else:
                     identity['table_cell_addr'] = None
+                live_pos = snapshot.get('pos')
+                if isinstance(live_pos, (list, tuple)) and len(live_pos) >= 2:
+                    identity['live_position'] = [live_pos[0], live_pos[1]]
+                identity['paragraph_normalized_hash'] = match.get('normalized_hash')
                 match['identity'] = identity
                 match['live_cursor_proof'] = {
                     'occurrence': occurrence,
@@ -1978,6 +3189,8 @@ class LocalCliService:
                 'cell_margin_hu',
                 'cell_margin_mm',
                 'vertical_align',
+                'fill_color',
+                'border',
                 'confirm_layout',
                 'max_controls',
             },
@@ -2408,7 +3621,7 @@ class LocalCliService:
                     )
 
             elif op == 'cell_format_exact':
-                for text_key in ('section_anchor', 'around', 'target_id', 'expected_hash', 'vertical_align'):
+                for text_key in ('section_anchor', 'around', 'target_id', 'expected_hash', 'vertical_align', 'fill_color', 'border'):
                     if text_key in step and step.get(text_key) not in (None, ''):
                         value = str(step.get(text_key) or '').strip()
                         if len(value) > 500:
@@ -2453,7 +3666,7 @@ class LocalCliService:
                         f'command-bundle step {index} cell_format_exact requires expected_page',
                         status_code=400,
                     )
-                selectors = [key for key in ('cell_margin_hu', 'cell_margin_mm', 'vertical_align') if step.get(key) is not None]
+                selectors = [key for key in ('cell_margin_hu', 'cell_margin_mm', 'vertical_align', 'fill_color', 'border') if step.get(key) is not None]
                 if len(selectors) != 1:
                     raise LocalCliServiceError(
                         f'command-bundle step {index} cell_format_exact requires exactly one format selector',
@@ -2467,6 +3680,13 @@ class LocalCliService:
                     raise LocalCliServiceError(f'command-bundle step {index} vertical_align must be top, center, middle, or bottom', status_code=400)
                 if step.get('vertical_align') == 'middle':
                     step['vertical_align'] = 'center'
+                if step.get('fill_color') is not None:
+                    fill_color = str(step.get('fill_color')).upper()
+                    if re.fullmatch(r'#[0-9A-F]{6}', fill_color) is None:
+                        raise LocalCliServiceError(f'command-bundle step {index} fill_color must be #RRGGBB', status_code=400)
+                    step['fill_color'] = fill_color
+                if step.get('border') is not None and step.get('border') != 'none':
+                    raise LocalCliServiceError(f'command-bundle step {index} border must be none', status_code=400)
                 if step.get('confirm_layout') is not True:
                     raise LocalCliServiceError(
                         f'command-bundle step {index} cell_format_exact requires confirm_layout=true',
@@ -2675,15 +3895,15 @@ class LocalCliService:
     def _bundle_compact_snapshot(self, hwp: Any) -> dict[str, Any]:
         try:
             snapshot = _snapshot_cursor_context(hwp)
-        except Exception as exc:
-            return {'error': f'{type(exc).__name__}: {exc}'}
+        except Exception:
+            return {'error': 'native location snapshot unavailable'}
         return {
             'pos': snapshot.get('pos'),
             'cell_addr': snapshot.get('cell_addr'),
             'is_cell': snapshot.get('is_cell'),
             'has_selection': snapshot.get('has_selection'),
             'selection_mode': snapshot.get('selection_mode'),
-            'current_paragraph_preview': snapshot.get('current_paragraph_preview'),
+            'current_paragraph_preview': None,
         }
 
 
@@ -2730,7 +3950,7 @@ class LocalCliService:
         return {
             'cursor_summary': location.get('cursor_summary'),
             'selection_summary': location.get('selection_summary'),
-            'current_paragraph_preview': location.get('current_paragraph_preview'),
+            'current_paragraph_preview': None,
             'caret_in_table_cell': location.get('caret_in_table_cell'),
             'document_is_modified': location.get('document_is_modified'),
         }
@@ -3552,6 +4772,71 @@ class LocalCliService:
             'attempts': attempts,
         }
 
+    def _bundle_native_cell_margin_readback(
+        self,
+        hwp: Any,
+        *,
+        expected_cell_addr: Any = None,
+    ) -> dict[str, Any]:
+        """Read fresh native four-side cell margins for the current cell.
+
+        ``pyhwpx.get_cell_margin`` can expose a cached wrapper value.  The
+        native action refresh is therefore part of this observation contract;
+        a failed refresh makes the observation unavailable instead of allowing
+        a stale value to serve as persistence evidence.
+        """
+        source = 'HParameterSet.HShapeObject.ShapeTableCell.Margin*'
+        observed_addr: list[int] | None = None
+        try:
+            get_cell_addr = getattr(hwp, 'get_cell_addr', None)
+            if not callable(get_cell_addr):
+                raise LocalCliRuntimeError('native cell identity getter is unavailable')
+            observed_addr = _normalize_cell_addr_value(get_cell_addr(as_='tuple'))
+            if observed_addr is None:
+                raise LocalCliRuntimeError('native cell identity is missing or invalid')
+            expected_addr = _normalize_cell_addr_value(expected_cell_addr) if expected_cell_addr is not None else None
+            if expected_cell_addr is not None and (expected_addr is None or observed_addr != expected_addr):
+                raise LocalCliRuntimeError(
+                    'native cell identity does not match the requested target; '
+                    f'observed={observed_addr!r}; expected={expected_cell_addr!r}'
+                )
+
+            parameter_root = getattr(hwp, 'HParameterSet')
+            shape = getattr(parameter_root, 'HShapeObject')
+            hset = getattr(shape, 'HSet')
+            get_default = getattr(getattr(hwp, 'HAction'), 'GetDefault', None)
+            if not callable(get_default):
+                raise LocalCliRuntimeError('TablePropertyDialog GetDefault is unavailable')
+            refresh_result = get_default('TablePropertyDialog', hset)
+            if refresh_result is not True:
+                raise LocalCliRuntimeError('TablePropertyDialog GetDefault returned no positive success')
+            cell = getattr(shape, 'ShapeTableCell')
+            margins = {
+                'left': getattr(cell, 'MarginLeft'),
+                'right': getattr(cell, 'MarginRight'),
+                'top': getattr(cell, 'MarginTop'),
+                'bottom': getattr(cell, 'MarginBottom'),
+            }
+            normalized = _normalize_cell_margin_readback(margins)
+            if normalized is None:
+                raise LocalCliRuntimeError(f'native four-side cell-margin values are invalid: {margins!r}')
+            return {
+                'available': True,
+                'refresh_succeeded': True,
+                'cell_addr': observed_addr,
+                'value': normalized,
+                'source': source,
+            }
+        except Exception as exc:
+            error = str(exc) if isinstance(exc, LocalCliRuntimeError) else f'{type(exc).__name__}: {exc}'
+            return {
+                'available': False,
+                'refresh_succeeded': False,
+                'cell_addr': observed_addr,
+                'error': error,
+                'source': source,
+            }
+
     def _bundle_table_cell_metrics(self, hwp: Any, ctrl: Any) -> dict[str, Any]:
         original_pos = None
         try:
@@ -3569,7 +4854,6 @@ class LocalCliService:
                 ('row_height_mm', 'get_row_height', {'as_': 'mm'}),
                 ('table_height_hu', 'get_table_height', {'as_': 'hwpunit'}),
                 ('table_height_mm', 'get_table_height', {'as_': 'mm'}),
-                ('cell_margin_hu', 'get_cell_margin', {'as_': 'hwpunit'}),
                 ('table_inside_margin_hu', 'get_table_inside_margin', {'as_': 'hwpunit'}),
                 ('table_outside_margin_hu', 'get_table_outside_margin', {'as_': 'hwpunit'}),
             ):
@@ -3581,6 +4865,22 @@ class LocalCliService:
                     metrics[key] = method(**kwargs)
                 except Exception as exc:
                     metrics[key] = {'error': f'{type(exc).__name__}: {exc}'}
+            target_cell_addr = _normalize_cell_addr_value(enter.get('cell_addr'))
+            if target_cell_addr is None:
+                target_cell_addr = _normalize_cell_addr_value(metrics.get('cell_addr'))
+            metrics['target_cell_addr'] = target_cell_addr
+            margin_readback = self._bundle_native_cell_margin_readback(
+                hwp,
+                expected_cell_addr=target_cell_addr,
+            )
+            metrics['cell_margin_readback'] = margin_readback
+            metrics['cell_margin_hu'] = (
+                margin_readback.get('value')
+                if margin_readback.get('available') is True
+                else {'error': margin_readback.get('error', 'native margin readback unavailable')}
+            )
+            if margin_readback.get('cell_addr') is not None:
+                metrics['cell_addr'] = margin_readback.get('cell_addr')
             char_raw = self._style_parameter_snapshot(
                 hwp,
                 'CharShape',
@@ -3598,8 +4898,25 @@ class LocalCliService:
             metrics['char_height_raw'] = char_values.get('Height')
             metrics['para_line_spacing'] = para_values.get('LineSpacing')
             metrics['para_line_spacing_type'] = para_values.get('LineSpacingType')
+            metrics['vertical_align'] = self._bundle_table_cell_vertical_align(hwp)
             metrics['style_snapshot'] = {'char_shape': char_raw, 'para_shape': para_raw}
-            metrics['available'] = not isinstance(metrics.get('row_height_hu'), dict)
+            metrics['cell_addr_valid'] = _normalize_cell_addr_value(metrics.get('cell_addr')) is not None
+            metrics['row_height_hu_valid'] = _valid_numeric_readback(metrics.get('row_height_hu'))
+            metrics['cell_margin_hu_valid'] = _normalize_cell_margin_readback(metrics.get('cell_margin_hu')) is not None
+            metrics['cell_margin_hu_available'] = bool(
+                metrics['cell_margin_hu_valid'] and margin_readback.get('refresh_succeeded') is True
+            )
+            metrics['cell_identity_matches_target'] = bool(
+                target_cell_addr is not None
+                and _normalize_cell_addr_value(metrics.get('cell_addr')) == target_cell_addr
+            )
+            metrics['vertical_align_available'] = _normalize_vertical_align_readback(metrics.get('vertical_align')) is not None
+            metrics['available'] = (
+                bool(metrics['cell_addr_valid'])
+                and bool(metrics['row_height_hu_valid'])
+                and bool(metrics['cell_margin_hu_available'])
+                and bool(metrics['cell_identity_matches_target'])
+            )
             return metrics
         finally:
             if original_pos is not None and len(original_pos) >= 3:
@@ -3607,6 +4924,54 @@ class LocalCliService:
                     _set_pos(hwp, int(original_pos[0]), int(original_pos[1]), int(original_pos[2]))
                 except Exception:
                     pass
+
+    @staticmethod
+    def _bundle_table_cell_vertical_align(hwp: Any) -> dict[str, Any]:
+        """Read the native vertical alignment of the current table cell.
+
+        Hancom exposes this value after ``TablePropertyDialog`` populates
+        ``HShapeObject.ShapeTableCell``. The COM value is an integer enum:
+        0=top, 1=center, 2=bottom.
+        """
+        try:
+            parameter_root = getattr(hwp, 'HParameterSet')
+            shape = getattr(parameter_root, 'HShapeObject')
+            get_default = getattr(getattr(hwp, 'HAction'), 'GetDefault', None)
+            if not callable(get_default):
+                raise LocalCliRuntimeError('TablePropertyDialog GetDefault is unavailable')
+            default_result = get_default('TablePropertyDialog', getattr(shape, 'HSet'))
+            if default_result is not True:
+                raise LocalCliRuntimeError(
+                    'TablePropertyDialog GetDefault did not return positive success; '
+                    f'result={default_result!r}'
+                )
+            cell = getattr(shape, 'ShapeTableCell')
+            raw_value = getattr(cell, 'VertAlign')
+            if isinstance(raw_value, bool):
+                raise LocalCliRuntimeError('TablePropertyDialog VertAlign is boolean, not a native enum')
+            if not isinstance(raw_value, int) or raw_value not in {0, 1, 2}:
+                raise LocalCliRuntimeError(
+                    'TablePropertyDialog VertAlign enum is invalid (not an integral native enum); '
+                    f'value={raw_value!r}'
+                )
+            value = raw_value
+            names = {0: 'top', 1: 'center', 2: 'bottom'}
+            if value not in names:
+                raise LocalCliRuntimeError(f'TablePropertyDialog VertAlign enum is invalid: {value!r}')
+            return {
+                'available': True,
+                'refresh_succeeded': True,
+                'value': value,
+                'name': names.get(value),
+                'source': 'HParameterSet.HShapeObject.ShapeTableCell.VertAlign',
+            }
+        except Exception as exc:
+            return {
+                'available': False,
+                'refresh_succeeded': False,
+                'error': f'{type(exc).__name__}: {exc}',
+                'source': 'HParameterSet.HShapeObject.ShapeTableCell.VertAlign',
+            }
 
     def _bundle_exact_control_select_proof(self, hwp: Any, step: dict[str, Any]) -> dict[str, Any]:
         resolved = self._bundle_resolve_control_target(hwp, step, op_name='exact_control_select_proof')
@@ -3656,7 +5021,7 @@ class LocalCliService:
         try:
             value = method(**(kwargs or {}))
         except Exception as exc:
-            return {'available': True, 'method': method_name, 'error': f'{type(exc).__name__}: {exc}'}
+            return {'available': False, 'method': method_name, 'error': f'{type(exc).__name__}: {exc}'}
         return {
             'available': True,
             'method': method_name,
@@ -4290,24 +5655,521 @@ class LocalCliService:
                 except Exception:
                     pass
 
-    def _bundle_set_uniform_cell_margin(self, hwp: Any, value_hu: int) -> dict[str, Any]:
+    def _bundle_set_cell_margin_values(self, hwp: Any, margins: Mapping[str, Any]) -> dict[str, Any]:
         method = getattr(hwp, 'set_cell_margin', None)
         if not callable(method):
             raise LocalCliRuntimeError('cell_format_exact requires pyhwpx set_cell_margin')
-        attempts: list[dict[str, Any]] = []
-        variants: list[tuple[str, tuple[Any, ...], dict[str, Any]]] = [
-            ('set_cell_margin(value, as_=hwpunit)', (value_hu,), {'as_': 'hwpunit'}),
-            ('set_cell_margin(left,right,top,bottom, as_=hwpunit)', (value_hu, value_hu, value_hu, value_hu), {'as_': 'hwpunit'}),
-            ('set_cell_margin(keyword margins, as_=hwpunit)', (), {'left': value_hu, 'right': value_hu, 'top': value_hu, 'bottom': value_hu, 'as_': 'hwpunit'}),
-        ]
-        for label, args, kwargs in variants:
+        normalized = _normalize_cell_margin_readback(margins)
+        if normalized is None:
+            raise LocalCliRuntimeError(f'cell_format_exact cell-margin values are invalid: {margins!r}')
+        args = tuple(normalized[key] for key in _CELL_MARGIN_KEYS)
+        kwargs = {'as_': 'hwpunit'}
+        signature = None
+        try:
+            signature = inspect.signature(method)
+        except (TypeError, ValueError):
+            # Some COM proxies do not expose a Python signature.  The pinned
+            # pyhwpx order is still invoked once; never probe alternatives.
+            pass
+        if signature is not None:
             try:
-                raw = method(*args, **kwargs)
-                attempts.append({'method': label, 'result': bool(raw) if raw is not None else None})
-                return {'method': label, 'result': bool(raw) if raw is not None else None, 'attempts': attempts}
+                signature.bind(*args, **kwargs)
+            except TypeError as exc:
+                raise LocalCliRuntimeError(
+                    'cell_format_exact set_cell_margin does not support the documented '
+                    'four-side HWPUNIT call'
+                ) from exc
+        label = 'set_cell_margin(left,right,top,bottom, as_=hwpunit)'
+        try:
+            raw = method(*args, **kwargs)
+        except Exception as exc:
+            raise LocalCliMutationError(
+                f'cell_format_exact set_cell_margin failed after invocation: {type(exc).__name__}: {exc}',
+                mutation_may_have_persisted=True,
+                rollback={'attempted': False, 'succeeded': False},
+            ) from exc
+        result = bool(raw) if raw is not None else None
+        attempt = {'method': label, 'result': result}
+        if raw is not None and not bool(raw):
+            raise LocalCliMutationError(
+                'cell_format_exact set_cell_margin returned false after invocation',
+                mutation_may_have_persisted=True,
+                rollback={'attempted': False, 'succeeded': False},
+            )
+        return {'method': label, 'result': result, 'attempts': [attempt], 'arguments': dict(normalized)}
+
+    def _bundle_set_uniform_cell_margin(self, hwp: Any, value_hu: int) -> dict[str, Any]:
+        return self._bundle_set_cell_margin_values(
+            hwp,
+            {key: value_hu for key in _CELL_MARGIN_KEYS},
+        )
+
+    def _bundle_apply_cell_fill_color(self, hwp: Any, fill_color: str) -> dict[str, Any]:
+        value = str(fill_color or '').strip().upper()
+        if re.fullmatch(r'#[0-9A-F]{6}', value) is None:
+            raise LocalCliRuntimeError('cell_format_exact fill_color must be #RRGGBB')
+        rgb = tuple(int(value[offset:offset + 2], 16) for offset in (1, 3, 5))
+
+        def action_ok(raw: Any, *, action_name: str) -> bool:
+            # COM automation methods commonly return None on success, but an
+            # explicit False is a native failure and must never be reported as
+            # a successful cell mutation.
+            if raw is not None and not bool(raw):
+                raise LocalCliRuntimeError(f'cell_format_exact {action_name} returned false')
+            return True
+
+        def coerce_rgb(raw: Any) -> tuple[int, int, int] | None:
+            if isinstance(raw, (list, tuple)) and len(raw) >= 3:
+                try:
+                    channels = tuple(int(raw[index]) for index in range(3))
+                except (TypeError, ValueError):
+                    return None
+                return channels if all(0 <= channel <= 255 for channel in channels) else None
+            if isinstance(raw, Mapping):
+                values = []
+                for names in (('r', 'red'), ('g', 'green'), ('b', 'blue')):
+                    selected = next((raw[name] for name in names if name in raw), None)
+                    if selected is None:
+                        return None
+                    values.append(selected)
+                return coerce_rgb(values)
+            if isinstance(raw, bool):
+                return None
+            if isinstance(raw, int):
+                # Win32 COLORREF stores RGB as 0x00BBGGRR.
+                return (raw & 0xFF, (raw >> 8) & 0xFF, (raw >> 16) & 0xFF)
+            if isinstance(raw, str):
+                text = raw.strip().upper()
+                if re.fullmatch(r'#[0-9A-F]{6}', text):
+                    return (
+                        int(text[1:3], 16),
+                        int(text[3:5], 16),
+                        int(text[5:7], 16),
+                    )
+                if text.startswith('0X'):
+                    try:
+                        return coerce_rgb(int(text, 16))
+                    except ValueError:
+                        return None
+            for names in (('red', 'r'), ('green', 'g'), ('blue', 'b')):
+                if not any(hasattr(raw, name) for name in names):
+                    break
+            else:
+                return coerce_rgb({
+                    'r': next(getattr(raw, name) for name in ('red', 'r') if hasattr(raw, name)),
+                    'g': next(getattr(raw, name) for name in ('green', 'g') if hasattr(raw, name)),
+                    'b': next(getattr(raw, name) for name in ('blue', 'b') if hasattr(raw, name)),
+                })
+            return None
+
+        def readback(*, refresh_default: bool = True) -> dict[str, Any]:
+            parameter_root = getattr(hwp, 'HParameterSet', None)
+            parameter_set = getattr(parameter_root, 'HCellBorderFill', None) if parameter_root is not None else None
+            action = getattr(hwp, 'HAction', None)
+            get_default = getattr(action, 'GetDefault', None)
+            if parameter_set is not None:
+                hset = getattr(parameter_set, 'HSet', parameter_set)
+                if refresh_default and callable(get_default):
+                    raw_default = get_default('CellFill', hset)
+                    action_ok(raw_default, action_name='CellFill GetDefault')
+                fill_attr = getattr(parameter_set, 'FillAttr', None)
+                if fill_attr is None:
+                    fill_attr = getattr(hset, 'FillAttr', None)
+                if fill_attr is not None:
+                    for attribute in ('WinBrushFaceColor', 'Color', 'FaceColor'):
+                        try:
+                            observed = coerce_rgb(getattr(fill_attr, attribute))
+                        except Exception:
+                            observed = None
+                        if observed is not None:
+                            if observed != rgb:
+                                raise LocalCliRuntimeError(
+                                    f'cell_format_exact fill-color native readback mismatch: expected={rgb!r}; observed={observed!r}'
+                                )
+                            return {
+                                'source': (
+                                    'HAction.GetDefault(CellFill)'
+                                    if refresh_default and callable(get_default)
+                                    else 'HCellBorderFill.FillAttr'
+                                ),
+                                'observed_rgb': list(observed),
+                                'expected_rgb': list(rgb),
+                            }
+            for getter_name in ('get_cell_fill_color', 'get_cell_fill', 'cell_fill_color'):
+                getter = getattr(hwp, getter_name, None)
+                if not callable(getter):
+                    continue
+                try:
+                    observed = coerce_rgb(getter())
+                except Exception:
+                    observed = None
+                if observed is None:
+                    continue
+                if observed != rgb:
+                    raise LocalCliRuntimeError(
+                        f'cell_format_exact fill-color native readback mismatch: expected={rgb!r}; observed={observed!r}'
+                    )
+                return {
+                    'source': getter_name,
+                    'observed_rgb': list(observed),
+                    'expected_rgb': list(rgb),
+                }
+            raise LocalCliRuntimeError(
+                'cell_format_exact fill-color native readback was unavailable; refusing to report success'
+            )
+
+        def read_current_fill() -> dict[str, Any] | None:
+            parameter_root = getattr(hwp, 'HParameterSet', None)
+            parameter_set = getattr(parameter_root, 'HCellBorderFill', None) if parameter_root is not None else None
+            action = getattr(hwp, 'HAction', None)
+            get_default = getattr(action, 'GetDefault', None)
+            if parameter_set is not None:
+                hset = getattr(parameter_set, 'HSet', parameter_set)
+                if callable(get_default):
+                    try:
+                        raw_default = get_default('CellFill', hset)
+                        if raw_default is not None and not bool(raw_default):
+                            return None
+                    except Exception:
+                        return None
+                fill_attr = getattr(parameter_set, 'FillAttr', None) or getattr(hset, 'FillAttr', None)
+                if fill_attr is not None:
+                    for attribute in ('WinBrushFaceColor', 'Color', 'FaceColor'):
+                        try:
+                            observed = coerce_rgb(getattr(fill_attr, attribute))
+                        except Exception:
+                            observed = None
+                        if observed is not None:
+                            return {'source': 'HAction.GetDefault(CellFill)', 'rgb': list(observed)}
+            for getter_name in ('get_cell_fill_color', 'get_cell_fill', 'cell_fill_color'):
+                getter = getattr(hwp, getter_name, None)
+                if callable(getter):
+                    try:
+                        observed = coerce_rgb(getter())
+                    except Exception:
+                        observed = None
+                    if observed is not None:
+                        return {'source': getter_name, 'rgb': list(observed)}
+            return None
+
+        method = getattr(hwp, 'cell_fill', None)
+        if callable(method):
+            preimage = read_current_fill()
+            mutation_attempted = False
+            try:
+                mutation_attempted = True
+                raw = method(rgb)
+                action_ok(raw, action_name='cell_fill')
+                readback_proof = readback()
             except Exception as exc:
-                attempts.append({'method': label, 'error': f'{type(exc).__name__}: {exc}'})
-        raise LocalCliRuntimeError(f'cell_format_exact set_cell_margin failed for all documented call forms: {attempts!r}')
+                rollback: dict[str, Any] = {
+                    'attempted': False,
+                    'succeeded': False,
+                    'preimage': preimage,
+                }
+                if preimage is not None:
+                    rollback['attempted'] = True
+                    try:
+                        rollback_raw = method(tuple(preimage['rgb']))
+                        action_ok(rollback_raw, action_name='cell_fill rollback')
+                        observed_after_rollback = read_current_fill()
+                        rollback['observed'] = observed_after_rollback
+                        rollback['succeeded'] = bool(
+                            observed_after_rollback
+                            and observed_after_rollback.get('rgb') == preimage.get('rgb')
+                        )
+                    except Exception as rollback_exc:
+                        rollback['error'] = f'{type(rollback_exc).__name__}: {rollback_exc}'
+                raise LocalCliMutationError(
+                    f'cell_format_exact fill-color mutation/readback failed: {type(exc).__name__}: {exc}',
+                    mutation_may_have_persisted=mutation_attempted and not bool(rollback.get('succeeded')),
+                    rollback=rollback,
+                ) from exc
+            return {
+                'method': 'cell_fill((r,g,b))',
+                'rgb': list(rgb),
+                'result': bool(raw) if raw is not None else None,
+                'preimage': preimage,
+                'rollback': {'attempted': False, 'succeeded': False},
+                'readback_proof': readback_proof,
+            }
+        parameter_root = getattr(hwp, 'HParameterSet', None)
+        parameter_set = getattr(parameter_root, 'HCellBorderFill', None) if parameter_root is not None else None
+        action = getattr(hwp, 'HAction', None)
+        get_default = getattr(action, 'GetDefault', None)
+        execute = getattr(action, 'Execute', None)
+        if parameter_set is None or not callable(get_default) or not callable(execute):
+            raise LocalCliRuntimeError(
+                'cell_format_exact requires pyhwpx cell_fill or the documented HCellBorderFill CellFill parameter set'
+            )
+
+        hset = getattr(parameter_set, 'HSet', parameter_set)
+        fill_attr = getattr(parameter_set, 'FillAttr', None)
+        if fill_attr is None:
+            fill_attr = getattr(hset, 'FillAttr', None)
+        if fill_attr is None:
+            raise LocalCliRuntimeError('cell_format_exact CellFill parameter set has no FillAttr member')
+        rgb_color = getattr(hwp, 'RGBColor', None)
+        color_value = rgb_color(*rgb) if callable(rgb_color) else rgb
+        initial_default_rgb: tuple[int, int, int] | None = None
+        fallback_mutation_attempted = False
+        try:
+            action_ok(get_default('CellFill', hset), action_name='CellFill GetDefault')
+            for attribute in ('WinBrushFaceColor', 'Color', 'FaceColor'):
+                try:
+                    initial_default_rgb = coerce_rgb(getattr(fill_attr, attribute))
+                except Exception:
+                    initial_default_rgb = None
+                if initial_default_rgb is not None:
+                    break
+            fill_attr.Type = 1
+            fill_attr.WinBrushFaceColor = color_value
+            fallback_mutation_attempted = True
+            raw = execute('CellFill', hset)
+            action_ok(raw, action_name='CellFill Execute')
+            readback_proof = readback(refresh_default=initial_default_rgb is not None)
+        except Exception as exc:
+            rollback: dict[str, Any] = {
+                'attempted': False,
+                'succeeded': False,
+                'preimage': {'rgb': list(initial_default_rgb)} if initial_default_rgb is not None else None,
+            }
+            if fallback_mutation_attempted and initial_default_rgb is not None:
+                rollback['attempted'] = True
+                try:
+                    fill_attr.Type = 1
+                    fill_attr.WinBrushFaceColor = (
+                        rgb_color(*initial_default_rgb) if callable(rgb_color) else initial_default_rgb
+                    )
+                    rollback_raw = execute('CellFill', hset)
+                    action_ok(rollback_raw, action_name='CellFill rollback')
+                    observed_after_rollback = read_current_fill()
+                    rollback['observed'] = observed_after_rollback
+                    rollback['succeeded'] = bool(
+                        observed_after_rollback
+                        and observed_after_rollback.get('rgb') == list(initial_default_rgb)
+                    )
+                except Exception as rollback_exc:
+                    rollback['error'] = f'{type(rollback_exc).__name__}: {rollback_exc}'
+            if isinstance(exc, LocalCliRuntimeError) and not fallback_mutation_attempted:
+                raise
+            raise LocalCliMutationError(
+                f'cell_format_exact HAction.Execute(CellFill) failed: {type(exc).__name__}: {exc}',
+                mutation_may_have_persisted=fallback_mutation_attempted and not bool(rollback.get('succeeded')),
+                rollback=rollback,
+            ) from exc
+        return {
+            'method': 'HAction.Execute(CellFill)',
+            'rgb': list(rgb),
+            'color_value': color_value,
+            'result': bool(raw) if raw is not None else None,
+            # A few older pyhwpx-compatible wrappers expose the parameter set
+            # but do not populate it from GetDefault.  In that case the
+            # post-execute FillAttr value is the only available proof and a
+            # second GetDefault call would add no information.  Real native
+            # bindings that provide an initial value are refreshed after the
+            # mutation so a stale requested value cannot masquerade as proof.
+            'readback_proof': readback_proof,
+            'preimage': {'rgb': list(initial_default_rgb)} if initial_default_rgb is not None else None,
+            'rollback': {'attempted': False, 'succeeded': False},
+        }
+
+    def _bundle_apply_cell_border_none(self, hwp: Any) -> dict[str, Any]:
+        action = getattr(hwp, 'HAction', None)
+        hset_root = getattr(hwp, 'HParameterSet', None)
+        parameter_set = getattr(hset_root, 'HCellBorderFill', None) if hset_root is not None else None
+        get_default = getattr(action, 'GetDefault', None)
+        execute = getattr(action, 'Execute', None)
+        hset_value = getattr(parameter_set, 'HSet', parameter_set) if parameter_set is not None else None
+        set_item = getattr(hset_value, 'SetItem', None) if hset_value is not None else None
+        if parameter_set is None or not callable(get_default) or not callable(execute) or not callable(set_item):
+            raise LocalCliRuntimeError(
+                'cell_format_exact border-none requires the explicit HCellBorderFill parameter set and diagonal readback; '
+                'TableCellBorderNo fallback cannot prove diagonal NONE'
+            )
+
+        line_type_factory = getattr(hwp, 'HwpLineType', None)
+        line_width_factory = getattr(hwp, 'HwpLineWidth', None)
+        line_type = line_type_factory('None') if callable(line_type_factory) else 'None'
+        line_width = line_width_factory('0.1mm') if callable(line_width_factory) else '0.1mm'
+        flags = (
+            'SlashFlag',
+            'BackSlashFlag',
+            'CounterSlashFlag',
+            'CounterBackSlashFlag',
+            'CenterLineFlag',
+            'CrookedSlashFlag',
+            'CrookedSlashFlag1',
+            'CrookedSlashFlag2',
+        )
+        side_names = ('Left', 'Right', 'Top', 'Bottom')
+        expected_type_items = tuple(f'BorderType{side}' for side in side_names) + ('DiagonalType',)
+        expected_line_items = tuple(
+            list(expected_type_items)
+            + [f'BorderWidth{side}' for side in side_names]
+            + ['DiagonalWidth']
+        )
+
+        def action_ok(raw: Any) -> bool:
+            return raw is None or bool(raw)
+
+        def read_parameter_item(name: str) -> Any:
+            errors: list[str] = []
+            for owner, owner_name in ((parameter_set, 'parameter set'), (hset_value, 'HSet')):
+                try:
+                    value = getattr(owner, name)
+                except Exception as exc:
+                    errors.append(f'{owner_name}: {type(exc).__name__}: {exc}')
+                    continue
+                if value is not None:
+                    return value
+                errors.append(f'{owner_name}: returned null')
+            for accessor_name in ('GetItem', 'Item'):
+                try:
+                    accessor = getattr(hset_value, accessor_name)
+                except Exception as exc:
+                    errors.append(f'{accessor_name}: {type(exc).__name__}: {exc}')
+                    continue
+                if not callable(accessor):
+                    errors.append(f'{accessor_name}: not callable')
+                    continue
+                try:
+                    value = accessor(name)
+                except Exception as exc:
+                    errors.append(f'{accessor_name}: {type(exc).__name__}: {exc}')
+                    continue
+                if value is not None:
+                    return value
+                errors.append(f'{accessor_name}: returned null')
+            detail = '; '.join(errors[-4:])
+            raise LocalCliRuntimeError(f'cell_format_exact border-none readback unavailable for {name}: {detail}')
+
+        def is_none_line(value: Any) -> bool:
+            if isinstance(value, bool):
+                return not value
+            if isinstance(value, (int, float)):
+                return value == 0
+            normalized = str(value).strip().lower()
+            return normalized in {'0', 'none', 'line:none'} or normalized.endswith(':none')
+
+        def is_clear_flag(value: Any) -> bool:
+            if isinstance(value, bool):
+                return not value
+            if isinstance(value, (int, float)):
+                return value == 0
+            return str(value).strip().lower() in {'', '0', 'false', 'none'}
+
+        preimage_values: dict[str, Any] = {}
+        preimage_missing: list[str] = []
+        mutation_attempted = False
+        try:
+            if not action_ok(get_default('CellBorderFill', hset_value)):
+                raise LocalCliRuntimeError('cell_format_exact border-none GetDefault returned false')
+            for name in expected_line_items + flags + ('ApplyTo',):
+                try:
+                    preimage_values[name] = read_parameter_item(name)
+                except LocalCliRuntimeError:
+                    preimage_missing.append(name)
+            for side in side_names:
+                mutation_attempted = True
+                set_item(f'BorderType{side}', line_type)
+                set_item(f'BorderWidth{side}', line_width)
+            # Hancom's documented BorderFill schema uses numeric PIT_UI*
+            # values for DiagonalType/DiagonalWidth. BorderTypeDiagonal is
+            # not a native item and can leave a persisted diagonal line
+            # untouched. ApplyTo=0 is the selected-cell value; ApplyTo=1
+            # leaves a cell's persisted diagonal unchanged on Hancom.
+            set_item('DiagonalType', 0)
+            set_item('DiagonalWidth', 0)
+            for flag in flags:
+                set_item(flag, 0)
+            set_item('ApplyTo', 0)
+            raw = execute('CellBorderFill', hset_value)
+            if not action_ok(raw):
+                raise LocalCliRuntimeError('cell_format_exact border-none Execute returned false')
+            if not action_ok(get_default('CellBorderFill', hset_value)):
+                raise LocalCliRuntimeError('cell_format_exact border-none readback GetDefault returned false')
+
+            readback_values = {name: read_parameter_item(name) for name in expected_line_items}
+            readback_flags = {name: read_parameter_item(name) for name in flags}
+            non_none_sides = [name for name in expected_type_items if not is_none_line(readback_values[name])]
+            non_clear_flags = [name for name, value in readback_flags.items() if not is_clear_flag(value)]
+            if non_none_sides or non_clear_flags:
+                details = ', '.join(non_none_sides + non_clear_flags)
+                raise LocalCliRuntimeError(
+                    f'cell_format_exact border-none diagonal/all-side readback did not prove NONE: {details}'
+                )
+            preimage = {
+                'available': not preimage_missing,
+                'values': preimage_values,
+                'missing': preimage_missing,
+            }
+            return {
+                'method': 'HAction.Execute(CellBorderFill border none)',
+                'result': bool(raw) if raw is not None else None,
+                'border_sides': ['Left', 'Right', 'Top', 'Bottom', 'Diagonal'],
+                'diagonal_none_requested': True,
+                'preimage': preimage,
+                'rollback': {'attempted': False, 'succeeded': False},
+                'readback_proof': {
+                    'action': 'HAction.GetDefault(CellBorderFill)',
+                    'all_sides_none': True,
+                    'diagonal_none': True,
+                    'diagonal_flags_clear': True,
+                    'verified_items': list(expected_line_items) + list(flags),
+                },
+            }
+        except LocalCliRuntimeError as exc:
+            rollback: dict[str, Any] = {
+                'attempted': False,
+                'succeeded': False,
+                'preimage': {
+                    'available': not preimage_missing,
+                    'values': preimage_values,
+                    'missing': preimage_missing,
+                },
+            }
+            if mutation_attempted and not preimage_missing:
+                rollback['attempted'] = True
+                try:
+                    for name, value in preimage_values.items():
+                        set_item(name, value)
+                    rollback_raw = execute('CellBorderFill', hset_value)
+                    if not action_ok(rollback_raw):
+                        raise LocalCliRuntimeError('cell_format_exact border-none rollback Execute returned false')
+                    if not action_ok(get_default('CellBorderFill', hset_value)):
+                        raise LocalCliRuntimeError('cell_format_exact border-none rollback GetDefault returned false')
+                    rollback_values = {name: read_parameter_item(name) for name in preimage_values}
+                    rollback['observed'] = rollback_values
+                    rollback['succeeded'] = rollback_values == preimage_values
+                except Exception as rollback_exc:
+                    rollback['error'] = f'{type(rollback_exc).__name__}: {rollback_exc}'
+            if not mutation_attempted:
+                raise
+            raise LocalCliMutationError(
+                f'cell_format_exact border-none mutation/readback failed: {type(exc).__name__}: {exc}',
+                mutation_may_have_persisted=not bool(rollback.get('succeeded')),
+                rollback=rollback,
+            ) from exc
+        except Exception as parameter_exc:
+            if not mutation_attempted:
+                raise LocalCliRuntimeError(
+                    f'cell_format_exact HAction.Execute(CellBorderFill border none) failed: '
+                    f'{type(parameter_exc).__name__}: {parameter_exc}'
+                ) from parameter_exc
+            raise LocalCliMutationError(
+                f'cell_format_exact border-none mutation failed: {type(parameter_exc).__name__}: {parameter_exc}',
+                mutation_may_have_persisted=True,
+                rollback={
+                    'attempted': False,
+                    'succeeded': False,
+                    'preimage': {
+                        'available': not preimage_missing,
+                        'values': preimage_values,
+                        'missing': preimage_missing,
+                    },
+                },
+            ) from parameter_exc
 
     def _bundle_cell_format_exact(self, hwp: Any, step: dict[str, Any]) -> dict[str, Any]:
         if not bool(step.get('confirm_layout')):
@@ -4318,12 +6180,38 @@ class LocalCliService:
         before_metrics = self._bundle_table_cell_metrics(hwp, target_ctrl)
         if not before_metrics.get('available'):
             raise LocalCliRuntimeError(f'cell_format_exact cannot read target cell metrics: {before_metrics.get("error")}')
+        requested_margin_hu: int | None = None
+        if step.get('cell_margin_hu') is not None or step.get('cell_margin_mm') is not None:
+            requested_margin_hu = (
+                int(round(float(step.get('cell_margin_hu'))))
+                if step.get('cell_margin_hu') is not None
+                else self._mm_to_hwp_unit(hwp, float(step.get('cell_margin_mm')))
+            )
+            before_margin = _normalize_cell_margin_readback(before_metrics.get('cell_margin_hu'))
+            expected_margin = {key: requested_margin_hu for key in _CELL_MARGIN_KEYS}
+            if before_margin == expected_margin:
+                raise LocalCliRuntimeError(
+                    f'cell_format_exact requested cell margins are already present: {expected_margin!r}'
+                )
+        elif step.get('fill_color') is None and step.get('border') is None:
+            requested_vertical_align = str(step.get('vertical_align') or '').strip()
+            before_vertical = _normalize_vertical_align_readback(before_metrics.get('vertical_align'))
+            if before_vertical is None:
+                raise LocalCliRuntimeError(
+                    'cell_format_exact cannot mutate vertical alignment without a fresh native before readback'
+                )
+            if requested_vertical_align == before_vertical['name']:
+                raise LocalCliRuntimeError(
+                    f'cell_format_exact requested vertical alignment is already present: {requested_vertical_align!r}'
+                )
 
         mutation_original_pos = None
         try:
             mutation_original_pos = _get_pos(hwp)
         except Exception:
             mutation_original_pos = None
+        mutation_attempted = False
+        operation_kind: str | None = None
         try:
             enter = self._bundle_enter_table_cell_for_ctrl(hwp, target_ctrl)
             if not enter.get('is_cell'):
@@ -4334,16 +6222,46 @@ class LocalCliService:
                 try:
                     raw = run('TableCellBlock')
                     raw_results.append({'method': 'TableCellBlock', 'result': bool(raw) if raw is not None else None})
+                    if raw is not None and not bool(raw):
+                        raise LocalCliRuntimeError('cell_format_exact TableCellBlock returned false')
                 except Exception as exc:
+                    if isinstance(exc, LocalCliRuntimeError):
+                        raise
                     raw_results.append({'method': 'TableCellBlock', 'error': f'{type(exc).__name__}: {exc}'})
             if step.get('cell_margin_hu') is not None or step.get('cell_margin_mm') is not None:
-                value_hu = int(round(float(step.get('cell_margin_hu')))) if step.get('cell_margin_hu') is not None else self._mm_to_hwp_unit(hwp, float(step.get('cell_margin_mm')))
+                assert requested_margin_hu is not None
+                value_hu = requested_margin_hu
+                operation_kind = 'set-cell-margin'
+                mutation_attempted = True
                 margin_result = self._bundle_set_uniform_cell_margin(hwp, value_hu)
                 raw_results.append({'method': margin_result.get('method'), 'result': margin_result.get('result'), 'value_hu': value_hu, 'attempts': margin_result.get('attempts')})
                 operation = {
                     'op': 'set-cell-margin',
                     'cell_margin_hu': value_hu,
+                    'requested_margins_hu': {key: value_hu for key in _CELL_MARGIN_KEYS},
                     'cell_margin_mm': self._hwp_unit_to_mm(hwp, value_hu),
+                    'raw_results': raw_results,
+                    'enter': enter,
+                }
+            elif step.get('fill_color') is not None:
+                operation_kind = 'fill-color'
+                fill_result = self._bundle_apply_cell_fill_color(hwp, str(step.get('fill_color')))
+                mutation_attempted = True
+                raw_results.append(fill_result)
+                operation = {
+                    'op': 'fill-color',
+                    'fill_color': str(step.get('fill_color')).upper(),
+                    'raw_results': raw_results,
+                    'enter': enter,
+                }
+            elif step.get('border') is not None:
+                operation_kind = 'border-none'
+                border_result = self._bundle_apply_cell_border_none(hwp)
+                mutation_attempted = True
+                raw_results.append(border_result)
+                operation = {
+                    'op': 'border-none',
+                    'border': 'none',
                     'raw_results': raw_results,
                     'enter': enter,
                 }
@@ -4359,8 +6277,16 @@ class LocalCliService:
                     raise LocalCliRuntimeError('cell_format_exact requires vertical_align top, center, or bottom')
                 if not callable(run):
                     raise LocalCliRuntimeError(f'cell_format_exact requires HAction.Run for {action_name}')
+                operation_kind = 'vertical-align'
+                mutation_attempted = True
                 raw = run(action_name)
                 raw_results.append({'method': action_name, 'result': bool(raw) if raw is not None else None})
+                if raw is not None and not bool(raw):
+                    raise LocalCliMutationError(
+                        f'cell_format_exact {action_name} returned false after invocation',
+                        mutation_may_have_persisted=True,
+                        rollback={'attempted': False, 'succeeded': False},
+                    )
                 operation = {
                     'op': 'vertical-align',
                     'vertical_align': vertical_align,
@@ -4368,9 +6294,23 @@ class LocalCliService:
                     'raw_results': raw_results,
                     'enter': enter,
                 }
-        except LocalCliRuntimeError:
+        except LocalCliMutationError:
+            raise
+        except LocalCliRuntimeError as exc:
+            if mutation_attempted:
+                raise LocalCliMutationError(
+                    f'cell_format_exact {operation_kind or "mutation"} failed after invocation: {type(exc).__name__}: {exc}',
+                    mutation_may_have_persisted=True,
+                    rollback={'attempted': False, 'succeeded': False},
+                ) from exc
             raise
         except Exception as exc:
+            if mutation_attempted:
+                raise LocalCliMutationError(
+                    f'cell_format_exact {operation_kind or "mutation"} failed after invocation: {type(exc).__name__}: {exc}',
+                    mutation_may_have_persisted=True,
+                    rollback={'attempted': False, 'succeeded': False},
+                ) from exc
             raise LocalCliRuntimeError(f'cell_format_exact mutation failed: {type(exc).__name__}: {exc}') from exc
         finally:
             if mutation_original_pos is not None and len(mutation_original_pos) >= 3:
@@ -4379,45 +6319,67 @@ class LocalCliService:
                 except Exception:
                     pass
 
-        after_snapshot = self._bundle_compact_snapshot(hwp)
-        after_metrics = self._bundle_table_cell_metrics(hwp, target_ctrl)
-        changed_metrics = {
-            key: {'before': before_metrics.get(key), 'after': after_metrics.get(key)}
-            for key in sorted(set(before_metrics) | set(after_metrics))
-            if before_metrics.get(key) != after_metrics.get(key)
-        }
-        if operation.get('op') == 'set-cell-margin' and before_metrics.get('cell_margin_hu') == after_metrics.get('cell_margin_hu'):
-            raise LocalCliRuntimeError(
-                'cell_format_exact did not observe changed cell_margin_hu after mutation; '
-                f'before={before_metrics!r}; after={after_metrics!r}; operation={operation!r}'
+        try:
+            after_snapshot = self._bundle_compact_snapshot(hwp)
+            after_metrics = self._bundle_table_cell_metrics(hwp, target_ctrl)
+            changed_metrics = {
+                key: {'before': before_metrics.get(key), 'after': after_metrics.get(key)}
+                for key in sorted(set(before_metrics) | set(after_metrics))
+                if before_metrics.get(key) != after_metrics.get(key)
+            }
+            _require_observed_cell_format_mutation(
+                str(operation.get('op') or ''),
+                before_metrics,
+                after_metrics,
+                changed_metrics,
+                expected_vertical_align=(
+                    str(operation.get('vertical_align') or '')
+                    if operation.get('op') == 'vertical-align'
+                    else None
+                ),
+                expected_cell_margin_hu=(
+                    operation.get('requested_margins_hu')
+                    if operation.get('op') == 'set-cell-margin'
+                    else None
+                ),
+                expected_cell_addr=before_metrics.get('cell_addr'),
             )
 
-        post_controls, _post_mode = _enumerate_controls_headctrl(hwp, max_controls=int(resolved['max_controls']))
-        if len(post_controls) != len(resolved['controls']):
-            raise LocalCliRuntimeError(f'cell_format_exact control count changed unexpectedly: before={len(resolved["controls"])}, after={len(post_controls)}')
-        post_target_items: list[dict[str, Any]] = []
-        post_original_pos = None
-        try:
-            post_original_pos = _get_pos(hwp)
-        except Exception:
+            post_controls, _post_mode = _enumerate_controls_headctrl(hwp, max_controls=int(resolved['max_controls']))
+            if len(post_controls) != len(resolved['controls']):
+                raise LocalCliRuntimeError(f'cell_format_exact control count changed unexpectedly: before={len(resolved["controls"])}, after={len(post_controls)}')
+            post_target_items: list[dict[str, Any]] = []
             post_original_pos = None
-        try:
-            for index, ctrl in enumerate(post_controls):
-                item, _snapshot, _anchor_pos = self._bundle_control_proof_item(hwp, ctrl, index)
-                if item.get('target_id') == resolved['target_id']:
-                    post_target_items.append(item)
-        finally:
-            if post_original_pos is not None and len(post_original_pos) >= 3:
-                try:
-                    _set_pos(hwp, int(post_original_pos[0]), int(post_original_pos[1]), int(post_original_pos[2]))
-                except Exception:
-                    pass
-        if len(post_target_items) != 1:
-            raise LocalCliRuntimeError(f'cell_format_exact post-mutation target count must be exactly 1, got {len(post_target_items)} for {resolved["target_id"]!r}')
+            try:
+                post_original_pos = _get_pos(hwp)
+            except Exception:
+                post_original_pos = None
+            try:
+                for index, ctrl in enumerate(post_controls):
+                    item, _snapshot, _anchor_pos = self._bundle_control_proof_item(hwp, ctrl, index)
+                    if item.get('target_id') == resolved['target_id']:
+                        post_target_items.append(item)
+            finally:
+                if post_original_pos is not None and len(post_original_pos) >= 3:
+                    try:
+                        _set_pos(hwp, int(post_original_pos[0]), int(post_original_pos[1]), int(post_original_pos[2]))
+                    except Exception:
+                        pass
+            if len(post_target_items) != 1:
+                raise LocalCliRuntimeError(f'cell_format_exact post-mutation target count must be exactly 1, got {len(post_target_items)} for {resolved["target_id"]!r}')
+        except LocalCliMutationError:
+            raise
+        except Exception as exc:
+            raise LocalCliMutationError(
+                f'cell_format_exact {operation_kind or "mutation"} post-mutation readback/proof failed: '
+                f'{type(exc).__name__}: {exc}',
+                mutation_may_have_persisted=True,
+                rollback={'attempted': False, 'succeeded': False},
+            ) from exc
 
         warnings = ['This primitive mutates one target table cell format only; rendered before/after proof is required before accepting the working copy.']
         if operation.get('op') == 'vertical-align':
-            warnings.append('Vertical alignment proof currently relies on native action success plus rendered review; pyhwpx does not expose a compact getter in this primitive yet.')
+            warnings.append('Vertical alignment includes native ShapeTableCell.VertAlign before/after readback; rendered review remains required for final acceptance.')
         return {
             'schema_version': 'local-cli/cell-format-exact/v1',
             'read_only': False,
@@ -6355,10 +8317,13 @@ class LocalCliService:
         if not session_id:
             return
         try:
+            semantic_ok = payload.get('semantic_ok') if isinstance(payload.get('semantic_ok'), bool) else (
+                payload.get('ok') if isinstance(payload.get('ok'), bool) else None
+            )
             self.interactive_sessions.record_command(
                 command,
                 session_id=session_id,
-                state='succeeded',
+                state='failed' if semantic_ok is False else 'succeeded',
                 summary=summary,
                 payload=payload,
                 metadata={'local_cli_v1': {'bridge': 'local_cli_v1'}},
@@ -6377,17 +8342,116 @@ class LocalCliService:
     ) -> T:
         self._require_ready_runtime(task_label)
         session_id = self._binding_session_id(binding)
+        current_binding = self._read_binding(session_id=session_id)
+        if not isinstance(current_binding, dict):
+            raise LocalCliServiceError(
+                'Live local CLI binding is unavailable. Re-open the document.',
+                status_code=409,
+            )
+        binding.clear()
+        binding.update(current_binding)
+        binding['_binding_base'] = copy.deepcopy(current_binding)
+        try:
+            command_generation = int(binding.get('command_generation', 0))
+        except (TypeError, ValueError) as exc:
+            raise LocalCliServiceError(
+                'Live local CLI binding generation is invalid.',
+                status_code=500,
+            ) from exc
+        try:
+            native_command_sequence = int(binding.get('native_command_sequence', 0))
+        except (TypeError, ValueError) as exc:
+            raise LocalCliServiceError(
+                'Live local CLI native command sequence is invalid.',
+                status_code=500,
+            ) from exc
         if not self.runtime_manager.has_session(session_id):
             self._cleanup_stale_binding(binding)
             raise LocalCliServiceError('Live local CLI session is unavailable. Re-open the document.', status_code=409)
         try:
-            return self.runtime_manager.execute(
+            result = self.runtime_manager.execute(
                 session_id=session_id,
                 command_name=command_name,
                 handler=handler,
                 timeout=timeout,
             )
+            binding['_expected_command_generation'] = command_generation
+            try:
+                command_status = self.runtime_manager.command_status(session_id)
+            except Exception:
+                command_status = {}
+            if isinstance(result, dict):
+                result = dict(result)
+                semantic_ok = command_status.get('semantic_ok')
+                if isinstance(semantic_ok, bool):
+                    # The handler's envelope may have been assembled before a
+                    # later bundle step failed.  Normalize before redaction so
+                    # the adapter cannot report a semantic failure as success.
+                    result['ok'] = semantic_ok
+                    result['semantic_ok'] = semantic_ok
+                if isinstance(command_status.get('may_have_mutated'), bool):
+                    result['may_have_mutated'] = command_status['may_have_mutated']
+                if isinstance(command_status.get('failed_step_count'), int):
+                    result['failed_step_count'] = command_status['failed_step_count']
+                if isinstance(command_status.get('step_count'), int):
+                    result['step_count'] = command_status['step_count']
+                result['_local_cli_command'] = {
+                    'command': command_name,
+                    'generation': command_generation,
+                    'command_id': command_status.get('command_id'),
+                    'sequence': command_status.get('sequence', native_command_sequence),
+                    'state': command_status.get('state', 'succeeded'),
+                    'semantic_ok': command_status.get('semantic_ok'),
+                    'recovery': command_status.get('recovery'),
+                }
+            command_sequence = command_status.get('sequence')
+            if isinstance(command_sequence, int) and command_sequence >= native_command_sequence:
+                binding['_expected_native_command_sequence'] = native_command_sequence
+                binding['native_command_sequence'] = command_sequence
+                binding.pop('pending_command', None)
+            return result
         except LocalCliRuntimeError as exc:
+            if isinstance(exc, LocalCliRuntimeTimeoutError):
+                try:
+                    command_status = self.runtime_manager.command_status(session_id, exc.command_id)
+                except Exception:
+                    command_status = {'command_id': exc.command_id, 'state': exc.command_state}
+                command_sequence = command_status.get('sequence', native_command_sequence)
+                try:
+                    command_sequence = max(native_command_sequence, int(command_sequence))
+                except (TypeError, ValueError):
+                    command_sequence = native_command_sequence
+                binding['_expected_command_generation'] = command_generation
+                binding['_expected_native_command_sequence'] = native_command_sequence
+                binding['native_command_sequence'] = command_sequence
+                binding['pending_command'] = {
+                    'command_id': exc.command_id,
+                    'command': command_name,
+                    'sequence': command_sequence,
+                    'state': command_status.get('state', exc.command_state),
+                    'timed_out_at': utc_now_iso(),
+                }
+                self._save_binding(binding)
+                try:
+                    self.interactive_sessions.record_command(
+                        command_name,
+                        session_id=session_id,
+                        state='pending',
+                        summary=f'{command_name} timed out; awaiting native reconciliation',
+                        payload={'command_id': exc.command_id, 'sequence': command_sequence},
+                        metadata={'local_cli_v1': {'reconciliation_pending': True}},
+                        live_runtime={
+                            'reconciliation_pending': True,
+                            'pending_command': dict(binding['pending_command']),
+                        },
+                    )
+                except Exception:
+                    pass
+                raise LocalCliServiceError(
+                    f'{exc} status={command_status.get("state", exc.command_state)} '
+                    f'command_id={exc.command_id}; run command-reconcile before retrying.',
+                    status_code=504,
+                ) from exc
             if self._looks_like_stale_live_session_error(exc):
                 self._cleanup_stale_binding(
                     binding,
@@ -6398,7 +8462,7 @@ class LocalCliService:
             if not self.runtime_manager.has_session(session_id):
                 self._cleanup_stale_binding(binding)
                 raise LocalCliServiceError('Live local CLI session is unavailable. Re-open the document.', status_code=409) from exc
-            raise LocalCliServiceError(str(exc), status_code=500) from exc
+            raise LocalCliServiceError('Local CLI native command failed.', status_code=500) from exc
 
     def _snapshot_temp_hwpx(self, handle: LocalCliRuntimeHandle, *, purpose: str) -> Path:
         snapshot_path = handle.session_root / 'metadata' / f'{purpose}-{uuid.uuid4().hex}.hwpx'
@@ -6479,9 +8543,29 @@ class LocalCliService:
         active_binding = self._read_binding()
         if isinstance(active_binding, dict):
             active_session_id = str(active_binding.get('session_id') or '').strip()
+            if self._binding_has_pending_reconciliation(active_binding):
+                pending = active_binding.get('pending_command') if isinstance(active_binding.get('pending_command'), dict) else {}
+                raise LocalCliServiceError(
+                    'A native local CLI command is unresolved; reconcile '
+                    f"command_id={str(pending.get('command_id') or '').strip()} before opening another document.",
+                    status_code=409,
+                )
             if active_session_id and self.runtime_manager.has_session(active_session_id):
                 raise LocalCliServiceError('A local CLI document is already open. Close it before opening another one.', status_code=409)
-            self._cleanup_stale_binding(active_binding)
+            if (
+                active_binding.get('document_session_state') in {'reconciled', 'reconciled_cleanup_pending'}
+                or isinstance(active_binding.get('artifact_custody'), dict)
+            ):
+                raise LocalCliServiceError(
+                    'A reconciled local CLI session must be explicitly closed after downloading its artifacts.',
+                    status_code=409,
+                )
+            if not self._cleanup_stale_binding(active_binding):
+                raise LocalCliServiceError(
+                    'The previous local CLI session is unavailable and its managed root is retained; '
+                    'retry cleanup before opening another document.',
+                    status_code=409,
+                )
 
         filename = Path(file.filename or 'upload.hwpx').name
         suffix = Path(filename).suffix.lower() or '.hwpx'
@@ -6536,22 +8620,87 @@ class LocalCliService:
                     status_code=500,
                 )
 
-            runtime_open = self.runtime_manager.open_session(
-                session_id=session_id,
-                session_root=session_root,
-                working_copy_path=working_copy_path,
-                source_filename=filename,
-            )
+            try:
+                runtime_open = self.runtime_manager.open_session(
+                    session_id=session_id,
+                    session_root=session_root,
+                    working_copy_path=working_copy_path,
+                    source_filename=filename,
+                )
+            except LocalCliRuntimeTimeoutError as exc:
+                try:
+                    command_status = self.runtime_manager.command_status(session_id, exc.command_id)
+                except Exception:
+                    command_status = {'command_id': exc.command_id, 'state': exc.command_state}
+                try:
+                    command_sequence = command_status.get('sequence', 1)
+                    if isinstance(command_sequence, bool) or not isinstance(command_sequence, int) or command_sequence <= 0:
+                        raise ValueError('invalid startup timeout sequence')
+                except (TypeError, ValueError) as sequence_exc:
+                    raise LocalCliServiceError('Local CLI startup reconciliation sequence is invalid.', status_code=500) from sequence_exc
+                root_identity = self._managed_path_identity(session_root)
+                if not isinstance(root_identity, dict):
+                    raise LocalCliServiceError('Server-managed session root identity could not be captured.', status_code=500)
+                binding = {
+                    'session_id': session_id,
+                    'session_root_path': str(session_root),
+                    'session_root_identity': root_identity,
+                    'source_filename': filename,
+                    'uploaded_path': str(uploaded_path),
+                    'working_copy_path': str(working_copy_path),
+                    'opened_at': utc_now_iso(),
+                    'updated_at': utc_now_iso(),
+                    'command_generation': 0,
+                    'native_command_sequence': command_sequence,
+                    'document_session_state': 'timed_out_pending_reconciliation',
+                    'live_session_bound': True,
+                    'working_copy_dirty': False,
+                    'pending_command': {
+                        'command_id': exc.command_id,
+                        'command': 'start',
+                        'sequence': command_sequence,
+                        'state': command_status.get('state', exc.command_state),
+                        'timed_out_at': utc_now_iso(),
+                    },
+                    'artifacts': {'latest_working_copy_path': str(working_copy_path)},
+                }
+                working_copy_custody = {}
+                self._verify_artifact_readback(binding, working_copy_path, readback=working_copy_custody)
+                binding['artifact_custody'] = {'working-copy': working_copy_custody}
+                self._save_binding(binding)
+                try:
+                    self.interactive_sessions.record_command(
+                        'open',
+                        session_id=session_id,
+                        state='pending',
+                        summary='open timed out; awaiting native reconciliation',
+                        payload={'command_id': exc.command_id, 'sequence': command_sequence},
+                        metadata={'local_cli_v1': {'reconciliation_pending': True}},
+                        live_runtime={
+                            'reconciliation_pending': True,
+                            'pending_command': dict(binding['pending_command']),
+                        },
+                    )
+                except Exception:
+                    pass
+                raise LocalCliServiceError(
+                    f'{exc} status={command_status.get("state", exc.command_state)} '
+                    f'command_id={exc.command_id}; run command-reconcile before retrying.',
+                    status_code=504,
+                ) from exc
             location = runtime_open.get('location') if isinstance(runtime_open.get('location'), dict) else {}
 
             binding = {
                 'session_id': session_id,
                 'session_root_path': str(session_root),
+                'session_root_identity': self._managed_path_identity(session_root),
                 'source_filename': filename,
                 'uploaded_path': str(uploaded_path),
                 'working_copy_path': str(working_copy_path),
                 'opened_at': utc_now_iso(),
                 'updated_at': utc_now_iso(),
+                'command_generation': 0,
+                'native_command_sequence': 0,
                 'document_session_state': 'open',
                 'live_session_bound': True,
                 'working_copy_dirty': False,
@@ -6563,6 +8712,11 @@ class LocalCliService:
                 'last_live_location': None,
                 'artifacts': {'latest_working_copy_path': str(working_copy_path)},
             }
+            if not isinstance(binding['session_root_identity'], dict):
+                raise LocalCliServiceError('Server-managed session root identity could not be captured.', status_code=500)
+            working_copy_custody = {}
+            self._verify_artifact_readback(binding, working_copy_path, readback=working_copy_custody)
+            binding['artifact_custody'] = {'working-copy': working_copy_custody}
             binding = self._update_live_binding(binding, location=location, dirty=False)
             return {
                 'ok': True,
@@ -6573,21 +8727,470 @@ class LocalCliService:
             }
         except Exception:
             if session_id:
+                runtime_close_ok = False
                 try:
                     self.runtime_manager.close_session(session_id)
+                    runtime_close_ok = True
                 except Exception:
-                    pass
-                self._record_session_close(
-                    session_id=session_id,
-                    summary='Local CLI session failed during open.',
-                    outcome='open_failed',
-                    state='failed',
-                )
-                self._clear_binding(session_id=session_id)
-            # Keep the failed session root for forensics while the live-session open path is still stabilizing.
+                    # The native runtime may still own the working copy.  Do
+                    # not delete or clear its binding until teardown is known
+                    # to have completed.
+                    runtime_close_ok = False
+                if runtime_close_ok:
+                    cleanup_binding = {
+                        'session_id': session_id,
+                        'session_root_path': str(session_root),
+                        'session_root_identity': self._managed_path_identity(session_root),
+                    }
+                    cleanup_ok = False
+                    try:
+                        self._cleanup_managed_session_root(cleanup_binding)
+                        cleanup_ok = True
+                    except Exception:
+                        # Do not silently claim cleanup.  The root remains
+                        # discoverable for an operator/reaper when identity-bound
+                        # removal cannot be proven.
+                        cleanup_ok = False
+                    if cleanup_ok:
+                        self._record_session_close(
+                            session_id=session_id,
+                            summary='Local CLI session failed during open.',
+                            outcome='open_failed',
+                            state='failed',
+                        )
+                        self._clear_binding(session_id=session_id)
             raise
         finally:
             await file.close()
+
+    def reconcile_command(self, *, command_id: str, session_id: str | None = None) -> dict[str, Any]:
+        """Reconcile one timed-out native command and commit its late result."""
+
+        command_id = str(command_id or '').strip()
+        if not command_id:
+            raise LocalCliServiceError('command_id must not be empty.', status_code=400)
+        binding = self._load_active_binding(session_id=session_id, require_live=False)
+        pending = binding.get('pending_command') if isinstance(binding.get('pending_command'), dict) else {}
+        pending_id = str(pending.get('command_id') or '').strip()
+        if pending_id and pending_id != command_id:
+            raise LocalCliServiceError(
+                f'Local CLI binding is waiting for a different command: {pending_id}.',
+                status_code=409,
+            )
+        status = self._command_status_for_binding(binding, command_id)
+        if str(status.get('command_id') or '').strip() not in {'', command_id}:
+            raise LocalCliServiceError('Native command identity did not match the requested reconciliation.', status_code=409)
+        state = str(status.get('state') or 'unknown')
+        if state == 'timed_out_pending_reconciliation':
+            return {
+                'ok': False,
+                'reconciled': False,
+                'reconciliation': 'pending',
+                'session_id': self._binding_session_id(binding),
+                'command': status,
+            }
+        if state not in {'completed_after_timeout', 'failed_after_timeout'}:
+            raise LocalCliServiceError(
+                f'Local CLI command is not awaiting reconciliation: state={state}.',
+                status_code=409,
+            )
+        custody_reader = getattr(self.runtime_manager, 'command_custody', None)
+        legacy_runtime_double = not callable(custody_reader)
+        if not legacy_runtime_double and not status.get('reconciled'):
+            try:
+                status = self.runtime_manager.reconcile_command(
+                    self._binding_session_id(binding),
+                    command_id,
+                    session_root=self._binding_session_root(binding),
+                )
+            except Exception as exc:
+                raise LocalCliServiceError(
+                    'Native command reconciliation could not complete; outcome remains unknown.',
+                    status_code=409,
+                ) from exc
+            state = str(status.get('state') or 'unknown')
+            if state == 'timed_out_pending_reconciliation':
+                return {
+                    'ok': False,
+                    'reconciled': False,
+                    'reconciliation': 'pending',
+                    'session_id': self._binding_session_id(binding),
+                    'command': status,
+                }
+            if state not in {'completed_after_timeout', 'failed_after_timeout'}:
+                raise LocalCliServiceError(
+                    f'Local CLI command is not awaiting reconciliation: state={state}.',
+                    status_code=409,
+                )
+        if legacy_runtime_double:
+            # Existing unit seams predate the custody API.  Keep this branch
+            # limited to objects that cannot be the production runtime manager;
+            # the real manager always exposes command_custody below.
+            custody = status
+        else:
+            try:
+                custody = custody_reader(
+                    self._binding_session_id(binding),
+                    command_id,
+                    session_root=self._binding_session_root(binding),
+                )
+            except Exception as exc:
+                raise LocalCliServiceError(
+                    'Late command custody is unavailable; the native outcome is unknown and must not be promoted.',
+                    status_code=409,
+                ) from exc
+        reconciliation_data = custody.get('reconciliation_data') if isinstance(custody.get('reconciliation_data'), dict) else {}
+        if not legacy_runtime_double:
+            private_version = reconciliation_data.get('version')
+            private_session_id = str(reconciliation_data.get('session_id') or '').strip()
+            private_command_id = str(reconciliation_data.get('command_id') or '').strip()
+            private_sequence = reconciliation_data.get('sequence')
+            if private_version != 1 or private_session_id != self._binding_session_id(binding) or private_command_id != command_id:
+                raise LocalCliServiceError('Late command custody identity did not match the managed binding.', status_code=409)
+            if isinstance(private_sequence, bool) or not isinstance(private_sequence, int) or private_sequence <= 0:
+                raise LocalCliServiceError('Late command custody sequence is invalid.', status_code=409)
+            if not isinstance(status.get('sequence'), int) or isinstance(status.get('sequence'), bool) or status['sequence'] != private_sequence:
+                raise LocalCliServiceError('Late command custody sequence did not match the command status.', status_code=409)
+            for field in ('semantic_ok', 'delta_dirty', 'document_modified_before_recovery'):
+                value = reconciliation_data.get(field)
+                if value is not None and not isinstance(value, bool):
+                    raise LocalCliServiceError(f'Late command custody field is invalid: {field}.', status_code=409)
+            if not isinstance(reconciliation_data.get('may_have_mutated'), bool):
+                raise LocalCliServiceError('Late command custody mutation flag is invalid.', status_code=409)
+            for field in ('step_count', 'failed_step_count'):
+                value = reconciliation_data.get(field)
+                if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                    raise LocalCliServiceError(f'Late command custody count is invalid: {field}.', status_code=409)
+            if reconciliation_data['failed_step_count'] > reconciliation_data['step_count']:
+                raise LocalCliServiceError('Late command custody step counts are inconsistent.', status_code=409)
+        recovery = reconciliation_data.get('recovery') if isinstance(reconciliation_data.get('recovery'), dict) else {}
+        public_recovery = status.get('recovery') if isinstance(status.get('recovery'), dict) else {}
+        recovery_state = str(recovery.get('state') or public_recovery.get('state') or 'none')
+        if recovery_state not in _RECOVERY_STATES:
+            raise LocalCliServiceError('Late command recovery state is invalid.', status_code=409)
+        if not legacy_runtime_double and recovery_state == 'preserved' and not str(recovery.get('attempt_id') or '').strip():
+            raise LocalCliServiceError('Late command recovery attempt identity is missing.', status_code=409)
+        if recovery_state == 'saving':
+            return {
+                'ok': False,
+                'reconciled': False,
+                'reconciliation': 'pending',
+                'session_id': self._binding_session_id(binding),
+                'command': status,
+            }
+        if not legacy_runtime_double and recovery_state != 'preserved':
+            raise LocalCliServiceError(
+                'Late command result has no committed native recovery artifact; outcome remains unknown.',
+                status_code=409,
+            )
+        associated_command_id = str(binding.get('last_reconciliation_command_id') or '').strip()
+        if not pending_id and not status.get('reconciled') and associated_command_id != command_id:
+            raise LocalCliServiceError(
+                'Local CLI command is not associated with a pending binding reconciliation.',
+                status_code=409,
+            )
+        if status.get('reconciled') and not pending_id:
+            custody_map = binding.get('artifact_custody') if isinstance(binding.get('artifact_custody'), dict) else {}
+            committed_artifacts = binding.get('artifacts') if isinstance(binding.get('artifacts'), dict) else {}
+            if not legacy_runtime_double and 'recovery' not in custody_map:
+                raise LocalCliServiceError('Committed reconciliation has no recovery custody.', status_code=409)
+            for kind, expected in custody_map.items():
+                if not isinstance(expected, dict):
+                    raise LocalCliServiceError('Committed artifact custody is malformed.', status_code=409)
+                artifact_key = 'latest_working_copy_path' if kind in {'working-copy', 'working_copy'} else f'latest_{kind}_path'
+                artifact_path = committed_artifacts.get(artifact_key)
+                if not isinstance(artifact_path, str):
+                    raise LocalCliServiceError('Committed artifact projection is missing.', status_code=409)
+                try:
+                    self._verify_artifact_readback(binding, Path(artifact_path), expected=expected)
+                except (OSError, ValueError) as exc:
+                    raise LocalCliServiceError('Committed artifact failed retry readback.', status_code=409) from exc
+            stored_semantic_ok = (
+                custody.get('semantic_ok') if isinstance(custody.get('semantic_ok'), bool) else
+                status.get('semantic_ok') if isinstance(status.get('semantic_ok'), bool) else None
+            )
+            if not isinstance(stored_semantic_ok, bool):
+                raise LocalCliServiceError('Stored semantic command outcome is unavailable; outcome remains unknown.', status_code=409)
+            private_sequence = reconciliation_data.get('sequence')
+            if (
+                isinstance(private_sequence, bool)
+                or not isinstance(private_sequence, int)
+                or binding.get('native_command_sequence') != private_sequence
+            ):
+                raise LocalCliServiceError('Committed reconciliation sequence did not match the binding.', status_code=409)
+            for expected in custody_map.values():
+                if (
+                    expected.get('command_id') not in (None, '', command_id)
+                    or expected.get('sequence') not in (None, private_sequence)
+                ):
+                    raise LocalCliServiceError('Committed artifact custody identity did not match the command.', status_code=409)
+            recovery_claim = recovery.get('artifact') if isinstance(recovery.get('artifact'), dict) else None
+            recovery_entry = custody_map.get('recovery')
+            if recovery_claim is None or recovery_entry is None or any(
+                recovery_claim.get(key) != recovery_entry.get(key)
+                for key in ('relative_path', 'sha256', 'size_bytes')
+            ):
+                raise LocalCliServiceError('Committed recovery claim did not match artifact custody.', status_code=409)
+            return {
+                'ok': stored_semantic_ok,
+                'reconciled': True,
+                'reconciliation': 'already_reconciled',
+                'session_id': self._binding_session_id(binding),
+                'command': status,
+            }
+
+        session_id = self._binding_session_id(binding)
+        try:
+            current_generation = int(binding.get('command_generation', 0))
+            current_sequence = int(binding.get('native_command_sequence', 0))
+            status_sequence = status.get('sequence')
+            if isinstance(status_sequence, bool) or not isinstance(status_sequence, int) or status_sequence <= 0:
+                raise ValueError('invalid native command sequence')
+            command_sequence = status_sequence
+        except (TypeError, ValueError) as exc:
+            raise LocalCliServiceError('Local CLI reconciliation sequence is invalid.', status_code=500) from exc
+        pending_sequence = pending.get('sequence')
+        if pending_id and (
+            isinstance(pending_sequence, bool)
+            or not isinstance(pending_sequence, int)
+            or pending_sequence != command_sequence
+        ):
+            raise LocalCliServiceError('Local CLI reconciliation sequence did not match its pending command.', status_code=409)
+        if not pending_id and current_sequence != command_sequence:
+            raise LocalCliServiceError('Local CLI reconciliation sequence did not match the binding.', status_code=409)
+        result = status.get('result') if isinstance(status.get('result'), dict) else {}
+        command_name = str(status.get('command') or pending.get('command') or '')
+        location = result.get('location') if isinstance(result.get('location'), dict) else {}
+        if not location and isinstance(result.get('after_location'), dict):
+            location = result['after_location']
+        artifacts = result.get('artifacts') if isinstance(result.get('artifacts'), dict) else {}
+        root = self._binding_session_root(binding).resolve(strict=True)
+        private_identity = reconciliation_data.get('session_root_identity')
+        if not legacy_runtime_double:
+            try:
+                actual_stat = os.stat(root, follow_symlinks=False)
+                actual_identity = {
+                    'device': int(actual_stat.st_dev),
+                    'inode': int(actual_stat.st_ino),
+                    'mode': int(actual_stat.st_mode),
+                }
+            except OSError as exc:
+                raise LocalCliServiceError('Recovery root custody could not be verified.', status_code=409) from exc
+            if private_identity != actual_identity:
+                raise LocalCliServiceError('Recovery root identity changed; native outcome remains unknown.', status_code=409)
+        private_artifacts = reconciliation_data.get('artifacts') if isinstance(reconciliation_data.get('artifacts'), list) else []
+        artifact_custody: dict[str, dict[str, Any]] = {}
+        for entry in private_artifacts:
+            if not isinstance(entry, dict):
+                continue
+            kind = str(entry.get('kind') or '')
+            relative = str(entry.get('relative_path') or '')
+            if not relative or kind not in {'recovery', 'export', 'screenshot', 'working-copy', 'working_copy'}:
+                continue
+            try:
+                if (
+                    relative.startswith(('/', '\\'))
+                    or re.match(r'^[A-Za-z]:', relative)
+                    or ':' in relative
+                    or any(part in {'', '.', '..'} for part in relative.replace('\\', '/').split('/'))
+                ):
+                    raise ValueError('invalid managed artifact relative path')
+                lexical = root / relative
+                lexical.relative_to(root)
+                current_path = root
+                for part in lexical.relative_to(root).parts:
+                    current_path = current_path / part
+                    if current_path.is_symlink():
+                        raise ValueError('symlinked managed artifact path')
+                candidate = lexical.resolve(strict=True)
+                candidate.relative_to(root)
+                if candidate != lexical:
+                    raise ValueError('managed artifact path resolves through a link')
+                if not candidate.is_file() or candidate.is_symlink():
+                    raise ValueError('not a regular managed artifact')
+                expected_size = entry.get('size_bytes')
+                expected_sha256 = entry.get('sha256')
+                if isinstance(expected_size, bool) or not isinstance(expected_size, int) or expected_size <= 0:
+                    raise ValueError('invalid committed artifact size')
+                if not isinstance(expected_sha256, str) or re.fullmatch(r'[0-9a-f]{64}', expected_sha256) is None:
+                    raise ValueError('invalid committed artifact hash')
+                digest = hashlib.sha256()
+                actual_size = 0
+                with candidate.open('rb') as stream:
+                    for chunk in iter(lambda: stream.read(1024 * 1024), b''):
+                        actual_size += len(chunk)
+                        digest.update(chunk)
+                if actual_size != expected_size or digest.hexdigest() != expected_sha256:
+                    raise ValueError('committed artifact changed after custody')
+                artifact_custody[kind] = {
+                    'relative_path': relative,
+                    'sha256': expected_sha256,
+                    'size_bytes': expected_size,
+                    'command_id': command_id,
+                    'sequence': command_sequence,
+                }
+                if kind == 'recovery':
+                    artifacts = {**artifacts, 'latest_recovery_path': str(candidate)}
+                    artifacts = {**artifacts, 'latest_recovery_sha256': expected_sha256, 'latest_recovery_size_bytes': expected_size}
+                elif kind == 'export':
+                    artifacts = {**artifacts, 'latest_export_path': str(candidate)}
+                elif kind == 'screenshot':
+                    artifacts = {**artifacts, 'latest_screenshot_path': str(candidate)}
+                elif kind in {'working-copy', 'working_copy'}:
+                    artifacts = {**artifacts, 'latest_working_copy_path': str(candidate)}
+            except (OSError, ValueError) as exc:
+                raise LocalCliServiceError('Committed recovery artifact failed managed-root readback.', status_code=409) from exc
+        if not legacy_runtime_double:
+            recovery_entry = artifact_custody.get('recovery')
+            recovery_claim = recovery.get('artifact') if isinstance(recovery.get('artifact'), dict) else None
+            if recovery_entry is None or recovery_claim is None or any(
+                recovery_claim.get(key) != recovery_entry.get(key)
+                for key in ('relative_path', 'sha256', 'size_bytes')
+            ):
+                raise LocalCliServiceError('Committed recovery custody has no matching recovery artifact.', status_code=409)
+        semantic_ok = reconciliation_data.get('semantic_ok') if isinstance(reconciliation_data.get('semantic_ok'), bool) else (
+            status.get('semantic_ok') if isinstance(status.get('semantic_ok'), bool) else None
+        )
+        if not isinstance(semantic_ok, bool):
+            if legacy_runtime_double:
+                semantic_ok = state == 'completed_after_timeout'
+            else:
+                raise LocalCliServiceError('Stored semantic command outcome is unavailable; outcome remains unknown.', status_code=409)
+        delta_dirty = reconciliation_data.get('delta_dirty') if isinstance(reconciliation_data.get('delta_dirty'), bool) else (
+            result.get('dirty') if legacy_runtime_double and isinstance(result.get('dirty'), bool) else None
+        )
+        may_have_mutated = reconciliation_data.get('may_have_mutated') is True or (
+            legacy_runtime_double and result.get('dirty') is True
+        )
+        dirty, dirty_source = self._reduce_working_copy_dirty(
+            prior_dirty=binding.get('working_copy_dirty') is True or binding.get('dirty') is True,
+            semantic_ok=semantic_ok,
+            delta_dirty=delta_dirty,
+            may_have_mutated=may_have_mutated,
+            command_name=command_name,
+            fresh_document_modified=location.get('document_is_modified') if isinstance(location.get('document_is_modified'), bool) else None,
+            fresh_sequence_matches=int(reconciliation_data.get('sequence', -1)) == int(status.get('sequence', -2)),
+            ordinary_save_confirmed=reconciliation_data.get('ordinary_save_confirmed') is True,
+        )
+        if command_name == 'save':
+            artifacts = {**artifacts, 'latest_working_copy_path': str(self._working_copy_path(binding))}
+        if command_name == 'export':
+            for entry in private_artifacts:
+                if isinstance(entry, dict) and entry.get('kind') == 'export':
+                    candidate = root / str(entry.get('relative_path') or '')
+                    artifacts = {**artifacts, 'latest_export_path': str(candidate)}
+                    break
+        if state == 'failed_after_timeout':
+            failure = status.get('error') if isinstance(status.get('error'), dict) else {}
+            binding['last_reconciliation_error'] = {
+                'command_id': command_id,
+                'command': command_name,
+                'error': failure,
+                'recorded_at': utc_now_iso(),
+            }
+        binding['_expected_command_generation'] = current_generation
+        binding['_expected_native_command_sequence'] = current_sequence
+        binding['native_command_sequence'] = command_sequence
+        binding['last_reconciliation_command_id'] = command_id
+        binding['reconciliation_state'] = state
+        if artifact_custody:
+            binding['artifact_custody'] = artifact_custody
+        if not location:
+            location = binding.get('last_live_location') if isinstance(binding.get('last_live_location'), dict) else {}
+        # First persist the artifact/location/dirty projection while the
+        # binding still owns the pending command and the live session.
+        binding = self._update_live_binding(binding, location=location, artifacts=artifacts, dirty=dirty)
+        try:
+            if legacy_runtime_double:
+                acknowledged = self.runtime_manager.reconcile_command(
+                    session_id,
+                    command_id,
+                    session_root=self._binding_session_root(binding),
+                )
+            else:
+                acknowledged = self.runtime_manager.acknowledge_reconciliation(
+                    session_id,
+                    command_id,
+                    session_root=self._binding_session_root(binding),
+                )
+        except Exception as exc:
+            raise LocalCliServiceError(
+                'Late command result could not be durably acknowledged; binding ownership remains pending.',
+                status_code=500,
+            ) from exc
+        if not acknowledged.get('reconciled'):
+            raise LocalCliServiceError(
+                'Late command result was not durably marked reconciled; binding ownership remains pending.',
+                status_code=500,
+            )
+        binding.pop('pending_command', None)
+        binding['live_session_bound'] = False
+        binding['document_session_state'] = 'reconciled'
+        binding = self._save_binding(binding)
+        cleanup_pending = False
+        try:
+            self.runtime_manager.close_session(session_id, timeout=30.0)
+        except Exception:
+            # Custody is already committed; leave the registered runtime for a
+            # later explicit cleanup retry rather than reopening the document.
+            cleanup_pending = True
+            binding['cleanup_pending'] = True
+            binding['document_session_state'] = 'reconciled_cleanup_pending'
+            binding['live_session_bound'] = False
+            try:
+                binding = self._save_binding(binding)
+            except Exception:
+                pass
+        try:
+            self.interactive_sessions.record_command(
+                command_name or 'native-command',
+                session_id=session_id,
+                state='succeeded' if semantic_ok is True else 'failed',
+                summary=f'{command_name or "native command"} reconciled after timeout ({state})',
+                payload={
+                    'command_id': command_id,
+                    'sequence': command_sequence,
+                    'result': result,
+                    'semantic_ok': semantic_ok,
+                    'dirty': dirty,
+                    'dirty_source': dirty_source,
+                },
+                metadata={'local_cli_v1': {'reconciliation': state, 'reconciliation_pending': False}},
+                live_runtime={
+                    'reconciliation_pending': False,
+                    'pending_command': {'command_id': command_id, 'reconciled': True},
+                },
+            )
+        except Exception:
+            pass
+        public_artifacts = self._public_artifacts(
+            session_id=session_id,
+            artifacts=binding.get('artifacts') if isinstance(binding.get('artifacts'), dict) else {},
+            binding=binding,
+        )
+        recovery_download_path = public_artifacts.get('latest_recovery_download_path')
+        return {
+            'ok': bool(semantic_ok) if isinstance(semantic_ok, bool) else state == 'completed_after_timeout',
+            'reconciled': True,
+            'reconciliation': 'completed_after_timeout' if state == 'completed_after_timeout' else 'failed_after_timeout',
+            'session_id': session_id,
+            'command': acknowledged,
+            'binding_generation': binding.get('command_generation'),
+            'working_copy_dirty': binding.get('working_copy_dirty'),
+            'artifacts': public_artifacts,
+            'recovery_artifact_path': recovery_download_path,
+            'recovery_artifact': {
+                'download_path': recovery_download_path,
+                **{
+                    key: recovery['artifact'].get(key)
+                    for key in ('sha256', 'size_bytes')
+                    if recovery['artifact'].get(key) not in (None, '')
+                },
+            } if isinstance(recovery.get('artifact'), dict) and recovery_download_path else None,
+            'cleanup_pending': cleanup_pending,
+            'semantic_ok': semantic_ok,
+            'dirty_source': dirty_source,
+        }
 
     def status(self) -> dict[str, Any]:
         snapshot = self._runtime_snapshot()
@@ -6598,20 +9201,63 @@ class LocalCliService:
         ready = bool(snapshot and snapshot.get('ready'))
         blocked_reason = str(errors[0]).strip() if errors else None
         session_id = str((active_binding or {}).get('session_id') or '').strip() or None
-        live_bound = bool(session_id and self.runtime_manager.has_session(session_id))
+        pending_reconciliation = (
+            self._command_status_for_binding(active_binding)
+            if isinstance(active_binding, dict) and self._binding_has_pending_reconciliation(active_binding)
+            else None
+        )
+        cleanup_pending = bool(
+            isinstance(active_binding, dict)
+            and active_binding.get('document_session_state') in {'reconciled', 'reconciled_cleanup_pending'}
+        )
+        live_bound = bool(
+            session_id
+            and (not isinstance(active_binding, dict) or active_binding.get('live_session_bound') is not False)
+            and self.runtime_manager.has_session(session_id)
+        )
         if isinstance(active_binding, dict) and session_id:
-            if live_bound:
+            if pending_reconciliation is not None:
+                live_bound = False
+            elif live_bound:
                 live_bound = self._probe_live_binding(active_binding)
             if not live_bound:
                 active_binding = self._read_binding()
                 if isinstance(active_binding, dict):
-                    active_binding['live_session_bound'] = False
-                    active_binding['document_session_state'] = 'stale'
-                    active_binding['updated_at'] = utc_now_iso()
-                    self._save_binding(active_binding)
+                    if self._binding_has_pending_reconciliation(active_binding):
+                        pending_reconciliation = self._command_status_for_binding(active_binding)
+                    if pending_reconciliation is not None:
+                        pass
+                    elif active_binding.get('document_session_state') in {
+                        'reconciled', 'reconciled_cleanup_pending', 'closed_cleanup_pending'
+                    }:
+                        cleanup_pending = True
+                    elif self._is_session_closed(session_id):
+                        if active_binding.get('session_root_path'):
+                            # A previous close may have released COM but failed
+                            # managed-root deletion. Keep the ownership binding
+                            # visible and make retrying cleanup the next action.
+                            cleanup_pending = True
+                            active_binding['live_session_bound'] = False
+                            active_binding['document_session_state'] = 'closed_cleanup_pending'
+                        else:
+                            # Legacy bindings predate server-managed root
+                            # custody, so there is no removable path left to
+                            # prove before clearing their closed projection.
+                            self._clear_binding(session_id=session_id, force=True)
+                            active_binding = None
+                    else:
+                        active_binding['live_session_bound'] = False
+                        active_binding['document_session_state'] = 'stale'
+                        active_binding['updated_at'] = utc_now_iso()
+                        self._save_binding(active_binding)
 
         artifacts = (active_binding or {}).get('artifacts') if isinstance(active_binding, dict) else None
         artifacts = artifacts if isinstance(artifacts, dict) else {}
+        public_artifacts = (
+            self._public_artifacts(session_id=session_id, artifacts=artifacts, binding=active_binding)
+            if session_id
+            else {}
+        )
         return {
             'ok': True,
             'runtime_up': ready,
@@ -6619,6 +9265,12 @@ class LocalCliService:
             'api_ready': True,
             'blocked_reason': blocked_reason,
             'next_action': (
+                f'reconcile command {pending_reconciliation.get("command_id")}'
+                if pending_reconciliation is not None
+                else
+                f'retry close cleanup for session {session_id}'
+                if cleanup_pending
+                else
                 'open a file'
                 if ready and not live_bound
                 else 'continue with find/where/select or capture rendered proof before saving/reporting'
@@ -6627,13 +9279,13 @@ class LocalCliService:
             ),
             'session_id': session_id,
             'active_document': (active_binding or {}).get('source_filename'),
-            'working_copy_path': (active_binding or {}).get('working_copy_path'),
-            'artifacts': artifacts,
+            'artifacts': public_artifacts,
             'last_proof_artifact': (
-                artifacts.get('latest_screenshot_path')
-                or artifacts.get('latest_export_path')
+                public_artifacts.get('latest_screenshot_download_path')
+                or public_artifacts.get('latest_export_download_path')
             ),
             'live_session_bound': live_bound,
+            'command_reconciliation': pending_reconciliation,
             'working_copy_dirty': bool((active_binding or {}).get('working_copy_dirty')),
             'command_bundle_route_active': True,
             'server_primitive_version': 'local-cli-command-bundle/v2-style-inspect',
@@ -6652,18 +9304,97 @@ class LocalCliService:
 
         def _handler(handle: LocalCliRuntimeHandle) -> dict[str, Any]:
             paragraphs = self._live_paragraph_records(handle, purpose='find')
+            live_text = '\n'.join(str(item.get('text') or '') for item in paragraphs)
+            document_text_hash = 'sha256:' + hashlib.sha256(live_text.encode('utf-8')).hexdigest()
+            document_generation = f'local-cli/live-document/v1:{handle.session_id}:{document_text_hash}'
             try:
-                matches = find_matches(paragraphs, query, around=around, with_page=with_page)
+                matches = find_matches(
+                    paragraphs,
+                    query,
+                    around=around,
+                    with_page=with_page or proof_match is not None,
+                )
             except LocalCliDocumentError as exc:
                 raise LocalCliRuntimeError(str(exc)) from exc
+            # Reject an invalid proof index before any live-location snapshot.  This
+            # keeps the read-only 404 deterministic even on runtimes without get_pos.
+            if proof_match is not None and proof_match > len(matches):
+                raise LocalCliServiceError(f'No find match number {proof_match} for proof-match.', status_code=404)
             matches, enrich_warnings = self._enrich_live_find_matches_with_cursor_context(
                 handle.hwp,
                 query=query,
                 matches=matches,
             )
+            proof_payload: dict[str, Any] | None = None
+            if proof_match is not None:
+                proof_payload = dict(matches[proof_match - 1])
+                # `proof_match` identifies a static paragraph, not the global
+                # occurrence of that paragraph's full text. Keep searching for
+                # the user's query and bind the live result to the selected
+                # paragraph's identity/position instead.
+                proof_query = query
+                target_identity = dict(proof_payload.get('identity') or {})
+                target_identity['normalized_hash'] = proof_payload.get('normalized_hash')
+                target_identity['paragraph_normalized_hash'] = proof_payload.get('normalized_hash')
+                target_identity['static_text'] = proof_payload.get('text')
+                live_cursor_proof = proof_payload.get('live_cursor_proof')
+                if isinstance(live_cursor_proof, Mapping):
+                    live_pos = live_cursor_proof.get('pos')
+                    if isinstance(live_pos, (list, tuple)) and len(live_pos) >= 2:
+                        target_identity['live_position'] = [live_pos[0], live_pos[1]]
+                original_snapshot: Mapping[str, Any] = {}
+                try:
+                    raw_snapshot = _snapshot_cursor_context(handle.hwp)
+                    if isinstance(raw_snapshot, Mapping):
+                        original_snapshot = raw_snapshot
+                    live_match = self._find_live_match(
+                        handle.hwp,
+                        query=proof_query,
+                        occurrence=1,
+                        target_identity=target_identity,
+                    )
+                    live_snapshot = live_match.get('snapshot') if isinstance(live_match.get('snapshot'), Mapping) else {}
+                    current_page = getattr(handle.hwp, 'current_page', None)
+                    current_page = current_page() if callable(current_page) else current_page
+                    try:
+                        page = int(current_page)
+                    except (TypeError, ValueError):
+                        page = None
+                    if page is not None and page > 0:
+                        proof_payload['page'] = page
+                        proof_payload['page_evidence'] = {
+                            'method': 'current_page',
+                            'value': page,
+                            'authoritative': True,
+                        }
+                    proof_payload['live_cursor_proof'] = {
+                        'occurrence': live_match.get('occurrence', 1),
+                        'requested_match': proof_match,
+                        'matched_query': live_match.get('matched_query'),
+                        'match_strategy': live_match.get('match_strategy'),
+                        'pos': live_snapshot.get('pos'),
+                        'selected_pos': live_snapshot.get('selected_pos'),
+                        'selected_text_preview': _preview_text(live_match.get('selected_text'), limit=120),
+                        'target_identity': target_identity,
+                        'document_generation': document_generation,
+                    }
+                    proof_payload['proof_generation'] = document_generation
+                    proof_payload['session_id'] = handle.session_id
+                    matches[proof_match - 1] = proof_payload
+                finally:
+                    original_pos = original_snapshot.get('pos')
+                    if isinstance(original_pos, (list, tuple)) and len(original_pos) >= 3:
+                        try:
+                            _set_pos(handle.hwp, int(original_pos[0]), int(original_pos[1]), int(original_pos[2]))
+                        except Exception as exc:
+                            enrich_warnings.append(
+                                f'live find proof could not restore original caret position: {type(exc).__name__}: {exc}'
+                            )
             return {
                 'matches': matches,
                 'warnings': enrich_warnings,
+                'proof_match': proof_payload,
+                'document_generation': document_generation,
                 'location': snapshot_live_location(
                     hwp=handle.hwp,
                     source_filename=handle.source_filename,
@@ -6679,6 +9410,8 @@ class LocalCliService:
             'matches': matches,
             'around': around,
             'with_page': with_page,
+            'document_generation': result.get('document_generation'),
+            'session_id': binding.get('session_id'),
             'updated_at': utc_now_iso(),
         }
         binding = self._update_live_binding(binding, location=location)
@@ -6697,7 +9430,7 @@ class LocalCliService:
         proof_payload = None
         if proof_match is not None:
             if proof_match > len(matches):
-                raise LocalCliServiceError(f'No match number {proof_match} for proof-match.', status_code=404)
+                raise LocalCliServiceError(f'No find match number {proof_match} for proof-match.', status_code=404)
             proof_payload = matches[proof_match - 1]
         return {
             'schema_version': 'local-cli/find/v2',
@@ -6708,6 +9441,7 @@ class LocalCliService:
             'around': around,
             'with_page': with_page,
             'match_count': len(matches),
+            'document_generation': result.get('document_generation'),
             'matches': matches,
             'proof_match': proof_payload,
             'warnings': warnings,
@@ -7629,7 +10363,7 @@ class LocalCliService:
             **self._compact_state_payload(location=location, context=result.get('context') if isinstance(result.get('context'), dict) else {}),
         }
 
-    def type_text(self, *, text: str, session_id: str | None = None) -> dict[str, Any]:
+    def type_text(self, *, text: str, session_id: str | None = None, allow_insert_at_caret: bool = False) -> dict[str, Any]:
         binding = self._load_active_binding(session_id=session_id)
         text = self._validate_single_paragraph_text(value=text, field_name='type text', command_name='type')
 
@@ -7656,7 +10390,7 @@ class LocalCliService:
                     cached_range = self._normalize_selected_range(last_selection.get('selected_range'))
                 if cached_range is not None and self._selected_ranges_equal(before.get('selected_pos'), cached_range):
                     before_selected_text = str(last_selection.get('selected_text') or '')
-            if not had_selection:
+            if not had_selection and not allow_insert_at_caret:
                 stored_range = self._normalize_selected_range(binding.get('selected_range'))
                 if stored_range is not None:
                     try:
@@ -7668,6 +10402,14 @@ class LocalCliService:
                             restored_cached_selection = True
                     except EditOperationError:
                         had_selection = False
+            guard_reason = type_insert_guard_reason(
+                binding,
+                had_selection=had_selection,
+                restored_cached_selection=restored_cached_selection,
+                allow_insert_at_caret=allow_insert_at_caret,
+            )
+            if guard_reason:
+                raise LocalCliRuntimeError(guard_reason)
             if had_selection:
                 try:
                     _delete_selection(handle.hwp)
@@ -8594,6 +11336,38 @@ class LocalCliService:
             'summary': summary,
         }
 
+    def _reduce_working_copy_dirty(
+        self,
+        *,
+        prior_dirty: bool,
+        semantic_ok: bool | None,
+        delta_dirty: bool | None,
+        may_have_mutated: bool,
+        command_name: str,
+        fresh_document_modified: bool | None,
+        fresh_sequence_matches: bool,
+        ordinary_save_confirmed: bool,
+    ) -> tuple[bool, str]:
+        """Reduce dirty state without allowing a stale false delta to clear it."""
+
+        if semantic_ok is False and may_have_mutated:
+            return True, 'semantic_failure_may_have_mutated'
+        if semantic_ok is None and may_have_mutated:
+            return True, 'semantic_uncertainty_may_have_mutated'
+        if ordinary_save_confirmed and semantic_ok is True:
+            return False, 'ordinary_save_confirmed'
+        if fresh_sequence_matches and isinstance(fresh_document_modified, bool):
+            if fresh_document_modified:
+                return True, 'fresh_native_modified_state'
+            if prior_dirty:
+                return True, 'preserved_prior_dirty'
+            return False, 'fresh_native_clean_state'
+        if delta_dirty is True:
+            return True, 'command_dirty_delta'
+        if delta_dirty is False:
+            return bool(prior_dirty), 'preserved_prior_dirty' if prior_dirty else 'command_clean_delta'
+        return bool(prior_dirty), 'preserved_prior_dirty' if prior_dirty else 'unknown_preserved'
+
     def command_bundle(self, *, steps: list[dict[str, Any]], session_id: str | None = None) -> dict[str, Any]:
         cleaned_steps = self._validate_command_bundle_steps(steps)
         binding = self._load_active_binding(session_id=session_id)
@@ -8635,15 +11409,26 @@ class LocalCliService:
                     warnings.extend(step_warnings)
                 except Exception as exc:
                     ok = False
+                    mutation_may_have_persisted = bool(getattr(exc, 'mutation_may_have_persisted', False))
+                    rollback = getattr(exc, 'rollback', {})
+                    if not isinstance(rollback, dict):
+                        rollback = {}
+                    dirty = dirty or mutation_may_have_persisted
                     status = {
                         'index': index,
                         'label': step.get('label'),
                         'op': step.get('op'),
                         'ok': False,
-                        'dirty': False,
+                        'dirty': mutation_may_have_persisted,
                         'before': step_before,
                         'after': self._bundle_compact_snapshot(handle.hwp),
                         'error': f'{type(exc).__name__}: {exc}',
+                        'mutation_may_have_persisted': mutation_may_have_persisted,
+                        'rollback': rollback,
+                        'mutation': {
+                            'may_have_persisted': mutation_may_have_persisted,
+                            'rollback': rollback,
+                        },
                     }
                     step_results.append(status)
                     break
@@ -8665,6 +11450,7 @@ class LocalCliService:
                 'artifacts': artifacts,
             }
 
+        prior_native_sequence = binding.get('native_command_sequence', 0)
         result = self._execute_live(
             binding=binding,
             command_name='command-bundle',
@@ -8673,9 +11459,37 @@ class LocalCliService:
             timeout=120.0,
         )
         location = result.get('after_location') if isinstance(result.get('after_location'), dict) else {}
-        dirty = bool(result.get('dirty'))
-        artifacts = result.get('artifacts') if isinstance(result.get('artifacts'), dict) else {}
-        binding = self._update_live_binding(binding, location=location, artifacts=artifacts, dirty=True if dirty else None, clear_last_find=dirty, clear_selection_cache=dirty)
+        command_evidence = result.get('_local_cli_command') if isinstance(result.get('_local_cli_command'), dict) else {}
+        semantic_ok = command_evidence.get('semantic_ok') if isinstance(command_evidence.get('semantic_ok'), bool) else (
+            result.get('semantic_ok') if isinstance(result.get('semantic_ok'), bool) else None
+        )
+        command_sequence = command_evidence.get('sequence')
+        try:
+            fresh_sequence_matches = isinstance(command_sequence, int) and command_sequence > int(prior_native_sequence)
+        except (TypeError, ValueError):
+            fresh_sequence_matches = False
+        dirty, dirty_source = self._reduce_working_copy_dirty(
+            prior_dirty=binding.get('working_copy_dirty') is True or binding.get('dirty') is True,
+            semantic_ok=semantic_ok,
+            delta_dirty=result.get('dirty') if isinstance(result.get('dirty'), bool) else None,
+            may_have_mutated=result.get('may_have_mutated') is True,
+            command_name='command-bundle',
+            fresh_document_modified=location.get('document_is_modified') if isinstance(location.get('document_is_modified'), bool) else None,
+            fresh_sequence_matches=fresh_sequence_matches,
+            ordinary_save_confirmed=False,
+        )
+        artifacts = self._validated_artifact_projection(
+            binding=binding,
+            artifacts=result.get('artifacts') if isinstance(result.get('artifacts'), dict) else {},
+        )
+        binding = self._update_live_binding(
+            binding,
+            location=location,
+            artifacts=artifacts,
+            dirty=dirty,
+            clear_last_find=dirty,
+            clear_selection_cache=dirty,
+        )
         if dirty:
             dirty_step_count = sum(1 for step in (result.get('steps') or []) if isinstance(step, dict) and step.get('dirty'))
             binding['pending_logical_undo_count'] = max(1, dirty_step_count)
@@ -8688,23 +11502,784 @@ class LocalCliService:
             payload={
                 'ok': bool(result.get('ok')),
                 'dirty': dirty,
+                'dirty_source': dirty_source,
+                'semantic_ok': semantic_ok,
+                'may_have_mutated': result.get('may_have_mutated') is True,
                 'step_count': len(cleaned_steps),
                 'warnings': result.get('warnings') if isinstance(result.get('warnings'), list) else [],
                 'artifacts': artifacts,
             },
         )
         return {
-            'ok': bool(result.get('ok')),
+            'ok': bool(semantic_ok) if isinstance(semantic_ok, bool) else bool(result.get('ok')),
+            'semantic_ok': semantic_ok,
             'command': 'command-bundle',
             'summary': summary,
             'dirty': dirty,
             'before': self._bundle_compact_location(result.get('before_location') if isinstance(result.get('before_location'), dict) else {}),
             'after': self._bundle_compact_location(location),
-            'steps': result.get('steps') if isinstance(result.get('steps'), list) else [],
+            'steps': self._public_bundle_steps(
+                session_id=self._binding_session_id(binding),
+                steps=result.get('steps'),
+                binding=binding,
+            ),
             'warnings': result.get('warnings') if isinstance(result.get('warnings'), list) else [],
-            'artifacts': artifacts,
+            'artifacts': self._public_artifacts(
+                session_id=self._binding_session_id(binding),
+                artifacts=artifacts,
+                binding=binding,
+            ),
             **self._compact_state_payload(location=location),
         }
+
+    # ------------------------------------------------------------------
+    # Standalone targeted four-margin getter (document-read-only).
+    #
+    # The private method names below are a fixed responsibility map:
+    #   cell_margins_get               public entry point / response shape
+    #   _cell_margins_get_native       one ordered native observation walk
+    #   _cell_margins_assert_document  strict live path/size/hash identity
+    #   _cell_margins_document_generation  native-only text generation value
+    #   _cell_margins_resolve_target   exact control/cell/anchor/page binding
+    #   _cell_margins_restore_position failure-propagating navigation restore
+    # No cached, default, XML, ambient-caret, first-table or suffix-path
+    # fallback exists anywhere in this path, and no setter is reachable.
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _cell_margins_fail(code: str, message: str, details: dict[str, Any] | None = None) -> 'LocalCliCellMarginsGetError':
+        return LocalCliCellMarginsGetError(code, message, details or {})
+
+    def _cell_margins_assert_document(
+        self,
+        hwp: Any,
+        working_copy_path: Path,
+        *,
+        size_bytes: int,
+        sha256: str,
+    ) -> None:
+        """Assert the native document is the exact managed on-disk working copy."""
+
+        doc_path = str(_safe_hwp_value(hwp, 'Path') or '').strip()
+        if not doc_path:
+            raise self._cell_margins_fail(
+                'DOCUMENT_IDENTITY_MISMATCH',
+                'The native document path is unavailable; refusing the read.',
+            )
+        if not self._cell_margins_native_path_names(doc_path, working_copy_path):
+            raise self._cell_margins_fail(
+                'DOCUMENT_IDENTITY_MISMATCH',
+                'The live document is not the managed working copy for this session.',
+            )
+        custody: dict[str, Any] = {}
+        self._verify_artifact_readback(
+            self._cell_margins_custody_binding,
+            working_copy_path,
+            expected={'size_bytes': size_bytes, 'sha256': sha256},
+            readback=custody,
+        )
+
+    @staticmethod
+    def _cell_margins_native_path_names(native_path: str, managed_path: Path) -> bool:
+        """Exact absolute-path equality with Windows normalization; never suffix matching."""
+
+        def _normalize(value: str) -> str:
+            text = str(value).strip().replace('/', '\\')
+            parts = [part for part in text.split('\\') if part not in ('', '.')]
+            # Keep the drive prefix; drop only dot components; casefold separators.
+            return '\\'.join(part.casefold() for part in parts)
+
+        native = _normalize(native_path)
+        managed = _normalize(str(managed_path.resolve()))
+        if not native or not managed:
+            return False
+        return native == managed
+
+    def _cell_margins_document_generation(self, hwp: Any, *, session_id: str) -> str:
+        """Fresh native-only text read; the find-generation producer without any open/disk fallback."""
+
+        if hasattr(hwp, 'get_text_file'):
+            text = hwp.get_text_file(format='UNICODE', option='')
+        elif hasattr(hwp, 'GetTextFile'):
+            text = hwp.GetTextFile('UNICODE', '')
+        else:
+            raise self._cell_margins_fail(
+                'DOCUMENT_STATE_UNAVAILABLE',
+                'Native text reading is unavailable on this runtime.',
+            )
+        records = load_plain_text_records(str(text or ''))
+        if not records:
+            raise self._cell_margins_fail(
+                'DOCUMENT_STATE_UNAVAILABLE',
+                'The native text observation is empty; an anchor-bearing read cannot proceed.',
+            )
+        live_text = '\n'.join(str(item.get('text') or '') for item in records)
+        digest = hashlib.sha256(live_text.encode('utf-8')).hexdigest()
+        return f'local-cli/live-document/v1:{session_id}:sha256:{digest}'
+
+    def _cell_margins_resolve_target(
+        self,
+        hwp: Any,
+        *,
+        target: CellMarginsGetTarget,
+    ) -> dict[str, Any]:
+        """Resolve exactly one full target control and bind cell/page/anchor in one live observation."""
+
+        head_ctrl = getattr(hwp, 'HeadCtrl', None)
+        head_ctrl = head_ctrl() if callable(head_ctrl) else head_ctrl
+        if head_ctrl is None:
+            raise self._cell_margins_fail(
+                'TARGET_IDENTITY_UNAVAILABLE',
+                'The native control enumeration head is unavailable.',
+            )
+        try:
+            controls, enumeration_mode = _enumerate_controls_headctrl(hwp, max_controls=target.max_controls + 1)
+        except EditOperationError as exc:
+            raise self._cell_margins_fail(
+                'TARGET_ENUMERATION_INCOMPLETE',
+                'The control inventory could not be completely enumerated.',
+                {'reason': str(exc)},
+            ) from exc
+        if enumeration_mode != 'HeadCtrl->Next':
+            raise self._cell_margins_fail(
+                'TARGET_IDENTITY_UNAVAILABLE',
+                'The control inventory fell back to an uncapped source; refusing the read.',
+            )
+        if len(controls) > target.max_controls:
+            raise self._cell_margins_fail(
+                'TARGET_ENUMERATION_INCOMPLETE',
+                'The control inventory exceeds max_controls; completeness cannot be proven.',
+            )
+
+        expected_hash = 'sha256:' + (target.expected_hash[7:] if target.expected_hash.startswith('sha256:') else target.expected_hash)
+        matching: list[tuple[Any, dict[str, Any]]] = []
+        seen_locators: set[str] = set()
+        for index, ctrl in enumerate(controls):
+            item, _snapshot, _anchor_pos = self._bundle_control_proof_item(hwp, ctrl, index)
+            locator = str(item.get('target_id') or '')
+            if locator in seen_locators:
+                raise self._cell_margins_fail(
+                    'TARGET_ENUMERATION_INCOMPLETE',
+                    'The control inventory repeated one locator; enumeration is not trustworthy.',
+                )
+            seen_locators.add(locator)
+            if locator == target.target_id:
+                matching.append((ctrl, item))
+        if not matching:
+            raise self._cell_margins_fail('TARGET_NOT_FOUND', 'No control matches the requested exact target_id.')
+        if len(matching) > 1:
+            raise self._cell_margins_fail('TARGET_AMBIGUOUS', 'More than one control matches the requested target_id.')
+
+        target_ctrl, item = matching[0]
+        ctrl_id = str(item.get('ctrl_id') or '')
+        ctrl_inst_id = str(item.get('ctrl_inst_id') or '')
+        if ctrl_id != 'tbl' or not ctrl_inst_id or ctrl_inst_id == 'no-inst':
+            raise self._cell_margins_fail('TARGET_NOT_TABLE', 'The resolved target is not a proven table control.')
+        if str(item.get('proof_hash') or '') != expected_hash:
+            raise self._cell_margins_fail(
+                'TARGET_HASH_MISMATCH',
+                'The control inventory proof does not match the expected_hash.',
+            )
+        inventory_page = item.get('page')
+        if isinstance(inventory_page, bool) or not isinstance(inventory_page, int) or inventory_page <= 0:
+            raise self._cell_margins_fail(
+                'PAGE_UNAVAILABLE',
+                'The inventory cannot prove the table anchor page.',
+            )
+        if inventory_page != target.expected_page:
+            raise self._cell_margins_fail(
+                'PAGE_MISMATCH',
+                'The table anchor page does not match expected_page.',
+            )
+
+        anchor_page = self._cell_margins_read_current_page(hwp)
+        if anchor_page != target.expected_page:
+            raise self._cell_margins_fail(
+                'PAGE_MISMATCH',
+                'The live table anchor page does not match expected_page.',
+            )
+
+        return {
+            'target_ctrl': target_ctrl,
+            'item': item,
+            'ctrl_inst_id': ctrl_inst_id,
+            'anchor_page': anchor_page,
+        }
+
+    @staticmethod
+    def _cell_margins_read_current_page(hwp: Any) -> int | None:
+        """Direct current_page probe (property or zero-argument method) only."""
+
+        current_page = getattr(hwp, 'current_page', None)
+        try:
+            value = current_page() if callable(current_page) else current_page
+        except Exception:
+            return None
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            return None
+        return value
+
+    def _cell_margins_restore_position(self, hwp: Any, original_pos: tuple[int, int, int]) -> None:
+        """Low-level SetPos restoration; any failure propagates to the caller."""
+
+        _set_pos(hwp, int(original_pos[0]), int(original_pos[1]), int(original_pos[2]))
+
+    def _cell_margins_get_native(
+        self,
+        hwp: Any,
+        *,
+        request: CellMarginsGetRequest,
+        request_sha256: str,
+        handle_session_id: str,
+        working_copy_path: Path,
+        working_copy_custody: dict[str, Any],
+    ) -> dict[str, Any]:
+        """One ordered native observation walk. See architecture spec section 4."""
+
+        target = request.request
+
+        # 3. Capture live original state; require no selection.
+        try:
+            original_pos = _get_pos(hwp)
+            if len(original_pos) < 3:
+                raise self._cell_margins_fail(
+                    'DOCUMENT_STATE_UNAVAILABLE',
+                    'The native cursor position is unavailable.',
+                )
+            original_pos = (int(original_pos[0]), int(original_pos[1]), int(original_pos[2]))
+        except LocalCliCellMarginsGetError:
+            raise
+        except Exception as exc:
+            raise self._cell_margins_fail(
+                'DOCUMENT_STATE_UNAVAILABLE',
+                'The native cursor state is unavailable.',
+                {'reason': f'{type(exc).__name__}'},
+            ) from exc
+
+        def _selection_state() -> tuple[Any, Any]:
+            try:
+                selected = _get_selected_pos(hwp)
+            except Exception:
+                selected = None
+            selection_mode = _get_selection_mode(hwp)
+            return selected, selection_mode
+
+        selected_before, selection_mode_before = _selection_state()
+        if selected_before and selected_before[0]:
+            raise self._cell_margins_fail(
+                'ACTIVE_SELECTION_UNSUPPORTED',
+                'A text or block selection is active; clear it before reading margins.',
+            )
+        try:
+            mode_value = int(selection_mode_before)
+        except (TypeError, ValueError):
+            mode_value = None
+        if selection_mode_before is None or mode_value is None:
+            raise self._cell_margins_fail(
+                'DOCUMENT_STATE_UNAVAILABLE',
+                'The native selection state is unavailable.',
+            )
+        if mode_value != 0:
+            raise self._cell_margins_fail(
+                'ACTIVE_SELECTION_UNSUPPORTED',
+                'The native selection mode is not a plain caret.',
+            )
+
+        def _read_is_modified() -> bool:
+            value = _safe_hwp_value(hwp, 'IsModified')
+            if isinstance(value, bool) or (isinstance(value, int) and not isinstance(value, bool)):
+                return bool(value)
+            raise self._cell_margins_fail(
+                'DOCUMENT_STATE_UNAVAILABLE',
+                'The native modification flag is unavailable.',
+            )
+
+        modified_before = _read_is_modified()
+
+        navigation_attempted = False
+
+        try:
+            # 2/4. Assert document identity and fresh generation before reading.
+            try:
+                self._cell_margins_assert_document(
+                    hwp,
+                    working_copy_path,
+                    size_bytes=int(working_copy_custody['size_bytes']),
+                    sha256=str(working_copy_custody['sha256']),
+                )
+            except LocalCliServiceError:
+                raise
+            except LocalCliCellMarginsGetError:
+                raise
+            generation_before = self._cell_margins_document_generation(hwp, session_id=handle_session_id)
+            if generation_before != target.expected_document_generation:
+                raise self._cell_margins_fail(
+                    'DOCUMENT_GENERATION_MISMATCH',
+                    'The fresh native text generation does not match expected_document_generation.',
+                )
+
+            # 5. Exact target control resolution.
+            resolved = self._cell_margins_resolve_target(hwp, target=target)
+            target_ctrl = resolved['target_ctrl']
+            ctrl_inst_id = resolved['ctrl_inst_id']
+
+            # 6. Direct cell entry by exact position.
+            navigation_attempted = True
+            _set_pos(hwp, int(target.cell_pos[0]), int(target.cell_pos[1]), int(target.cell_pos[2]))
+            cell_snapshot = _snapshot_cursor_context(hwp)
+            if not self._cell_margins_cell_state_ok(hwp, cell_snapshot, target):
+                raise self._cell_margins_fail(
+                    'CELL_TARGET_MISMATCH',
+                    'The caret did not land in the requested cell of the requested table.',
+                )
+            cell_page = self._cell_margins_read_current_page(hwp)
+            if cell_page is None:
+                raise self._cell_margins_fail('PAGE_UNAVAILABLE', 'The rendered cell page is unavailable.')
+            if cell_page != target.expected_cell_page:
+                raise self._cell_margins_fail(
+                    'PAGE_MISMATCH',
+                    'The rendered cell page does not match expected_cell_page.',
+                )
+            paragraph_text = self._cell_margins_current_paragraph(hwp)
+            occurrences = paragraph_text.count(target.section_anchor)
+            if occurrences != 1:
+                raise self._cell_margins_fail(
+                    'SECTION_ANCHOR_MISMATCH',
+                    'The literal anchor must occur exactly once in the target cell paragraph.',
+                    {'occurrences': occurrences},
+                )
+
+            # 7. One fresh native four-side observation through the existing reader.
+            readback = self._bundle_native_cell_margin_readback(hwp, expected_cell_addr=list(target.cell_addr))
+            if readback.get('available') is not True or readback.get('refresh_succeeded') is not True:
+                raise self._cell_margins_fail(
+                    'NATIVE_MARGIN_UNAVAILABLE',
+                    'The fresh native four-side observation is unavailable.',
+                    {'stage': 'native-refresh'},
+                )
+            margins = _normalize_cell_margin_readback(readback.get('value'))
+            if margins is None:
+                raise self._cell_margins_fail(
+                    'NATIVE_MARGIN_UNAVAILABLE',
+                    'The native four-side values failed strict validation.',
+                    {'stage': 'value-validation'},
+                )
+            refresh_count = getattr(hwp, 'get_default_count', None)
+
+            # 8. Immediate post-refresh identity and state reassertion.
+            post_doc_path = str(_safe_hwp_value(hwp, 'Path') or '').strip()
+            if not post_doc_path or not self._cell_margins_native_path_names(post_doc_path, working_copy_path):
+                raise self._cell_margins_fail(
+                    'DOCUMENT_CHANGED_DURING_READ',
+                    'The live document identity changed during the read.',
+                )
+            post_snapshot = _snapshot_cursor_context(hwp)
+            if not self._cell_margins_cell_state_ok(hwp, post_snapshot, target):
+                raise self._cell_margins_fail(
+                    'CELL_TARGET_MISMATCH',
+                    'The cell identity changed during the read.',
+                )
+            post_page = self._cell_margins_read_current_page(hwp)
+            if post_page != target.expected_cell_page:
+                raise self._cell_margins_fail(
+                    'PAGE_MISMATCH',
+                    'The rendered cell page changed during the read.',
+                )
+            parent_summary = _safe_parent_ctrl_summary(hwp)
+            if parent_summary is None or str(parent_summary.get('CtrlInstID') or '') != ctrl_inst_id:
+                raise self._cell_margins_fail(
+                    'CELL_TARGET_MISMATCH',
+                    'The immediate parent table identity changed during the read.',
+                )
+            resolved_after = self._cell_margins_resolve_target(hwp, target=target)
+            if str(resolved_after['item'].get('proof_hash') or '') != str(resolved['item'].get('proof_hash') or ''):
+                raise self._cell_margins_fail(
+                    'TARGET_CHANGED_DURING_READ',
+                    'The target control proof changed during the read.',
+                )
+            generation_after = self._cell_margins_document_generation(hwp, session_id=handle_session_id)
+            if generation_after != generation_before:
+                raise self._cell_margins_fail(
+                    'DOCUMENT_CHANGED_DURING_READ',
+                    'The document text changed during the read.',
+                )
+        except LocalCliCellMarginsGetError as exc:
+            # Cleanup path: confirm restoration and post-state; promote the
+            # primary failure code per the error-precedence contract.
+            if navigation_attempted:
+                try:
+                    self._cell_margins_restore_position(hwp, original_pos)
+                except Exception:
+                    exc.primary_code = 'NAVIGATION_RESTORE_FAILED'
+                    exc.details['secondary_codes'] = self._cell_margins_bounded_codes(
+                        exc.details.get('secondary_codes'), exc.code)
+                else:
+                    post_selected, post_mode = _selection_state()
+                    try:
+                        post_mode_value = int(post_mode)
+                    except (TypeError, ValueError):
+                        post_mode_value = None
+                    if (post_selected and post_selected[0]) or post_mode_value != 0:
+                        exc.primary_code = 'NAVIGATION_RESTORE_FAILED'
+                        exc.details['secondary_codes'] = self._cell_margins_bounded_codes(
+                            exc.details.get('secondary_codes'), exc.code)
+            raise
+
+        # 9. Confirmed restoration of the captured original position.
+        try:
+            self._cell_margins_restore_position(hwp, original_pos)
+        except Exception as exc:
+            raise self._cell_margins_fail(
+                'NAVIGATION_RESTORE_FAILED',
+                'The original caret position could not be restored; margin values are suppressed.',
+                {'secondary_codes': []},
+            ) from exc
+        restored_selected, restored_mode = _selection_state()
+        try:
+            restored_mode_value = int(restored_mode)
+        except (TypeError, ValueError):
+            restored_mode_value = None
+        navigation_restored = not (restored_selected and restored_selected[0]) and restored_mode_value == 0
+
+        # 10. Post-read document state comparison.
+        modified_after = _read_is_modified()
+        post_path = str(_safe_hwp_value(hwp, 'Path') or '').strip()
+        identity_stable = bool(post_path) and self._cell_margins_native_path_names(post_path, working_copy_path)
+        try:
+            self._cell_margins_assert_document(
+                hwp,
+                working_copy_path,
+                size_bytes=int(working_copy_custody['size_bytes']),
+                sha256=str(working_copy_custody['sha256']),
+            )
+        except LocalCliServiceError:
+            identity_stable = False
+        except LocalCliCellMarginsGetError:
+            identity_stable = False
+
+        document_state_unchanged = (
+            identity_stable
+            and modified_before == modified_after
+            and navigation_restored
+        )
+        if not document_state_unchanged:
+            raise self._cell_margins_fail(
+                'DOCUMENT_CHANGED_DURING_READ'
+                if (not identity_stable or modified_before != modified_after)
+                else 'NAVIGATION_RESTORE_FAILED',
+                'The post-read state could not be proven unchanged.',
+            )
+
+        # 11. Bounded public projection.
+        return {
+            'ok': True,
+            'semantic_ok': True,
+            'document_generation': generation_before,
+            'margins': margins,
+            'ctrl_inst_id': ctrl_inst_id,
+            'cell_addr': list(target.cell_addr),
+            'anchor_page': resolved['anchor_page'],
+            'cell_page': target.expected_cell_page,
+            'navigation_restored': True,
+            'document_modified_before': modified_before,
+            'document_modified_after': modified_after,
+            'refresh_count': refresh_count,
+            'request_sha256': request_sha256,
+            'working_copy_custody': dict(working_copy_custody),
+        }
+
+    @staticmethod
+    def _cell_margins_bounded_codes(existing: Any, code: str) -> list[str]:
+        codes = [str(item) for item in existing] if isinstance(existing, list) else []
+        if code not in codes:
+            codes.append(code)
+        return codes[:4]
+
+    @staticmethod
+    def _cell_margins_cell_state_ok(hwp: Any, snapshot: Mapping[str, Any], target: CellMarginsGetTarget) -> bool:
+        if not isinstance(snapshot, Mapping):
+            return False
+        if snapshot.get('is_cell') is not True and snapshot.get('is_cell') is not False:
+            pass
+        if snapshot.get('is_cell') is not True:
+            return False
+        if snapshot.get('has_selection'):
+            return False
+        try:
+            mode_value = int(snapshot.get('selection_mode'))
+        except (TypeError, ValueError):
+            return False
+        if mode_value != 0:
+            return False
+        observed_addr = _normalize_cell_addr_value(snapshot.get('cell_addr'))
+        if observed_addr != list(target.cell_addr):
+            return False
+        parent_summary = _safe_parent_ctrl_summary(hwp)
+        if parent_summary is None:
+            return False
+        return True
+
+    @staticmethod
+    def _cell_margins_current_paragraph(hwp: Any) -> str:
+        """Read the current paragraph through the existing paragraph reader."""
+
+        try:
+            text = _get_current_paragraph_text_at_cursor(hwp)
+        except Exception as exc:
+            raise LocalCliCellMarginsGetError(
+                'DOCUMENT_STATE_UNAVAILABLE',
+                'The current paragraph could not be read.',
+                {'reason': f'{type(exc).__name__}'},
+            ) from exc
+        return str(text or '')
+
+    def cell_margins_get(self, *, session_id: str | None = None, request: CellMarginsGetRequest | None = None) -> dict[str, Any]:
+        """POST /local-cli/cell-margins-get — one exact-target native margin observation.
+
+        Admission, live-state and identity checks run again inside the queued
+        handler, not only in the adapter, so the observation is bound to the
+        state at execution time. The response is a bounded public object; no
+        internal handler dictionary escapes.
+        """
+
+        if request is None:
+            raise LocalCliServiceError('cell-margins-get requires the shared request model.', status_code=400)
+        target = request.request
+        binding = self._load_active_binding(session_id=session_id or target.document_id)
+        resolved_session_id = self._binding_session_id(binding)
+        if resolved_session_id != request.session_id or target.document_id != request.session_id:
+            raise LocalCliServiceError('Session and document identity do not match.', status_code=409)
+        if self._binding_has_pending_reconciliation(binding):
+            raise LocalCliServiceError(
+                'A native local CLI command is awaiting reconciliation; the getter cannot run.',
+                status_code=409,
+            )
+        working_copy_path = self._working_copy_path(binding)
+
+        custody: dict[str, Any] = {}
+        self._verify_artifact_readback(binding, working_copy_path, readback=custody)
+        expected = binding.get('artifact_custody') if isinstance(binding.get('artifact_custody'), dict) else {}
+        working_copy_custody = {
+            'size_bytes': custody.get('size_bytes'),
+            'sha256': 'sha256:' + str(custody.get('sha256')),
+            'basis': 'managed-on-disk-copy-not-live-format-state',
+        }
+        if not isinstance(working_copy_custody['size_bytes'], int) or working_copy_custody['size_bytes'] <= 0:
+            raise LocalCliServiceError('Managed working-copy custody could not be established.', status_code=409)
+        del expected
+
+        binding_dirty_before = binding.get('working_copy_dirty')
+        pending_logical_undo_count = binding.get('pending_logical_undo_count')
+
+        def _handler(handle: LocalCliRuntimeHandle) -> dict[str, Any]:
+            if handle.session_id != request.session_id or handle.session_id != target.document_id:
+                raise self._cell_margins_fail(
+                    'DOCUMENT_IDENTITY_MISMATCH',
+                    'The live runtime handle does not match the requested session identity.',
+                )
+            if Path(str(handle.working_copy_path)) != working_copy_path:
+                raise self._cell_margins_fail(
+                    'DOCUMENT_IDENTITY_MISMATCH',
+                    'The live runtime handle does not reference the managed working copy.',
+                )
+            self._cell_margins_custody_binding.clear()
+            self._cell_margins_custody_binding.update({
+                'session_root_path': str(handle.session_root),
+                'session_root_identity': self._managed_path_identity(handle.session_root),
+            })
+            if not isinstance(self._cell_margins_custody_binding['session_root_identity'], dict):
+                raise self._cell_margins_fail(
+                    'DOCUMENT_IDENTITY_MISMATCH',
+                    'The managed session root identity is unavailable.',
+                )
+            try:
+                native = self._cell_margins_get_native(
+                    handle.hwp,
+                    request=request,
+                    request_sha256=request_sha256,
+                    handle_session_id=handle.session_id,
+                    working_copy_path=working_copy_path,
+                    working_copy_custody=working_copy_custody,
+                )
+            except LocalCliCellMarginsGetError as exc:
+                return {
+                    'failed': True,
+                    'code': exc.primary_code,
+                    'message': str(exc),
+                    'details': exc.details,
+                }
+            location = snapshot_live_location(
+                hwp=handle.hwp,
+                source_filename=handle.source_filename,
+                working_copy_id=handle.session_id,
+                include_nearby_context=False,
+                include_document_snapshot=False,
+            )
+            native['location'] = location
+            return native
+
+        request_sha256 = canonical_cell_margins_request_sha256(request)
+        result = self._execute_live(
+            binding=binding,
+            command_name='cell_margins_get',
+            task_label='local_cli.cell_margins_get',
+            handler=_handler,
+        )
+        command_evidence = result.get('_local_cli_command') if isinstance(result.get('_local_cli_command'), dict) else {}
+        semantic_ok = command_evidence.get('semantic_ok')
+        command_state = command_evidence.get('state')
+        command_id = command_evidence.get('command_id')
+        sequence = command_evidence.get('sequence')
+        if result.get('failed') is True:
+            return self._cell_margins_failure_response(
+                session_id=request.session_id,
+                code=str(result.get('code') or 'DOCUMENT_STATE_UNAVAILABLE'),
+                message=str(result.get('message') or 'The targeted read failed.'),
+                details=result.get('details') if isinstance(result.get('details'), dict) else {},
+                command={'command_id': command_id, 'sequence': sequence, 'state': command_state},
+                dirty=None,
+                may_have_mutated=False,
+            )
+        if semantic_ok is not True or command_state != 'succeeded':
+            return self._cell_margins_failure_response(
+                session_id=request.session_id,
+                code='DOCUMENT_STATE_UNAVAILABLE',
+                message='The runtime command did not report a succeeded semantic state.',
+                details={'stage': 'command-status'},
+                command={'command_id': command_id, 'sequence': sequence, 'state': command_state},
+                dirty=None,
+                may_have_mutated=True,
+            )
+        if not isinstance(command_id, str) or not command_id or isinstance(sequence, bool) or not isinstance(sequence, int) or sequence <= 0:
+            return self._cell_margins_failure_response(
+                session_id=request.session_id,
+                code='DOCUMENT_STATE_UNAVAILABLE',
+                message='The runtime command identity is incomplete.',
+                details={'stage': 'command-identity'},
+                command={'command_id': command_id, 'sequence': sequence, 'state': command_state},
+                dirty=None,
+                may_have_mutated=True,
+            )
+
+        location = result.get('location') if isinstance(result.get('location'), dict) else {}
+        binding = self._update_live_binding(
+            binding,
+            location=location,
+            dirty=bool(binding_dirty_before) if isinstance(binding_dirty_before, bool) else None,
+        )
+        binding['working_copy_dirty'] = binding_dirty_before if isinstance(binding_dirty_before, bool) else bool(binding.get('working_copy_dirty'))
+        if isinstance(pending_logical_undo_count, int):
+            binding['pending_logical_undo_count'] = pending_logical_undo_count
+        self._save_binding(binding)
+        self._record_local_cli_command(
+            'cell_margins_get',
+            binding=binding,
+            summary=f'observed four-side margins for {target.target_id}',
+            payload={
+                'ok': True,
+                'dirty': False,
+                'semantic_ok': True,
+                'may_have_mutated': False,
+                'read_only': True,
+            },
+        )
+        modified_before = bool(result.get('document_modified_before'))
+        modified_after = bool(result.get('document_modified_after'))
+        margins = result.get('margins') or {}
+        observed_at = utc_now_iso()
+        return {
+            'schema_version': 'local-cli/cell-margins-get/v1',
+            'operation': 'cell_margins_get',
+            'ok': True,
+            'semantic_ok': True,
+            'session_id': request.session_id,
+            'document_id': request.session_id,
+            'read_only': True,
+            'dirty': False,
+            'may_have_mutated': False,
+            'mutation_may_have_persisted': False,
+            'request_sha256': result.get('request_sha256'),
+            'document_generation': result.get('document_generation'),
+            'working_copy_file': result.get('working_copy_custody'),
+            'target': {
+                'target_id': target.target_id,
+                'proof_hash': 'sha256:' + target.expected_hash[7:],
+                'ctrl_inst_id': result.get('ctrl_inst_id'),
+                'anchor_page': result.get('anchor_page'),
+                'cell_page': result.get('cell_page'),
+                'cell_pos': list(target.cell_pos),
+                'cell_addr': list(target.cell_addr),
+                'page_from': target.page_from,
+                'page_to': target.page_to,
+                'section_anchor_sha256': 'sha256:' + hashlib.sha256(target.section_anchor.encode('utf-8')).hexdigest(),
+                'section_binding': 'literal-in-target-cell-paragraph',
+            },
+            'unit': 'hwpunit',
+            'units_per_inch': 7200,
+            'side_order': ['left', 'right', 'top', 'bottom'],
+            'margins_hu': {'left': margins.get('left'), 'right': margins.get('right'), 'top': margins.get('top'), 'bottom': margins.get('bottom')},
+            'provenance': {
+                'source': 'HParameterSet.HShapeObject.ShapeTableCell.Margin*',
+                'refresh_action': 'TablePropertyDialog',
+                'refresh_method': 'HAction.GetDefault',
+                'refresh_succeeded': True,
+                'cache_used': False,
+                'observed_at_utc': observed_at,
+                'target_verified_before': True,
+                'target_verified_after': True,
+            },
+            'state': {
+                'document_modified_before': modified_before,
+                'document_modified_after': modified_after,
+                'binding_dirty_before': bool(binding_dirty_before) if isinstance(binding_dirty_before, bool) else bool(binding.get('working_copy_dirty')),
+                'binding_dirty_after': bool(binding.get('working_copy_dirty')),
+                'document_state_unchanged': True,
+                'navigation_restored': True,
+                'selection_cache_invalidated': False,
+                'mutation_attempted': False,
+            },
+            'error': None,
+            'command': {'command_id': command_id, 'sequence': sequence, 'state': command_state},
+        }
+
+    def _cell_margins_failure_response(
+        self,
+        *,
+        session_id: str,
+        code: str,
+        message: str,
+        details: dict[str, Any],
+        command: dict[str, Any] | None,
+        dirty: bool | None,
+        may_have_mutated: bool,
+    ) -> dict[str, Any]:
+        """One bounded failure shape shared by every handled getter failure."""
+
+        bounded_details = dict(details)
+        bounded_details.setdefault('mutation_attempted', False)
+        command_payload = None
+        if isinstance(command, dict):
+            command_payload = {
+                'command_id': command.get('command_id') if isinstance(command.get('command_id'), str) else None,
+                'sequence': command.get('sequence') if isinstance(command.get('sequence'), int) and not isinstance(command.get('sequence'), bool) else None,
+                'state': str(command.get('state') or '') or None,
+            }
+        return {
+            'schema_version': 'local-cli/cell-margins-get/v1',
+            'operation': 'cell_margins_get',
+            'ok': False,
+            'semantic_ok': False,
+            'session_id': session_id,
+            'document_id': session_id,
+            'read_only': True,
+            'dirty': dirty,
+            'may_have_mutated': bool(may_have_mutated),
+            'mutation_may_have_persisted': bool(may_have_mutated),
+            'observation': None,
+            'error': {'code': code, 'message': message, 'details': bounded_details},
+            'command': command_payload,
+        }
+
 
     def screenshot(self, *, session_id: str | None = None) -> dict[str, Any]:
         binding = self._load_active_binding(session_id=session_id)
@@ -8729,7 +12304,11 @@ class LocalCliService:
         result = self._execute_live(binding=binding, command_name='screenshot', task_label='local_cli.screenshot', handler=_handler)
         location = result.get('location') if isinstance(result.get('location'), dict) else {}
         artifact_path = str(result.get('artifact_path') or '')
-        binding = self._update_live_binding(binding, location=location, artifacts={'latest_screenshot_path': artifact_path})
+        artifacts = self._validated_artifact_projection(
+            binding=binding,
+            artifacts={'latest_screenshot_path': artifact_path},
+        )
+        binding = self._update_live_binding(binding, location=location, artifacts=artifacts)
         self._record_local_cli_command('screenshot', binding=binding, summary='captured editor screenshot', payload={'artifact_path': artifact_path})
         return {
             'ok': True,
@@ -8744,23 +12323,64 @@ class LocalCliService:
 
         def _handler(handle: LocalCliRuntimeHandle) -> dict[str, Any]:
             save_document(handle.hwp)
+            if working_copy_path.is_symlink() or not working_copy_path.is_file():
+                raise LocalCliRuntimeError('Native save returned without a regular working-copy file.')
+            try:
+                working_copy_size = working_copy_path.stat().st_size
+            except OSError as exc:
+                raise LocalCliRuntimeError('Saved working-copy readback failed.') from exc
+            if working_copy_size <= 0:
+                raise LocalCliRuntimeError('Native save produced an empty working copy.')
+            working_copy_custody = {}
+            self._verify_artifact_readback(binding, working_copy_path, readback=working_copy_custody)
+            location = snapshot_live_location(
+                hwp=handle.hwp,
+                source_filename=handle.source_filename,
+                working_copy_id=handle.session_id,
+            )
             return {
-                'location': snapshot_live_location(
-                    hwp=handle.hwp,
-                    source_filename=handle.source_filename,
-                    working_copy_id=handle.session_id,
-                ),
+                'location': location,
+                'ordinary_save_confirmed': True,
+                'working_copy_size_bytes': working_copy_size,
+                'working_copy_custody': working_copy_custody,
             }
 
         result = self._execute_live(binding=binding, command_name='save', task_label='local_cli.save', handler=_handler)
         location = result.get('location') if isinstance(result.get('location'), dict) else {}
+        command_evidence = result.get('_local_cli_command') if isinstance(result.get('_local_cli_command'), dict) else {}
+        semantic_ok = command_evidence.get('semantic_ok') if isinstance(command_evidence.get('semantic_ok'), bool) else True
+        dirty, dirty_source = self._reduce_working_copy_dirty(
+            prior_dirty=binding.get('working_copy_dirty') is True or binding.get('dirty') is True,
+            semantic_ok=semantic_ok,
+            delta_dirty=False,
+            may_have_mutated=result.get('may_have_mutated') is True,
+            command_name='save',
+            fresh_document_modified=location.get('document_is_modified') if isinstance(location.get('document_is_modified'), bool) else None,
+            fresh_sequence_matches=True,
+            ordinary_save_confirmed=result.get('ordinary_save_confirmed') is True,
+        )
+        working_copy_custody = result.get('working_copy_custody')
+        if isinstance(working_copy_custody, dict):
+            custody_map = binding.get('artifact_custody') if isinstance(binding.get('artifact_custody'), dict) else {}
+            custody_map['working-copy'] = working_copy_custody
+            binding['artifact_custody'] = custody_map
         binding = self._update_live_binding(
             binding,
             location=location,
-            dirty=False,
+            dirty=dirty,
             artifacts={'latest_working_copy_path': str(working_copy_path)},
         )
-        self._record_local_cli_command('save', binding=binding, summary='saved active working copy', payload={'working_copy_path': str(working_copy_path)})
+        self._record_local_cli_command(
+            'save',
+            binding=binding,
+            summary='saved active working copy',
+            payload={
+                'working_copy_path': str(working_copy_path),
+                'dirty': dirty,
+                'dirty_source': dirty_source,
+                'semantic_ok': semantic_ok,
+            },
+        )
         resolved_session_id = self._binding_session_id(binding)
         return {
             'ok': True,
@@ -8792,7 +12412,11 @@ class LocalCliService:
         result = self._execute_live(binding=binding, command_name='export', task_label='local_cli.export', handler=_handler)
         location = result.get('location') if isinstance(result.get('location'), dict) else {}
         artifact_path = str(result.get('artifact_path') or '')
-        binding = self._update_live_binding(binding, location=location, artifacts={'latest_export_path': artifact_path})
+        artifacts = self._validated_artifact_projection(
+            binding=binding,
+            artifacts={'latest_export_path': artifact_path},
+        )
+        binding = self._update_live_binding(binding, location=location, artifacts=artifacts)
         self._record_local_cli_command('export', binding=binding, summary='exported live document to PDF', payload={'artifact_path': artifact_path})
         return {
             'ok': True,
@@ -8917,26 +12541,115 @@ class LocalCliService:
     def close(self, *, session_id: str | None = None) -> dict[str, Any]:
         binding = self._read_binding(session_id=session_id)
         if not isinstance(binding, dict):
+            if session_id:
+                self._mark_session_closed(session_id)
             self._clear_binding(session_id=session_id)
             return {'ok': True}
 
         resolved_session_id = self._binding_session_id(binding)
+        if self._binding_has_pending_reconciliation(binding):
+            pending = binding.get('pending_command') if isinstance(binding.get('pending_command'), dict) else {}
+            raise LocalCliServiceError(
+                'Cannot close a local CLI session before its native command is reconciled: '
+                f"{str(pending.get('command_id') or '').strip()}",
+                status_code=409,
+            )
+        # Close admission is a persistence boundary too.  The runtime rejects
+        # new work as soon as close begins; mark the tombstone only after
+        # native close succeeds so a close timeout remains reconcilable.
         try:
             self.runtime_manager.close_session(resolved_session_id)
+        except LocalCliRuntimeTimeoutError as exc:
+            try:
+                command_status = self.runtime_manager.command_status(resolved_session_id, exc.command_id)
+            except Exception:
+                command_status = {'command_id': exc.command_id, 'state': exc.command_state}
+            try:
+                current_sequence = self._parse_binding_generation(binding.get('native_command_sequence', 0))
+            except LocalCliServiceError:
+                current_sequence = 0
+            try:
+                raw_sequence = command_status.get('sequence', current_sequence)
+                if isinstance(raw_sequence, bool) or not isinstance(raw_sequence, int) or raw_sequence < current_sequence:
+                    raise ValueError('invalid or stale native command sequence')
+                command_sequence = raw_sequence
+            except (TypeError, ValueError) as exc:
+                raise LocalCliServiceError('Local CLI close reconciliation sequence is invalid.', status_code=409) from exc
+            binding['_expected_command_generation'] = binding.get('command_generation', 0)
+            binding['_expected_native_command_sequence'] = current_sequence
+            binding['native_command_sequence'] = command_sequence
+            binding['pending_command'] = {
+                'command_id': exc.command_id,
+                'command': 'close',
+                'sequence': command_sequence,
+                'state': command_status.get('state', exc.command_state),
+                'timed_out_at': utc_now_iso(),
+            }
+            binding['document_session_state'] = 'timed_out_pending_reconciliation'
+            binding['live_session_bound'] = True
+            self._save_binding(binding)
+            try:
+                self.interactive_sessions.record_command(
+                    'close',
+                    session_id=resolved_session_id,
+                    state='pending',
+                    summary='close timed out; awaiting native reconciliation',
+                    payload={'command_id': exc.command_id, 'sequence': command_sequence},
+                    metadata={'local_cli_v1': {'reconciliation_pending': True}},
+                    live_runtime={
+                        'reconciliation_pending': True,
+                        'pending_command': dict(binding['pending_command']),
+                    },
+                )
+            except Exception:
+                pass
+            raise LocalCliServiceError(
+                f'{exc} status={command_status.get("state", exc.command_state)} '
+                f'command_id={exc.command_id}; run command-reconcile before retrying.',
+                status_code=504,
+            ) from exc
         except LocalCliRuntimeError as exc:
-            raise LocalCliServiceError(str(exc), status_code=500) from exc
+            raise LocalCliServiceError('Local CLI native close failed.', status_code=500) from exc
 
+        if binding.get('session_root_path'):
+            try:
+                cleanup_result = self._cleanup_managed_session_root(binding)
+            except LocalCliServiceError:
+                # Keep the binding as an operator-visible ownership record
+                # when managed cleanup cannot prove the exact root was removed.
+                binding['cleanup_pending'] = True
+                binding['live_session_bound'] = False
+                binding['document_session_state'] = 'closed_cleanup_pending'
+                binding['updated_at'] = utc_now_iso()
+                try:
+                    self._save_binding(binding)
+                except Exception:
+                    pass
+                raise
+        else:
+            # Bindings created before server-managed root custody was added do
+            # not identify a removable directory; never guess one.
+            cleanup_result = {
+                'removed': False,
+                'verified': True,
+                'reason': 'no server-managed session root was recorded',
+            }
         self._record_session_close(
             session_id=resolved_session_id,
             summary='Local CLI session closed.',
             outcome='closed',
         )
-        self._clear_binding(binding=binding)
-        return {'ok': True}
+        self._clear_binding(session_id=resolved_session_id, force=True)
+        self._mark_session_closed(resolved_session_id)
+        public_cleanup = dict(cleanup_result) if isinstance(cleanup_result, dict) else {}
+        public_cleanup.pop('path', None)
+        return {'ok': True, 'cleanup': public_cleanup}
 
 
 
 def as_http_error(exc: Exception) -> HTTPException:
     if isinstance(exc, LocalCliServiceError):
         return HTTPException(status_code=exc.status_code, detail=exc.message)
-    return HTTPException(status_code=500, detail=str(exc))
+    if isinstance(exc, LocalCliRuntimeError):
+        return HTTPException(status_code=500, detail='Local CLI native operation failed.')
+    return HTTPException(status_code=500, detail='Local CLI request failed.')

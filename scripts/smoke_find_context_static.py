@@ -142,6 +142,18 @@ def require_find_cli_json_and_options() -> None:
         captured['payload'] = payload
         return _raw_find_payload()
 
+    def fake_execute_named_bundle(base_url: str, bundle_name: str, bundle_args: list[str] | None = None):
+        require(bundle_name == 'export-proof-range', f'unexpected bundle in find smoke: {bundle_name}')
+        return object(), {'summary': 'export proof fixture', 'steps': [{'op': 'export_pdf', 'result': {'download_path': '/download/source.pdf'}}]}
+
+    def fake_render_export_proof_manifest(**kwargs):
+        return {
+            'manifest_path': str(ROOT / 'tmp-find-proof-manifest.json'),
+            'exported_pdf_path': str(ROOT / 'tmp-find-proof.pdf'),
+            'pages_rendered': kwargs.get('pages') or [],
+            'pages_rendered_summary': '1',
+        }
+
     argv = [
         '--base-url',
         'http://unit.test',
@@ -154,7 +166,13 @@ def require_find_cli_json_and_options() -> None:
         '--proof-match',
         '1',
     ]
-    with patch('local_cli_v1.main.post_json', fake_post_json), contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+    with (
+        patch('local_cli_v1.main.post_json', fake_post_json),
+        patch('local_cli_v1.main._execute_named_bundle', fake_execute_named_bundle),
+        patch('local_cli_v1.main._render_export_proof_manifest', fake_render_export_proof_manifest),
+        contextlib.redirect_stdout(stdout),
+        contextlib.redirect_stderr(stderr),
+    ):
         rc = cli_main(argv)
     require(rc == 0, f'cli returned {rc}, stderr={stderr.getvalue()!r}')
     require(captured.get('path') == '/local-cli/find', f'find did not use find route: {captured!r}')

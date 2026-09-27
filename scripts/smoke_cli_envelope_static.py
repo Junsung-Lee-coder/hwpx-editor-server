@@ -14,6 +14,7 @@ from local_cli_v1.envelope import build_envelope  # noqa: E402
 
 
 REQUIRED_KEYS = ('result:', 'where:', 'how:', 'changed:', 'proof:', 'next:')
+SMOKE_ROOT = Path.home() / '.cache' / 'hwpx-local-cli' / 'static-smoke-fixtures'
 
 
 def capture(fn, *args, **kwargs) -> str:
@@ -48,8 +49,8 @@ def main() -> int:
         cli_main.load_state = lambda: {
             'source_filename': 'fixture.hwpx',
             'session_id': 'session-fixture',
-            'last_page_screenshot_path': '/tmp/fixture-page-001.png',
-            'last_page_screenshot_manifest_path': '/tmp/fixture-page-001.manifest.json',
+            'last_page_screenshot_path': str(SMOKE_ROOT / 'fixture-page-001.png'),
+            'last_page_screenshot_manifest_path': str(SMOKE_ROOT / 'fixture-page-001.manifest.json'),
         }
         status_output = capture(
             cli_main._print_status,
@@ -73,12 +74,12 @@ def main() -> int:
     artifact_output = capture(
         cli_main._print_artifact_result,
         role='rendered page proof',
-        path=Path('/tmp/fixture-page-001.png'),
-        manifest_path=Path('/tmp/fixture-page-001.manifest.json'),
+        path=SMOKE_ROOT / 'fixture-page-001.png',
+        manifest_path=SMOKE_ROOT / 'fixture-page-001.manifest.json',
         next_step='review rendered proof',
     )
     require_envelope('artifact', artifact_output)
-    require('manifest: /tmp/fixture-page-001.manifest.json' in artifact_output, 'artifact manifest line missing')
+    require(f'manifest: {SMOKE_ROOT / "fixture-page-001.manifest.json"}' in artifact_output, 'artifact manifest line missing')
 
     lifecycle_output = capture(
         cli_main._print_lifecycle_result,

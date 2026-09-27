@@ -19,7 +19,31 @@ sys.modules.setdefault('fastapi', fastapi_stub)
 runtime_stub = types.ModuleType('app.local_cli_runtime')
 LocalCliRuntimeError = type('LocalCliRuntimeError', (RuntimeError,), {})
 runtime_stub.LocalCliRuntimeError = LocalCliRuntimeError
+# The static helper never exercises timeout construction; alias the
+# dependency-light error class so the service import remains complete.
+setattr(runtime_stub, 'LocalCliRuntimeTimeoutError', LocalCliRuntimeError)
 runtime_stub.LocalCliRuntimeHandle = type('LocalCliRuntimeHandle', (), {})
+runtime_stub._RECOVERY_STATES = {
+    'none', 'pending_execution', 'quarantined', 'saving', 'failed', 'preserved',
+}
+runtime_stub._RECOVERY_ARTIFACT_KINDS = {
+    'export', 'screenshot', 'working-copy', 'working_copy', 'recovery',
+}
+runtime_stub._artifact_kind_from_key = lambda key: next(
+    (kind for kind in ('working-copy', 'working_copy', 'screenshot', 'export', 'recovery') if kind in str(key).casefold()),
+    None,
+)
+
+def _bounded_journal_value(value, *, depth=0, key_hint=None):
+    if key_hint and any(marker in str(key_hint).casefold() for marker in ('path', 'text', 'document', 'error', 'warning')):
+        return '<redacted>'
+    if isinstance(value, dict):
+        return {key: _bounded_journal_value(item, depth=depth + 1, key_hint=key) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_bounded_journal_value(item, depth=depth + 1) for item in value]
+    return value
+
+runtime_stub._bounded_journal_value = _bounded_journal_value
 for name in (
     'apply_char_style',
     'capture_screenshot_artifact',
@@ -27,6 +51,7 @@ for name in (
     'ensure_session_layout',
     'export_document_pdf',
     'get_local_cli_runtime_manager',
+    'read_command_journal',
     'insert_multiline_text_at_caret_native',
     'insert_text_at_caret',
     'insert_text_at_caret_native',
@@ -40,6 +65,8 @@ sys.modules.setdefault('app.local_cli_runtime', runtime_stub)
 readiness_stub = types.ModuleType('app.readiness')
 readiness_stub.build_plain_readiness_failure = lambda *args, **kwargs: None
 readiness_stub.load_runtime_readiness_snapshot = lambda *args, **kwargs: {}
+setattr(readiness_stub, 'readiness_matches_current_worker', lambda *args, **kwargs: True)
+setattr(readiness_stub, 'resolve_candidate_generation', lambda *args, **kwargs: 'smoke-candidate-generation')
 readiness_stub.utc_now_iso = lambda: '2026-04-27T00:00:00Z'
 sys.modules.setdefault('app.readiness', readiness_stub)
 

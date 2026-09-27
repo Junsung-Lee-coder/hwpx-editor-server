@@ -24,6 +24,24 @@ def _mutation_step(args: list[str]) -> dict[str, object]:
 
 
 class CellFormatExactBundleTests(unittest.TestCase):
+    def test_builds_guarded_uniform_hwpunit_margin_step(self) -> None:
+        step = _mutation_step(['--cell-margin-hu', '1984'])
+
+        self.assertEqual(step['op'], 'cell_format_exact')
+        self.assertEqual(step['cell_margin_hu'], 1984.0)
+        self.assertIs(step['confirm_layout'], True)
+        self.assertNotIn('cell_margin_mm', step)
+        self.assertNotIn('vertical_align', step)
+
+    def test_builds_guarded_uniform_millimeter_margin_step(self) -> None:
+        step = _mutation_step(['--cell-margin-mm', '7'])
+
+        self.assertEqual(step['op'], 'cell_format_exact')
+        self.assertEqual(step['cell_margin_mm'], 7.0)
+        self.assertIs(step['confirm_layout'], True)
+        self.assertNotIn('cell_margin_hu', step)
+        self.assertNotIn('vertical_align', step)
+
     def test_builds_guarded_fill_color_step_with_normalized_hex(self) -> None:
         step = _mutation_step(['--fill-color', '#12abEF'])
 

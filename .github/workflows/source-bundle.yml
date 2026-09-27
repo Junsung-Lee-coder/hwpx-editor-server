@@ -1,0 +1,101 @@
+name: Deterministic source bundle
+
+on:
+  # Publication is deliberately downstream of the complete CI workflow.  It
+  # has no push/tag/manual trigger that could bypass the portable and Windows
+  # gates.
+  workflow_run:
+    workflows: ["Source and Windows contracts"]
+    types: [completed]
+
+permissions:
+  contents: read
+
+jobs:
+  source-bundle:
+    name: Publish verified exact-SHA source bundle
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.head_branch == 'main' &&
+      github.event.workflow_run.head_repository.full_name == github.repository
+    runs-on: ubuntu-latest
+    # No publication environment or upload action is declared in this
+    # candidate. The external approval prerequisite is absent, so this job is
+    # verification-only and cannot publish bytes.
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.workflow_run.head_sha }}
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: '3.13'
+      - name: Install pinned portable dependencies for archive gates
+        run: python -m pip install --disable-pip-version-check --require-hashes -r requirements-portable.lock
+      - name: Build exact source bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts verified-source
+          candidate_sha='${{ github.event.workflow_run.head_sha }}'
+          actual_sha="$(git rev-parse HEAD)"
+          test "$actual_sha" = "$candidate_sha"
+          git rev-parse --verify origin/main^{commit} >/dev/null
+          test "$(git rev-parse origin/main)" = "$candidate_sha"
+          git merge-base --is-ancestor "$candidate_sha" origin/main
+          commit="$(git rev-parse HEAD)"
+          tree="$(git rev-parse 'HEAD^{tree}')"
+          python scripts/build_source_bundle.py \
+            --source-root . \
+            --archive artifacts/hwpx-source.zip \
+            --manifest artifacts/source-manifest.json \
+            --repository 'github:Junsung-Lee-coder/hwpx-editor-server' \
+            --commit "$commit" \
+            --tree "$tree"
+          manifest_sha256="$(sha256sum artifacts/source-manifest.json | cut -d ' ' -f 1)"
+          archive_sha256="$(sha256sum artifacts/hwpx-source.zip | cut -d ' ' -f 1)"
+          python scripts/verify_source_bundle.py \
+            --archive artifacts/hwpx-source.zip \
+            --manifest artifacts/source-manifest.json \
+            --destination verified-source \
+            --expected-repository 'github:Junsung-Lee-coder/hwpx-editor-server' \
+            --expected-commit "$commit" \
+            --expected-tree "$tree" \
+            --expected-manifest-sha256 "$manifest_sha256" \
+            --expected-archive-sha256 "$archive_sha256"
+      - name: Run source-bundle gates from extracted archive
+        id: source-bundle-gates
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd verified-source
+          python -m compileall -q app local_cli_v1 scripts tests
+          for script in \
+            smoke_cli_workflow_status_static.py \
+            smoke_local_cli_health_static.py \
+            smoke_output_parser_static.py \
+            smoke_command_bundle_static.py \
+            smoke_command_packages_static.py \
+            smoke_native_table_command_static.py \
+            smoke_export_proof_range_clamp_static.py \
+            smoke_find_context_static.py \
+            smoke_cli_json_envelope_parity_static.py \
+            smoke_readback_diff_static.py \
+            smoke_readback_schema_static.py \
+            smoke_selection_proof_static.py \
+            smoke_text_table_cleanup_static.py \
+            smoke_cli_envelope_static.py; do
+            python "scripts/$script"
+          done
+          python -m unittest \
+            tests.test_local_cli_status_payload \
+            tests.test_raw_target_readback \
+            tests.test_readback_command_status \
+            tests.test_readback_diff \
+            tests.test_table_scoped_cell_and_list_primitives \
+            tests.test_table4_anchor_range_replace_bundle
+          python -m unittest discover -s tests -p 'test_*.py' -v
+          python scripts/run_function_style_tests.py
+      # Deliberately no artifact upload exists in this candidate.  The external
+      # protected-environment prerequisite is absent; keeping the workflow
+      # verification-only is the fail-closed publication behavior.

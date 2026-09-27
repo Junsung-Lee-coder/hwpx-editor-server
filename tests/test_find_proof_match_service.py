@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+import hashlib
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -29,8 +30,19 @@ class FindProofMatchServiceTests(unittest.TestCase):
         def fake_execute_live(**kwargs):
             return kwargs['handler'](handle)
 
-        def fake_find_live_match(hwp_arg: Any, *, query: str, occurrence: int) -> dict[str, Any]:
-            calls['find_live_match'] = {'hwp': hwp_arg, 'query': query, 'occurrence': occurrence}
+        def fake_find_live_match(
+            hwp_arg: Any,
+            *,
+            query: str,
+            occurrence: int,
+            target_identity: dict[str, Any] | None = None,
+        ) -> dict[str, Any]:
+            calls['find_live_match'] = {
+                'hwp': hwp_arg,
+                'query': query,
+                'occurrence': occurrence,
+                'target_identity': target_identity,
+            }
             return {'snapshot': {'pos': [10, 20, 30], 'selected_pos': None}}
 
         def fake_set_pos(hwp_arg: Any, a: int, b: int, c: int) -> None:
@@ -60,8 +72,10 @@ class FindProofMatchServiceTests(unittest.TestCase):
         self.assertEqual(result['proof_match']['number'], 2)
         self.assertEqual(result['proof_match']['page'], 7)
         self.assertEqual(result['proof_match']['page_evidence']['method'], 'current_page')
-        self.assertEqual(calls['find_live_match']['query'], 'Repeated target paragraph')
-        self.assertEqual(calls['find_live_match']['occurrence'], 2)
+        self.assertEqual(calls['find_live_match']['query'], 'target')
+        self.assertEqual(calls['find_live_match']['occurrence'], 1)
+        self.assertEqual(calls['find_live_match']['target_identity']['global_paragraph_index'], 2)
+        self.assertEqual(calls['find_live_match']['target_identity']['live_position'], [10, 20])
         self.assertEqual(calls['set_pos'][-1][1:], (1, 2, 3))
 
     def test_find_proof_match_rejects_out_of_range_match(self) -> None:
@@ -79,6 +93,24 @@ class FindProofMatchServiceTests(unittest.TestCase):
 
         self.assertEqual(ctx.exception.status_code, 404)
         self.assertIn('No find match number 2', ctx.exception.message)
+
+    def test_live_match_rejects_duplicate_paragraph_hash_without_occurrence_identity(self) -> None:
+        service = self.make_service()
+        normalized = 'repeated target paragraph'
+        target_identity = {
+            'global_paragraph_index': 2,
+            'paragraph_normalized_hash': 'sha256:' + hashlib.sha256(normalized.casefold().encode('utf-8')).hexdigest(),
+        }
+
+        self.assertFalse(
+            service._live_match_matches_target(
+                {
+                    'snapshot': {},
+                    'paragraph_text_normalized': normalized,
+                },
+                target_identity=target_identity,
+            )
+        )
 
 
 if __name__ == '__main__':
