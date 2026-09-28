@@ -39,6 +39,7 @@ BUNDLE_SERVER_OPS = frozenset(
         'table_cell_structure_exact',
         'table_column_width_exact',
         'table_split_exact',
+        'object_insert_exact',
         'where',
     }
 )
@@ -303,6 +304,24 @@ _STEP_KEYS: dict[str, frozenset[str]] = {
             'down_rows',
             'confirm_layout',
             'max_controls',
+        }
+    ),
+    'object_insert_exact': frozenset(
+        {
+            'op',
+            'label',
+            'kind',
+            'expected_pos',
+            'confirm_mutation',
+            'text',
+            'url',
+            'display_text',
+            'name',
+            'script',
+            'width_mm',
+            'height_mm',
+            'treat_as_char',
+            'apply_to',
         }
     ),
     'control_move_resize_exact': frozenset(
@@ -2090,6 +2109,60 @@ def _build_table_split_exact(argv: Sequence[str]) -> BundleSpec:
     )
 
 
+_OBJECT_INSERT_KINDS = ('footnote', 'endnote', 'memo', 'hyperlink', 'bookmark', 'equation', 'line', 'rectangle', 'ellipse', 'header', 'footer')
+
+
+def _parse_expected_pos(raw: str) -> list[int]:
+    parts = [part.strip() for part in str(raw).split(',')]
+    if len(parts) != 3 or not all(part.isdigit() for part in parts):
+        raise BundleError('--expected-pos must be LIST,PARA,POS from `hwpx where`, e.g. 0,12,3')
+    return [int(part) for part in parts]
+
+
+def _build_object_insert_exact(argv: Sequence[str]) -> BundleSpec:
+    parser = _parser('object-insert-exact', 'Insert one footnote, endnote, memo, hyperlink, bookmark, equation, shape, header or footer at the proven caret.')
+    parser.add_argument('--kind', required=True, choices=_OBJECT_INSERT_KINDS)
+    parser.add_argument('--expected-pos', required=True, help='Caret position LIST,PARA,POS reported by `hwpx where`; the edit refuses anywhere else')
+    parser.add_argument('--text', default=None, help='footnote/endnote/memo/header/footer text')
+    parser.add_argument('--url', default=None, help='hyperlink: http(s) or mailto URL')
+    parser.add_argument('--display-text', default=None, help='hyperlink: the exact currently selected text to link')
+    parser.add_argument('--name', default=None, help='bookmark name')
+    parser.add_argument('--script', default=None, help='equation: Hancom equation script, e.g. "{a} over {b}"')
+    parser.add_argument('--width-mm', type=float, default=None, help='line/rectangle/ellipse width in mm')
+    parser.add_argument('--height-mm', type=float, default=None, help='line/rectangle/ellipse height in mm')
+    parser.add_argument('--treat-as-char', choices=('on', 'off'), default=None, help='shapes: place as character (default on)')
+    parser.add_argument('--apply-to', choices=('both', 'even', 'odd'), default=None, help='header/footer pages (default both)')
+    parser.add_argument('--confirm-mutation', action='store_true', required=True, help='Required explicit confirmation for the insertion')
+    args = _parse_bundle_args(parser, argv)
+    fields: dict[str, Any] = {'kind': args.kind, 'expected_pos': _parse_expected_pos(args.expected_pos), 'confirm_mutation': True}
+    for key in ('text', 'url', 'display_text', 'name', 'script', 'width_mm', 'height_mm', 'apply_to'):
+        value = getattr(args, key)
+        if value is not None:
+            fields[key] = value
+    if args.treat_as_char is not None:
+        fields['treat_as_char'] = args.treat_as_char == 'on'
+    return BundleSpec(
+        name='object-insert-exact',
+        summary=f'Insert one {args.kind} at the proven caret; whole-document HWPML readback must show exactly that one new object.',
+        where=f'Caret at {fields["expected_pos"]} as reported by `hwpx where` (hyperlink: the current selection must equal --display-text).',
+        how='Runs read-only where, then one `object_insert_exact` primitive: read the document, re-prove caret and edit state, run the documented Hancom action once, and read the document again.',
+        changed='Adds exactly one object of the requested kind; the step fails with mutation_may_have_persisted if the readback shows anything else.',
+        steps=(
+            _where_step('where:before-object-insert'),
+            _step('object_insert_exact', f'mutate:object-insert:{args.kind}', **fields),
+            _where_step('where:after-object-insert'),
+        ),
+        sources=(
+            {
+                'type': 'documented-native-action',
+                'hancom_actions': 'InsertFootnote / InsertEndnote / InsertFieldMemo / InsertHyperlink (HHyperLink) / Bookmark (HBookMark) / EquationCreate (HEqEdit) / DrawObjCreator* (HShapeObject) / HeaderFooter (HHeaderFooter)',
+                'readback': 'GetTextFile("HWPML2X", "") before and after: control counts, the new element, and body text',
+                'risk_note': 'Native paths are not yet verified on a Hancom desktop; shapes and header/footer are the least certain. Review rendered proof before saving.',
+            },
+        ),
+    )
+
+
 def _build_section_control_move_resize_exact(argv: Sequence[str]) -> BundleSpec:
     parser = _parser('section-control-move-resize-exact', 'Move and/or resize one control only after exact inventory proof matches.')
     _add_section_scope_args(parser)
@@ -2187,6 +2260,7 @@ _RECIPES: dict[str, BundleRecipe] = {
     'table-cell-structure-exact': BundleRecipe('table-cell-structure-exact', 'Read-only exact table/cell structure and navigability probe.', _build_table_cell_structure_exact),
     'table-column-width-exact': BundleRecipe('table-column-width-exact', 'Apply guarded native exact table column widths with preservation and rollback proof.', _build_table_column_width_exact),
     'table-split-exact': BundleRecipe('table-split-exact', 'Split one exact pre-proven table with documented TableSplitTable.', _build_table_split_exact),
+    'object-insert-exact': BundleRecipe('object-insert-exact', 'Insert one footnote, endnote, memo, hyperlink, bookmark, equation, shape, header or footer at the proven caret.', _build_object_insert_exact),
     'paragraph-style-apply-exact': BundleRecipe('paragraph-style-apply-exact', 'Apply exact paragraph style toggles with fail-closed match/page proof.', _build_paragraph_style_apply_exact),
     'paragraph-delete-exact': BundleRecipe('paragraph-delete-exact', 'Delete one exact paragraph/row after page and neighbor proof.', _build_paragraph_delete_exact),
     'style-apply': BundleRecipe('style-apply', 'Guarded dump-only style clone/apply proof; no mutation.', _build_style_apply),
@@ -2249,6 +2323,8 @@ def bundle_help(name: str) -> str:
         return 'usage: hwpx bundle-dump cell-row-fit-exact (--section-anchor TEXT | --page-from N [--page-to N]) --target-id ID --expected-hash HASH --expected-page N (--row-height-percent PCT | --row-height-hu HU | --row-height-mm MM | --resize-up-steps N | --resize-down-steps N | --line-spacing N | --char-height-percent PCT) --confirm-layout'
     if bundle_name == 'table-cell-structure-exact':
         return 'usage: hwpx bundle-dump table-cell-structure-exact (--section-anchor TEXT | --page-from N [--page-to N]) --target-id ID --expected-hash HASH --expected-page N\n       read-only exact table/cell structure probe; reports single-cell/non-navigable evidence before any TableSplitTable or row-fit attempt'
+    if bundle_name == 'object-insert-exact':
+        return 'usage: hwpx bundle-dump object-insert-exact --kind KIND --expected-pos LIST,PARA,POS [--text T | --url U --display-text T | --name N | --script S | --width-mm W --height-mm H [--treat-as-char on|off]] [--apply-to both|even|odd] --confirm-mutation\n       KIND: footnote, endnote, memo, hyperlink, bookmark, equation, line, rectangle, ellipse, header, footer; verified by whole-document HWPML readback'
     if bundle_name == 'table-split-exact':
         return 'usage: hwpx bundle-dump table-split-exact (--section-anchor TEXT | --page-from N [--page-to N]) --target-id ID --expected-hash HASH --expected-page N --down-rows N --confirm-layout\n       splits one exact pre-proven table with documented TableSplitTable after explicit downward cell navigation'
     if bundle_name == 'export-proof-range':

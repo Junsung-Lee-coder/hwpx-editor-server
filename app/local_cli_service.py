@@ -109,12 +109,14 @@ from app.local_cli_service_support import (  # noqa: F401
 from app.local_cli_bundle_controls import LocalCliBundleControlsMixin
 from app.local_cli_bundle_paragraphs import LocalCliBundleParagraphsMixin
 from app.local_cli_cell_margins import LocalCliCellMarginsMixin
+from app.local_cli_object_insert import LocalCliObjectInsertMixin
 
 
 class LocalCliService(
     LocalCliBundleControlsMixin,
     LocalCliBundleParagraphsMixin,
     LocalCliCellMarginsMixin,
+    LocalCliObjectInsertMixin,
 ):
     def __init__(self, *, settings: Any, interactive_sessions: Any):
         self.settings = settings
@@ -2812,6 +2814,23 @@ class LocalCliService(
                 'split_group_index',
                 'split_group_count',
                 'split_group_hash',
+            },
+            'object_insert_exact': {
+                'op',
+                'operation',
+                'label',
+                'kind',
+                'expected_pos',
+                'confirm_mutation',
+                'text',
+                'url',
+                'display_text',
+                'name',
+                'script',
+                'width_mm',
+                'height_mm',
+                'treat_as_char',
+                'apply_to',
             },
             'table_split_exact': {
                 'op',

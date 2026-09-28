@@ -1,0 +1,25 @@
+{
+  "op": "object_insert_exact",
+  "version": "local-cli/object-insert-exact/v1-package",
+  "summary": "Insert exactly one footnote, endnote, memo, hyperlink, bookmark, equation, drawing shape, header or footer at the proven caret; whole-document HWPML readback must prove the single expected change. Rendered proof required before save.",
+  "module": "app.command_packages.commands.object_insert_exact.run",
+  "read_only": false,
+  "dirty_default": true,
+  "allowed_keys": [
+    "op",
+    "operation",
+    "label",
+    "kind",
+    "expected_pos",
+    "confirm_mutation",
+    "text",
+    "url",
+    "display_text",
+    "name",
+    "script",
+    "width_mm",
+    "height_mm",
+    "treat_as_char",
+    "apply_to"
+  ]
+}
