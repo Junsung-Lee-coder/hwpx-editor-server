@@ -49,6 +49,7 @@ from .output_parser import (
 )
 from .readback_diff import format_readback_diff_human, load_readback_manifest, summarize_readback_diff
 from .gate_verdict import load_manifest as load_gate_manifest, summarize_gate_verdict
+from . import reading_cli
 from .hwpx_new import HwpxNewError, write_blank_hwpx
 from .mermaid_render import MermaidRenderError, render_png
 from .proof_packet import ProofPacketError, build_proof_packet, seal_native_border_readback
@@ -117,6 +118,7 @@ LOCAL_METADATA_NOTES: dict[str, str] = {
     'output-format-policy': 'planning-only output extension/save/export policy manifest; no mutation; requires Hancom-native save/export proof',
     'gate-verdict': 'local read-only Hancom-primary gate verdict merger for hashes/tokens/counts/render proof/static supplements; no mutation and no external send',
 }
+LOCAL_METADATA_NOTES.update(reading_cli.READING_COMMAND_NOTES)
 
 DIRECT_ROUTE_NOTES: dict[str, str] = {
     'command-reconcile': 'durable timed-out native command reconciliation through the server route; no retry is admitted until terminal outcome',
@@ -272,6 +274,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     subparsers = parser.add_subparsers(dest='command', required=True)
+    reading_cli.register(subparsers)
 
     help_parser = subparsers.add_parser('help', help='Show HWPX safe workflow help')
     help_parser.add_argument('topic', nargs='?', choices=('workflow', 'commands'), default='workflow')
@@ -2845,6 +2848,9 @@ def main(argv: list[str] | None = None) -> int:
     base_url = _resolve_base_url(args.base_url)
 
     try:
+        if args.command in reading_cli.READING_COMMANDS:
+            return reading_cli.dispatch(args)
+
         if args.command == 'help':
             if args.topic == 'commands':
                 _print_command_status()
