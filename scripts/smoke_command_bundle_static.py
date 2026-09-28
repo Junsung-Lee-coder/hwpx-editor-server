@@ -64,7 +64,7 @@ def _literal_allowed_key_ops(path: Path) -> set[str]:
 
 def require_bundle_op_drift_check() -> None:
     server_path = ROOT / 'app' / 'local_cli_service.py'
-    server_ops = _literal_string_set_assignment(server_path, '_BUNDLE_ALLOWED_OPS')
+    server_ops = _literal_string_set_assignment(ROOT / 'app' / 'local_cli_service_support.py', '_BUNDLE_ALLOWED_OPS')
     server_validated_ops = _literal_allowed_key_ops(server_path)
     local_ops = set(BUNDLE_SERVER_OPS)
     local_key_ops = set(_STEP_KEYS)

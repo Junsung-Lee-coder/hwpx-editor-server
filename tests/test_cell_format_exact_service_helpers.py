@@ -591,7 +591,7 @@ class CellFormatExactServiceHelperTests(unittest.TestCase):
             'name': 'center',
         }
 
-        with patch('app.local_cli_service._get_pos', return_value=(0, 0, 0)), patch('app.local_cli_service._set_pos'):
+        with patch('app.local_cli_bundle_controls._get_pos', return_value=(0, 0, 0)), patch('app.local_cli_bundle_controls._set_pos'):
             metrics = self.service._bundle_table_cell_metrics(hwp, object())
 
         self.assertFalse(metrics['cell_margin_hu_available'])
@@ -608,7 +608,7 @@ class CellFormatExactServiceHelperTests(unittest.TestCase):
             'cell_addr': 'A1',
         }
         self.service._style_parameter_snapshot = lambda *args, **kwargs: {'values': {}}  # type: ignore[method-assign]
-        with patch('app.local_cli_service._get_pos', return_value=(0, 0, 0)), patch('app.local_cli_service._set_pos'):
+        with patch('app.local_cli_bundle_controls._get_pos', return_value=(0, 0, 0)), patch('app.local_cli_bundle_controls._set_pos'):
             metrics = self.service._bundle_table_cell_metrics(hwp, object())
 
         self.assertFalse(metrics['cell_margin_hu_available'])
