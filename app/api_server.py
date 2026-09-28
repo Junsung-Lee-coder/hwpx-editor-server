@@ -14,6 +14,7 @@ import uvicorn
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
 
+from app.api_auth import ApiTokenMiddleware
 from app.config import get_settings
 from app.edit_ops import EditOperationError, SUPPORTED_OPS, SUPPORTED_VALIDATION_KEYS, normalize_instruction_payload, normalize_validation
 from app.interactive_session_manager import (
@@ -78,6 +79,7 @@ db = QueueDB(settings.db_path)
 logger = configure_logger('hwp.api', settings.log_level, settings.logs_root / 'api.log')
 interactive_sessions = InteractiveSessionManager(settings)
 app = FastAPI(title='Windows HWPX Converter Pilot', version='0.2.0')
+app.add_middleware(ApiTokenMiddleware, token=settings.api_token, api_port=settings.api_port)
 local_cli_service = LocalCliService(settings=settings, interactive_sessions=interactive_sessions)
 app.include_router(
     build_local_cli_router(
