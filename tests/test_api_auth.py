@@ -1,9 +1,15 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import json
+import logging
 import os
+import tempfile
+import threading
 import unittest
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from unittest.mock import patch
 
 from app.api_auth import ApiTokenMiddleware, is_loopback_host
@@ -94,6 +100,29 @@ class ApiTokenSettingsTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     Settings(_env_file=None)
 
+    def test_invalid_token_is_absent_from_validation_error_and_logs(self) -> None:
+        secret = 'leak-canary-token-value'
+        stream = io.StringIO()
+        logger = logging.getLogger('test_api_auth.settings')
+        handler = logging.StreamHandler(stream)
+        logger.addHandler(handler)
+        try:
+            for env in (
+                {'HWP_API_TOKEN': secret},
+                {'HWP_API_TOKEN': secret, 'HWP_API_HOST': '0.0.0.0'},
+                {'HWP_API_TOKEN': secret + ' ' + 'x' * 40},
+            ):
+                with self.subTest(env=sorted(env)), patch.dict(os.environ, env, clear=True):
+                    with self.assertRaises(ValueError) as caught:
+                        Settings(_env_file=None)
+                    logger.error('settings failed', exc_info=caught.exception)
+                    self.assertNotIn(secret, str(caught.exception))
+                    self.assertNotIn(secret, repr(caught.exception))
+        finally:
+            logger.removeHandler(handler)
+        self.assertIn('settings failed', stream.getvalue())
+        self.assertNotIn(secret, stream.getvalue())
+
     def test_token_is_not_in_settings_repr(self) -> None:
         with patch.dict(os.environ, {'HWP_API_TOKEN': TOKEN}, clear=True):
             self.assertNotIn(TOKEN, repr(Settings(_env_file=None)))
@@ -113,6 +142,22 @@ class CliTransportTokenTests(unittest.TestCase):
     def test_no_token_sends_no_header(self) -> None:
         with patch.dict(os.environ, {}, clear=True):
             self.assertEqual(transport._auth_headers('http://127.0.0.1:8765', 'http://127.0.0.1:8765/x'), {})
+
+    def test_token_is_never_sent_over_plain_http_off_loopback(self) -> None:
+        with patch.dict(os.environ, {'HWPX_API_TOKEN': TOKEN}):
+            for base in ('http://192.168.0.10:8765', 'http://hwpx.example:8765'):
+                with self.subTest(base=base), self.assertRaises(transport.ApiError):
+                    transport._auth_headers(base, f'{base}/local-cli/status')
+            for base in ('https://hwpx.example', 'http://localhost:8765', 'http://[::1]:8765'):
+                with self.subTest(base=base):
+                    self.assertEqual(
+                        transport._auth_headers(base, f'{base}/x'),
+                        {'Authorization': f'Bearer {TOKEN}'},
+                    )
+
+    def test_plain_http_off_loopback_without_token_is_unchanged(self) -> None:
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(transport._auth_headers('http://192.168.0.10:8765', 'http://192.168.0.10:8765/x'), {})
 
     def test_get_json_attaches_header(self) -> None:
         captured = {}
@@ -134,6 +179,95 @@ class CliTransportTokenTests(unittest.TestCase):
         with patch.dict(os.environ, {'HWPX_API_TOKEN': TOKEN}), patch.object(transport, '_request_raw', fake_raw):
             transport.get_json('http://127.0.0.1:8765', '/local-cli/status')
         self.assertEqual(captured['headers'], {'Authorization': f'Bearer {TOKEN}'})
+
+
+
+class _Recorder(BaseHTTPRequestHandler):
+    def _record(self) -> None:
+        self.server.seen.append((self.command, self.path, self.headers.get('Authorization')))
+
+    def do_GET(self) -> None:
+        self._record()
+        body = b'{"ok": true}'
+        self.send_response(200)
+        self.send_header('Content-Type', 'application/json')
+        self.send_header('Content-Length', str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    do_POST = do_GET
+
+    def log_message(self, *args) -> None:
+        pass
+
+
+class _Redirector(_Recorder):
+    def do_GET(self) -> None:
+        self._record()
+        self.send_response(307)
+        self.send_header('Location', self.server.target + self.path)
+        self.send_header('Content-Length', '0')
+        self.end_headers()
+
+    do_POST = do_GET
+
+
+def _serve(handler, target: str = '') -> ThreadingHTTPServer:
+    server = ThreadingHTTPServer(('127.0.0.1', 0), handler)
+    server.seen = []
+    server.target = target
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server
+
+
+class CliTransportRedirectTests(unittest.TestCase):
+    """Two real local servers: the configured API redirects to another port on the same host."""
+
+    def setUp(self) -> None:
+        self.other = _serve(_Recorder)
+        self.api = _serve(_Redirector, target=f'http://127.0.0.1:{self.other.server_port}')
+        self.base = f'http://127.0.0.1:{self.api.server_port}'
+        for server in (self.other, self.api):
+            self.addCleanup(server.server_close)
+            self.addCleanup(server.shutdown)
+
+    def _assert_token_never_reached_other_origin(self) -> None:
+        self.assertEqual(len(self.api.seen), 1)
+        self.assertEqual(self.api.seen[0][2], f'Bearer {TOKEN}')
+        self.assertEqual(self.other.seen, [])
+
+    def test_get_json_refuses_credentialed_redirect(self) -> None:
+        with patch.dict(os.environ, {'HWPX_API_TOKEN': TOKEN}):
+            with self.assertRaises(transport.ApiError) as caught:
+                transport.get_json(self.base, '/local-cli/status')
+        self.assertEqual(caught.exception.status_code, 307)
+        self._assert_token_never_reached_other_origin()
+
+    def test_post_json_refuses_credentialed_redirect(self) -> None:
+        with patch.dict(os.environ, {'HWPX_API_TOKEN': TOKEN}):
+            with self.assertRaises(transport.ApiError):
+                transport.post_json(self.base, '/local-cli/open', {'x': 1})
+        self._assert_token_never_reached_other_origin()
+
+    def test_download_refuses_credentialed_redirect(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {'HWPX_API_TOKEN': TOKEN}):
+            destination = Path(tmp) / 'artifact.png'
+            with self.assertRaises(transport.ApiError):
+                transport.download_to_path(self.base, '/local-cli/session/s1/artifact/export', destination)
+            self.assertFalse(destination.exists())
+        self._assert_token_never_reached_other_origin()
+
+    def test_download_of_absolute_same_origin_url_refuses_credentialed_redirect(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {'HWPX_API_TOKEN': TOKEN}):
+            with self.assertRaises(transport.ApiError):
+                transport.download_to_path(self.base, f'{self.base}/artifact', Path(tmp) / 'a.png')
+        self._assert_token_never_reached_other_origin()
+
+    def test_unauthenticated_redirect_is_still_followed(self) -> None:
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(transport.get_json(self.base, '/local-cli/status'), {'ok': True})
+        self.assertEqual(self.api.seen[0][2], None)
+        self.assertEqual(self.other.seen, [('GET', '/local-cli/status', None)])
 
 
 if __name__ == '__main__':

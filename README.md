@@ -65,7 +65,9 @@ The CLI picks its server in this order: `--base-url`, the URL cached by `open`, 
 - The API binds to `127.0.0.1` by default and has no CORS.
 - Set `HWP_API_TOKEN` (32+ ASCII characters, no whitespace) to require `Authorization: Bearer <token>` on every request. Without a token, an unauthenticated `GET /health` returns only `status` and `api_port`.
 - The server refuses to start on a non-loopback `HWP_API_HOST` unless `HWP_API_TOKEN` is set.
-- Clients send the token from their own environment: `HWPX_API_TOKEN` for the CLI, `HWPX_MCP_BACKEND_TOKEN` for the MCP adapter. The CLI sends it only to the configured server's origin.
+- The server itself speaks plain HTTP. A non-loopback bind is only safe behind a TLS-terminating proxy or tunnel, and clients must reach it through `https://`. The CLI refuses to send its token over `http://` to a non-loopback host, and the MCP adapter rejects non-loopback HTTP backends.
+- Clients send the token from their own environment: `HWPX_API_TOKEN` for the CLI, `HWPX_MCP_BACKEND_TOKEN` for the MCP adapter. The CLI sends it only to the configured server's origin and refuses to follow a redirect on a request that carries it.
+- Settings validation errors never echo input values, so an invalid token does not appear in startup errors or logs.
 - The browser observation viewer and the independent Windows verifier do not send a token. Use them with the default token-less loopback setup.
 
 Configuration lives in a local `.env` (Git-ignored). `config.example` is the redacted template.

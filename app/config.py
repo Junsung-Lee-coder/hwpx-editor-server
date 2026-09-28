@@ -15,6 +15,8 @@ class Settings(BaseSettings):
         env_prefix='HWP_',
         extra='ignore',
         populate_by_name=True,
+        # Keep HWP_API_TOKEN (and other inputs) out of ValidationError text and startup logs.
+        hide_input_in_errors=True,
     )
 
     api_host: str = '127.0.0.1'
