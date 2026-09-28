@@ -125,12 +125,57 @@ class LocalCliTableStructureMixin:
                 raise LocalCliRuntimeError(f'{OP} {where}: caret is on {here!r}, expected {cell_address(*address)}')
         return state['snapshot']
 
+    def _table_structure_selected_inst_id(self, hwp: Any) -> str | None:
+        try:
+            selected = getattr(hwp, 'CurSelectedCtrl', None)
+        except Exception:
+            return None
+        return self._table_structure_inst_id(selected)
+
+    def _table_structure_select_table(self, hwp: Any, target_inst: str, pos: Any, *, where: str) -> dict[str, Any]:
+        """Select exactly the target table as a control and prove it via CurSelectedCtrl.
+
+        SelectCtrl(CtrlInstID) is tried first: SelectCtrlFront selects the
+        control in front of the caret, which is an embedded picture (not the
+        table) when the caret sits at the start of a cell that begins with one.
+        SelectCtrlFront is only a fallback, and either way the selection is
+        accepted only when CurSelectedCtrl reports the target CtrlInstID.
+        """
+        attempts: list[dict[str, Any]] = []
+        select_ctrl = getattr(hwp, 'SelectCtrl', None)
+        if callable(select_ctrl):
+            for args in ((target_inst, 1), (target_inst,)):
+                try:
+                    raw = select_ctrl(*args)
+                except Exception as exc:
+                    attempts.append({'method': 'SelectCtrl', 'args': list(args), 'error': f'{type(exc).__name__}: {exc}'})
+                    continue
+                selected = self._table_structure_selected_inst_id(hwp)
+                attempts.append({'method': 'SelectCtrl', 'args': list(args), 'result': raw, 'selected_ctrl_inst_id': selected})
+                if selected == target_inst:
+                    return {'method': 'SelectCtrl(CtrlInstID)', 'attempts': attempts}
+        select_front = getattr(hwp, 'SelectCtrlFront', None)
+        if callable(select_front):
+            if pos is not None and len(pos) >= 3:
+                _set_pos(hwp, int(pos[0]), int(pos[1]), int(pos[2]))
+            try:
+                raw = select_front()
+                selected = self._table_structure_selected_inst_id(hwp)
+                attempts.append({'method': 'SelectCtrlFront', 'result': raw, 'selected_ctrl_inst_id': selected})
+                if selected == target_inst:
+                    return {'method': 'SelectCtrlFront', 'attempts': attempts}
+            except Exception as exc:
+                attempts.append({'method': 'SelectCtrlFront', 'error': f'{type(exc).__name__}: {exc}'})
+        raise LocalCliRuntimeError(
+            f'{OP} {where}: could not select the target table {target_inst!r} for grid readback '
+            f'(CurSelectedCtrl never reported it): {attempts!r}'
+        )
+
     def _table_structure_grid(self, hwp: Any, target_inst: str, *, where: str) -> dict[str, Any]:
         """Read the target table's grid through HWPML; the caret must be inside that table."""
-        select_front = getattr(hwp, 'SelectCtrlFront', None)
         get_text = getattr(hwp, 'GetTextFile', None)
-        if not callable(select_front) or not callable(get_text):
-            raise LocalCliRuntimeError(f'{OP} needs SelectCtrlFront and GetTextFile for table grid readback')
+        if not callable(get_text):
+            raise LocalCliRuntimeError(f'{OP} needs GetTextFile for table grid readback')
         parent_inst = self._table_structure_parent_inst_id(hwp)
         if parent_inst != target_inst:
             raise LocalCliRuntimeError(
@@ -138,16 +183,7 @@ class LocalCliTableStructureMixin:
             )
         pos = _get_pos(hwp)
         try:
-            select_front()
-            try:
-                selected = getattr(hwp, 'CurSelectedCtrl', None)
-            except Exception:
-                selected = None
-            selected_inst = self._table_structure_inst_id(selected)
-            if selected_inst is not None and selected_inst != target_inst:
-                raise LocalCliRuntimeError(
-                    f'{OP} {where}: SelectCtrlFront selected CtrlInstID {selected_inst!r}, not the target {target_inst!r}'
-                )
+            self._table_structure_select_table(hwp, target_inst, pos, where=where)
             xml_text = get_text('HWPML2X', 'saveblock')
         finally:
             if pos is not None and len(pos) >= 3:

@@ -376,8 +376,11 @@ class _FakeTableHwp:
     ``caret_after_delete='previous'`` leaves the caret on the previous row
     after TableDeleteRow; ``sticky_selection`` ignores Cancel;
     ``goto_leaves_selection`` leaves an uncancellable block after goto_addr;
-    ``parent_inst`` / ``parent_after_first_action`` / ``selected_inst``
-    change which table the caret or SelectCtrlFront reports;
+    ``parent_inst`` / ``parent_after_first_action`` change which table the
+    caret reports; ``select_wrong`` makes every control selection land on
+    another control; ``front_after_first_action`` makes SelectCtrlFront pick
+    that control once a mutating action ran (an embedded picture at the
+    caret); ``no_select_ctrl`` removes SelectCtrl;
     ``snapshot_unknown`` makes the selection state unreadable;
     ``range_off`` makes get_selected_range report a wider block.
     """
@@ -401,7 +404,12 @@ class _FakeTableHwp:
         self.goto_leaves_selection = bool(faults.get('goto_leaves_selection'))
         self.parent_inst = faults.get('parent_inst', TARGET_INST)
         self.parent_after_first_action = faults.get('parent_after_first_action')
-        self.selected_inst = faults.get('selected_inst', TARGET_INST)
+        self.select_wrong = bool(faults.get('select_wrong'))
+        self.front_inst = TARGET_INST
+        self.front_after_first_action = faults.get('front_after_first_action')
+        self.current_selected: str | None = None
+        if faults.get('no_select_ctrl'):
+            self.SelectCtrl = None  # type: ignore[assignment]
         self.snapshot_unknown = bool(faults.get('snapshot_unknown'))
         self.has_selection_unknown = bool(faults.get('has_selection_unknown'))
         self.range_off = bool(faults.get('range_off'))
@@ -414,7 +422,12 @@ class _FakeTableHwp:
 
     @property
     def CurSelectedCtrl(self) -> _Ctrl | None:  # noqa: N802
-        return _Ctrl(self.selected_inst) if self.selected else None
+        return _Ctrl(self.current_selected) if self.selected and self.current_selected else None
+
+    def SelectCtrl(self, inst: str, option: int = 1) -> bool:  # noqa: N802
+        self.selected = True
+        self.current_selected = OTHER_INST if self.select_wrong else inst
+        return True
 
     def get_pos(self) -> tuple[int, int, int]:
         return (1, 0, 0)
@@ -446,6 +459,7 @@ class _FakeTableHwp:
 
     def SelectCtrlFront(self) -> bool:  # noqa: N802
         self.selected = True
+        self.current_selected = OTHER_INST if self.select_wrong else self.front_inst
         return True
 
     def GetTextFile(self, fmt: str, option: str) -> str:  # noqa: N802
@@ -470,6 +484,8 @@ class _FakeTableHwp:
         self.log.append(name)
         if name in self.MUTATING and self.parent_after_first_action is not None:
             self.parent_inst = self.parent_after_first_action
+        if name in self.MUTATING and self.front_after_first_action is not None:
+            self.front_inst = self.front_after_first_action
         if name in self.noop:
             return True
         row, col = self.caret
@@ -646,7 +662,7 @@ class ServiceFlowTests(unittest.TestCase):
     def test_caret_in_another_table_is_refused_before_mutation(self) -> None:
         for faults, message in (
             ({'parent_inst': OTHER_INST}, 'grid readback is not bound to the target table'),
-            ({'selected_inst': OTHER_INST}, 'SelectCtrlFront selected CtrlInstID'),
+            ({'select_wrong': True}, 'could not select the target table'),
         ):
             with self.subTest(faults=faults):
                 hwp = _FakeTableHwp(3, 2, **faults)
@@ -655,6 +671,24 @@ class ServiceFlowTests(unittest.TestCase):
                 self.assertNotIsInstance(caught.exception, LocalCliMutationError)
                 self.assertIn(message, str(caught.exception))
                 self.assertEqual(hwp.log, [])
+
+    def test_picture_at_caret_does_not_break_post_edit_readback(self) -> None:
+        # Native finding on 768647e: with a picture in A2, SelectCtrlFront picked
+        # the picture during post-edit readback and a correct edit was reported
+        # as possibly-persisted failure. Exact SelectCtrl(CtrlInstID) avoids it.
+        hwp = _FakeTableHwp(3, 2, front_after_first_action='gso-picture')
+        hwp.grid.cells[(2, 1)][3] = ('PICTURE',)
+        result = _run(hwp, action='insert_row_below', row=1)
+        self.assertTrue(result['verification']['ok'], result['verification'])
+        self.assertEqual(hwp.grid.cells[(3, 1)][3], ('PICTURE',))
+
+    def test_readback_falls_back_to_select_ctrl_front_only_when_it_selects_the_target(self) -> None:
+        hwp = _FakeTableHwp(3, 2, no_select_ctrl=True)
+        self.assertTrue(_run(hwp, action='insert_row_below', row=1)['verification']['ok'])
+        hwp = _FakeTableHwp(3, 2, no_select_ctrl=True, front_after_first_action='gso-picture')
+        with self.assertRaises(LocalCliMutationError) as caught:
+            _run(hwp, action='insert_row_below', row=1)
+        self.assertIn('could not select the target table', str(caught.exception))
 
     def test_table_switch_between_repeats_stops_with_possible_mutation(self) -> None:
         # After the first native delete the caret reports a different table:
