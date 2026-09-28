@@ -72,13 +72,22 @@ class _RefuseCredentialedRedirect(request.HTTPRedirectHandler):
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
-_OPENER = request.build_opener(_RefuseCredentialedRedirect)
+def _opener_for(req: request.Request) -> request.OpenerDirector:
+    """Build the opener per request so environment proxies are read at call time.
+
+    A request that carries the API token never goes through a proxy: the
+    loopback/https checks in _auth_headers cover the destination, and a
+    proxy would receive the bearer header on a route they do not see.
+    """
+    if req.has_header('Authorization'):
+        return request.build_opener(request.ProxyHandler({}), _RefuseCredentialedRedirect)
+    return request.build_opener(_RefuseCredentialedRedirect)
 
 
 def _request_raw(method: str, url: str, *, headers: dict[str, str] | None = None, body: bytes | None = None):
     req = request.Request(url, method=method, headers=headers or {}, data=body)
     try:
-        return _OPENER.open(req)
+        return _opener_for(req).open(req)
     except error.HTTPError as exc:
         payload = {}
         try:

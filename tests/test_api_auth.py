@@ -202,9 +202,11 @@ class _Recorder(BaseHTTPRequestHandler):
 
 
 class _Redirector(_Recorder):
+    # 302 is followed by urllib for GET and POST alike (POST becomes GET), so
+    # these tests fail if the credentialed-redirect guard is removed.
     def do_GET(self) -> None:
         self._record()
-        self.send_response(307)
+        self.send_response(302)
         self.send_header('Location', self.server.target + self.path)
         self.send_header('Content-Length', '0')
         self.end_headers()
@@ -240,7 +242,7 @@ class CliTransportRedirectTests(unittest.TestCase):
         with patch.dict(os.environ, {'HWPX_API_TOKEN': TOKEN}):
             with self.assertRaises(transport.ApiError) as caught:
                 transport.get_json(self.base, '/local-cli/status')
-        self.assertEqual(caught.exception.status_code, 307)
+        self.assertEqual(caught.exception.status_code, 302)
         self._assert_token_never_reached_other_origin()
 
     def test_post_json_refuses_credentialed_redirect(self) -> None:
@@ -268,6 +270,37 @@ class CliTransportRedirectTests(unittest.TestCase):
             self.assertEqual(transport.get_json(self.base, '/local-cli/status'), {'ok': True})
         self.assertEqual(self.api.seen[0][2], None)
         self.assertEqual(self.other.seen, [('GET', '/local-cli/status', None)])
+
+
+class CliTransportProxyTests(unittest.TestCase):
+    """An environment HTTP proxy must never carry a credentialed request."""
+
+    def setUp(self) -> None:
+        self.api = _serve(_Recorder)
+        self.proxy = _serve(_Recorder)
+        self.base = f'http://localhost:{self.api.server_port}'
+        proxy_url = f'http://127.0.0.1:{self.proxy.server_port}'
+        self.proxy_env = {'http_proxy': proxy_url, 'HTTP_PROXY': proxy_url, 'no_proxy': '', 'NO_PROXY': ''}
+        for server in (self.api, self.proxy):
+            self.addCleanup(server.server_close)
+            self.addCleanup(server.shutdown)
+
+    def test_environment_proxy_is_active_for_unauthenticated_requests(self) -> None:
+        # Guards the test setup: without a token the proxy route is taken.
+        env = {k: v for k, v in os.environ.items() if k != 'HWPX_API_TOKEN'} | self.proxy_env
+        with patch.dict(os.environ, env, clear=True):
+            transport.get_json(self.base, '/local-cli/status')
+        self.assertEqual(len(self.proxy.seen), 1)
+        self.assertEqual(self.api.seen, [])
+
+    def test_authenticated_requests_bypass_environment_proxy(self) -> None:
+        with patch.dict(os.environ, {**self.proxy_env, 'HWPX_API_TOKEN': TOKEN}):
+            self.assertEqual(transport.get_json(self.base, '/local-cli/status'), {'ok': True})
+            transport.post_json(self.base, '/local-cli/open', {'x': 1})
+            with tempfile.TemporaryDirectory() as tmp:
+                transport.download_to_path(self.base, '/artifact', Path(tmp) / 'a.bin')
+        self.assertEqual(self.proxy.seen, [])
+        self.assertEqual([auth for _method, _path, auth in self.api.seen], [f'Bearer {TOKEN}'] * 3)
 
 
 if __name__ == '__main__':
