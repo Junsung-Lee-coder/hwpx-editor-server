@@ -2,6 +2,9 @@
 # Copy this file to .env on a private Windows machine. Never commit .env.
 HWP_API_HOST=127.0.0.1
 HWP_API_PORT=8765
+# Optional bearer token (32+ ASCII characters, no whitespace). Required when HWP_API_HOST is not loopback.
+# Clients send it as HWPX_API_TOKEN (CLI) or HWPX_MCP_BACKEND_TOKEN (MCP adapter).
+HWP_API_TOKEN=
 HWP_SPOOL_ROOT=./spool
 HWP_ALLOWED_EXTENSIONS=.hwpx,.hwp
 HWP_MAX_UPLOAD_MB=50

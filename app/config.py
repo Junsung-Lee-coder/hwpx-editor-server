@@ -3,8 +3,10 @@ from __future__ import annotations
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import AliasChoices, Field, field_validator
+from pydantic import AliasChoices, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from app.api_auth import is_loopback_host
 
 
 class Settings(BaseSettings):
@@ -13,10 +15,14 @@ class Settings(BaseSettings):
         env_prefix='HWP_',
         extra='ignore',
         populate_by_name=True,
+        # Keep HWP_API_TOKEN (and other inputs) out of ValidationError text and startup logs.
+        hide_input_in_errors=True,
     )
 
     api_host: str = '127.0.0.1'
     api_port: int = 8765
+    # Optional bearer token. Required whenever api_host is not a loopback address.
+    api_token: str = Field(default='', repr=False)
     spool_root: Path = Path('./spool')
     pdftoppm_path: str | None = Field(
         default=None,
@@ -45,6 +51,19 @@ class Settings(BaseSettings):
         if not 1 <= value <= 65535:
             raise ValueError('api_port must be between 1 and 65535')
         return value
+
+    @field_validator('api_token')
+    @classmethod
+    def _validate_api_token(cls, value: str) -> str:
+        if value and (len(value) < 32 or not value.isascii() or any(c.isspace() for c in value)):
+            raise ValueError('api_token must be at least 32 ASCII characters with no whitespace')
+        return value
+
+    @model_validator(mode='after')
+    def _require_token_off_loopback(self) -> 'Settings':
+        if not is_loopback_host(self.api_host) and not self.api_token:
+            raise ValueError('HWP_API_TOKEN is required when HWP_API_HOST is not a loopback address')
+        return self
 
     @field_validator('spool_root', mode='before')
     @classmethod

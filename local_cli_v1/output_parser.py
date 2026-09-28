@@ -1047,7 +1047,7 @@ def _int_cap(value: Any, default: int) -> int:
         return default
     try:
         parsed = int(value)
-    except Exception:
+    except (TypeError, ValueError, OverflowError):
         return default
     return parsed if parsed > 0 else default
 

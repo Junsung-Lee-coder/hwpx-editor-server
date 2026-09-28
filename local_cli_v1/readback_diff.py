@@ -82,7 +82,7 @@ def _float_value(value: Any) -> float | None:
         return None
     try:
         return round(float(value), 3)
-    except Exception:
+    except (TypeError, ValueError, OverflowError):
         return None
 
 

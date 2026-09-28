@@ -259,7 +259,7 @@ def main() -> int:
     registry = get_command_package_registry()
     ops = registry.ops()
     server_path = ROOT / 'app' / 'local_cli_service.py'
-    server_ops = _literal_string_set_assignment(server_path, '_BUNDLE_ALLOWED_OPS')
+    server_ops = _literal_string_set_assignment(ROOT / 'app' / 'local_cli_service_support.py', '_BUNDLE_ALLOWED_OPS')
     server_allowed_keys = _literal_allowed_keys(server_path)
 
     require(ops == server_ops, f'command package coverage drift: missing={sorted(server_ops - ops)} extra={sorted(ops - server_ops)}')

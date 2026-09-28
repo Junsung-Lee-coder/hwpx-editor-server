@@ -1992,7 +1992,7 @@ def _resolve_pdftoppm(
     if configured is None:
         try:
             configured = get_settings().pdftoppm_path
-        except Exception:
+        except (OSError, ValueError):
             configured = None
     try:
         result = resolve_pdftoppm(
@@ -2246,7 +2246,7 @@ def _maybe_create_contact_sheet(page_pngs: list[Path], out_dir: Path) -> Path | 
 
     try:
         from PIL import Image, ImageDraw
-    except Exception:
+    except ImportError:
         return None
 
     try:
