@@ -12,6 +12,7 @@ Hancom's ``A1`` addresses (``A1`` is row 1, col 1).
 
 from __future__ import annotations
 
+import hashlib
 import re
 import xml.etree.ElementTree as ET
 from typing import Any, Mapping
@@ -115,6 +116,9 @@ def parse_table_grid_xml(xml_text: str) -> dict[str, Any]:
                 'col': col_addr + 1,
                 'row_span': _int_attr(cell, 'RowSpan') or 1,
                 'col_span': _int_attr(cell, 'ColSpan') or 1,
+                # Whitespace-normalized text: the per-cell content fingerprint
+                # that tells which rows/columns actually moved or vanished.
+                'text': ' '.join(''.join(cell.itertext()).split()),
             })
         if cells is None:
             break
@@ -128,18 +132,57 @@ def parse_table_grid_xml(xml_text: str) -> dict[str, Any]:
     }
 
 
-def _cell_at(grid: Mapping[str, Any], row: int, col: int) -> dict[str, int] | None:
+def public_grid(grid: Mapping[str, Any]) -> dict[str, Any]:
+    """Grid for responses and logs: cell text replaced by a short hash and length."""
+    cells = grid.get('cells')
+    return {
+        'rows': grid['rows'],
+        'cols': grid['cols'],
+        'cell_count': grid.get('cell_count'),
+        'cells': None if cells is None else [
+            {
+                **{key: cell[key] for key in ('row', 'col', 'row_span', 'col_span')},
+                'text_sha256': hashlib.sha256(cell['text'].encode('utf-8')).hexdigest()[:16],
+                'text_chars': len(cell['text']),
+            }
+            for cell in cells
+        ],
+    }
+
+
+def _cell_at(grid: Mapping[str, Any], row: int, col: int) -> dict[str, Any] | None:
     for cell in grid.get('cells') or []:
         if cell['row'] == row and cell['col'] == col:
             return cell
     return None
 
 
-def _covering_cell(grid: Mapping[str, Any], row: int, col: int) -> dict[str, int] | None:
+def _covering_cell(grid: Mapping[str, Any], row: int, col: int) -> dict[str, Any] | None:
     for cell in grid.get('cells') or []:
         if cell['row'] <= row < cell['row'] + cell['row_span'] and cell['col'] <= col < cell['col'] + cell['col_span']:
             return cell
     return None
+
+
+def _require_unmerged_lines(before: Mapping[str, Any], *, rows: range | None = None, cols: range | None = None) -> None:
+    """Every cell touching the given rows (or columns) must be a plain 1x1 cell.
+
+    That excludes merged cells in the edited lines and cells spanning across
+    them, which is what makes the post-edit layout exactly predictable.
+    """
+    points = (
+        [(r, c) for r in rows for c in range(1, before['cols'] + 1)]
+        if rows is not None
+        else [(r, c) for c in cols for r in range(1, before['rows'] + 1)]
+    )
+    for r, c in points:
+        cell = _covering_cell(before, r, c)
+        if cell is None or cell['row_span'] != 1 or cell['col_span'] != 1:
+            owner = cell_address(cell['row'], cell['col']) if cell else 'no cell'
+            line = 'row' if rows is not None else 'column'
+            raise TableStructureError(
+                f'{line} edit touches merged cell {owner} at {cell_address(r, c)}; row/column edits only run on lines of unmerged cells'
+            )
 
 
 def check_plan(step: Mapping[str, Any], before: Mapping[str, Any]) -> dict[str, Any]:
@@ -157,6 +200,8 @@ def check_plan(step: Mapping[str, Any], before: Mapping[str, Any]) -> dict[str, 
     row, col = int(step['row']), int(step['col'])
     if not (1 <= row <= rows and 1 <= col <= cols):
         raise TableStructureError(f'target cell {cell_address(row, col)} is outside the {rows}x{cols} table')
+    if before.get('cells') is None:
+        raise TableStructureError(f'{action} needs cell-level readback (RowAddr/ColAddr), which this table did not report')
     plan: dict[str, Any] = {'action': action, 'row': row, 'col': col, 'address': cell_address(row, col)}
     count = int(step.get('count') or 1)
     if action in ROW_COL_ACTIONS:
@@ -176,9 +221,12 @@ def check_plan(step: Mapping[str, Any], before: Mapping[str, Any]) -> dict[str, 
                 raise TableStructureError(f'deleting {count} column(s) from column {col} runs past the last column {cols}')
             if cols - count < 1:
                 raise TableStructureError('refusing to delete every column; delete the table as a control instead')
+        span = count if action.startswith('delete') else 1
+        if 'row' in action:
+            _require_unmerged_lines(before, rows=range(row, row + span))
+        else:
+            _require_unmerged_lines(before, cols=range(col, col + span))
         return plan
-    if before.get('cells') is None:
-        raise TableStructureError(f'{action} needs cell-level readback (RowAddr/ColAddr), which this table did not report')
     if action == 'merge_cells':
         end_row, end_col = int(step['end_row']), int(step['end_col'])
         if not (row <= end_row <= rows and col <= end_col <= cols):
@@ -208,63 +256,116 @@ def check_plan(step: Mapping[str, Any], before: Mapping[str, Any]) -> dict[str, 
         raise TableStructureError(f'{cell_address(row, col)} is covered by merged cell {where}; target its top-left address')
     if cell['row_span'] != 1 or cell['col_span'] != 1:
         raise TableStructureError(f'{cell_address(row, col)} is a merged cell; split_cell only accepts an unmerged cell')
+    if rows + split_rows - 1 > MAX_GRID or cols + split_cols - 1 > MAX_GRID:
+        raise TableStructureError(f'split would exceed {MAX_GRID} rows or columns')
     plan.update({'split_rows': split_rows, 'split_cols': split_cols})
     return plan
 
 
-def evaluate_change(plan: Mapping[str, Any], before: Mapping[str, Any], after: Mapping[str, Any]) -> dict[str, Any]:
-    """Compare before/after grids with what the plan requires.
+def _shift(value: int, at: int, by: int) -> int:
+    return value + by if value >= at else value
 
-    ``ok`` is True only when every expectation holds; ``reasons`` lists the
-    ones that did not.
+
+def expected_layout(plan: Mapping[str, Any], before: Mapping[str, Any]) -> dict[str, Any]:
+    """The exact grid the plan must produce.
+
+    Each expected cell carries ``text``: the text it must keep, '' for a new
+    empty cell, or None when Hancom decides the content (merged or split
+    cells). ``merged_texts`` lists texts the merged cell must still contain.
     """
     action = plan['action']
-    expected: dict[str, Any] = {'rows': before['rows'], 'cols': before['cols']}
-    count = int(plan.get('count') or 0)
-    if action.startswith('insert_row'):
-        expected['rows'] = before['rows'] + count
-    elif action.startswith('insert_col'):
-        expected['cols'] = before['cols'] + count
-    elif action == 'delete_row':
-        expected['rows'] = before['rows'] - count
-    elif action == 'delete_col':
-        expected['cols'] = before['cols'] - count
+    rows, cols = before['rows'], before['cols']
+    cells = [dict(cell) for cell in before['cells']]
+    merged_texts: list[str] = []
+    if action in ROW_COL_ACTIONS:
+        n = plan['count']
+        on_rows = 'row' in action
+        index = plan['row'] if on_rows else plan['col']
+        axis, span_axis = ('row', 'col') if on_rows else ('col', 'row')
+        extent = cols if on_rows else rows
+        if action.startswith('insert'):
+            at = index if action in ('insert_row_above', 'insert_col_left') else index + 1
+            for cell in cells:
+                cell[axis] = _shift(cell[axis], at, n)
+            for i in range(n):
+                for other in range(1, extent + 1):
+                    cells.append({axis: at + i, span_axis: other, 'row_span': 1, 'col_span': 1, 'text': ''})
+        else:
+            cells = [cell for cell in cells if not (index <= cell[axis] < index + n)]
+            for cell in cells:
+                if cell[axis] >= index + n:
+                    cell[axis] -= n
+            n = -n
+        if on_rows:
+            rows += n
+        else:
+            cols += n
+    elif action == 'merge_cells':
+        r, c, er, ec = plan['row'], plan['col'], plan['end_row'], plan['end_col']
+        area = [cell for cell in cells if r <= cell['row'] <= er and c <= cell['col'] <= ec]
+        merged_texts = [cell['text'] for cell in sorted(area, key=lambda item: (item['row'], item['col'])) if cell['text']]
+        cells = [cell for cell in cells if cell not in area]
+        cells.append({'row': r, 'col': c, 'row_span': er - r + 1, 'col_span': ec - c + 1, 'text': None})
+    else:  # split_cell: a 1x1 cell gains (R-1) row lines and (C-1) column lines.
+        r, c, dr, dc = plan['row'], plan['col'], plan['split_rows'] - 1, plan['split_cols'] - 1
+        target = _cell_at(before, r, c)
+        cells = []
+        for cell in before['cells']:
+            if cell is target:
+                continue
+            moved = dict(cell)
+            if cell['row'] <= r < cell['row'] + cell['row_span']:
+                moved['row_span'] += dr
+            if cell['col'] <= c < cell['col'] + cell['col_span']:
+                moved['col_span'] += dc
+            moved['row'] = _shift(cell['row'], r + 1, dr)
+            moved['col'] = _shift(cell['col'], c + 1, dc)
+            cells.append(moved)
+        for i in range(dr + 1):
+            for j in range(dc + 1):
+                cells.append({'row': r + i, 'col': c + j, 'row_span': 1, 'col_span': 1, 'text': None})
+        rows, cols = rows + dr, cols + dc
+    cells.sort(key=lambda item: (item['row'], item['col']))
+    return {'rows': rows, 'cols': cols, 'cell_count': len(cells), 'cells': cells, 'merged_texts': merged_texts}
+
+
+def evaluate_change(plan: Mapping[str, Any], before: Mapping[str, Any], after: Mapping[str, Any]) -> dict[str, Any]:
+    """Compare the observed grid with the exact expected layout.
+
+    Checks dimensions, every cell's position and span, and every cell's text
+    fingerprint, so deleting or inserting at the wrong line, or splitting on
+    the wrong axis, cannot pass on counts alone. ``ok`` is True only when
+    nothing differs; ``reasons`` lists up to ten differences.
+    """
+    expected = expected_layout(plan, before)
     reasons: list[str] = []
     for key in ('rows', 'cols'):
-        if action == 'split_cell':
-            # Splitting can add grid lines; it must never remove them.
-            if after[key] < before[key]:
-                reasons.append(f'{key} shrank from {before[key]} to {after[key]}')
-        elif after[key] != expected[key]:
+        if after[key] != expected[key]:
             reasons.append(f'{key} is {after[key]}, expected {expected[key]}')
-    if action == 'merge_cells':
-        expected['cell_count'] = before['cell_count'] - (plan['area'] - 1)
-        expected['merged_cell'] = {
-            'row': plan['row'],
-            'col': plan['col'],
-            'row_span': plan['end_row'] - plan['row'] + 1,
-            'col_span': plan['end_col'] - plan['col'] + 1,
-        }
-        if after.get('cells') is None:
-            reasons.append('post-merge readback has no cell-level data')
-        else:
-            if after['cell_count'] != expected['cell_count']:
-                reasons.append(f'cell_count is {after["cell_count"]}, expected {expected["cell_count"]}')
-            merged = _cell_at(after, plan['row'], plan['col'])
-            if merged is None or {k: merged[k] for k in ('row_span', 'col_span')} != {
-                'row_span': expected['merged_cell']['row_span'],
-                'col_span': expected['merged_cell']['col_span'],
-            }:
-                reasons.append(f'{plan["address"]} does not span the requested range after merge: {merged!r}')
-    elif action == 'split_cell':
-        expected['cell_count'] = before['cell_count'] + plan['split_rows'] * plan['split_cols'] - 1
-        if after.get('cells') is None:
-            reasons.append('post-split readback has no cell-level data')
-        elif after['cell_count'] != expected['cell_count']:
-            reasons.append(f'cell_count is {after["cell_count"]}, expected {expected["cell_count"]}')
+    if after.get('cells') is None:
+        reasons.append('post-edit readback has no cell-level data')
+    else:
+        observed = {(cell['row'], cell['col']): cell for cell in after['cells']}
+        wanted = {(cell['row'], cell['col']): cell for cell in expected['cells']}
+        for key in sorted(set(observed) | set(wanted)):
+            where = cell_address(*key)
+            got, want = observed.get(key), wanted.get(key)
+            if got is None:
+                reasons.append(f'expected a cell at {where}, found none')
+            elif want is None:
+                reasons.append(f'unexpected cell at {where}')
+            elif (got['row_span'], got['col_span']) != (want['row_span'], want['col_span']):
+                reasons.append(f'{where} spans {got["row_span"]}x{got["col_span"]}, expected {want["row_span"]}x{want["col_span"]}')
+            elif want['text'] is not None and got['text'] != want['text']:
+                reasons.append(f'{where} content changed (expected {len(want["text"])} chars, found {len(got["text"])})')
+        if plan['action'] == 'merge_cells':
+            merged = observed.get((plan['row'], plan['col']))
+            missing = [text for text in expected['merged_texts'] if merged is None or text not in merged['text']]
+            if missing:
+                reasons.append(f'merged cell {plan["address"]} lost content from {len(missing)} source cell(s)')
     return {
         'ok': not reasons,
-        'expected': expected,
+        'expected': {'rows': expected['rows'], 'cols': expected['cols'], 'cell_count': expected['cell_count']},
         'observed': {'rows': after['rows'], 'cols': after['cols'], 'cell_count': after.get('cell_count')},
-        'reasons': reasons,
+        'reasons': reasons[:10],
     }

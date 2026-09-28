@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import unittest
-from typing import Any
+from typing import Any, Callable
 
 from app.command_packages.runtime import get_command_package_registry
 from app.local_cli_runtime import LocalCliRuntimeError
@@ -13,32 +13,49 @@ from app.table_structure import (
     evaluate_change,
     parse_cell_address,
     parse_table_grid_xml,
+    public_grid,
 )
 from local_cli_v1.bundles import BundleError, build_named_bundle
 
+Cell = tuple  # (row, col, row_span, col_span[, text]), 1-based
 
-def _hwpml(rows: int, cols: int, cells: list[tuple[int, int, int, int]] | None = None, *, declaration: bool = False) -> str:
-    """cells: (row, col, row_span, col_span), 1-based; default is an unmerged grid."""
+
+def _hwpml(rows: int, cols: int, cells: list[Cell] | None = None, *, declaration: bool = False) -> str:
+    """Default cells: an unmerged grid whose texts are 'R<r>C<c>'."""
     if cells is None:
-        cells = [(r, c, 1, 1) for r in range(1, rows + 1) for c in range(1, cols + 1)]
+        cells = [(r, c, 1, 1, f'R{r}C{c}') for r in range(1, rows + 1) for c in range(1, cols + 1)]
     by_row: dict[int, list[str]] = {}
-    for row, col, row_span, col_span in cells:
+    for row, col, row_span, col_span, *text in cells:
+        body = f'<P><TEXT><CHAR>{text[0]}</CHAR></TEXT></P>' if text and text[0] else ''
         by_row.setdefault(row, []).append(
-            f'<CELL RowAddr="{row - 1}" ColAddr="{col - 1}" RowSpan="{row_span}" ColSpan="{col_span}"><PARALIST/></CELL>'
+            f'<CELL RowAddr="{row - 1}" ColAddr="{col - 1}" RowSpan="{row_span}" ColSpan="{col_span}"><PARALIST>{body}</PARALIST></CELL>'
         )
-    body = ''.join(f'<ROW>{"".join(items)}</ROW>' for _row, items in sorted(by_row.items()))
+    rows_xml = ''.join(f'<ROW>{"".join(items)}</ROW>' for _row, items in sorted(by_row.items()))
     prefix = '<?xml version="1.0" encoding="UTF-16" standalone="no"?>' if declaration else ''
-    return f'{prefix}<HWPML><BODY><SECTION><P><TEXT><TABLE RowCount="{rows}" ColCount="{cols}">{body}</TABLE></TEXT></P></SECTION></BODY></HWPML>'
+    return f'{prefix}<HWPML><BODY><SECTION><P><TEXT><TABLE RowCount="{rows}" ColCount="{cols}">{rows_xml}</TABLE></TEXT></P></SECTION></BODY></HWPML>'
 
 
-def _grid(rows: int, cols: int, cells: list[tuple[int, int, int, int]] | None = None) -> dict[str, Any]:
+def _grid(rows: int, cols: int, cells: list[Cell] | None = None) -> dict[str, Any]:
     return parse_table_grid_xml(_hwpml(rows, cols, cells))
+
+
+def _unmerged(rows: int, cols: int, text: Callable[[int, int], str]) -> dict[str, Any]:
+    return _grid(rows, cols, [(r, c, 1, 1, text(r, c)) for r in range(1, rows + 1) for c in range(1, cols + 1)])
+
+
+def _from_old_rows(rows: int, cols: int, old_row: dict[int, int]) -> dict[str, Any]:
+    """New row r holds old row old_row[r]'s text, or is empty when r is not mapped."""
+    return _unmerged(rows, cols, lambda r, c: f'R{old_row[r]}C{c}' if r in old_row else '')
 
 
 def _step(**overrides: Any) -> dict[str, Any]:
     step = {'action': 'insert_row_below', 'row': 1, 'col': 1, 'expected_rows': 3, 'expected_cols': 2}
     step.update(overrides)
     return step
+
+
+# 3x2 grid with A1:A2 merged vertically.
+MERGED_COL_A = [(1, 1, 2, 1, 'A'), (1, 2, 1, 1, 'B1'), (2, 2, 1, 1, 'B2'), (3, 1, 1, 1, 'A3'), (3, 2, 1, 1, 'B3')]
 
 
 class AddressTests(unittest.TestCase):
@@ -53,17 +70,22 @@ class AddressTests(unittest.TestCase):
 
 
 class GridReadbackTests(unittest.TestCase):
-    def test_counts_rows_cols_and_cells(self) -> None:
+    def test_counts_rows_cols_cells_and_text(self) -> None:
         grid = _grid(2, 3)
         self.assertEqual((grid['rows'], grid['cols'], grid['cell_count']), (2, 3, 6))
-        self.assertEqual(grid['cells'][0], {'row': 1, 'col': 1, 'row_span': 1, 'col_span': 1})
+        self.assertEqual(grid['cells'][0], {'row': 1, 'col': 1, 'row_span': 1, 'col_span': 1, 'text': 'R1C1'})
+
+    def test_public_grid_hides_cell_text(self) -> None:
+        cell = public_grid(_grid(1, 2))['cells'][0]
+        self.assertNotIn('text', cell)
+        self.assertEqual((cell['text_chars'], len(cell['text_sha256'])), (4, 16))
 
     def test_accepts_xml_declaration_in_str(self) -> None:
         self.assertEqual(parse_table_grid_xml(_hwpml(1, 2, declaration=True))['cell_count'], 2)
 
     def test_ignores_nested_tables(self) -> None:
         nested = '<TABLE RowCount="5" ColCount="5"><ROW><CELL RowAddr="0" ColAddr="0" RowSpan="1" ColSpan="1"/></ROW></TABLE>'
-        xml = _hwpml(1, 2).replace('<PARALIST/></CELL>', f'<PARALIST><P><TEXT>{nested}</TEXT></P></PARALIST></CELL>', 1)
+        xml = _hwpml(1, 2).replace('</PARALIST></CELL>', f'<P><TEXT>{nested}</TEXT></P></PARALIST></CELL>', 1)
         grid = parse_table_grid_xml(xml)
         self.assertEqual((grid['rows'], grid['cols'], grid['cell_count']), (1, 2, 2))
 
@@ -100,6 +122,21 @@ class PlanTests(unittest.TestCase):
         self.assertEqual(plan['hancom_action'], 'TableInsertRightColumn')
         self.assertEqual((plan['count'], plan['address']), (2, 'B1'))
 
+    def test_row_col_edits_refuse_lines_touching_merged_cells(self) -> None:
+        merged = _grid(3, 2, MERGED_COL_A)
+        for step in (
+            _step(action='insert_row_below', row=1),  # A1:A2 spans across the new line
+            _step(action='insert_row_above', row=2),
+            _step(action='delete_row', row=2),
+            _step(action='insert_col_right', col=1),  # column A holds the merged cell
+            _step(action='delete_col', col=1),
+        ):
+            with self.subTest(step=step), self.assertRaisesRegex(TableStructureError, 'merged cell A1'):
+                check_plan(step, merged)
+        # Lines away from the merged cell are accepted.
+        check_plan(_step(action='insert_row_below', row=3), merged)
+        check_plan(_step(action='delete_col', col=2), merged)
+
     def test_merge_requires_unmerged_range_inside_table(self) -> None:
         plan = check_plan(_step(action='merge_cells', end_row=2, end_col=2), _grid(3, 2))
         self.assertEqual((plan['area'], plan['end_address']), (4, 'B2'))
@@ -107,9 +144,8 @@ class PlanTests(unittest.TestCase):
             check_plan(_step(action='merge_cells', end_row=4, end_col=2), _grid(3, 2))
         with self.assertRaisesRegex(TableStructureError, 'at least two'):
             check_plan(_step(action='merge_cells', end_row=1, end_col=1), _grid(3, 2))
-        merged = _grid(3, 2, [(1, 1, 2, 1), (1, 2, 1, 1), (2, 2, 1, 1), (3, 1, 1, 1), (3, 2, 1, 1)])
         with self.assertRaisesRegex(TableStructureError, 'already merged'):
-            check_plan(_step(action='merge_cells', end_row=2, end_col=2), merged)
+            check_plan(_step(action='merge_cells', end_row=2, end_col=2), _grid(3, 2, MERGED_COL_A))
 
     def test_split_requires_unmerged_top_left_cell(self) -> None:
         merged = _grid(2, 2, [(1, 1, 1, 2), (2, 1, 1, 1), (2, 2, 1, 1)])
@@ -120,76 +156,114 @@ class PlanTests(unittest.TestCase):
         with self.assertRaisesRegex(TableStructureError, '>= 2'):
             check_plan(_step(action='split_cell', expected_rows=2, expected_cols=2), _grid(2, 2))
 
-    def test_merge_and_split_need_cell_level_readback(self) -> None:
+    def test_every_action_needs_cell_level_readback(self) -> None:
         grid = parse_table_grid_xml('<HWPML><TABLE RowCount="2" ColCount="2"><ROW><CELL/></ROW></TABLE></HWPML>')
-        with self.assertRaisesRegex(TableStructureError, 'cell-level'):
-            check_plan(_step(action='merge_cells', end_row=1, end_col=2, expected_rows=2), grid)
+        for step in (_step(expected_rows=2), _step(action='merge_cells', end_row=1, end_col=2, expected_rows=2)):
+            with self.subTest(step=step), self.assertRaisesRegex(TableStructureError, 'cell-level'):
+                check_plan(step, grid)
 
 
 class EvaluateChangeTests(unittest.TestCase):
-    def _plan(self, before: dict[str, Any], **step: Any) -> dict[str, Any]:
-        return check_plan(_step(expected_rows=before['rows'], expected_cols=before['cols'], **step), before)
+    def _check(self, before: dict[str, Any], after: dict[str, Any], **step: Any) -> dict[str, Any]:
+        plan = check_plan(_step(expected_rows=before['rows'], expected_cols=before['cols'], **step), before)
+        return evaluate_change(plan, before, after)
 
-    def test_row_and_column_counts(self) -> None:
+    def test_insert_and_delete_check_every_cell(self) -> None:
         before = _grid(3, 2)
         cases = (
-            ({'action': 'insert_row_above', 'count': 2}, _grid(5, 2), True),
-            ({'action': 'insert_row_below'}, _grid(3, 2), False),
-            ({'action': 'insert_col_left'}, _grid(3, 3), True),
-            ({'action': 'delete_row', 'row': 2}, _grid(2, 2), True),
-            ({'action': 'delete_col', 'col': 2}, _grid(3, 1), True),
-            ({'action': 'delete_col', 'col': 2}, _grid(2, 1), False),
+            # Two rows above row 2: new empty rows 2-3, old rows 2-3 move to 4-5.
+            ({'action': 'insert_row_above', 'row': 2, 'count': 2}, _from_old_rows(5, 2, {1: 1, 4: 2, 5: 3}), True),
+            # Same counts, but the new rows landed at the bottom.
+            ({'action': 'insert_row_above', 'row': 2, 'count': 2}, _from_old_rows(5, 2, {1: 1, 2: 2, 3: 3}), False),
+            ({'action': 'delete_row', 'row': 2}, _from_old_rows(2, 2, {1: 1, 2: 3}), True),
+            # Wrong row deleted (row 1 instead of row 2): counts match, content does not.
+            ({'action': 'delete_row', 'row': 2}, _from_old_rows(2, 2, {1: 2, 2: 3}), False),
+            ({'action': 'delete_col', 'col': 2}, _unmerged(3, 1, lambda r, c: f'R{r}C1'), True),
+            ({'action': 'delete_col', 'col': 2}, _unmerged(3, 1, lambda r, c: f'R{r}C2'), False),
+            ({'action': 'insert_col_left', 'col': 1}, _unmerged(3, 3, lambda r, c: '' if c == 1 else f'R{r}C{c - 1}'), True),
+            ({'action': 'insert_row_below', 'row': 1}, _grid(3, 2), False),
         )
         for step, after, ok in cases:
-            with self.subTest(step=step):
-                self.assertEqual(evaluate_change(self._plan(before, **step), before, after)['ok'], ok)
+            with self.subTest(step=step, ok=ok):
+                result = self._check(before, after, **step)
+                self.assertEqual(result['ok'], ok, result['reasons'])
 
-    def test_merge_checks_span_and_cell_count(self) -> None:
+    def test_merge_checks_layout_and_keeps_content(self) -> None:
         before = _grid(2, 2)
-        plan = self._plan(before, action='merge_cells', end_row=1, end_col=2)
-        good = _grid(2, 2, [(1, 1, 1, 2), (2, 1, 1, 1), (2, 2, 1, 1)])
-        self.assertTrue(evaluate_change(plan, before, good)['ok'])
-        wrong_span = _grid(2, 2, [(1, 1, 2, 1), (1, 2, 1, 1), (2, 2, 1, 1)])
-        result = evaluate_change(plan, before, wrong_span)
+        step = {'action': 'merge_cells', 'end_row': 1, 'end_col': 2}
+        good = _grid(2, 2, [(1, 1, 1, 2, 'R1C1 R1C2'), (2, 1, 1, 1, 'R2C1'), (2, 2, 1, 1, 'R2C2')])
+        self.assertTrue(self._check(before, good, **step)['ok'])
+        lost = _grid(2, 2, [(1, 1, 1, 2, 'R1C1'), (2, 1, 1, 1, 'R2C1'), (2, 2, 1, 1, 'R2C2')])
+        self.assertTrue(any('lost content' in reason for reason in self._check(before, lost, **step)['reasons']))
+        wrong_span = _grid(2, 2, [(1, 1, 2, 1, 'R1C1 R2C1'), (1, 2, 1, 1, 'R1C2'), (2, 2, 1, 1, 'R2C2')])
+        self.assertFalse(self._check(before, wrong_span, **step)['ok'])
+        self.assertFalse(self._check(before, before, **step)['ok'])
+
+    def test_split_checks_axis_and_neighbour_spans(self) -> None:
+        before = _grid(2, 2)
+        step = {'action': 'split_cell', 'row': 1, 'col': 1, 'split_cols': 2}
+        # A1 becomes A1|B1; old column B shifts to C; A2 now spans A2:B2.
+        good = _grid(2, 3, [(1, 1, 1, 1, 'R1C1'), (1, 2, 1, 1, ''), (1, 3, 1, 1, 'R1C2'), (2, 1, 1, 2, 'R2C1'), (2, 3, 1, 1, 'R2C2')])
+        result = self._check(before, good, **step)
+        self.assertTrue(result['ok'], result['reasons'])
+        # Same cell count (5), split on the wrong axis.
+        wrong_axis = _grid(3, 2, [(1, 1, 1, 1, 'R1C1'), (1, 2, 2, 1, 'R1C2'), (2, 1, 1, 1, ''), (3, 1, 1, 1, 'R2C1'), (3, 2, 1, 1, 'R2C2')])
+        result = self._check(before, wrong_axis, **step)
         self.assertFalse(result['ok'])
-        self.assertTrue(any('does not span' in reason for reason in result['reasons']))
-        self.assertFalse(evaluate_change(plan, before, before)['ok'])
-
-    def test_split_checks_cell_count(self) -> None:
-        before = _grid(2, 2)
-        plan = self._plan(before, action='split_cell', split_rows=2, split_cols=2)
-        after = _grid(4, 4, [(r, c, 1, 1) for r in range(1, 5) for c in range(1, 5)][:7])
-        self.assertTrue(evaluate_change(plan, before, after)['ok'])
-        self.assertFalse(evaluate_change(plan, before, before)['ok'])
+        self.assertIn('rows is 3, expected 2', result['reasons'])
+        self.assertFalse(self._check(before, before, **step)['ok'])
 
 
 class _Grid:
-    """Tiny table model: 1-based cells with spans, enough to fake Hancom actions."""
+    """Tiny table model: 1-based (row, col) -> [row_span, col_span, text]."""
 
     def __init__(self, rows: int, cols: int) -> None:
         self.rows, self.cols = rows, cols
-        self.cells = {(r, c): [1, 1] for r in range(1, rows + 1) for c in range(1, cols + 1)}
+        self.cells = {(r, c): [1, 1, f'R{r}C{c}'] for r in range(1, rows + 1) for c in range(1, cols + 1)}
 
     def xml(self) -> str:
-        return _hwpml(self.rows, self.cols, [(r, c, span[0], span[1]) for (r, c), span in sorted(self.cells.items())])
+        return _hwpml(self.rows, self.cols, [(r, c, *cell) for (r, c), cell in sorted(self.cells.items())])
 
     def insert_row(self, at: int) -> None:
-        self.cells = {((r + 1) if r >= at else r, c): span for (r, c), span in self.cells.items()}
-        self.cells.update({(at, c): [1, 1] for c in range(1, self.cols + 1)})
+        self.cells = {((r + 1) if r >= at else r, c): cell for (r, c), cell in self.cells.items()}
+        self.cells.update({(at, c): [1, 1, ''] for c in range(1, self.cols + 1)})
         self.rows += 1
 
     def insert_col(self, at: int) -> None:
-        self.cells = {(r, (c + 1) if c >= at else c): span for (r, c), span in self.cells.items()}
-        self.cells.update({(r, at): [1, 1] for r in range(1, self.rows + 1)})
+        self.cells = {(r, (c + 1) if c >= at else c): cell for (r, c), cell in self.cells.items()}
+        self.cells.update({(r, at): [1, 1, ''] for r in range(1, self.rows + 1)})
         self.cols += 1
 
     def delete_row(self, at: int) -> None:
-        self.cells = {((r - 1) if r > at else r, c): span for (r, c), span in self.cells.items() if r != at}
+        self.cells = {((r - 1) if r > at else r, c): cell for (r, c), cell in self.cells.items() if r != at}
         self.rows -= 1
 
     def delete_col(self, at: int) -> None:
-        self.cells = {(r, (c - 1) if c > at else c): span for (r, c), span in self.cells.items() if c != at}
+        self.cells = {(r, (c - 1) if c > at else c): cell for (r, c), cell in self.cells.items() if c != at}
         self.cols -= 1
+
+    def merge(self, top_left: tuple[int, int], bottom_right: tuple[int, int]) -> None:
+        (r1, c1), (r2, c2) = top_left, bottom_right
+        texts = [self.cells.pop((r, c))[2] for r in range(r1, r2 + 1) for c in range(c1, c2 + 1)]
+        self.cells[(r1, c1)] = [r2 - r1 + 1, c2 - c1 + 1, ' '.join(text for text in texts if text)]
+
+    def split(self, row: int, col: int, rows: int, cols: int) -> None:
+        """Insert (rows-1) row lines and (cols-1) column lines through the target cell."""
+        dr, dc = rows - 1, cols - 1
+        moved: dict[tuple[int, int], list[Any]] = {}
+        for (r, c), (rs, cs, text) in self.cells.items():
+            if (r, c) == (row, col):
+                continue
+            if r <= row < r + rs:
+                rs += dr
+            if c <= col < c + cs:
+                cs += dc
+            moved[((r + dr) if r > row else r, (c + dc) if c > col else c)] = [rs, cs, text]
+        original = self.cells[(row, col)][2]
+        for i in range(rows):
+            for j in range(cols):
+                moved[(row + i, col + j)] = [1, 1, original if (i, j) == (0, 0) else '']
+        self.cells, self.rows, self.cols = moved, self.rows + dr, self.cols + dc
 
 
 class _FakeHAction:
@@ -197,31 +271,52 @@ class _FakeHAction:
         self.hwp = hwp
 
     def Run(self, name: str) -> bool:  # noqa: N802 - Hancom API name
+        if name in self.hwp.raising:
+            self.hwp.log.append(f'{name}!raised')
+            raise RuntimeError(f'COM error in {name}')
         return self.hwp.run(name)
 
 
 class _FakeTableHwp:
-    def __init__(self, rows: int, cols: int, *, broken_actions: set[str] | None = None) -> None:
+    """Fake pyhwpx Hwp over _Grid.
+
+    Fault knobs: ``noop`` actions report success but change nothing;
+    ``raising`` actions raise from HAction.Run; ``wrong_line`` makes row/col
+    deletes hit the neighbouring line; ``split_swap`` swaps the split axes;
+    ``caret_after_delete='previous'`` leaves the caret on the previous row
+    after TableDeleteRow; ``sticky_selection`` ignores Cancel;
+    ``goto_leaves_selection`` leaves an uncancellable block after goto_addr.
+    """
+
+    def __init__(self, rows: int, cols: int, **faults: Any) -> None:
         self.grid = _Grid(rows, cols)
         self.caret = (1, 1)
         self.block: tuple[int, int] | None = None
         self.selected = False
         self.log: list[str] = []
-        self.broken = broken_actions or set()
+        self.plain_run_calls: list[str] = []
+        self.noop: set[str] = set(faults.get('noop', ()))
+        self.raising: set[str] = set(faults.get('raising', ()))
+        self.wrong_line = bool(faults.get('wrong_line'))
+        self.split_swap = bool(faults.get('split_swap'))
+        self.caret_after_delete = faults.get('caret_after_delete', 'same')
+        self.sticky_selection = bool(faults.get('sticky_selection'))
+        self.goto_leaves_selection = bool(faults.get('goto_leaves_selection'))
+        self.stuck_block = False
         self.HAction = _FakeHAction(self)
 
-    # position / selection
     def get_pos(self) -> tuple[int, int, int]:
         return (1, 0, 0)
 
     def set_pos(self, *_args: Any) -> bool:
-        self.selected = False
+        if not self.sticky_selection:
+            self.selected = False
         return True
 
     def get_cell_addr(self, as_: str = 'str') -> Any:
         row, col = self.caret
         if as_ == 'tuple':
-            return (row - 1, col - 1)  # pyhwpx order: (row, col)
+            return (row - 1, col - 1)  # pyhwpx 1.7.2 order: (row, col)
         return cell_address(row, col)
 
     def goto_addr(self, addr: str) -> bool:
@@ -229,6 +324,7 @@ class _FakeTableHwp:
         if parsed is None or parsed not in self.grid.cells:
             return False
         self.caret = parsed
+        self.stuck_block = self.goto_leaves_selection
         return True
 
     def SelectCtrlFront(self) -> bool:  # noqa: N802
@@ -239,35 +335,26 @@ class _FakeTableHwp:
         assert (fmt, option) == ('HWPML2X', 'saveblock') and self.selected
         return self.grid.xml()
 
+    def Run(self, name: str) -> bool:  # noqa: N802 - plain hwp.Run entry point
+        self.plain_run_calls.append(name)
+        return self.run(name)
+
     def TableSplitCell(self, Rows: int = 2, Cols: int = 0, DistributeHeight: int = 0, Merge: int = 0) -> bool:  # noqa: N802,N803
         self.log.append(f'TableSplitCell(Rows={Rows}, Cols={Cols})')
-        if 'TableSplitCell' in self.broken:
+        if 'TableSplitCell' in self.noop:
             return True
         rows, cols = max(Rows, 1), max(Cols, 1)
-        row, col = self.caret
-        for _ in range(cols - 1):
-            self.grid.insert_col(col + 1)
-        for _ in range(rows - 1):
-            self.grid.insert_row(row + 1)
-        # Neighbours in the widened row/column become merged cells.
-        for (r, c), span in list(self.grid.cells.items()):
-            if (r, c) == (row, col):
-                continue
-            if r == row and not (col <= c < col + cols) and (r, c) in self.grid.cells:
-                span[0] = rows
-                for extra in range(1, rows):
-                    self.grid.cells.pop((r + extra, c), None)
-            if c == col and not (row <= r < row + rows) and (r, c) in self.grid.cells:
-                span[1] = cols
-                for extra in range(1, cols):
-                    self.grid.cells.pop((r, c + extra), None)
+        if self.split_swap:
+            rows, cols = cols, rows
+        self.grid.split(*self.caret, rows, cols)
         return True
 
     def run(self, name: str) -> bool:
         self.log.append(name)
-        if name in self.broken:
-            return True  # reports success but changes nothing
+        if name in self.noop:
+            return True
         row, col = self.caret
+        shift = -1 if self.wrong_line else 0
         if name == 'TableInsertUpperRow':
             self.grid.insert_row(row)
             self.caret = (row + 1, col)
@@ -279,26 +366,23 @@ class _FakeTableHwp:
         elif name == 'TableInsertRightColumn':
             self.grid.insert_col(col + 1)
         elif name == 'TableDeleteRow':
-            self.grid.delete_row(row)
-            self.caret = (min(row, self.grid.rows), col)
+            self.grid.delete_row(max(row + shift, 1))
+            previous = self.caret_after_delete == 'previous'
+            self.caret = (max(1, min(row - 1 if previous else row, self.grid.rows)), col)
         elif name == 'TableDeleteColumn':
-            self.grid.delete_col(col)
+            self.grid.delete_col(max(col + shift, 1))
             self.caret = (row, min(col, self.grid.cols))
         elif name == 'TableCellBlock':
             self.block = self.caret
         elif name in ('TableRightCell', 'TableLowerCell'):
             self.caret = (row, col + 1) if name == 'TableRightCell' else (row + 1, col)
         elif name == 'TableMergeCell' and self.block is not None:
-            (r1, c1), (r2, c2) = self.block, self.caret
-            for r in range(r1, r2 + 1):
-                for c in range(c1, c2 + 1):
-                    if (r, c) != (r1, c1):
-                        self.grid.cells.pop((r, c), None)
-            self.grid.cells[(r1, c1)] = [r2 - r1 + 1, c2 - c1 + 1]
-            self.caret = (r1, c1)
+            self.grid.merge(self.block, self.caret)
+            self.caret = self.block
         elif name == 'Cancel':
             self.block = None
-            self.selected = False
+            if not self.sticky_selection:
+                self.selected = False
         return True
 
 
@@ -322,7 +406,7 @@ def _service(hwp: _FakeTableHwp) -> LocalCliService:
     )
     service._bundle_compact_snapshot = lambda _hwp: {  # type: ignore[method-assign]
         'is_cell': True,
-        'has_selection': hwp.selected or hwp.block is not None,
+        'has_selection': hwp.selected or hwp.block is not None or hwp.stuck_block,
         'selection_mode': 0,
     }
     return service
@@ -344,8 +428,13 @@ def _exec_step(rows: int, cols: int, **overrides: Any) -> dict[str, Any]:
     return step
 
 
+def _run(hwp: _FakeTableHwp, **overrides: Any) -> dict[str, Any]:
+    return _service(hwp)._bundle_table_structure_exact(hwp, _exec_step(hwp.grid.rows, hwp.grid.cols, **overrides))
+
+
 class ServiceFlowTests(unittest.TestCase):
     def test_each_action_runs_and_verifies(self) -> None:
+        merge_keys = ['TableCellBlock', 'TableCellBlockExtend', 'TableRightCell', 'TableLowerCell', 'TableMergeCell', 'Cancel']
         cases = (
             ({'action': 'insert_row_above', 'row': 2, 'count': 2}, (5, 2), ['TableInsertUpperRow'] * 2),
             ({'action': 'insert_row_below', 'row': 3}, (4, 2), ['TableInsertLowerRow']),
@@ -353,19 +442,28 @@ class ServiceFlowTests(unittest.TestCase):
             ({'action': 'insert_col_right', 'col': 2, 'count': 3}, (3, 5), ['TableInsertRightColumn'] * 3),
             ({'action': 'delete_row', 'row': 2, 'count': 2}, (1, 2), ['TableDeleteRow'] * 2),
             ({'action': 'delete_col', 'col': 1}, (3, 1), ['TableDeleteColumn']),
-            ({'action': 'merge_cells', 'row': 2, 'col': 1, 'end_row': 3, 'end_col': 2}, (3, 2),
-             ['TableCellBlock', 'TableCellBlockExtend', 'TableRightCell', 'TableLowerCell', 'TableMergeCell', 'Cancel']),
+            ({'action': 'merge_cells', 'row': 2, 'col': 1, 'end_row': 3, 'end_col': 2}, (3, 2), merge_keys),
             ({'action': 'split_cell', 'row': 2, 'col': 2, 'split_cols': 2}, (3, 3), ['TableSplitCell(Rows=0, Cols=2)']),
+            ({'action': 'split_cell', 'row': 1, 'col': 1, 'split_rows': 2, 'split_cols': 3}, (4, 4), ['TableSplitCell(Rows=2, Cols=3)']),
         )
         for overrides, (rows, cols), native in cases:
             with self.subTest(action=overrides['action']):
                 hwp = _FakeTableHwp(3, 2)
-                result = _service(hwp)._bundle_table_structure_exact(hwp, _exec_step(3, 2, **overrides))
+                result = _run(hwp, **overrides)
                 self.assertTrue(result['succeeded'])
                 self.assertTrue(result['verification']['ok'], result['verification'])
                 self.assertEqual((result['after_grid']['rows'], result['after_grid']['cols']), (rows, cols))
-                mutating = [entry for entry in hwp.log if entry not in ('Cancel',) or overrides['action'] == 'merge_cells']
-                self.assertEqual(mutating, native)
+                self.assertNotIn('text', result['after_grid']['cells'][0])
+                self.assertEqual(hwp.log, native)
+                self.assertEqual(hwp.plain_run_calls, [])
+
+    def test_repeats_restart_from_target_cell(self) -> None:
+        # Hancom may leave the caret on the previous row after a delete; the
+        # second delete must still hit the planned row, not the one above.
+        hwp = _FakeTableHwp(4, 2, caret_after_delete='previous')
+        result = _run(hwp, action='delete_row', row=2, count=2)
+        self.assertTrue(result['verification']['ok'])
+        self.assertEqual(sorted(cell[2] for cell in hwp.grid.cells.values()), ['R1C1', 'R1C2', 'R4C1', 'R4C2'])
 
     def test_plan_refusal_happens_before_any_native_action(self) -> None:
         hwp = _FakeTableHwp(3, 2)
@@ -375,20 +473,60 @@ class ServiceFlowTests(unittest.TestCase):
         self.assertIn('re-inventory', str(caught.exception))
         self.assertEqual(hwp.log, [])
 
-    def test_unverified_change_reports_possible_mutation(self) -> None:
-        hwp = _FakeTableHwp(3, 2, broken_actions={'TableInsertLowerRow'})
+    def test_unverified_or_misplaced_changes_report_possible_mutation(self) -> None:
+        cases = (
+            ({'noop': {'TableInsertLowerRow'}}, {'action': 'insert_row_below'}, 'rows is 3, expected 4'),
+            ({'wrong_line': True}, {'action': 'delete_row', 'row': 2}, 'content changed'),
+            ({'wrong_line': True}, {'action': 'delete_col', 'col': 2}, 'content changed'),
+            ({'split_swap': True}, {'action': 'split_cell', 'row': 1, 'col': 1, 'split_cols': 2}, 'rows is 4, expected 3'),
+        )
+        for faults, overrides, reason in cases:
+            with self.subTest(faults=faults, action=overrides['action']):
+                hwp = _FakeTableHwp(3, 2, **faults)
+                with self.assertRaises(LocalCliMutationError) as caught:
+                    _run(hwp, **overrides)
+                self.assertTrue(caught.exception.mutation_may_have_persisted)
+                self.assertIn('refused to mark success', str(caught.exception))
+                self.assertIn(reason, str(caught.exception))
+
+    def test_raising_native_action_is_not_retried_through_plain_run(self) -> None:
+        hwp = _FakeTableHwp(3, 2, raising={'TableDeleteRow'})
         with self.assertRaises(LocalCliMutationError) as caught:
-            _service(hwp)._bundle_table_structure_exact(hwp, _exec_step(3, 2, action='insert_row_below'))
+            _run(hwp, action='delete_row', row=2)
         self.assertTrue(caught.exception.mutation_may_have_persisted)
-        self.assertIn('refused to mark success', str(caught.exception))
+        self.assertIn('outcome_unknown', str(caught.exception))
+        self.assertEqual(hwp.log, ['TableDeleteRow!raised'])
+        self.assertEqual(hwp.plain_run_calls, [])
+        self.assertEqual(hwp.grid.rows, 3)
+
+    def test_selection_left_before_mutation_is_refused(self) -> None:
+        for faults, message in (
+            ({'sticky_selection': True}, 'after grid readback'),
+            # Readback is clean; only the caret check right before mutation sees the block.
+            ({'goto_leaves_selection': True}, 'refused before mutation: caret is not on A1 in normal edit state'),
+        ):
+            with self.subTest(faults=faults):
+                hwp = _FakeTableHwp(3, 2, **faults)
+                with self.assertRaises(LocalCliRuntimeError) as caught:
+                    _run(hwp, action='insert_row_below')
+                self.assertNotIsInstance(caught.exception, LocalCliMutationError)
+                self.assertIn(message, str(caught.exception))
+                self.assertNotIn('TableInsertLowerRow', hwp.log)
 
     def test_merge_over_already_merged_range_is_refused_without_mutation(self) -> None:
         hwp = _FakeTableHwp(3, 2)
-        service = _service(hwp)
-        service._bundle_table_structure_exact(hwp, _exec_step(3, 2, action='merge_cells', end_row=2, end_col=1))
+        _run(hwp, action='merge_cells', end_row=2, end_col=1)
         hwp.log.clear()
         with self.assertRaisesRegex(LocalCliRuntimeError, 'already merged'):
-            service._bundle_table_structure_exact(hwp, _exec_step(3, 2, action='merge_cells', end_row=2, end_col=2))
+            _run(hwp, action='merge_cells', end_row=2, end_col=2)
+        self.assertEqual(hwp.log, [])
+
+    def test_row_edit_across_merged_cell_is_refused_without_mutation(self) -> None:
+        hwp = _FakeTableHwp(3, 2)
+        _run(hwp, action='merge_cells', end_row=2, end_col=1)
+        hwp.log.clear()
+        with self.assertRaisesRegex(LocalCliRuntimeError, 'merged cell A1'):
+            _run(hwp, action='insert_row_below', row=1)
         self.assertEqual(hwp.log, [])
 
     def test_unreachable_cell_is_refused_without_mutation(self) -> None:
@@ -396,7 +534,7 @@ class ServiceFlowTests(unittest.TestCase):
         hwp.goto_addr = lambda _addr: False  # type: ignore[method-assign]
         hwp.run = lambda name: hwp.log.append(name) or True  # type: ignore[method-assign]
         with self.assertRaisesRegex(LocalCliRuntimeError, 'could not place the caret'):
-            _service(hwp)._bundle_table_structure_exact(hwp, _exec_step(3, 2, action='delete_row', row=3))
+            _run(hwp, action='delete_row', row=3)
         self.assertNotIn('TableDeleteRow', hwp.log)
 
 

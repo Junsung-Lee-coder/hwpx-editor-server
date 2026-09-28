@@ -17,6 +17,7 @@ from app.table_structure import (
     evaluate_change,
     parse_cell_address,
     parse_table_grid_xml,
+    public_grid,
 )
 
 
@@ -30,20 +31,23 @@ class LocalCliTableStructureMixin:
     """
 
     def _table_structure_run_action(self, hwp: Any, action_name: str) -> dict[str, Any]:
-        attempts: list[dict[str, Any]] = []
+        """Run one Hancom action exactly once.
+
+        hwp.Run is used only when HAction.Run does not exist. An action that
+        raises is never retried through another entry point: its native
+        outcome is unknown, and a second attempt could apply it twice.
+        """
         haction_run = getattr(getattr(hwp, 'HAction', None), 'Run', None)
-        run = getattr(hwp, 'Run', None)
-        for label, runner in ((f'HAction.Run({action_name})', haction_run), (f'Run({action_name})', run)):
-            if not callable(runner):
-                continue
-            try:
-                raw = runner(action_name)
-            except Exception as exc:
-                attempts.append({'method': label, 'error': f'{type(exc).__name__}: {exc}'})
-                continue
-            attempts.append({'method': label, 'result': bool(raw) if raw is not None else None})
-            return {'succeeded': raw is None or bool(raw), 'attempts': attempts}
-        return {'succeeded': False, 'attempts': attempts}
+        label, runner = f'HAction.Run({action_name})', haction_run
+        if not callable(runner):
+            label, runner = f'Run({action_name})', getattr(hwp, 'Run', None)
+        if not callable(runner):
+            return {'succeeded': False, 'method': None, 'error': f'no entry point for {action_name}'}
+        try:
+            raw = runner(action_name)
+        except Exception as exc:
+            return {'succeeded': False, 'method': label, 'outcome_unknown': True, 'error': f'{type(exc).__name__}: {exc}'}
+        return {'succeeded': raw is None or bool(raw), 'method': label, 'result': bool(raw) if raw is not None else None}
 
     def _table_structure_address(self, hwp: Any) -> tuple[int, int] | None:
         # Use the "A1" string form: pyhwpx's tuple form is (row, col) while
@@ -121,6 +125,13 @@ class LocalCliTableStructureMixin:
         actions: list[dict[str, Any]] = []
         if action in ROW_COL_ACTIONS:
             for index in range(plan['count']):
+                if index:
+                    # Every repeat starts from the target cell again, so a caret
+                    # that Hancom moved elsewhere cannot hit the wrong line.
+                    goto = self._table_structure_goto(hwp, plan['row'], plan['col'])
+                    actions.append({'repeat': index + 1, 'action': 'goto', 'succeeded': goto['reached'], 'address': goto['address']})
+                    if not goto['reached']:
+                        break
                 result = self._table_structure_run_action(hwp, plan['hancom_action'])
                 actions.append({'repeat': index + 1, 'action': plan['hancom_action'], **result})
                 if not result['succeeded']:
@@ -180,6 +191,17 @@ class LocalCliTableStructureMixin:
             if not goto['reached']:
                 raise LocalCliRuntimeError(f'{OP} could not place the caret on {plan["address"]}: {goto["attempts"]!r}')
             before_snapshot = self._table_structure_clear_selection(hwp)
+            here = self._table_structure_address(hwp)
+            if (
+                not before_snapshot.get('is_cell')
+                or before_snapshot.get('has_selection')
+                or int(before_snapshot.get('selection_mode') or 0) != 0
+                or here != (plan['row'], plan['col'])
+            ):
+                raise LocalCliRuntimeError(
+                    f'{OP} refused before mutation: caret is not on {plan["address"]} in normal edit state '
+                    f'(address={here!r}, snapshot={before_snapshot!r})'
+                )
             mutation_started = True
             actions = self._table_structure_mutate(hwp, plan)
             if not all(item.get('succeeded', True) for item in actions if item.get('action') != 'Cancel'):
@@ -214,9 +236,9 @@ class LocalCliTableStructureMixin:
                 'enter': enter,
                 'goto': goto,
                 'before_snapshot': before_snapshot,
-                'before_grid': before,
+                'before_grid': public_grid(before),
                 'native_actions': actions,
-                'after_grid': after,
+                'after_grid': public_grid(after),
                 'verification': verification,
                 'next_proof_required': 'Render the page (page-screenshot or export-proof-range) and review it before saving; the target proof_hash changes after this edit, so re-inventory before another exact edit.',
                 'warnings': [],
