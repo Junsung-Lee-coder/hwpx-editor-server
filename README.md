@@ -1,107 +1,116 @@
 # HWPX editor/server
 
-Windows-native HWPX editing runtime with a local HTTP API and a thin command-line client. The runtime uses Hancom automation through `pyhwpx`; the CLI builds explicit command bundles, sends them to the server, and formats structured results locally.
+Edit Hancom `.hwpx`/`.hwp` documents programmatically on Windows. A local HTTP API drives the real Hancom editor through [`pyhwpx`](https://pypi.org/project/pyhwpx/), and a thin command-line client (`hwpx`) plans each edit, sends it to the API, and prints structured proof of what changed.
 
-This repository is source-only. It does not include working documents, generated files, uploads, rendered output, queues, logs, databases, screenshots, credentials, or machine-specific runtime state.
-
-## Requirements
-
-- Windows with a logged-in desktop session for Hancom automation.
-- Python 3.13 and a Hancom installation that supports the automation calls used by `pyhwpx`.
-- The Windows installer uses the hash-pinned `requirements-windows.lock` dependency set.
-- Poppler `pdftoppm`, either on `PATH` or configured with `HWP_PDFTOPPM`.
-
-The server defaults to loopback address `127.0.0.1` and port `8765`. Set `HWP_API_HOST`, `HWP_API_PORT`, and the other `HWP_*` settings in a local `.env` file when needed. `.env` is ignored by Git; `config.example` is the redacted configuration template.
-
-## Setup
-
-From a Windows command prompt, the supported portable installer is:
-
-```bat
-scripts\setup_venv.bat
+```text
+hwpx CLI / MCP client  ──HTTP──▶  API server (127.0.0.1:8765)  ──COM──▶  Hancom editor (visible desktop)
 ```
 
-The wrapper invokes `scripts\install_windows.ps1` in user-scope dependency mode and installs into `.hwpx-install`. That default is a portable, Git-ignored install inside the checkout: runtime state such as `.venv`, `.env`, `spool`, receipts, and proof output can be created there, so the checkout is not physically untouched. Use an external `-InstallRoot` when the source checkout must remain free of runtime state. For explicit preflight-only or separate source/install roots, use the PowerShell command documented in `docs/WINDOWS_INSTALL.md`. The installer copies `config.example` only when `.env` is absent; edit `.env` only on the local machine and never commit it.
+What you get:
 
-Read `docs/WINDOWS_INSTALL.md` before installing, `docs/WINDOWS_VERIFY.md` before accepting a receipt, and `docs/WINDOWS_ROLLBACK.md` before replacing an existing root or task.
+- **Find and navigate:** text search with page and cursor context, table and control inventories.
+- **Targeted edits:** text entry, character styles, bullets, tables, cell formatting, paragraph and control operations. Each edit is validated before it touches the document.
+- **Rendered proof:** page screenshots and PDF renders, so you check the edit visually. Page count alone is never treated as proof.
+- **Honest failure reporting:** when Hancom's outcome is unknown, the server says so and keeps the evidence. It does not guess or silently retry.
 
-### Windows installation pitfalls
+This repository is source-only. It contains no working documents, generated output, logs, credentials, or machine-specific state.
 
-- **Use an interactive desktop.** Hancom automation needs a logged-in, visible Windows session; a successful SSH command in Session 0 does not prove native editing works. Run the installer and verifier as the intended interactive user. The documented `-ExecutionPolicy Bypass` applies to that PowerShell process only; do not change the machine-wide policy to make an installation pass.
-- **Pin missing tools explicitly.** If the Python launcher is unavailable, set process-scoped `HWP_PYTHON` to the absolute Python 3.13 executable. If `pdftoppm` is not discoverable, pass `-PopplerPath` with its executable path. Check both in the interactive user's environment rather than assuming the SSH user's `PATH` is identical.
-- **A new port is not a separate task or Hancom process.** For a side-by-side installation, choose a different `-InstallRoot` and `-ApiPort`, and set distinct process-scoped `HWP_API_TASK_NAME` and `HWP_WORKER_TASK_NAME` before invoking the installer. Otherwise the default `hwpx-editor-api`/`hwpx-editor-worker` names collide; do not use `-ReplaceExistingTasks` merely to force a parallel installation. Preserve the old root, task definitions, and queue for rollback. Confirm both services are idle, then isolate Hancom ownership before native fixture checks; two listening ports do not isolate the desktop COM object.
-- **Pin the CLI target after a port change.** A cached URL or the `8765` fallback can point a manual CLI command at the wrong server. For example, run `python -m local_cli_v1.main --base-url http://127.0.0.1:18765 status --json`; use the actual installed port. The independent verifier also takes `-ApiPort` and pins fixture CLI requests to that service. Do not rewrite an active client's state just to change ports.
-- **Read final receipts, not just task status.** Starting a scheduled task or seeing installer `PASS_RUNTIME_ONLY` does not prove native editing. Parse the completed installer and independent verifier JSON receipts and compare their root, port, source identity, and result. The disposable fixture verifier covers `open -> status -> where -> page-screenshot -> close -> status`; it does **not** establish edit/save/reopen behavior. If a native command times out or its effect is unknown, retain its session and command IDs; do not blindly retry or close it. See `docs/WINDOWS_VERIFY.md` and `docs/WINDOWS_ROLLBACK.md`.
+## Quick start (Windows)
 
-## Run
+Requirements: Windows with a logged-in desktop session, Hancom Office, Python 3.13, and Poppler `pdftoppm` (on `PATH` or set with `HWP_PDFTOPPM`).
 
-The packaged launcher is manual and on-demand when a task-based installation is not desired:
+1. **Install.** From a command prompt in the checkout:
 
-```bat
-scripts\writer_v1_manual.cmd status
-scripts\writer_v1_manual.cmd start
-python -m local_cli_v1.main help
-scripts\writer_v1_manual.cmd stop
-```
+   ```bat
+   scripts\setup_venv.bat
+   ```
 
-The same manual launcher is available from the installed runtime at `.hwpx-install\scripts\writer_v1_manual.cmd`; it selects the packaged `.hwpx-install\.venv` and the task names in that root's canonical `HWP_*` `.env` settings. The installer is the supported path for creating or replacing the interactive scheduled tasks.
+   This installs a portable runtime into `.hwpx-install` (Git-ignored) using the hash-pinned `requirements-windows.lock`. See [docs/WINDOWS_INSTALL.md](docs/WINDOWS_INSTALL.md) for custom install roots, ports, and troubleshooting.
 
-For direct development entry points:
+2. **Start the server.**
 
-```bat
-.venv\Scripts\python -m app.api_server
-.venv\Scripts\python -m app.worker
-```
+   ```bat
+   scripts\writer_v1_manual.cmd start
+   scripts\writer_v1_manual.cmd status
+   ```
 
-The CLI resolves its base URL in this order: `--base-url`, the cached URL from `python -m local_cli_v1.main open`, `HWPX_BASE_URL`, then `http://127.0.0.1:8765`.
+3. **Run an edit session.** Work on a copy, never on the only copy of a document:
 
-A normal edit loop is:
+   ```bat
+   python -m local_cli_v1.main status
+   python -m local_cli_v1.main open C:\work\copy-of-report.hwpx
+   python -m local_cli_v1.main find "Quarterly results" --with-page
+   python -m local_cli_v1.main where
+   python -m local_cli_v1.main page-screenshot --page 1 --out-dir C:\work\proof
+   python -m local_cli_v1.main save --out C:\work\report-edited.hwpx
+   python -m local_cli_v1.main close
+   ```
+
+   `python -m local_cli_v1.main help` prints the full workflow and `bundle-list` shows the available edit operations.
+
+4. **Stop the server** when you are done: `scripts\writer_v1_manual.cmd stop`.
+
+## How an edit works
 
 ```text
 status -> open -> find/where/select -> edit -> render proof -> save -> close
 ```
 
-Work on managed copies. Review rendered proof before treating a mutation as complete; page count alone is not validation.
+The CLI turns each command into an explicit command bundle, the server runs it against Hancom under a runtime lock, and the CLI formats the structured result locally. Review the rendered proof before treating an edit as done.
+
+The CLI picks its server in this order: `--base-url`, the URL cached by `open`, `HWPX_BASE_URL`, then `http://127.0.0.1:8765`.
+
+## Security
+
+- The API binds to `127.0.0.1` by default and has no CORS.
+- Set `HWP_API_TOKEN` (32+ ASCII characters, no whitespace) to require `Authorization: Bearer <token>` on every request. Without a token, an unauthenticated `GET /health` returns only `status` and `api_port`.
+- The server refuses to start on a non-loopback `HWP_API_HOST` unless `HWP_API_TOKEN` is set.
+- Clients send the token from their own environment: `HWPX_API_TOKEN` for the CLI, `HWPX_MCP_BACKEND_TOKEN` for the MCP adapter. The CLI sends it only to the configured server's origin.
+- The browser observation viewer and the independent Windows verifier do not send a token. Use them with the default token-less loopback setup.
+
+Configuration lives in a local `.env` (Git-ignored). `config.example` is the redacted template.
 
 ## Hancom automation limits
 
-The runtime needs a visible Hancom window on a logged-in Windows desktop. Minimized windows, an unfocused window, a locked or disconnected desktop, and background-only operation are not supported, and no successful response certifies them.
+- **Visible desktop only.** Hancom must run in a visible window on a logged-in, unlocked Windows desktop. Minimized windows, background-only operation, and SSH Session 0 are not supported, and no response certifies them.
+- **No exclusive ownership.** The runtime creates the Hancom object with `new=True`, but that does not guarantee exclusive ownership of a new native process. A constructor error may arrive after another Hancom object was contacted, so the helper makes one attempt and reports the original failure.
+- **Unknown outcomes stay unknown.** A pending reconciliation replies with HTTP 200 and `ok=false`, `reconciled=false`, `reconciliation="pending"`. That means the native result is unknown, not that the edit succeeded. Keep the session ID, command ID, and original document. Observation is bounded to one recovery request with a caller wait of at most 125 seconds. After that the binding, logs, and artifacts are preserved for an operator decision.
 
-The runtime constructs the Hancom object with `new=True`, but that argument does not establish exclusive ownership of a new native process before COM activation takes effect. An error from a constructor call may therefore arrive after an unrelated Hancom object was contacted or a process was started, and a later automated cleanup step cannot confirm anything about a process this code never received a handle for. The construction helper makes one attempt and reports the original failure instead of retrying.
+Recovery steps are in [docs/WINDOWS_ROLLBACK.md](docs/WINDOWS_ROLLBACK.md).
 
-A pending reconciliation reply answers with `ok=false`, `reconciled=false`, and `reconciliation="pending"` while the HTTP status stays 200. That reply is an observation, not a success: the native outcome is unknown, nothing was replayed, and the command keeps its identity. Ordinary status queries can succeed while the command they describe is still pending, so a query success never means the edit succeeded.
+## Repository layout
 
-Keep the session and command IDs and the original document when a command times out. Observation is bounded: one recovery request with a caller wait of at most 125 seconds, then automated observation stops. If the outcome is still unresolved, the binding, logs, and existing artifacts are preserved for an operator decision; these limits do not guarantee that the native process has ended.
+| Path | Contents |
+|---|---|
+| `app/` | HTTP API, runtime state, Hancom worker, editing operations, command packages, artifact custody |
+| `app/local_cli_service.py` | Local CLI session service: sessions, find/select, text edits, save/export |
+| `app/local_cli_bundle_controls.py`, `app/local_cli_bundle_paragraphs.py`, `app/local_cli_cell_margins.py` | Command-bundle operations, split out of the service as mixins |
+| `app/api_auth.py` | Optional bearer-token middleware |
+| `local_cli_v1/` | CLI planner, command-bundle registry, transport, output parser, readback helpers |
+| `hwpx_mcp/` | Optional MCP adapter over the HTTP API ([docs/MCP_SETUP.md](docs/MCP_SETUP.md)) |
+| `scripts/` | Windows installer, verifier, launchers, and dependency-light static smoke checks |
+| `tests/`, `mcp_tests/`, `fixtures/` | Unit and contract tests with synthetic fixtures |
 
-## Layout
+## Development
 
-- `app/` — HTTP routes, runtime state, Hancom worker, editing operations, command packages, and artifact handling.
-- `local_cli_v1/` — local planner, command-bundle registry, transport, output parser, and readback helpers.
-- `python -m local_cli_v1.main` — public CLI entry point.
-- `scripts/` — Windows launcher and dependency-light static smoke checks.
-- `tests/` — unit tests for pure helpers and local contracts.
-- `fixtures/local_cli/` — synthetic JSON responses used by local tests.
-
-## Testing
-
-See `TESTING.md`. The dependency-light syntax gate is safe to run on any platform:
+Checks that run on any OS:
 
 ```bash
+python -m pip install --require-hashes -r requirements-portable.lock
 python -m compileall -q app local_cli_v1 scripts tests
+python -m unittest discover -s tests -p 'test_*.py'
 ```
 
-The full runtime and native Hancom checks require Windows and the installed dependencies. Do not use production documents as test fixtures.
+[TESTING.md](TESTING.md) lists the static smoke checks and the Windows-only suites. Linux checks cannot prove native Windows/Hancom behavior. Native verification is done by `scripts\verify_windows.ps1` on an interactive desktop ([docs/WINDOWS_VERIFY.md](docs/WINDOWS_VERIFY.md)). Never use production documents as test fixtures.
 
-The deterministic source bundle and manifest commands are documented in `docs/WINDOWS_INSTALL.md`. Native installation verification is read-only after activation and is performed by `scripts\verify_windows.ps1`; Linux checks do not prove native Windows/Hancom runtime behavior.
+## Runtime state and the checkout
 
-## Checkout and runtime-state boundary
+Git-ignored runtime state is kept inside the checkout by the default portable install, under `.hwpx-install`. It may include `.venv`, `.env`, `spool`, receipts, queues, logs, backups, and rendered proof. Git ignore rules keep these paths out of commits, but they don't make the paths absent or read-only. Pass an external `-InstallRoot` when the checkout must stay free of runtime state.
 
-The Git checkout contains source and test inputs. Git-ignored runtime state is kept inside the checkout by the default portable install, in a separate directory named `.hwpx-install` below that checkout, and its scheduled tasks use that directory as their working directory. The installed runtime may therefore create `.venv`, `.env`, `spool`, receipts, queues, logs, backups, and rendered proof below `.hwpx-install`; Git ignore rules prevent accidental tracking but do not make those paths absent or immutable. Set `-InstallRoot` to an external local-data directory when that separation is required. Keep all documents and runtime state outside the tracked source files.
+## Further reading
 
-## Data boundary
-
-Keep documents and runtime state outside the repository. In particular, do not add `.hwp`, `.hwpx`, `.pdf`, `.docx`, `.pptx`, or `.xlsx` files, or files from `spool/`, `uploads/`, `output/`, `logs/`, or `backups/`. Use synthetic fixtures for local tests.
-
-Local CLI artifact responses expose route URLs rather than server filesystem paths. A route is advertised only for a server-managed session with a custody record for the artifact; the service rechecks the managed root, symlink-free path, file identity, size, and SHA-256 before opening a response stream. Download the working copy and recovery artifacts before closing the session.
-
-No license file is included in this repository.
+- [docs/WINDOWS_INSTALL.md](docs/WINDOWS_INSTALL.md): installation, side-by-side installs, field notes
+- [docs/WINDOWS_VERIFY.md](docs/WINDOWS_VERIFY.md): independent read-only verification
+- [docs/WINDOWS_ROLLBACK.md](docs/WINDOWS_ROLLBACK.md): rollback and timed-out command recovery
+- [docs/MCP_SETUP.md](docs/MCP_SETUP.md): MCP adapter setup (Korean)
+- [local_cli_v1/README.md](local_cli_v1/README.md): CLI command status and pipeline

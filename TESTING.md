@@ -19,7 +19,7 @@ After installing the locked Windows dependencies in a Windows virtual environmen
 python -m unittest discover -s tests -v
 ```
 
-For portable Linux validation, install the hash-pinned `requirements-portable.lock` in a temporary environment. The Windows lock file remains the installation input on Windows; do not claim that a Linux environment proves pyhwpx/Hancom behavior. These tests cover local planners, parsers, readback helpers, command-package contracts, portability, source bundles, installer contracts, service helpers, the targeted four-margin getter (`tests/test_cell_margins_get.py`), and the shared MCP schema (`tests/test_mcp_schema.py`).
+For portable Linux validation, install the hash-pinned `requirements-portable.lock` in a temporary environment. The Windows lock file remains the installation input on Windows; do not claim that a Linux environment proves pyhwpx/Hancom behavior. These tests cover local planners, parsers, readback helpers, command-package contracts, portability, source bundles, installer contracts, service helpers, the targeted four-margin getter (`tests/test_cell_margins_get.py`), the shared MCP schema (`tests/test_mcp_schema.py`), optional API token authentication (`tests/test_api_auth.py`), and malformed-input handling in parsing helpers (`tests/test_narrowed_exception_handlers.py`).
 
 The local CLI custody tests also cover managed-root identity replacement, symlinked artifact paths, custody hash mismatches, public route suppression for unmanaged or closed sessions, and streaming from an already validated file handle. On POSIX, the response test replaces the path after the handle is opened and requires the original bytes; on Windows, native file-sharing semantics prevent that replacement until the response closes.
 
@@ -46,7 +46,7 @@ python scripts/smoke_cli_envelope_static.py
 
 ## Publication gate
 
-For this source-only snapshot, the deterministic publication gate is the syntax check, all thirteen static smoke checks above, and these dependency-light unit modules:
+For this source-only snapshot, the deterministic publication gate is the syntax check, all fourteen static smoke checks above, and these dependency-light unit modules:
 
 ```bash
 python -m unittest \
