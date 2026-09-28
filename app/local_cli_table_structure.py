@@ -16,18 +16,30 @@ from app.table_structure import (
     check_plan,
     evaluate_change,
     parse_cell_address,
+    parse_cell_range,
     parse_table_grid_xml,
     public_grid,
 )
+
+_ROLLBACK_HINT = {'attempted': False, 'hint': 'Inspect rendered proof; use undo or reopen the working copy before saving.'}
+
+
+class _Mutation:
+    """Tracks whether a native mutating action has been issued."""
+
+    started = False
 
 
 class LocalCliTableStructureMixin:
     """Exact table-structure edits for LocalCliService.
 
-    Every edit resolves the table by inventory proof, reads the grid through
-    HWPML before and after, and only reports success when the grid changed
-    exactly as planned. Any failure after the first native action is raised
-    as LocalCliMutationError with mutation_may_have_persisted=True.
+    Every native action runs only after three facts are re-proven at that
+    moment: the caret's enclosing table is the resolved target (CtrlInstID),
+    the caret is on the planned cell, and the editor is in normal edit state
+    with no selection (an unreadable state counts as not normal). The grid is
+    read through HWPML before and after and must change exactly as planned.
+    Any failure once a mutating action was issued is raised as
+    LocalCliMutationError with mutation_may_have_persisted=True.
     """
 
     def _table_structure_run_action(self, hwp: Any, action_name: str) -> dict[str, Any]:
@@ -64,33 +76,88 @@ class LocalCliTableStructureMixin:
                 return parsed
         return None
 
-    def _table_structure_clear_selection(self, hwp: Any) -> dict[str, Any]:
-        snapshot = self._bundle_compact_snapshot(hwp)
-        if snapshot.get('has_selection') or int(snapshot.get('selection_mode') or 0) != 0:
-            self._table_structure_run_action(hwp, 'Cancel')
-            snapshot = self._bundle_compact_snapshot(hwp)
-        return snapshot
+    def _table_structure_inst_id(self, ctrl: Any) -> str | None:
+        if ctrl is None:
+            return None
+        value = self._bundle_control_scalar(ctrl, 'CtrlInstID')
+        return str(value) if value not in (None, '') else None
 
-    def _table_structure_grid(self, hwp: Any) -> dict[str, Any]:
-        """Read the enclosing table's grid through HWPML; caret must be in a cell."""
+    def _table_structure_parent_inst_id(self, hwp: Any) -> str | None:
+        try:
+            parent = getattr(hwp, 'ParentCtrl', None)
+        except Exception:
+            return None
+        return self._table_structure_inst_id(parent)
+
+    def _table_structure_state(self, hwp: Any) -> dict[str, Any]:
+        """Strict normal-edit check: every field must be positively known."""
+        snapshot = self._bundle_compact_snapshot(hwp)
+        mode = snapshot.get('selection_mode')
+        normal = (
+            snapshot.get('is_cell') is True
+            and snapshot.get('has_selection') is False
+            and isinstance(mode, int)
+            and not isinstance(mode, bool)
+            and mode == 0
+        )
+        return {'normal': normal, 'snapshot': snapshot}
+
+    def _table_structure_clear_selection(self, hwp: Any) -> dict[str, Any]:
+        state = self._table_structure_state(hwp)
+        if not state['normal'] and state['snapshot'].get('has_selection') is not False:
+            self._table_structure_run_action(hwp, 'Cancel')
+            state = self._table_structure_state(hwp)
+        return state
+
+    def _table_structure_require(self, hwp: Any, target_inst: str, *, where: str, address: tuple[int, int] | None = None) -> dict[str, Any]:
+        """Re-prove target table, caret cell and normal edit state; raise if any is not proven."""
+        parent_inst = self._table_structure_parent_inst_id(hwp)
+        if parent_inst != target_inst:
+            raise LocalCliRuntimeError(
+                f'{OP} {where}: caret is not inside the target table (ParentCtrl CtrlInstID {parent_inst!r}, target {target_inst!r})'
+            )
+        state = self._table_structure_state(hwp)
+        if not state['normal']:
+            raise LocalCliRuntimeError(f'{OP} {where}: editor is not provably in normal edit state: {state["snapshot"]!r}')
+        if address is not None:
+            here = self._table_structure_address(hwp)
+            if here != address:
+                raise LocalCliRuntimeError(f'{OP} {where}: caret is on {here!r}, expected {cell_address(*address)}')
+        return state['snapshot']
+
+    def _table_structure_grid(self, hwp: Any, target_inst: str, *, where: str) -> dict[str, Any]:
+        """Read the target table's grid through HWPML; the caret must be inside that table."""
         select_front = getattr(hwp, 'SelectCtrlFront', None)
         get_text = getattr(hwp, 'GetTextFile', None)
         if not callable(select_front) or not callable(get_text):
             raise LocalCliRuntimeError(f'{OP} needs SelectCtrlFront and GetTextFile for table grid readback')
+        parent_inst = self._table_structure_parent_inst_id(hwp)
+        if parent_inst != target_inst:
+            raise LocalCliRuntimeError(
+                f'{OP} {where}: grid readback is not bound to the target table (ParentCtrl CtrlInstID {parent_inst!r}, target {target_inst!r})'
+            )
         pos = _get_pos(hwp)
         try:
             select_front()
+            try:
+                selected = getattr(hwp, 'CurSelectedCtrl', None)
+            except Exception:
+                selected = None
+            selected_inst = self._table_structure_inst_id(selected)
+            if selected_inst is not None and selected_inst != target_inst:
+                raise LocalCliRuntimeError(
+                    f'{OP} {where}: SelectCtrlFront selected CtrlInstID {selected_inst!r}, not the target {target_inst!r}'
+                )
             xml_text = get_text('HWPML2X', 'saveblock')
         finally:
             if pos is not None and len(pos) >= 3:
                 _set_pos(hwp, int(pos[0]), int(pos[1]), int(pos[2]))
-        snapshot = self._table_structure_clear_selection(hwp)
-        if snapshot.get('has_selection') or int(snapshot.get('selection_mode') or 0) != 0:
-            raise LocalCliRuntimeError(f'{OP} could not return to normal edit state after grid readback')
+        if not self._table_structure_clear_selection(hwp)['normal']:
+            raise LocalCliRuntimeError(f'{OP} {where}: could not return to normal edit state after grid readback')
         try:
             return parse_table_grid_xml(xml_text)
         except TableStructureError as exc:
-            raise LocalCliRuntimeError(f'{OP} grid readback failed: {exc}') from exc
+            raise LocalCliRuntimeError(f'{OP} {where}: grid readback failed: {exc}') from exc
 
     def _table_structure_goto(self, hwp: Any, row: int, col: int) -> dict[str, Any]:
         target = (row, col)
@@ -120,39 +187,65 @@ class LocalCliTableStructureMixin:
         reached = self._table_structure_address(hwp) == target
         return {'reached': reached, 'address': address, 'attempts': attempts}
 
-    def _table_structure_mutate(self, hwp: Any, plan: dict[str, Any]) -> list[dict[str, Any]]:
+    def _table_structure_goto_and_require(self, hwp: Any, target_inst: str, plan: dict[str, Any], *, where: str) -> dict[str, Any]:
+        goto = self._table_structure_goto(hwp, plan['row'], plan['col'])
+        if not goto['reached']:
+            raise LocalCliRuntimeError(f'{OP} {where}: could not place the caret on {plan["address"]}: {goto["attempts"]!r}')
+        self._table_structure_clear_selection(hwp)
+        goto['snapshot'] = self._table_structure_require(hwp, target_inst, where=where, address=(plan['row'], plan['col']))
+        return goto
+
+    def _table_structure_native(self, hwp: Any, action_name: str, mutation: _Mutation) -> dict[str, Any]:
+        mutation.started = True
+        return {'action': action_name, **self._table_structure_run_action(hwp, action_name)}
+
+    def _table_structure_mutate(self, hwp: Any, plan: dict[str, Any], target_inst: str, mutation: _Mutation) -> list[dict[str, Any]]:
         action = plan['action']
         actions: list[dict[str, Any]] = []
         if action in ROW_COL_ACTIONS:
             for index in range(plan['count']):
+                where = f'before {plan["hancom_action"]} #{index + 1}'
                 if index:
                     # Every repeat starts from the target cell again, so a caret
                     # that Hancom moved elsewhere cannot hit the wrong line.
-                    goto = self._table_structure_goto(hwp, plan['row'], plan['col'])
-                    actions.append({'repeat': index + 1, 'action': 'goto', 'succeeded': goto['reached'], 'address': goto['address']})
-                    if not goto['reached']:
-                        break
-                result = self._table_structure_run_action(hwp, plan['hancom_action'])
-                actions.append({'repeat': index + 1, 'action': plan['hancom_action'], **result})
+                    self._table_structure_goto_and_require(hwp, target_inst, plan, where=where)
+                else:
+                    self._table_structure_require(hwp, target_inst, where=where, address=(plan['row'], plan['col']))
+                result = self._table_structure_native(hwp, plan['hancom_action'], mutation)
+                actions.append({'repeat': index + 1, **result})
                 if not result['succeeded']:
                     break
             return actions
         if action == 'merge_cells':
-            sequence = ['TableCellBlock', 'TableCellBlockExtend']
-            sequence += ['TableRightCell'] * (plan['end_col'] - plan['col'])
-            sequence += ['TableLowerCell'] * (plan['end_row'] - plan['row'])
-            sequence += ['TableMergeCell']
-            for action_name in sequence:
+            self._table_structure_require(hwp, target_inst, where='before merge selection', address=(plan['row'], plan['col']))
+            selection_steps = ['TableCellBlock', 'TableCellBlockExtend']
+            selection_steps += ['TableRightCell'] * (plan['end_col'] - plan['col'])
+            selection_steps += ['TableLowerCell'] * (plan['end_row'] - plan['row'])
+            for action_name in selection_steps:
                 result = self._table_structure_run_action(hwp, action_name)
                 actions.append({'action': action_name, **result})
                 if not result['succeeded']:
-                    break
+                    self._table_structure_run_action(hwp, 'Cancel')
+                    raise LocalCliRuntimeError(f'{OP} merge selection step {action_name} did not succeed: {result!r}')
+            selected = self._table_structure_selected_range(hwp)
+            actions.append({'action': 'get_selected_range', **selected})
+            parent_inst = self._table_structure_parent_inst_id(hwp)
+            if selected['cells'] != plan['selection'] or parent_inst != target_inst:
+                self._table_structure_run_action(hwp, 'Cancel')
+                raise LocalCliRuntimeError(
+                    f'{OP} refused before TableMergeCell: selected range {selected!r} in table {parent_inst!r} '
+                    f'is not exactly {plan["address"]}:{plan["end_address"]} in the target table'
+                )
+            result = self._table_structure_native(hwp, 'TableMergeCell', mutation)
+            actions.append(result)
             actions.append({'action': 'Cancel', **self._table_structure_run_action(hwp, 'Cancel')})
             return actions
         # split_cell: Rows/Cols of 0 leave that dimension unsplit.
+        self._table_structure_require(hwp, target_inst, where='before TableSplitCell', address=(plan['row'], plan['col']))
         rows = plan['split_rows'] if plan['split_rows'] > 1 else 0
         cols = plan['split_cols'] if plan['split_cols'] > 1 else 0
         entry: dict[str, Any] = {'action': 'TableSplitCell', 'rows': rows, 'cols': cols}
+        mutation.started = True
         try:
             wrapper = getattr(hwp, 'TableSplitCell', None)
             if callable(wrapper):
@@ -166,59 +259,60 @@ class LocalCliTableStructureMixin:
                 entry['method'] = 'HAction.Execute(TableSplitCell)'
             entry['succeeded'] = raw is None or bool(raw)
         except Exception as exc:
-            entry.update({'succeeded': False, 'error': f'{type(exc).__name__}: {exc}'})
+            entry.update({'succeeded': False, 'outcome_unknown': True, 'error': f'{type(exc).__name__}: {exc}'})
         actions.append(entry)
         return actions
 
+    def _table_structure_selected_range(self, hwp: Any) -> dict[str, Any]:
+        getter = getattr(hwp, 'get_selected_range', None)
+        if not callable(getter):
+            return {'cells': None, 'error': 'get_selected_range unavailable'}
+        try:
+            raw = getter()
+        except Exception as exc:
+            return {'cells': None, 'error': f'{type(exc).__name__}: {exc}'}
+        cells = parse_cell_range(raw)
+        return {'cells': None if cells is None else sorted(cells), 'raw': raw if isinstance(raw, (list, str)) else repr(raw)}
+
     def _bundle_table_structure_exact(self, hwp: Any, step: dict[str, Any]) -> dict[str, Any]:
         resolved = self._bundle_resolve_control_target(hwp, step, op_name=OP, require_table=True)
+        target_inst = self._table_structure_inst_id(resolved['target_ctrl'])
+        if target_inst is None:
+            raise LocalCliRuntimeError(f'{OP} refused: the target table exposes no CtrlInstID, so edits cannot be bound to it')
         original_pos = None
         try:
             original_pos = _get_pos(hwp)
         except Exception:
             original_pos = None
-        mutation_started = False
+        mutation = _Mutation()
         try:
             enter = self._bundle_enter_table_cell_for_ctrl(hwp, resolved['target_ctrl'])
             if not enter.get('is_cell') or not enter.get('normal_edit_state'):
                 raise LocalCliRuntimeError(f'{OP} cannot enter the target table in normal edit state')
-            before = self._table_structure_grid(hwp)
+            before = self._table_structure_grid(hwp, target_inst, where='before edit')
             try:
                 plan = check_plan(step, before)
             except TableStructureError as exc:
                 raise LocalCliRuntimeError(f'{OP} refused before mutation: {exc}') from exc
-            goto = self._table_structure_goto(hwp, plan['row'], plan['col'])
-            if not goto['reached']:
-                raise LocalCliRuntimeError(f'{OP} could not place the caret on {plan["address"]}: {goto["attempts"]!r}')
-            before_snapshot = self._table_structure_clear_selection(hwp)
-            here = self._table_structure_address(hwp)
-            if (
-                not before_snapshot.get('is_cell')
-                or before_snapshot.get('has_selection')
-                or int(before_snapshot.get('selection_mode') or 0) != 0
-                or here != (plan['row'], plan['col'])
-            ):
-                raise LocalCliRuntimeError(
-                    f'{OP} refused before mutation: caret is not on {plan["address"]} in normal edit state '
-                    f'(address={here!r}, snapshot={before_snapshot!r})'
-                )
-            mutation_started = True
-            actions = self._table_structure_mutate(hwp, plan)
-            if not all(item.get('succeeded', True) for item in actions if item.get('action') != 'Cancel'):
-                raise LocalCliRuntimeError(f'{OP} native action did not succeed: {actions!r}')
-            if not self._bundle_compact_snapshot(hwp).get('is_cell'):
+            goto = self._table_structure_goto_and_require(hwp, target_inst, plan, where='before mutation')
+            actions = self._table_structure_mutate(hwp, plan, target_inst, mutation)
+            failed = [item for item in actions if item.get('succeeded') is False and item.get('action') != 'Cancel']
+            if failed:
+                raise LocalCliRuntimeError(f'{OP} native action did not succeed: {failed!r}')
+            if self._table_structure_parent_inst_id(hwp) != target_inst:
                 reenter = self._bundle_enter_table_cell_for_ctrl(hwp, resolved['target_ctrl'])
                 if not reenter.get('is_cell'):
-                    raise LocalCliRuntimeError(f'{OP} cannot re-enter the table for post-edit readback')
-            after = self._table_structure_grid(hwp)
+                    raise LocalCliRuntimeError(f'{OP} cannot re-enter the target table for post-edit readback')
+            after = self._table_structure_grid(hwp, target_inst, where='after edit')
             verification = evaluate_change(plan, before, after)
             if not verification['ok']:
                 raise LocalCliRuntimeError(f'{OP} refused to mark success: {"; ".join(verification["reasons"])}')
+            public_plan = {key: value for key, value in plan.items() if key != 'selection'}
             return {
                 'schema_version': SCHEMA_VERSION,
                 'succeeded': True,
                 'action': plan['action'],
-                'plan': plan,
+                'plan': public_plan,
                 'enumeration_mode': resolved['enumeration_mode'],
                 'scope': {
                     'section_anchor': resolved['section_anchor'],
@@ -230,12 +324,12 @@ class LocalCliTableStructureMixin:
                     'target_id': resolved['target_id'],
                     'expected_hash': resolved['expected_hash'],
                     'expected_page': resolved['expected_page'],
+                    'ctrl_inst_id': target_inst,
                     'matched_before': resolved['before_item'],
                     'target_anchor_pos': list(resolved['target_anchor_pos']) if resolved['target_anchor_pos'] is not None else None,
                 },
                 'enter': enter,
                 'goto': goto,
-                'before_snapshot': before_snapshot,
                 'before_grid': public_grid(before),
                 'native_actions': actions,
                 'after_grid': public_grid(after),
@@ -243,22 +337,11 @@ class LocalCliTableStructureMixin:
                 'next_proof_required': 'Render the page (page-screenshot or export-proof-range) and review it before saving; the target proof_hash changes after this edit, so re-inventory before another exact edit.',
                 'warnings': [],
             }
-        except LocalCliRuntimeError as exc:
-            if not mutation_started:
-                raise
-            raise LocalCliMutationError(
-                str(exc),
-                mutation_may_have_persisted=True,
-                rollback={'attempted': False, 'hint': 'Inspect rendered proof; use undo or reopen the working copy before saving.'},
-            ) from exc
         except Exception as exc:
-            if not mutation_started:
+            if not mutation.started:
                 raise
-            raise LocalCliMutationError(
-                f'{OP} failed after native mutation started: {type(exc).__name__}: {exc}',
-                mutation_may_have_persisted=True,
-                rollback={'attempted': False, 'hint': 'Inspect rendered proof; use undo or reopen the working copy before saving.'},
-            ) from exc
+            message = str(exc) if isinstance(exc, LocalCliRuntimeError) else f'{OP} failed after native mutation started: {type(exc).__name__}: {exc}'
+            raise LocalCliMutationError(message, mutation_may_have_persisted=True, rollback=dict(_ROLLBACK_HINT)) from exc
         finally:
             if original_pos is not None and len(original_pos) >= 3:
                 try:
