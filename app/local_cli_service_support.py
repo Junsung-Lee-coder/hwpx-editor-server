@@ -392,6 +392,8 @@ _BUNDLE_ALLOWED_OPS = {
     'table_column_width_exact',
     'table_split_exact',
     'object_insert_exact',
+    'layout_exact',
+    'layout_inspect',
     'where',
 }
 

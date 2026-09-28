@@ -109,6 +109,7 @@ from app.local_cli_service_support import (  # noqa: F401
 from app.local_cli_bundle_controls import LocalCliBundleControlsMixin
 from app.local_cli_bundle_paragraphs import LocalCliBundleParagraphsMixin
 from app.local_cli_cell_margins import LocalCliCellMarginsMixin
+from app.local_cli_layout import LocalCliLayoutMixin
 from app.local_cli_object_insert import LocalCliObjectInsertMixin
 
 
@@ -117,6 +118,7 @@ class LocalCliService(
     LocalCliBundleParagraphsMixin,
     LocalCliCellMarginsMixin,
     LocalCliObjectInsertMixin,
+    LocalCliLayoutMixin,
 ):
     def __init__(self, *, settings: Any, interactive_sessions: Any):
         self.settings = settings
@@ -2832,6 +2834,32 @@ class LocalCliService(
                 'treat_as_char',
                 'apply_to',
             },
+            'layout_exact': {
+                'op',
+                'operation',
+                'label',
+                'kind',
+                'expected_pos',
+                'paper_width_mm',
+                'paper_height_mm',
+                'landscape',
+                'margin_top_mm',
+                'margin_bottom_mm',
+                'margin_left_mm',
+                'margin_right_mm',
+                'header_len_mm',
+                'footer_len_mm',
+                'gutter_len_mm',
+                'count',
+                'gap_mm',
+                'same_width',
+                'apply_to',
+                'section_index',
+                'marker_text',
+                'expected_before',
+                'confirm_layout',
+            },
+            'layout_inspect': {'op', 'operation', 'label'},
             'table_split_exact': {
                 'op',
                 'operation',

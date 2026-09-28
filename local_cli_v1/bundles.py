@@ -40,6 +40,8 @@ BUNDLE_SERVER_OPS = frozenset(
         'table_column_width_exact',
         'table_split_exact',
         'object_insert_exact',
+        'layout_exact',
+        'layout_inspect',
         'where',
     }
 )
@@ -324,6 +326,33 @@ _STEP_KEYS: dict[str, frozenset[str]] = {
             'apply_to',
         }
     ),
+    'layout_exact': frozenset(
+        {
+            'op',
+            'label',
+            'kind',
+            'expected_pos',
+            'paper_width_mm',
+            'paper_height_mm',
+            'landscape',
+            'margin_top_mm',
+            'margin_bottom_mm',
+            'margin_left_mm',
+            'margin_right_mm',
+            'header_len_mm',
+            'footer_len_mm',
+            'gutter_len_mm',
+            'count',
+            'gap_mm',
+            'same_width',
+            'apply_to',
+            'section_index',
+            'marker_text',
+            'expected_before',
+            'confirm_layout',
+        }
+    ),
+    'layout_inspect': frozenset({'op', 'label'}),
     'control_move_resize_exact': frozenset(
         {
             'op',
@@ -2163,6 +2192,93 @@ def _build_object_insert_exact(argv: Sequence[str]) -> BundleSpec:
     )
 
 
+_LAYOUT_KINDS = ('page_setup', 'columns', 'section_insert', 'section_delete', 'hanging_indent')
+_LAYOUT_PAGE_FIELDS = ('paper_width_mm', 'paper_height_mm', 'margin_top_mm', 'margin_bottom_mm', 'margin_left_mm',
+                       'margin_right_mm', 'header_len_mm', 'footer_len_mm', 'gutter_len_mm')
+
+
+def _parse_expected_before(pairs: Sequence[str]) -> dict[str, Any]:
+    values: dict[str, Any] = {}
+    for pair in pairs:
+        key, sep, raw = str(pair).partition('=')
+        key = key.strip().replace('-', '_')
+        if not sep or not key:
+            raise BundleError('--expected-before takes KEY=VALUE, e.g. margin_left_mm=30 or landscape=false')
+        raw = raw.strip()
+        if raw.lower() in ('true', 'false'):
+            values[key] = raw.lower() == 'true'
+        else:
+            try:
+                number = float(raw)
+            except ValueError as exc:
+                raise BundleError(f'--expected-before {key} must be a number or true/false') from exc
+            values[key] = int(number) if key == 'count' else number
+    return values
+
+
+def _build_layout_inspect(argv: Sequence[str]) -> BundleSpec:
+    parser = _parser('layout-inspect', 'Read the page setup and column definition at the caret (read-only).')
+    _parse_bundle_args(parser, argv)
+    return BundleSpec(
+        name='layout-inspect',
+        summary='Read-only page setup and column definition at the caret, in the units layout-exact takes as --expected-before.',
+        where='Current caret section.',
+        how='Runs read-only where, then `layout_inspect` (GetDefault only, nothing applied).',
+        changed='Nothing; read-only.',
+        steps=(_where_step('where:layout-inspect'), _step('layout_inspect', 'read:layout-inspect')),
+        sources=({'type': 'documented-native-readback', 'hancom_actions': 'GetDefault PageSetup (HSecDef) / MultiColumn (HColDef)'},),
+    )
+
+
+def _build_layout_exact(argv: Sequence[str]) -> BundleSpec:
+    parser = _parser('layout-exact', 'Change page setup or columns, insert/delete a section break, or apply an automatic hanging indent.')
+    parser.add_argument('--kind', required=True, choices=_LAYOUT_KINDS)
+    parser.add_argument('--expected-pos', required=True, help='Caret position LIST,PARA,POS reported by `hwpx where`')
+    for field in _LAYOUT_PAGE_FIELDS:
+        parser.add_argument(f'--{field.replace("_", "-")}', type=float, default=None, help=f'page_setup: {field.replace("_mm", "")} in mm')
+    parser.add_argument('--landscape', choices=('on', 'off'), default=None, help='page_setup: orientation')
+    parser.add_argument('--count', type=int, default=None, help='columns: 1..10')
+    parser.add_argument('--gap-mm', type=float, default=None, help='columns: gap between columns in mm')
+    parser.add_argument('--same-width', choices=('on', 'off'), default=None, help='columns: equal widths (default on)')
+    parser.add_argument('--apply-to', default=None, help='page_setup: current_section|whole_document; columns: current_section|from_caret_new')
+    parser.add_argument('--section-index', type=int, default=None, help='section_delete: 1-based section whose leading break is removed (>= 2)')
+    parser.add_argument('--marker-text', default=None, help='hanging_indent: the marker the paragraph starts with, e.g. "1. "')
+    parser.add_argument('--expected-before', action='append', default=[], help='Current value from layout-inspect as KEY=VALUE; repeat per field being changed')
+    parser.add_argument('--confirm-layout', action='store_true', required=True, help='Required explicit confirmation for the layout change')
+    args = _parse_bundle_args(parser, argv)
+    fields: dict[str, Any] = {'kind': args.kind, 'expected_pos': _parse_expected_pos(args.expected_pos), 'confirm_layout': True}
+    for key in (*_LAYOUT_PAGE_FIELDS, 'count', 'gap_mm', 'apply_to', 'section_index', 'marker_text'):
+        value = getattr(args, key)
+        if value is not None:
+            fields[key] = value
+    for key in ('landscape', 'same_width'):
+        value = getattr(args, key)
+        if value is not None:
+            fields[key] = value == 'on'
+    if args.expected_before:
+        fields['expected_before'] = _parse_expected_before(args.expected_before)
+    return BundleSpec(
+        name='layout-exact',
+        summary=f'Run layout {args.kind} at the proven caret; native readback must show exactly the requested change.',
+        where=f'Caret at {fields["expected_pos"]} as reported by `hwpx where`.',
+        how='Runs read-only where, then one `layout_exact` primitive: re-prove caret and edit state, check expected_before, run the documented Hancom action once, and read back the parameter set and whole-document HWPML.',
+        changed='Changes only the requested layout property; the step fails with mutation_may_have_persisted if the readback shows anything else.',
+        steps=(
+            _where_step('where:before-layout'),
+            _step('layout_exact', f'mutate:layout:{args.kind}', **fields),
+            _where_step('where:after-layout'),
+        ),
+        sources=(
+            {
+                'type': 'documented-native-action',
+                'hancom_actions': 'PageSetup (HSecDef) / MultiColumn (HColDef) / BreakSection / DeleteBack at a section start / ParagraphShapeIndentAtCaret',
+                'readback': 'GetDefault of the same parameter set plus GetTextFile("HWPML2X", "") before and after',
+                'risk_note': 'Native paths are not yet verified on a Hancom desktop; columns and section_delete are the least certain. Review rendered proof before saving.',
+            },
+        ),
+    )
+
+
 def _build_section_control_move_resize_exact(argv: Sequence[str]) -> BundleSpec:
     parser = _parser('section-control-move-resize-exact', 'Move and/or resize one control only after exact inventory proof matches.')
     _add_section_scope_args(parser)
@@ -2260,6 +2376,8 @@ _RECIPES: dict[str, BundleRecipe] = {
     'table-cell-structure-exact': BundleRecipe('table-cell-structure-exact', 'Read-only exact table/cell structure and navigability probe.', _build_table_cell_structure_exact),
     'table-column-width-exact': BundleRecipe('table-column-width-exact', 'Apply guarded native exact table column widths with preservation and rollback proof.', _build_table_column_width_exact),
     'table-split-exact': BundleRecipe('table-split-exact', 'Split one exact pre-proven table with documented TableSplitTable.', _build_table_split_exact),
+    'layout-inspect': BundleRecipe('layout-inspect', 'Read page setup and column definition at the caret (read-only).', _build_layout_inspect),
+    'layout-exact': BundleRecipe('layout-exact', 'Change page setup or columns, insert/delete a section break, or apply an automatic hanging indent.', _build_layout_exact),
     'object-insert-exact': BundleRecipe('object-insert-exact', 'Insert one footnote, endnote, memo, hyperlink, bookmark, equation, shape, header or footer at the proven caret.', _build_object_insert_exact),
     'paragraph-style-apply-exact': BundleRecipe('paragraph-style-apply-exact', 'Apply exact paragraph style toggles with fail-closed match/page proof.', _build_paragraph_style_apply_exact),
     'paragraph-delete-exact': BundleRecipe('paragraph-delete-exact', 'Delete one exact paragraph/row after page and neighbor proof.', _build_paragraph_delete_exact),
@@ -2323,6 +2441,10 @@ def bundle_help(name: str) -> str:
         return 'usage: hwpx bundle-dump cell-row-fit-exact (--section-anchor TEXT | --page-from N [--page-to N]) --target-id ID --expected-hash HASH --expected-page N (--row-height-percent PCT | --row-height-hu HU | --row-height-mm MM | --resize-up-steps N | --resize-down-steps N | --line-spacing N | --char-height-percent PCT) --confirm-layout'
     if bundle_name == 'table-cell-structure-exact':
         return 'usage: hwpx bundle-dump table-cell-structure-exact (--section-anchor TEXT | --page-from N [--page-to N]) --target-id ID --expected-hash HASH --expected-page N\n       read-only exact table/cell structure probe; reports single-cell/non-navigable evidence before any TableSplitTable or row-fit attempt'
+    if bundle_name == 'layout-inspect':
+        return 'usage: hwpx bundle-dump layout-inspect\n       read-only page setup and column definition at the caret; values feed layout-exact --expected-before'
+    if bundle_name == 'layout-exact':
+        return 'usage: hwpx bundle-dump layout-exact --kind KIND --expected-pos LIST,PARA,POS [page fields --expected-before KEY=VALUE ... --apply-to current_section|whole_document | --count N [--gap-mm G] [--same-width on|off] [--apply-to current_section|from_caret_new] | --section-index N | --marker-text TEXT] --confirm-layout\n       KIND: page_setup, columns, section_insert, section_delete, hanging_indent; verified by native parameter-set and HWPML readback'
     if bundle_name == 'object-insert-exact':
         return 'usage: hwpx bundle-dump object-insert-exact --kind KIND --expected-pos LIST,PARA,POS [--text T | --url U --display-text T | --name N | --script S | --width-mm W --height-mm H [--treat-as-char on|off]] [--apply-to both|even|odd] --confirm-mutation\n       KIND: footnote, endnote, memo, hyperlink, bookmark, equation, line, rectangle, ellipse, header, footer; verified by whole-document HWPML readback'
     if bundle_name == 'table-split-exact':
