@@ -39,7 +39,7 @@ def _load_json_artifact(path: Path) -> dict[str, Any] | None:
         return None
     try:
         data = json.loads(path.read_text(encoding='utf-8'))
-    except Exception:
+    except (OSError, ValueError):
         return None
     return data if isinstance(data, dict) else None
 
@@ -156,7 +156,7 @@ def read_runtime_status(job_dir: Path) -> dict[str, object] | None:
         return None
     try:
         return json.loads(path.read_text(encoding='utf-8'))
-    except Exception:
+    except (OSError, ValueError):
         return None
 
 

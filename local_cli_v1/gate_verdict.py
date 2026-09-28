@@ -50,7 +50,7 @@ def _load_render_manifest(path: str | Path | None) -> dict[str, Any] | None:
         return None
     try:
         return json.loads(manifest_path.read_text(encoding='utf-8'))
-    except Exception:
+    except (OSError, ValueError):
         return None
 
 
