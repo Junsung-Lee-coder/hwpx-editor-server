@@ -10,6 +10,7 @@ What you get:
 
 - **Find and navigate:** text search with page and cursor context, table and control inventories.
 - **Targeted edits:** text entry, character styles, bullets, tables, cell formatting, paragraph and control operations. Each edit is validated before it touches the document.
+- **Table structure:** insert or delete rows and columns, merge a cell range, or split a cell on one exact table (`table-structure-exact`). The table grid is read back before and after, and the edit only counts as done when the grid changed exactly as planned.
 - **Rendered proof:** page screenshots and PDF renders, so you check the edit visually. Page count alone is never treated as proof.
 - **Honest failure reporting:** when Hancom's outcome is unknown, the server says so and keeps the evidence. It does not guess or silently retry.
 

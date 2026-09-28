@@ -39,6 +39,7 @@ BUNDLE_SERVER_OPS = frozenset(
         'table_cell_structure_exact',
         'table_column_width_exact',
         'table_split_exact',
+        'table_structure_exact',
         'where',
     }
 )
@@ -301,6 +302,31 @@ _STEP_KEYS: dict[str, frozenset[str]] = {
             'expected_hash',
             'expected_page',
             'down_rows',
+            'confirm_layout',
+            'max_controls',
+        }
+    ),
+    'table_structure_exact': frozenset(
+        {
+            'op',
+            'label',
+            'section_anchor',
+            'page_from',
+            'page_to',
+            'around',
+            'target_id',
+            'expected_hash',
+            'expected_page',
+            'action',
+            'row',
+            'col',
+            'end_row',
+            'end_col',
+            'count',
+            'split_rows',
+            'split_cols',
+            'expected_rows',
+            'expected_cols',
             'confirm_layout',
             'max_controls',
         }
@@ -2090,6 +2116,91 @@ def _build_table_split_exact(argv: Sequence[str]) -> BundleSpec:
     )
 
 
+_TABLE_STRUCTURE_ACTIONS = (
+    'insert_row_above',
+    'insert_row_below',
+    'insert_col_left',
+    'insert_col_right',
+    'delete_row',
+    'delete_col',
+    'merge_cells',
+    'split_cell',
+)
+
+
+def _build_table_structure_exact(argv: Sequence[str]) -> BundleSpec:
+    parser = _parser('table-structure-exact', 'Insert/delete rows or columns, merge cells, or split a cell in one exact pre-proven table.')
+    _add_section_scope_args(parser)
+    parser.add_argument('--target-id', required=True, help='Exact table target id/path from section-table-frame-inventory')
+    parser.add_argument('--expected-hash', required=True, help='Exact proof_hash from section-table-frame-inventory')
+    parser.add_argument('--expected-page', type=int, required=True, help='Expected rendered/page evidence for the target before mutation')
+    parser.add_argument('--action', required=True, choices=_TABLE_STRUCTURE_ACTIONS, help='Structure edit to run')
+    parser.add_argument('--row', type=int, required=True, help='1-based row of the target cell (A1 is row 1)')
+    parser.add_argument('--col', type=int, required=True, help='1-based column of the target cell (A1 is column 1)')
+    parser.add_argument('--end-row', type=int, help='merge_cells: 1-based last row of the range')
+    parser.add_argument('--end-col', type=int, help='merge_cells: 1-based last column of the range')
+    parser.add_argument('--count', type=int, help='insert/delete: how many rows or columns (default 1, max 50)')
+    parser.add_argument('--split-rows', type=int, help='split_cell: rows to split the cell into (default 1)')
+    parser.add_argument('--split-cols', type=int, help='split_cell: columns to split the cell into (default 1)')
+    parser.add_argument('--expected-rows', type=int, required=True, help='Current row count of the table; the edit refuses to run on a different grid')
+    parser.add_argument('--expected-cols', type=int, required=True, help='Current column count of the table; the edit refuses to run on a different grid')
+    parser.add_argument('--confirm-layout', action='store_true', required=True, help='Required explicit confirmation for table structure mutation')
+    args = _parse_bundle_args(parser, argv)
+    scope = _normalize_section_scope_args(args)
+    target_id = _bounded_text(args.target_id, field='target_id')
+    expected_hash = _bounded_text(args.expected_hash, field='expected_hash')
+    fields: dict[str, Any] = {
+        'target_id': target_id,
+        'expected_hash': expected_hash,
+        'expected_page': _positive_int(args.expected_page, field='expected_page'),
+        'action': args.action,
+        'row': _positive_int(args.row, field='row'),
+        'col': _positive_int(args.col, field='col'),
+        'expected_rows': _positive_int(args.expected_rows, field='expected_rows'),
+        'expected_cols': _positive_int(args.expected_cols, field='expected_cols'),
+        'confirm_layout': bool(args.confirm_layout),
+        **scope,
+    }
+    takes = {
+        'merge_cells': ('end_row', 'end_col'),
+        'split_cell': ('split_rows', 'split_cols'),
+    }.get(args.action, ('count',))
+    for key in ('end_row', 'end_col', 'count', 'split_rows', 'split_cols'):
+        value = getattr(args, key)
+        if value is None:
+            continue
+        if key not in takes:
+            raise BundleError(f'--{key.replace("_", "-")} does not apply to --action {args.action}')
+        fields[key] = _positive_int(value, field=key)
+    if args.action == 'merge_cells' and not (fields.get('end_row') and fields.get('end_col')):
+        raise BundleError('--action merge_cells requires --end-row and --end-col')
+    if args.action == 'split_cell' and int(fields.get('split_rows') or 1) * int(fields.get('split_cols') or 1) < 2:
+        raise BundleError('--action split_cell requires --split-rows and/or --split-cols so the cell becomes at least two cells')
+    if args.max_controls:
+        fields['max_controls'] = int(args.max_controls)
+    cell = f'row {fields["row"]}, col {fields["col"]}'
+    return BundleSpec(
+        name='table-structure-exact',
+        summary=f'Run {args.action} on exactly one pre-proven table; verified by HWPML row/column/cell readback before and after.',
+        where=f'Table target {target_id!r} inside requested section/page scope, expected page {fields["expected_page"]}; cell {cell}.',
+        how='Runs read-only where, then one `table_structure_exact` primitive: re-inventory the exact table, read its grid, check the plan, move to the cell, run the documented Hancom action(s), and read the grid again.',
+        changed='Mutates table structure only if target id, proof_hash, expected page, expected grid size, cell navigation, and the post-edit grid all match the plan; any failure after the native action reports mutation_may_have_persisted.',
+        steps=(
+            _where_step('where:before-table-structure'),
+            _step('table_structure_exact', f'mutate:table-structure:{args.action}', **fields),
+            _where_step('where:after-table-structure'),
+        ),
+        sources=(
+            {
+                'type': 'documented-native-action',
+                'hancom_actions': 'TableInsertUpperRow / TableInsertLowerRow / TableInsertLeftColumn / TableInsertRightColumn / TableDeleteRow / TableDeleteColumn; TableCellBlock + TableCellBlockExtend + TableMergeCell; TableSplitCell (HTableSplitCell Rows/Cols)',
+                'readback': 'SelectCtrlFront + GetTextFile("HWPML2X", "saveblock"): TABLE RowCount/ColCount and ROW/CELL RowAddr/ColAddr/RowSpan/ColSpan',
+                'risk_note': 'Accept only after rendered before/after proof on a disposable or working copy; the table proof_hash changes after the edit.',
+            },
+        ),
+    )
+
+
 def _build_section_control_move_resize_exact(argv: Sequence[str]) -> BundleSpec:
     parser = _parser('section-control-move-resize-exact', 'Move and/or resize one control only after exact inventory proof matches.')
     _add_section_scope_args(parser)
@@ -2187,6 +2298,7 @@ _RECIPES: dict[str, BundleRecipe] = {
     'table-cell-structure-exact': BundleRecipe('table-cell-structure-exact', 'Read-only exact table/cell structure and navigability probe.', _build_table_cell_structure_exact),
     'table-column-width-exact': BundleRecipe('table-column-width-exact', 'Apply guarded native exact table column widths with preservation and rollback proof.', _build_table_column_width_exact),
     'table-split-exact': BundleRecipe('table-split-exact', 'Split one exact pre-proven table with documented TableSplitTable.', _build_table_split_exact),
+    'table-structure-exact': BundleRecipe('table-structure-exact', 'Insert/delete rows or columns, merge cells, or split a cell in one exact pre-proven table.', _build_table_structure_exact),
     'paragraph-style-apply-exact': BundleRecipe('paragraph-style-apply-exact', 'Apply exact paragraph style toggles with fail-closed match/page proof.', _build_paragraph_style_apply_exact),
     'paragraph-delete-exact': BundleRecipe('paragraph-delete-exact', 'Delete one exact paragraph/row after page and neighbor proof.', _build_paragraph_delete_exact),
     'style-apply': BundleRecipe('style-apply', 'Guarded dump-only style clone/apply proof; no mutation.', _build_style_apply),
@@ -2249,6 +2361,8 @@ def bundle_help(name: str) -> str:
         return 'usage: hwpx bundle-dump cell-row-fit-exact (--section-anchor TEXT | --page-from N [--page-to N]) --target-id ID --expected-hash HASH --expected-page N (--row-height-percent PCT | --row-height-hu HU | --row-height-mm MM | --resize-up-steps N | --resize-down-steps N | --line-spacing N | --char-height-percent PCT) --confirm-layout'
     if bundle_name == 'table-cell-structure-exact':
         return 'usage: hwpx bundle-dump table-cell-structure-exact (--section-anchor TEXT | --page-from N [--page-to N]) --target-id ID --expected-hash HASH --expected-page N\n       read-only exact table/cell structure probe; reports single-cell/non-navigable evidence before any TableSplitTable or row-fit attempt'
+    if bundle_name == 'table-structure-exact':
+        return 'usage: hwpx bundle-dump table-structure-exact (--section-anchor TEXT | --page-from N [--page-to N]) --target-id ID --expected-hash HASH --expected-page N --action ACTION --row R --col C --expected-rows N --expected-cols N [--count N | --end-row R --end-col C | --split-rows N --split-cols N] --confirm-layout\n       ACTION: insert_row_above, insert_row_below, insert_col_left, insert_col_right, delete_row, delete_col, merge_cells, split_cell; verified by HWPML grid readback'
     if bundle_name == 'table-split-exact':
         return 'usage: hwpx bundle-dump table-split-exact (--section-anchor TEXT | --page-from N [--page-to N]) --target-id ID --expected-hash HASH --expected-page N --down-rows N --confirm-layout\n       splits one exact pre-proven table with documented TableSplitTable after explicit downward cell navigation'
     if bundle_name == 'export-proof-range':
