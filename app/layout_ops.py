@@ -30,6 +30,9 @@ import xml.etree.ElementTree as ET
 from collections import Counter
 from typing import Any, Mapping
 
+from app.hwpml_invariants import head_tail_reasons, signature
+from app.object_insert import CONTROL_TAGS
+
 OP = 'layout_exact'
 SCHEMA_VERSION = 'local-cli/layout-exact/v1'
 
@@ -92,6 +95,12 @@ ALL_KEYS = sorted(COMMON_KEYS.union(*KIND_KEYS.values()))
 # HWPML elements that define sections/columns; they move with section edits,
 # so they are counted on their own and left out of the control inventory.
 _LAYOUT_TAGS = frozenset({'SECDEF', 'COLDEF'})
+# Paragraph shapes are compared on their own (``para_shapes``), so a hanging
+# indent inside a table cell does not count as a changed table.
+_PARA_SHAPE_IGNORED = {'P': frozenset({'ParaShape'})}
+# HEAD attribute that counts sections (UNVERIFIED natively); free to change
+# only when a section is added or removed.
+_SECTION_COUNT_ATTRS = {'HEAD': ('SecCnt',)}
 
 
 class LayoutError(ValueError):
@@ -275,8 +284,10 @@ def parse_layout_xml(xml_text: Any) -> dict[str, Any]:
     * ``pagedefs``: canonical PAGEDEF per SECDEF in order, or None when any
       SECDEF lacks exactly one PAGEDEF (per-section page checks then fail closed).
     * ``coldefs``: canonical COLDEF elements in document order.
-    * ``coldefs_by_section``: the same COLDEFs grouped by the section they
-      follow (one list per SECDEF, or per SECTION element without SECDEFs).
+    * ``coldefs_by_section``: the same COLDEFs grouped per SECTION element, or
+      None when the SECDEF-then-COLDEF order per section cannot be proven.
+    * ``control_signatures``: every non-layout control's subtree in order.
+    * ``_root``: the parsed readback, for HEAD/TAIL invariants.
     * ``text``: all CHAR text joined without separators, whitespace runs
       collapsed, so splitting or joining paragraphs does not change it.
     * ``controls``: tags of TEXT children other than CHAR/SECDEF/COLDEF.
@@ -304,7 +315,11 @@ def parse_layout_xml(xml_text: Any) -> dict[str, Any]:
     if not secdefs:
         pagedefs = None
     coldefs = [_canonical(element) for element in body.iter('COLDEF')]
-    coldefs_by_section = _coldefs_by_section(body, len(secdefs) if secdefs else section_elements)
+    coldefs_by_section = _coldefs_by_section(body)
+    # Every non-layout control (pictures, tables, notes, fields) must survive
+    # unchanged; paragraph shapes are checked separately via ``para_shapes``.
+    control_signatures = [signature(element, _PARA_SHAPE_IGNORED) for element in body.iter()
+                          if element.tag in CONTROL_TAGS and element.tag not in _LAYOUT_TAGS]
     chars = ''.join(''.join(char.itertext()) for char in body.iter('CHAR'))
     controls = Counter(child.tag for text_el in body.iter('TEXT') for child in text_el if child.tag != 'CHAR' and child.tag not in _LAYOUT_TAGS)
     paragraphs = list(body.iter('P'))
@@ -318,6 +333,8 @@ def parse_layout_xml(xml_text: Any) -> dict[str, Any]:
         'pagedefs': pagedefs,
         'coldefs': coldefs,
         'coldefs_by_section': coldefs_by_section,
+        'control_signatures': control_signatures,
+        '_root': root,
         'text': ' '.join(chars.split()),
         'controls': dict(sorted(controls.items())),
         'paragraph_count': len(paragraphs),
@@ -325,24 +342,31 @@ def parse_layout_xml(xml_text: Any) -> dict[str, Any]:
     }
 
 
-def _coldefs_by_section(body: ET.Element, section_count: int) -> list[list[str]]:
-    groups: list[list[str]] = [[] for _ in range(max(section_count, 1))]
-    if any(True for _ in body.iter('SECDEF')):
-        index = 0
-        for element in body.iter():
-            if element.tag == 'SECDEF':
-                index += 1
-            elif element.tag == 'COLDEF':
-                groups[min(max(index - 1, 0), len(groups) - 1)].append(_canonical(element))
-        return groups
-    for index, section in enumerate(body.findall('SECTION')):
-        groups[min(index, len(groups) - 1)].extend(_canonical(element) for element in section.iter('COLDEF'))
+def _coldefs_by_section(body: ET.Element) -> list[list[str]] | None:
+    """COLDEFs per SECTION element, or None when the section a COLDEF belongs to is not provable.
+
+    With SECDEFs present, each SECTION must hold exactly one SECDEF and it
+    must come before every COLDEF of that SECTION in document order.
+    """
+    sections = body.findall('SECTION')
+    if not sections:
+        return None
+    groups: list[list[str]] = []
+    for section in sections:
+        order = [element.tag for element in section.iter() if element.tag in ('SECDEF', 'COLDEF')]
+        if any(True for _ in body.iter('SECDEF')) and (order.count('SECDEF') != 1 or order[0] != 'SECDEF'):
+            return None
+        groups.append([_canonical(element) for element in section.iter('COLDEF')])
     return groups
 
 
 def _column_scope_reasons(plan: Mapping[str, Any], doc_before: Mapping[str, Any], doc_after: Mapping[str, Any], caret_section: int | None) -> list[str]:
     """The column change must land in the caret's section and nowhere else."""
     before, after = doc_before['coldefs_by_section'], doc_after['coldefs_by_section']
+    if before is None or after is None:
+        if doc_before['section_count'] == 1 and doc_after['section_count'] == 1:
+            return []
+        return ['the section each column definition belongs to cannot be proven from the readback (SECDEF/COLDEF order)']
     if len(before) != len(after):
         return [f'per-section column readback moved from {len(before)} to {len(after)} sections']
     changed = [index for index, (old, new) in enumerate(zip(before, after)) if old != new]
@@ -390,6 +414,12 @@ def compare_documents(
     unchanged, at most one ParaShape id changed) | 'free'.
     """
     reasons: list[str] = []
+    if '_root' not in before or '_root' not in after:
+        reasons.append('whole-document readback is unavailable for HEAD/TAIL checks')
+    else:
+        reasons += head_tail_reasons(before['_root'], after['_root'], allow_head_attrs=_SECTION_COUNT_ATTRS if section_delta else None)
+    if after.get('control_signatures') != before.get('control_signatures'):
+        reasons.append('an embedded object (picture, table, note, field) changed')
     if after['text'] != before['text']:
         reasons.append(f'document text changed ({len(before["text"])} -> {len(after["text"])} chars after whitespace normalization)')
     if after['controls'] != before['controls']:
@@ -546,6 +576,8 @@ def _read_optional_ints(values: Mapping[str, Any], items: tuple[str, ...]) -> di
 
 
 def plan_columns(request: Mapping[str, Any], before_raw: Mapping[str, Any], doc: Mapping[str, Any]) -> dict[str, Any]:
+    if doc['section_count'] > 1 and doc['coldefs_by_section'] is None:
+        raise LayoutError('the section each column definition belongs to cannot be proven from the readback (SECDEF/COLDEF order)')
     _as_int_items(before_raw, COLDEF_REQUIRED, 'MultiColumn')
     before = _read_optional_ints(before_raw, COLDEF_ITEMS)
     expected = request.get('expected_before') or {}

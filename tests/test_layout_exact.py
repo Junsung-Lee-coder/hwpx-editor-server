@@ -390,6 +390,40 @@ class ReadbackTests(unittest.TestCase):
             with self.subTest(xml=xml), self.assertRaises(LayoutError):
                 parse_layout_xml(xml)
 
+    def test_compare_documents_guards_head_tail_and_embedded_objects(self) -> None:
+        def doc(head: str = '<HEAD SecCnt="1"><CHARSHAPELIST Count="1"><CHARSHAPE Id="0" Height="1000"/></CHARSHAPELIST></HEAD>',
+                picture: str = '<PICTURE><IMAGE BinItem="1"/></PICTURE>', tail: str = '<TAIL><BINDATASTORAGE>QUJD</BINDATASTORAGE></TAIL>',
+                shape: str = '1') -> dict[str, Any]:
+            return parse_layout_xml(f'<HWPML>{head}<BODY><SECTION><SECDEF/><P ParaShape="{shape}"><TEXT><CHAR>x</CHAR>{picture}</TEXT></P></SECTION></BODY>{tail}</HWPML>')
+        base = doc()
+        grown = doc(head='<HEAD SecCnt="1"><CHARSHAPELIST Count="2"><CHARSHAPE Id="0" Height="1000"/><CHARSHAPE Id="1" Height="9"/></CHARSHAPELIST></HEAD>')
+        self.assertEqual(compare_documents(base, grown), [])
+        self.assertEqual(compare_documents(base, doc(shape='2'), paragraphs='one_shape'), [])
+        cases = (
+            (doc(head='<HEAD SecCnt="1"><CHARSHAPELIST Count="1"><CHARSHAPE Id="0" Height="1200"/></CHARSHAPELIST></HEAD>'), 'existing HEAD entry changed'),
+            (doc(tail='<TAIL/>'), 'TAIL changed'),
+            (doc(picture='<PICTURE><IMAGE BinItem="2"/></PICTURE>'), 'embedded object'),
+            (doc(head='<HEAD SecCnt="2"><CHARSHAPELIST Count="1"><CHARSHAPE Id="0" Height="1000"/></CHARSHAPELIST></HEAD>'), 'SecCnt'),
+        )
+        for after, reason in cases:
+            with self.subTest(reason=reason):
+                self.assertIn(reason, ' '.join(compare_documents(base, after)))
+
+    def test_column_sections_need_provable_secdef_order(self) -> None:
+        good = parse_layout_xml('<HWPML><BODY><SECTION><P><TEXT><SECDEF/><COLDEF Count="1"/><CHAR>a</CHAR></TEXT></P></SECTION>'
+                                '<SECTION><P><TEXT><SECDEF/><COLDEF Count="2"/><CHAR>b</CHAR></TEXT></P></SECTION></BODY></HWPML>')
+        self.assertEqual(len(good['coldefs_by_section']), 2)
+        for body in (
+            '<SECTION><P><TEXT><COLDEF Count="1"/><SECDEF/><CHAR>a</CHAR></TEXT></P></SECTION><SECTION><P><TEXT><SECDEF/><CHAR>b</CHAR></TEXT></P></SECTION>',
+            '<SECTION><P><TEXT><SECDEF/><COLDEF/><SECDEF/><COLDEF/><CHAR>a</CHAR></TEXT></P></SECTION>',
+        ):
+            with self.subTest(body=body):
+                doc = parse_layout_xml(f'<HWPML><BODY>{body}</BODY></HWPML>')
+                self.assertIsNone(doc['coldefs_by_section'])
+                request = normalize_request({'kind': 'columns', 'expected_pos': [0, 0, 0], 'confirm_layout': True, 'count': 2})
+                with self.assertRaisesRegex(LayoutError, 'cannot be proven'):
+                    plan_columns(request, COLDEF, doc)
+
     def test_compare_documents_detects_controls_and_shapes(self) -> None:
         base = parse_layout_xml('<HWPML><BODY><SECTION><P ParaShape="1"><TEXT><CHAR>x</CHAR></TEXT></P><P ParaShape="1"><TEXT><CHAR>y</CHAR></TEXT></P></SECTION></BODY></HWPML>')
         table = parse_layout_xml('<HWPML><BODY><SECTION><P ParaShape="1"><TEXT><CHAR>x</CHAR><TABLE/></TEXT></P><P ParaShape="1"><TEXT><CHAR>y</CHAR></TEXT></P></SECTION></BODY></HWPML>')

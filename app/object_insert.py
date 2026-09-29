@@ -25,6 +25,8 @@ from collections import Counter
 from typing import Any, Mapping
 from urllib.parse import urlsplit
 
+from app.hwpml_invariants import attrs, head_tail_reasons, signature
+
 OP = 'object_insert_exact'
 SCHEMA_VERSION = 'local-cli/object-insert-exact/v1'
 
@@ -357,37 +359,20 @@ def element_text(element: ET.Element) -> str:
     return _norm(''.join(element.itertext()))
 
 
-# Attributes that may legitimately differ between two readbacks of an unchanged
-# object (per tag; '*' applies to every tag). UNVERIFIED natively: InstId is
-# Hancom's per-instance id and AUTONUM Number renumbers when a note is added
-# before an existing one.
-VOLATILE_ATTRS: dict[str, frozenset[str]] = {'*': frozenset({'InstId'}), 'AUTONUM': frozenset({'Number'})}
-# Elements outside BODY that must survive byte-for-byte (after dropping
-# volatile attributes): embedded pictures and their binary storage.
-PRESERVED_OUTSIDE_BODY = ('BINDATALIST', 'BINDATASTORAGE')
 TEXT_RUN_TAG = 'TEXT'
 CHAR_SHAPE_ATTR = 'CharShape'
 MAX_DESCENT = 16
-
-
-def _attrs(element: ET.Element) -> tuple[tuple[str, str], ...]:
-    volatile = VOLATILE_ATTRS['*'] | VOLATILE_ATTRS.get(element.tag, frozenset())
-    return tuple(sorted((key, value) for key, value in element.attrib.items() if key not in volatile))
-
-
-def signature(element: ET.Element) -> str:
-    """Canonical form of an element's whole subtree, text and tails included."""
-    attrs = ''.join(f' {key}={value!r}' for key, value in _attrs(element))
-    children = ''.join(signature(child) + f'~{child.tail or ""!r}' for child in element)
-    return f'<{element.tag}{attrs}>{element.text or ""!r}{children}</{element.tag}>'
+_attrs = attrs
 
 
 def linearize(container: ET.Element) -> list[tuple[tuple[Any, ...], ET.Element | None]]:
     """Document-order tokens under ``container`` (not including it).
 
-    ``('P', attrs)`` opens a paragraph, ``('T', char, char_shape)`` is one run
-    character, and ``('C', key, signature)`` is a whole control, which is
-    atomic here (see ``evaluate_insert`` for descending into one). Each token
+    ``('E', tag, attrs)`` / ``('/E', tag)`` open and close every element other
+    than the run wrappers TEXT/CHAR (paragraphs, table rows, cells, sizes),
+    ``('T', char, char_shape)`` is one run character, and ``('C', key,
+    signature)`` is a whole control, which is atomic here (see
+    ``evaluate_insert`` for descending into one). Each token
     is paired with its element (controls) or None.
     """
     tokens: list[tuple[tuple[Any, ...], ET.Element | None]] = []
@@ -401,8 +386,13 @@ def linearize(container: ET.Element) -> list[tuple[tuple[Any, ...], ET.Element |
         if key is not None:
             tokens.append((('C', key, signature(element)), element))
             return
-        if element.tag == PARAGRAPH_TAG:
-            tokens.append((('P', _attrs(element)), None))
+        # Run wrappers (TEXT, CHAR) may split or merge around a new control, so
+        # they carry no token of their own; every other element opens and
+        # closes with a token carrying its attributes (table/cell size, spans,
+        # border fills, paragraph shape).
+        structural = element.tag not in TEXT_TAGS and element.tag != TEXT_RUN_TAG
+        if structural:
+            tokens.append((('E', element.tag, _attrs(element)), None))
         if element.tag == TEXT_RUN_TAG:
             shape = element.get(CHAR_SHAPE_ATTR, shape)
         run = in_run or element.tag in TEXT_TAGS
@@ -412,6 +402,8 @@ def linearize(container: ET.Element) -> list[tuple[tuple[Any, ...], ET.Element |
             walk(child, shape, run)
             if run:
                 chars(child.tail, shape)
+        if structural:
+            tokens.append((('/E', element.tag), None))
 
     for child in container:
         walk(child, None, False)
@@ -490,10 +482,6 @@ def check_before(plan: Mapping[str, Any], before: ET.Element) -> dict[str, Any]:
     return summary
 
 
-def _preserved_outside_body(root: ET.Element) -> list[str]:
-    return [signature(element) for tag in PRESERVED_OUTSIDE_BODY for element in root.iter(tag)]
-
-
 def _control_tally(tokens: list[Any]) -> Counter[str]:
     return Counter(token[1] for token, _element in tokens if token[0] == 'C')
 
@@ -539,8 +527,11 @@ def _locate_insert(plan: Mapping[str, Any], before_tokens: list[Any], after_toke
         changed = {name: value for name, value in sorted(changed.items()) if value}
         if changed:
             reasons.append(f'other controls changed: {changed}')
-        if any(token[0] == 'P' for token, _element in new + old):
+        changed_elements = sorted({token[1] for token, _element in new + old if token[0] in ('E', '/E')})
+        if PARAGRAPH_TAG in changed_elements:
             reasons.append('paragraph structure changed')
+        if [tag for tag in changed_elements if tag != PARAGRAPH_TAG]:
+            reasons.append(f'container structure or attributes changed: {[tag for tag in changed_elements if tag != PARAGRAPH_TAG]}')
         if any(token[0] == 'T' for token, _element in new + old):
             reasons.append('document text outside the new object changed')
         if not reasons:
@@ -566,8 +557,9 @@ def evaluate_insert(plan: Mapping[str, Any], before: ET.Element, after: ET.Eleme
     the caret sat inside a control (a table cell, a note), that one control
     is descended into and the same rule applies there. The requested
     text/url/name/script/size is checked on the control found at that
-    position, so a pre-existing twin can never stand in for it. Pictures'
-    BinData outside BODY must be unchanged. ``reasons`` lists up to ten
+    position, so a pre-existing twin can never stand in for it. Outside
+    BODY, HEAD may only gain appended list entries and everything else
+    (TAIL with its BinData) must be unchanged. ``reasons`` lists up to ten
     problems.
     """
     key = plan['tag_key']
@@ -587,8 +579,7 @@ def evaluate_insert(plan: Mapping[str, Any], before: ET.Element, after: ET.Eleme
     if not reasons:
         matched, found = _locate_insert(plan, linearize(_body(before)), linearize(_body(after)), path)
         reasons.extend(found)
-    if _preserved_outside_body(before) != _preserved_outside_body(after):
-        reasons.append('embedded binary data (BINDATALIST/BINDATASTORAGE) changed')
+    reasons.extend(head_tail_reasons(before, after))
     return {
         'ok': not reasons,
         'target': key,

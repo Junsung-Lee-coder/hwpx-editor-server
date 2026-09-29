@@ -8,7 +8,11 @@ from unittest.mock import patch
 
 from app.command_packages.runtime import get_command_package_registry
 from app.local_cli_runtime import LocalCliRuntimeError, snapshot_live_location
-from app.local_cli_service import LocalCliService, LocalCliServiceError
+from app.local_cli_service import (
+    LocalCliService,
+    LocalCliServiceError,
+    _record_bundle_undo_state,
+)
 from app.local_cli_service_support import _BUNDLE_ALLOWED_OPS
 from local_cli_v1.bundles import BUNDLE_SERVER_OPS, BundleError, build_named_bundle
 from tests.test_layout_exact import A4, _FakeLayoutHwp
@@ -158,6 +162,47 @@ class WhereKeepsSelectionTests(unittest.TestCase):
         with patch('app.local_cli_service.snapshot_live_location', side_effect=clobber), \
                 self.assertRaisesRegex(LocalCliRuntimeError, 'where changed the live'):
             _service()._bundle_where_location(hwp, source_filename='a.hwpx', working_copy_id='s')
+
+
+class UndoAfterUnverifiedOpsTests(unittest.TestCase):
+    def _undo(self, binding: dict[str, Any]) -> list[str]:
+        service = _service()
+        calls: list[str] = []
+        service._load_active_binding = lambda session_id=None: binding  # type: ignore[method-assign]
+
+        def execute_live(**kwargs: Any) -> dict[str, Any]:
+            calls.append(kwargs['command_name'])
+            raise RuntimeError('stop after dispatch')
+
+        service._execute_live = execute_live  # type: ignore[method-assign]
+        with self.assertRaises((LocalCliRuntimeError, RuntimeError)) as caught:
+            service.undo()
+        return calls if calls else [str(caught.exception)]
+
+    def test_undo_is_refused_after_object_or_layout_edits(self) -> None:
+        for op in ('object_insert_exact', 'layout_exact'):
+            with self.subTest(op=op):
+                binding: dict[str, Any] = {}
+                _record_bundle_undo_state(binding, [{'op': 'where', 'dirty': False}, {'op': op, 'dirty': True}])
+                self.assertIsNone(binding['pending_logical_undo_count'])
+                result = self._undo(binding)
+                self.assertIn('undo refused', result[0])
+                self.assertIn(op, result[0])
+
+    def test_later_counted_edit_can_be_undone_once_then_refused_again(self) -> None:
+        binding: dict[str, Any] = {}
+        _record_bundle_undo_state(binding, [{'op': 'object_insert_exact', 'dirty': True}])
+        binding['pending_logical_undo_count'] = 1  # a later edit recorded its own undo count
+        self.assertEqual(self._undo(binding), ['undo'])
+        binding['pending_logical_undo_count'] = None  # what undo() stores after it runs
+        self.assertIn('undo refused', self._undo(binding)[0])
+
+    def test_other_dirty_bundles_keep_their_step_count(self) -> None:
+        binding: dict[str, Any] = {}
+        _record_bundle_undo_state(binding, [{'op': 'insert_text', 'dirty': True}, {'op': 'where', 'dirty': False}, {'op': 'insert_text', 'dirty': True}])
+        self.assertEqual(binding['pending_logical_undo_count'], 2)
+        self.assertNotIn('logical_undo_unverified', binding)
+        self.assertEqual(self._undo(binding), ['undo'])
 
 
 if __name__ == '__main__':

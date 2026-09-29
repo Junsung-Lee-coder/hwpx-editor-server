@@ -165,23 +165,52 @@ class VerifierTests(unittest.TestCase):
         para_shape = after_ok.replace('<P><TEXT><CHAR>Second', '<P ParaShape="3"><TEXT><CHAR>Second')
         self.assertFalse(_evaluate(_plan(), BEFORE, para_shape)['ok'])
         bindata = after_ok.replace('QUJD', 'QUJE')
-        self.assertIn('BINDATASTORAGE', ' '.join(_evaluate(_plan(), BEFORE, bindata)['reasons']))
+        self.assertIn('TAIL changed', ' '.join(_evaluate(_plan(), BEFORE, bindata)['reasons']))
         pic_before = _doc('<PICTURE><IMAGE BinItem="1"/></PICTURE>' + _char('Hello world'), _char('Second'))
         pic_after = _doc('<PICTURE><IMAGE BinItem="2"/></PICTURE>' + _char('Hello') + _footnote('note') + _char(' world'), _char('Second'))
         self.assertFalse(_evaluate(_plan(), pic_before, pic_after)['ok'])
         self.assertTrue(_evaluate(_plan(), pic_before, pic_after.replace('BinItem="2"', 'BinItem="1"'))['ok'])
 
     def test_insert_inside_a_table_cell_descends_into_that_table_only(self) -> None:
-        table = lambda cell_a, cell_b: (
-            '<TABLE><ROW><CELL><PARALIST><P><TEXT>' + cell_a + '</TEXT></P></PARALIST></CELL>'
-            '<CELL><PARALIST><P><TEXT>' + cell_b + '</TEXT></P></PARALIST></CELL></ROW></TABLE>')
+        def table(cell_a: str, cell_b: str, width: int = 1000, border: str = '3', span: str = '1') -> str:
+            return (f'<TABLE><SHAPEOBJECT><SIZE Width="{width}" Height="500"/></SHAPEOBJECT><ROW>'
+                    f'<CELL BorderFill="{border}" ColSpan="{span}"><PARALIST><P><TEXT>{cell_a}</TEXT></P></PARALIST></CELL>'
+                    f'<CELL BorderFill="3" ColSpan="1"><PARALIST><P><TEXT>{cell_b}</TEXT></P></PARALIST></CELL></ROW></TABLE>')
         before = _doc(table(_char('ab'), _char('cd')) + _char('Hello'), _char('Second'))
-        after = _doc(table(_char('a') + _footnote('note') + _char('b'), _char('cd')) + _char('Hello'), _char('Second'))
-        result = _evaluate(_plan(), before, after)
+        noted = _char('a') + _footnote('note') + _char('b')
+        result = _evaluate(_plan(), before, _doc(table(noted, _char('cd')) + _char('Hello'), _char('Second')))
         self.assertTrue(result['ok'], result)
         self.assertEqual(result['inserted_at'][0], 'TABLE')
-        other_cell = _doc(table(_char('a') + _footnote('note') + _char('b'), _char('cX')) + _char('Hello'), _char('Second'))
-        self.assertFalse(_evaluate(_plan(), before, other_cell)['ok'])
+        for label, changed in (
+            ('other cell text', table(noted, _char('cX'))),
+            ('table SIZE Width', table(noted, _char('cd'), width=2000)),
+            ('cell BorderFill', table(noted, _char('cd'), border='4')),
+            ('cell ColSpan', table(noted, _char('cd'), span='2')),
+        ):
+            with self.subTest(label=label):
+                result = _evaluate(_plan(), before, _doc(changed + _char('Hello'), _char('Second')))
+                self.assertFalse(result['ok'], result)
+
+    def test_head_may_only_grow_and_tail_must_not_change(self) -> None:
+        def doc(head: str, *paragraphs: str) -> str:
+            return _doc(*paragraphs).replace('<HEAD/>', head)
+        head = '<HEAD SecCnt="1"><MAPPINGTABLE><CHARSHAPELIST Count="1"><CHARSHAPE Id="0" Height="1000"/></CHARSHAPELIST></MAPPINGTABLE></HEAD>'
+        grown = head.replace('Count="1"><CHARSHAPE Id="0" Height="1000"/>', 'Count="2"><CHARSHAPE Id="0" Height="1000"/><CHARSHAPE Id="1" Height="900"/>')
+        inserted = (_char('Hello') + _footnote('note') + _char(' world'), _char('Second'))
+        before = doc(head, _char('Hello world'), _char('Second'))
+        self.assertTrue(_evaluate(_plan(), before, doc(grown, *inserted))['ok'])
+        for label, after_head in (
+            ('existing shape changed', head.replace('Height="1000"', 'Height="1200"')),
+            ('entry dropped', head.replace('Count="1"><CHARSHAPE Id="0" Height="1000"/>', 'Count="0">')),
+            ('section count', head.replace('SecCnt="1"', 'SecCnt="2"')),
+            ('non-list growth', head.replace('</MAPPINGTABLE>', '</MAPPINGTABLE><COMPATIBLEDOCUMENT/>')),
+        ):
+            with self.subTest(label=label):
+                result = _evaluate(_plan(), before, doc(after_head, *inserted))
+                self.assertFalse(result['ok'], result)
+                self.assertIn('HEAD', ' '.join(result['reasons']))
+        dropped = doc(head, *inserted).replace('<TAIL><BINDATASTORAGE>QUJD</BINDATASTORAGE></TAIL>', '<TAIL/>')
+        self.assertIn('TAIL changed', ' '.join(_evaluate(_plan(), before, dropped)['reasons']))
 
     def test_check_before_refuses_unverifiable_or_conflicting_documents(self) -> None:
         header = '<HEADER ApplyPageType="Both"><PARALIST><P><TEXT>' + _char('x') + '</TEXT></P></PARALIST></HEADER>'
