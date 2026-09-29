@@ -359,6 +359,10 @@ _MACRO_MAX_STRING_CHARS = 10000
 _MACRO_PREVIEW_STRING_CHARS = 300
 _MACRO_PREVIEW_ITEMS = 20
 _BUNDLE_MAX_STEPS = 20
+# Ops that read and prove the whole document before and after their edit;
+# a bundle may run only one of them so both proofs fit its time limit. This
+# is separate from the undo policy (_BUNDLE_UNDO_POLICY in local_cli_service).
+_BUNDLE_WHOLE_DOCUMENT_PROOF_OPS = frozenset({'object_insert_exact', 'layout_exact'})
 _BUNDLE_ALLOWED_OPS = {
     'anchor_insert',
     'context',

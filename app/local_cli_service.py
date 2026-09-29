@@ -94,6 +94,7 @@ from app.local_cli_service_support import (
     _MACRO_PREVIEW_STRING_CHARS,
     _MACRO_PREVIEW_ITEMS,
     _BUNDLE_MAX_STEPS,
+    _BUNDLE_WHOLE_DOCUMENT_PROOF_OPS,
     _BUNDLE_ALLOWED_OPS,
     _BUNDLE_SAFE_HACTION_NAMES,
     _BUNDLE_SAFE_PYHWPX_CALLS,
@@ -114,8 +115,8 @@ from app.local_cli_object_insert import LocalCliObjectInsertMixin
 
 
 # How `hwpx undo` may count a bundle step that changed the document. This
-# table is the only authority; a step's own `undo` report (for example
-# `single_undo_expected`) is advisory and never makes an edit undoable.
+# table is the only authority; a step's own `undo` report (`hwpx_undo`)
+# restates it for the caller and never makes an edit undoable by itself.
 #   'refuse'             - never counted: `undo` refuses after the step.
 #   'single_native_edit' - one undo unit only when the step succeeded and its
 #                          result reports exactly one native edit.
@@ -3557,10 +3558,10 @@ class LocalCliService(
             cleaned.append(step)
         # Counted on normalized ops ('operation' alias, whitespace): each exact step
         # needs two whole-document proofs within one bundle time limit.
-        exact_steps = [step['op'] for step in cleaned if step['op'] in _UNDO_UNVERIFIED_BUNDLE_OPS]
+        exact_steps = [step['op'] for step in cleaned if step['op'] in _BUNDLE_WHOLE_DOCUMENT_PROOF_OPS]
         if len(exact_steps) > 1:
             raise LocalCliServiceError(
-                f'command-bundle accepts at most one exact document edit step ({", ".join(sorted(_UNDO_UNVERIFIED_BUNDLE_OPS))}); got {len(exact_steps)}',
+                f'command-bundle accepts at most one whole-document exact edit step ({", ".join(sorted(_BUNDLE_WHOLE_DOCUMENT_PROOF_OPS))}); got {len(exact_steps)}',
                 status_code=400,
             )
         return cleaned

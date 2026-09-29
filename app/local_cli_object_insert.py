@@ -28,8 +28,8 @@ from app.object_insert import (
 
 _ROLLBACK_HINT = {'attempted': False, 'hint': 'Close the working copy without saving and reopen it; a single Undo does not guarantee a full rollback of this edit.'}
 _UNDO_NOTE = (
-    'Hancom records each native editing action as its own undo unit, and the grouping is not verified natively; '
-    'when more than one editing action ran, do not assume one undo reverts the insertion; reopen the working copy instead.'
+    'hwpx undo refuses after object_insert_exact (_BUNDLE_UNDO_POLICY): Hancom may record each native editing action '
+    'as its own undo unit and the grouping is not verified natively. Close the working copy without saving and reopen it to discard the edit.'
 )
 
 
@@ -41,10 +41,11 @@ class _Mutation:
 
 
 def _undo_report(mutation: _Mutation) -> dict[str, Any]:
+    """What `hwpx undo` will do after this edit: refuse, whatever the action count."""
     return {
         'native_editing_actions': mutation.editing_actions,
-        'single_undo_expected': mutation.editing_actions == 1,
-        'verified_natively': False,
+        'hwpx_undo': 'refused',
+        'undo_units_verified': False,
         'note': _UNDO_NOTE,
     }
 

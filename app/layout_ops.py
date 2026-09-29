@@ -403,6 +403,11 @@ def _column_scope_reasons(plan: Mapping[str, Any], doc_before: Mapping[str, Any]
 
 BODY_RULES = ('page_setup', 'columns', 'columns_new', 'hanging_indent', 'section_insert', 'section_delete')
 _SECTION_BREAK_TOKENS = {('/E', 'P'), ('E', 'P'), ('/E', 'SECTION'), ('E', 'SECTION'), ('C', 'SECDEF'), ('C', 'COLDEF')}
+_SECTION_BREAK_SHAPES = frozenset(
+    head + (('C', 'SECDEF'),) + tail
+    for head in ((('/E', 'P'), ('E', 'P')), (('/E', 'P'), ('/E', 'SECTION'), ('E', 'SECTION'), ('E', 'P')))
+    for tail in ((), (('C', 'COLDEF'),))
+)
 
 
 def _body_tokens(doc: Mapping[str, Any], *, omit: frozenset[str] = frozenset(), mask: frozenset[str] = frozenset()) -> list[tuple[Any, ...]]:
@@ -432,6 +437,9 @@ def _at_caret(tokens: list[Any], index: int, caret: Any) -> str | None:
     list_id, para, pos = (int(item) for item in caret)
     if list_id != 0:
         return f'the caret is in list {list_id}, not the body'
+    marks = [token[:2] for token in tokens[:index] if token[:2] in (('E', 'P'), ('/E', 'P'))]
+    if not marks or marks[-1] != ('E', 'P'):
+        return 'the change is not inside an open body paragraph'
     opens = [i for i, token in enumerate(tokens[:index]) if token[:2] == ('E', 'P')]
     if len(opens) - 1 != para:
         return f'the change is in paragraph {len(opens) - 1}, but the caret is in paragraph {para}'
@@ -462,18 +470,15 @@ def _section_break_reasons(before: list[Any], after: list[Any], *, inserted: boo
     if len(shorter) - suffix != prefix:
         return [f'the body changed outside the section break ({_first_difference(before, after)})']
     extra = longer[prefix:len(longer) - suffix]
-    kinds = [token[:2] for token in extra]
+    kinds = tuple(token[:2] for token in extra)
     reasons: list[str] = []
-    stray = sorted({kind for kind in kinds if kind not in _SECTION_BREAK_TOKENS})
-    if stray:
-        reasons.append(f'the section break also {"added" if inserted else "removed"} {stray}')
-    if kinds.count(('/E', 'P')) != 1 or kinds.count(('E', 'P')) != 1:
-        reasons.append('the section break did not split (or join) exactly one paragraph')
-    if kinds.count(('/E', 'SECTION')) != kinds.count(('E', 'SECTION')) or kinds.count(('E', 'SECTION')) > 1:
-        reasons.append('the section break changed SECTION elements unevenly')
-    if kinds.count(('C', 'SECDEF')) != 1 or kinds.count(('C', 'COLDEF')) > 1:
-        reasons.append('the section break did not add (or remove) exactly one SECDEF and at most one COLDEF')
-    if reasons:
+    # Exactly: close the split paragraph, optionally close/open a SECTION,
+    # open the new section's first paragraph, and start it with its SECDEF
+    # (then at most one COLDEF). Anything else, in any other order, is refused.
+    if kinds not in _SECTION_BREAK_SHAPES:
+        stray = sorted({kind for kind in kinds if kind not in _SECTION_BREAK_TOKENS})
+        detail = f'; also {"added" if inserted else "removed"} {stray}' if stray else ''
+        reasons.append(f'the section break is not exactly a paragraph split whose new paragraph starts with the new SECDEF: {list(kinds)}{detail}')
         return reasons
     head = longer[:prefix]
     if inserted:

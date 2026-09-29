@@ -209,12 +209,12 @@ class UndoAfterUnverifiedOpsTests(unittest.TestCase):
                 self.assertEqual((binding['pending_logical_undo_count'], binding['logical_undo_unverified']), (1, expected))
 
     def test_policy_table_decides_not_the_step_report(self) -> None:
-        single = {'native_editing_actions': 1, 'single_undo_expected': True, 'verified_natively': False}
+        single = {'native_editing_actions': 1, 'hwpx_undo': 'one_step', 'single_undo_expected': True}
         cases = (
             ('object_insert_exact', single, None),
             ('layout_exact', single, None),
             ('table_structure_exact', single, 1),
-            ('table_structure_exact', {**single, 'native_editing_actions': 3, 'single_undo_expected': False}, None),
+            ('table_structure_exact', {**single, 'native_editing_actions': 3}, None),
         )
         for op, report, expected in cases:
             with self.subTest(op=op, actions=report['native_editing_actions']):
@@ -268,6 +268,8 @@ class BundlePathUndoTests(unittest.TestCase):
         self.assertTrue(result['ok'], result)
         self.assertTrue(result['dirty'])
         self.assertIn('object_insert_exact', store['binding']['logical_undo_unverified'])
+        # The step's own report says what undo then does: refuse (even for one native action).
+        self.assertEqual(result['steps'][1]['result']['undo']['hwpx_undo'], 'refused')
         with self.assertRaisesRegex(LocalCliRuntimeError, 'undo refused'):
             service.undo()
 
@@ -345,8 +347,17 @@ class ReadbackLimitTests(unittest.TestCase):
         aliased = {key: value for key, value in step.items() if key != 'op'} | {'operation': ' object_insert_exact '}
         spaced = dict(layout, op=' layout_exact')
         for pair in ([step, dict(step)], [step, layout], [step, aliased], [spaced, aliased]):
-            with self.assertRaisesRegex(LocalCliServiceError, 'at most one exact'):
+            with self.assertRaisesRegex(LocalCliServiceError, 'at most one whole-document exact'):
                 _service()._validate_command_bundle_steps(pair)
+
+    def test_exact_step_limit_is_separate_from_the_undo_policy(self) -> None:
+        from app.local_cli_service import _BUNDLE_UNDO_POLICY
+        from app.local_cli_service_support import _BUNDLE_WHOLE_DOCUMENT_PROOF_OPS
+        self.assertEqual(_BUNDLE_WHOLE_DOCUMENT_PROOF_OPS, {'object_insert_exact', 'layout_exact'})
+        # table_structure_exact (PR #7) has an undo policy but no whole-document
+        # proof, so several of its steps may share a bundle.
+        self.assertIn('table_structure_exact', _BUNDLE_UNDO_POLICY)
+        self.assertNotIn('table_structure_exact', _BUNDLE_WHOLE_DOCUMENT_PROOF_OPS)
 
     def test_object_dry_run_does_the_full_proof_work(self) -> None:
         from app import object_insert

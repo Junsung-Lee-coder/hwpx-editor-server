@@ -593,8 +593,9 @@ class ServiceFlowTests(unittest.TestCase):
                 self.assertNotIn('text', result['plan'])
                 typed = fields['kind'] in ('footnote', 'endnote', 'memo', 'header', 'footer')
                 self.assertEqual(result['undo']['native_editing_actions'], 2 if typed else 1)
-                self.assertIs(result['undo']['single_undo_expected'], not typed)
-                self.assertIs(result['undo']['verified_natively'], False)
+                self.assertEqual(result['undo']['hwpx_undo'], 'refused')
+                self.assertNotIn('single_undo_expected', result['undo'])
+                self.assertIs(result['undo']['undo_units_verified'], False)
 
     def test_hyperlink_wraps_the_proven_selection(self) -> None:
         hwp = _FakeHwp()

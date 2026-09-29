@@ -41,6 +41,12 @@ from app.local_cli_runtime import LocalCliRuntimeError
 from app.local_cli_service_support import LocalCliMutationError
 
 _ROLLBACK_HINT = {'attempted': False, 'hint': 'Close the working copy without saving and reopen it; a single Undo does not guarantee a full rollback of this edit.'}
+# What `hwpx undo` does after a layout edit (_BUNDLE_UNDO_POLICY): refuse.
+_UNDO_REPORT = {
+    'hwpx_undo': 'refused',
+    'undo_units_verified': False,
+    'note': 'Close the working copy without saving and reopen it to discard the edit.',
+}
 # Kinds whose caret position stays meaningful after the edit and is restored.
 _RESTORE_CARET_KINDS = frozenset({'page_setup', 'columns', 'hanging_indent'})
 
@@ -384,7 +390,9 @@ class LocalCliLayoutMixin:
             if not mutation.started:
                 raise
             message = str(exc) if isinstance(exc, LocalCliRuntimeError) else f'{OP} failed after native mutation started: {type(exc).__name__}: {exc}'
-            raise LocalCliMutationError(message, mutation_may_have_persisted=True, rollback=dict(_ROLLBACK_HINT)) from exc
+            rollback = dict(_ROLLBACK_HINT)
+            rollback['undo'] = dict(_UNDO_REPORT)
+            raise LocalCliMutationError(message, mutation_may_have_persisted=True, rollback=rollback) from exc
         finally:
             # Section edits renumber positions, so after one ran the caret stays where Hancom left it.
             if original_pos is not None and (kind in _RESTORE_CARET_KINDS or not mutation.started):
@@ -398,6 +406,7 @@ class LocalCliLayoutMixin:
             'kind': kind,
             'expected_pos': list(request['expected_pos']),
             **body,
+            'undo': dict(_UNDO_REPORT),
             'next_proof_required': 'Render the affected pages (page-screenshot or export-proof-range) and review them before saving; re-probe positions and layout before another exact edit.',
             'warnings': [],
         }

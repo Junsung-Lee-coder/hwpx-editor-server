@@ -464,6 +464,9 @@ class ReadbackTests(unittest.TestCase):
         self.assertEqual(body_token_reasons('columns_new', base, new_block, caret=[0, 0, 0]), [])
         self.assertTrue(body_token_reasons('columns', base, new_block))
         self.assertIn('not at the caret', ' '.join(body_token_reasons('columns_new', base, new_block, caret=[0, 1, 0])))
+        # D4: a new COLDEF outside any open paragraph is refused.
+        outside = parse_layout_xml(_raw_doc(base).replace('</P><P Para', '</P><COLDEF Count="2"/><P Para', 1))
+        self.assertIn('not inside an open body paragraph', ' '.join(body_token_reasons('columns_new', base, outside, caret=[0, 0, 0])))
         moved = parse_layout_xml(_raw_doc(base).replace('<COLDEF Count="1"/><CHAR>x', '<CHAR>x', 1).replace('<CHAR>y</CHAR>', '<COLDEF Count="1"/><CHAR>y</CHAR>', 1))
         self.assertTrue(body_token_reasons('columns', base, moved), 'a COLDEF moved to another paragraph')
         unrequested = (
@@ -499,6 +502,18 @@ class ReadbackTests(unittest.TestCase):
                                         '<CHAR>ab</CHAR></TEXT></P><P ParaShape="1"><TEXT><CHAR>c</CHAR></TEXT></P></SECTION>'
                                         + section('<CHAR>d</CHAR>') + '</BODY></HWPML>')
         self.assertIn('paragraph 1, but the caret is in paragraph 0', ' '.join(body_token_reasons('section_insert', other_para, broken_later, caret=[0, 0, 1])))
+        # G15 / G15b: the new SECDEF must open the new section's first paragraph.
+        at_old_end = parse_layout_xml('<HWPML><BODY><SECTION><P ParaShape="1"><TEXT><SECDEF><PAGEDEF Width="1"/></SECDEF><COLDEF Count="1"/>'
+                                      '<CHAR>a</CHAR><SECDEF><PAGEDEF Width="1"/></SECDEF><COLDEF Count="1"/></TEXT></P></SECTION>'
+                                      '<SECTION><P ParaShape="1"><TEXT><CHAR>b</CHAR></TEXT></P></SECTION></BODY></HWPML>')
+        after_text = parse_layout_xml(f'<HWPML><BODY>{section("<CHAR>a</CHAR>")}<SECTION><P ParaShape="1"><TEXT><CHAR>b</CHAR>'
+                                      f'<SECDEF><PAGEDEF Width="1"/></SECDEF><COLDEF Count="1"/></TEXT></P></SECTION></BODY></HWPML>')
+        no_new_para = parse_layout_xml('<HWPML><BODY><SECTION><P ParaShape="1"><TEXT><SECDEF><PAGEDEF Width="1"/></SECDEF><COLDEF Count="1"/>'
+                                       '<CHAR>a</CHAR><SECDEF><PAGEDEF Width="1"/></SECDEF><COLDEF Count="1"/><CHAR>b</CHAR></TEXT></P></SECTION></BODY></HWPML>')
+        for label, doc in (('SECDEF at the end of the previous paragraph', at_old_end), ('SECDEF after text', after_text),
+                           ('no new paragraph', no_new_para)):
+            with self.subTest(misplaced=label):
+                self.assertTrue(body_token_reasons('section_insert', one, doc, caret=[0, 0, 1]))
         for label, secdef in (('SECDEF attribute', '<SECDEF TextDirection="1"><PAGEDEF Width="1"/></SECDEF><COLDEF Count="1"/>'),
                               ('PAGEDEF', '<SECDEF><PAGEDEF Width="2"/></SECDEF><COLDEF Count="1"/>'),
                               ('COLDEF', '<SECDEF><PAGEDEF Width="1"/></SECDEF><COLDEF Count="2"/>')):
@@ -691,6 +706,7 @@ class ColumnFlowTests(unittest.TestCase):
     def test_success_current_and_new(self) -> None:
         hwp = _FakeLayoutHwp()
         result = _run(hwp, self._step())
+        self.assertEqual(result['undo']['hwpx_undo'], 'refused')
         self.assertEqual(result['verification']['after']['Count'], 2)
         self.assertEqual(hwp.sections[0]['coldefs'], [{**COLDEF, 'Count': 2, 'SameGap': mm_to_hwpunit(8)}])
         hwp = _FakeLayoutHwp()
@@ -732,8 +748,9 @@ class ColumnFlowTests(unittest.TestCase):
 
     def test_raising_not_retried(self) -> None:
         hwp = _FakeLayoutHwp(raising={'MultiColumn'})
-        with self.assertRaises(LocalCliMutationError):
+        with self.assertRaises(LocalCliMutationError) as caught:
             _run(hwp, self._step())
+        self.assertEqual(caught.exception.rollback['undo']['hwpx_undo'], 'refused')
         self.assertEqual(hwp.mutations(), ['MultiColumn'])
 
 
