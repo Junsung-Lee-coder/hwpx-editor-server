@@ -888,6 +888,20 @@ class BundleUndoTests(unittest.TestCase):
         _service_obj, result = self._bundle(_FakeTableHwp(3, 2), older, action='insert_row_below', row=3)
         self.assertEqual((older['binding']['pending_logical_undo_count'], older['binding']['logical_undo_unverified']), (1, 'an older multi-edit'))
 
+    def test_policy_table_decides_not_the_step_report(self) -> None:
+        single = {'native_editing_actions': 1, 'single_undo_expected': True, 'verified_natively': False}
+        for op, report, ok, expected in (
+            ('table_structure_exact', single, True, 1),
+            ('table_structure_exact', single, False, None),
+            ('table_structure_exact', {**single, 'native_editing_actions': 3}, True, None),
+            ('object_insert_exact', single, True, None),
+            ('layout_exact', single, True, None),
+        ):
+            with self.subTest(op=op, ok=ok, actions=report['native_editing_actions']):
+                binding: dict[str, Any] = {}
+                _record_bundle_undo_state(binding, [{'op': op, 'dirty': True, 'ok': ok, 'result': {'undo': report}}], {})
+                self.assertEqual(binding['pending_logical_undo_count'], expected)
+
     def test_refused_before_mutation_restores_prior_undo_state(self) -> None:
         hwp = _FakeTableHwp(3, 2)
         store = self._store()

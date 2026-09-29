@@ -112,15 +112,27 @@ from app.local_cli_cell_margins import LocalCliCellMarginsMixin
 from app.local_cli_table_structure import LocalCliTableStructureMixin
 
 
-# Bundle ops that may run several native edits for one logical request
-# (e.g. insert_row_below count=3). `undo` may count one native Undo per
-# step only when such a step succeeded with exactly one native edit.
-_UNDO_UNVERIFIED_BUNDLE_OPS = frozenset({'table_structure_exact'})
+# How `hwpx undo` may count a bundle step that changed the document. This
+# table is the only authority; a step's own `undo` report (for example
+# `single_undo_expected`) is advisory and never makes an edit undoable.
+#   'refuse'             - never counted: `undo` refuses after the step.
+#   'single_native_edit' - one undo unit only when the step succeeded and its
+#                          result reports exactly one native edit.
+# Ops not listed count one undo unit per changed step.
+_BUNDLE_UNDO_POLICY: dict[str, str] = {
+    'layout_exact': 'refuse',
+    'object_insert_exact': 'refuse',
+    'table_structure_exact': 'single_native_edit',
+}
+_UNDO_UNVERIFIED_BUNDLE_OPS = frozenset(_BUNDLE_UNDO_POLICY)
 
 
 def _bundle_step_single_undo(step: dict[str, Any]) -> bool:
-    if step.get('op') not in _UNDO_UNVERIFIED_BUNDLE_OPS:
+    policy = _BUNDLE_UNDO_POLICY.get(str(step.get('op')))
+    if policy is None:
         return True
+    if policy != 'single_native_edit':
+        return False
     result = step.get('result') if isinstance(step.get('result'), dict) else {}
     undo = result.get('undo') if isinstance(result.get('undo'), dict) else {}
     return step.get('ok') is True and undo.get('native_editing_actions') == 1
@@ -130,8 +142,9 @@ def _record_bundle_undo_state(binding: dict[str, Any], steps: list[Any], prior: 
     """Set how `undo` may revert this bundle: a native step count, refusal, or the prior state.
 
     Only steps that changed (or may have changed) the document count. A
-    bundle with no such step leaves the undo state exactly as it was before
-    the bundle (``prior``).
+    bundle with no such step, even on an already-dirty document, leaves the
+    undo state exactly as it was before the bundle (``prior``), so it can
+    never turn an earlier refusal into a one-step Undo.
     """
     dirty_steps = [step for step in steps if isinstance(step, dict) and step.get('dirty')]
     if not dirty_steps:
@@ -141,7 +154,7 @@ def _record_bundle_undo_state(binding: dict[str, Any], steps: list[Any], prior: 
     if unverified:
         binding['pending_logical_undo_count'] = None
         binding['logical_undo_unverified'] = (
-            f'{", ".join(unverified)} ran several native edits, or failed part-way, so one logical undo cannot be counted'
+            f'{", ".join(unverified)} changed the document with native actions that cannot be undone as one counted step'
         )
     else:
         binding['pending_logical_undo_count'] = len(dirty_steps)
@@ -6867,9 +6880,9 @@ class LocalCliService(
             }
 
         prior_native_sequence = binding.get('native_command_sequence', 0)
-        # Refuse undo from the start for multi-edit ops, so a timeout or crash
-        # mid-bundle cannot leave an older undo count in place; restored below
-        # when no step changed the document.
+        # Ops in _BUNDLE_UNDO_POLICY refuse undo from the start, so a timeout
+        # or crash mid-bundle cannot leave an older undo count in place;
+        # _record_bundle_undo_state settles it once the steps are known.
         prior_undo_state = {key: binding.get(key) for key in ('pending_logical_undo_count', 'logical_undo_unverified')}
         exact_ops = sorted({str(step.get('op')) for step in cleaned_steps if step.get('op') in _UNDO_UNVERIFIED_BUNDLE_OPS})
         if exact_ops:
