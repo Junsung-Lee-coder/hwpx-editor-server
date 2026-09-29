@@ -31,7 +31,7 @@ from collections import Counter
 from typing import Any, Mapping
 
 from app.hwpml_invariants import head_tail_reasons, signature
-from app.object_insert import CONTROL_TAGS, linearize
+from app.object_insert import CONTROL_TAGS, _middle, linearize
 
 OP = 'layout_exact'
 SCHEMA_VERSION = 'local-cli/layout-exact/v1'
@@ -389,29 +389,58 @@ def _column_scope_reasons(plan: Mapping[str, Any], doc_before: Mapping[str, Any]
 # as whole-subtree signatures). Each kind may change only what it asks for:
 #
 # * page_setup: PAGEDEF inside SECDEF (checked per section elsewhere).
-# * columns: COLDEF (checked per section elsewhere); nothing else.
+# * columns: COLDEF values (checked per section elsewhere); every COLDEF keeps
+#   its position. columns_new: additionally exactly one new COLDEF, at the caret.
 # * hanging_indent: the ParaShape attribute of at most one paragraph.
 # * section_insert / section_delete: one contiguous insertion / removal made
 #   only of a paragraph split (close + open with the split paragraph's own
-#   attributes), a SECTION boundary, one SECDEF and at most one COLDEF.
+#   attributes), a SECTION boundary, one SECDEF and at most one COLDEF. An
+#   insert must sit at the caret and copy the split section's SECDEF/COLDEF;
+#   a delete must remove the requested section's break.
 #
 # Everything else (whitespace, run CharShapes, paragraph attributes such as
 # Style or PageBreak, object positions, other SECDEF attributes) must match.
 
-BODY_RULES = ('page_setup', 'columns', 'hanging_indent', 'section_insert', 'section_delete')
+BODY_RULES = ('page_setup', 'columns', 'columns_new', 'hanging_indent', 'section_insert', 'section_delete')
 _SECTION_BREAK_TOKENS = {('/E', 'P'), ('E', 'P'), ('/E', 'SECTION'), ('E', 'SECTION'), ('C', 'SECDEF'), ('C', 'COLDEF')}
 
 
-def _body_tokens(doc: Mapping[str, Any], *, omit: frozenset[str] = frozenset(), drop: frozenset[str] = frozenset()) -> list[tuple[Any, ...]]:
+def _body_tokens(doc: Mapping[str, Any], *, omit: frozenset[str] = frozenset(), mask: frozenset[str] = frozenset()) -> list[tuple[Any, ...]]:
+    """Body tokens; ``omit`` drops those subtrees from control signatures and
+    ``mask`` keeps those controls in place with their values blanked (their
+    values are checked elsewhere, their positions here)."""
     tokens: list[tuple[Any, ...]] = []
     for token, element in linearize(doc['_body']):
         if token[0] == 'C':
-            if token[1] in drop:
-                continue
-            if omit and element is not None:
+            if token[1] in mask:
+                token = ('C', token[1], '')
+            elif omit and element is not None:
                 token = ('C', token[1], signature(element, omit=omit))
         tokens.append(token)
     return tokens
+
+
+# HWP caret positions may count an inline control as 8 characters or as
+# none; UNVERIFIED natively, so both readings are accepted and nothing else.
+CONTROL_POSITION_WIDTH = 8
+
+
+def _at_caret(tokens: list[Any], index: int, caret: Any) -> str | None:
+    """None if ``index`` in ``tokens`` is the caret (list, para, pos); else why not."""
+    if caret is None:
+        return 'the caret position is unknown, so the change cannot be tied to it'
+    list_id, para, pos = (int(item) for item in caret)
+    if list_id != 0:
+        return f'the caret is in list {list_id}, not the body'
+    opens = [i for i, token in enumerate(tokens[:index]) if token[:2] == ('E', 'P')]
+    if len(opens) - 1 != para:
+        return f'the change is in paragraph {len(opens) - 1}, but the caret is in paragraph {para}'
+    segment = tokens[opens[-1] + 1:index]
+    chars = sum(1 for token in segment if token[0] == 'T')
+    controls = sum(1 for token in segment if token[0] == 'C')
+    if pos not in (chars, chars + CONTROL_POSITION_WIDTH * controls):
+        return f'the change is at character {chars} of paragraph {para}, but the caret is at {pos}'
+    return None
 
 
 def _first_difference(before: list[Any], after: list[Any]) -> str:
@@ -421,7 +450,7 @@ def _first_difference(before: list[Any], after: list[Any]) -> str:
     return f'length {len(before)} -> {len(after)}'
 
 
-def _section_break_reasons(before: list[Any], after: list[Any], *, inserted: bool) -> list[str]:
+def _section_break_reasons(before: list[Any], after: list[Any], *, inserted: bool, caret: Any = None, section_index: int | None = None) -> list[str]:
     shorter, longer = (before, after) if inserted else (after, before)
     limit = len(shorter)
     prefix = 0
@@ -444,27 +473,53 @@ def _section_break_reasons(before: list[Any], after: list[Any], *, inserted: boo
         reasons.append('the section break changed SECTION elements unevenly')
     if kinds.count(('C', 'SECDEF')) != 1 or kinds.count(('C', 'COLDEF')) > 1:
         reasons.append('the section break did not add (or remove) exactly one SECDEF and at most one COLDEF')
-    if inserted and not reasons:
+    if reasons:
+        return reasons
+    head = longer[:prefix]
+    if inserted:
         opened = next(token for token in extra if token[:2] == ('E', 'P'))
-        split = [token for token in longer[:prefix] if token[:2] == ('E', 'P')]
+        split = [token for token in head if token[:2] == ('E', 'P')]
         if not split or split[-1] != opened:
             reasons.append('the paragraph after the new section break does not keep the split paragraph\'s attributes')
+        where = _at_caret(before, prefix, caret)
+        if where:
+            reasons.append(f'the section break is not at the caret: {where}')
+        # The new section copies the split section's definitions exactly.
+        for key in ('SECDEF', 'COLDEF'):
+            new = [token for token in extra if token[:2] == ('C', key)]
+            old = [token for token in head if token[:2] == ('C', key)]
+            if new and (not old or new[0] != old[-1]):
+                reasons.append(f'the new section\'s {key} is not a copy of the split section\'s {key}')
+    else:
+        removed = sum(1 for token in head if token[:2] == ('C', 'SECDEF')) + 1
+        if section_index is None or removed != section_index:
+            reasons.append(f'the removed section break belongs to section {removed}, not section {section_index!r}')
     return reasons
 
 
-def body_token_reasons(rule: str, before: Mapping[str, Any], after: Mapping[str, Any]) -> list[str]:
-    """Body changes that ``rule`` (one of ``BODY_RULES``) does not allow."""
+def body_token_reasons(rule: str, before: Mapping[str, Any], after: Mapping[str, Any], *, caret: Any = None, section_index: int | None = None) -> list[str]:
+    """Body changes that ``rule`` (one of ``BODY_RULES``) does not allow.
+
+    ``caret`` (list, para, pos) ties a section break or a new column block to
+    the caret; ``section_index`` names the section whose break is deleted.
+    """
     if '_body' not in before or '_body' not in after:
         return ['whole-document readback is unavailable for the body token check']
     if rule == 'page_setup':
         old, new = _body_tokens(before, omit=frozenset({'PAGEDEF'})), _body_tokens(after, omit=frozenset({'PAGEDEF'}))
-    elif rule == 'columns':
+    elif rule in ('columns', 'columns_new'):
         mask = frozenset({'COLDEF'})
-        old, new = _body_tokens(before, omit=mask, drop=mask), _body_tokens(after, omit=mask, drop=mask)
+        old, new = _body_tokens(before, omit=mask, mask=mask), _body_tokens(after, omit=mask, mask=mask)
     else:
         old, new = _body_tokens(before), _body_tokens(after)
     if rule in ('section_insert', 'section_delete'):
-        return _section_break_reasons(old, new, inserted=rule == 'section_insert')
+        return _section_break_reasons(old, new, inserted=rule == 'section_insert', caret=caret, section_index=section_index)
+    if rule == 'columns_new':
+        prefix, removed, added = _middle(old, new)
+        if removed or added != [('C', 'COLDEF', '')]:
+            return [f'the body changed beyond one new column definition ({_first_difference(old, new)})']
+        where = _at_caret(old, prefix, caret)
+        return [f'the new column definition is not at the caret: {where}'] if where else []
     if rule == 'hanging_indent' and len(old) == len(new):
         changed = [(a, b) for a, b in zip(old, new) if a != b]
         if not changed:
@@ -506,6 +561,8 @@ def compare_documents(
     coldefs_may_change: bool = False,
     paragraphs: str = 'same',
     body_rule: str | None = None,
+    caret: Any = None,
+    section_index: int | None = None,
 ) -> list[str]:
     """Differences between two document summaries that the planned edit does not explain.
 
@@ -519,7 +576,7 @@ def compare_documents(
     else:
         reasons += head_tail_reasons(before['_root'], after['_root'], allow_head_attrs=_SECTION_COUNT_ATTRS if section_delta else None)
     if body_rule is not None:
-        reasons += body_token_reasons(body_rule, before, after)
+        reasons += body_token_reasons(body_rule, before, after, caret=caret, section_index=section_index)
     if after.get('control_signatures') != before.get('control_signatures'):
         reasons.append('an embedded object (picture, table, note, field) changed')
     if after['text'] != before['text']:
@@ -715,6 +772,7 @@ def verify_columns(
     doc_after: Mapping[str, Any],
     *,
     caret_section: int | None,
+    caret: Any = None,
 ) -> dict[str, Any]:
     after = _read_optional_ints(after_raw, COLDEF_ITEMS)
     reasons: list[str] = []
@@ -729,7 +787,8 @@ def verify_columns(
         if plan['before'][item] is not None and after[item] != plan['before'][item]:
             reasons.append(f'{item} changed from {plan["before"][item]} to {after[item]} although it was not requested')
     new_block = plan['apply_to'] == 'from_caret_new'
-    reasons += compare_documents(doc_before, doc_after, coldef_delta=1 if new_block else 0, coldefs_may_change=not new_block, body_rule='columns')
+    reasons += compare_documents(doc_before, doc_after, coldef_delta=1 if new_block else 0, coldefs_may_change=not new_block,
+                                 body_rule='columns_new' if new_block else 'columns', caret=caret)
     if new_block and len(doc_after['coldefs']) == len(doc_before['coldefs']) + 1:
         # Every pre-existing column definition must survive unchanged around the new one.
         remaining = list(doc_after['coldefs'])
@@ -749,9 +808,9 @@ def plan_section_insert(doc: Mapping[str, Any]) -> dict[str, Any]:
     return {'kind': 'section_insert', 'section_count_before': doc['section_count']}
 
 
-def verify_section_insert(doc_before: Mapping[str, Any], doc_after: Mapping[str, Any]) -> dict[str, Any]:
+def verify_section_insert(doc_before: Mapping[str, Any], doc_after: Mapping[str, Any], *, caret: Any = None) -> dict[str, Any]:
     reasons = _section_coldef_reasons(doc_before, doc_after, 1)
-    reasons += compare_documents(doc_before, doc_after, section_delta=1, coldef_delta=len(doc_after['coldefs']) - len(doc_before['coldefs']), pagedefs='free', paragraphs='free', body_rule='section_insert')
+    reasons += compare_documents(doc_before, doc_after, section_delta=1, coldef_delta=len(doc_after['coldefs']) - len(doc_before['coldefs']), pagedefs='free', paragraphs='free', body_rule='section_insert', caret=caret)
     before_defs, after_defs = doc_before.get('pagedefs'), doc_after.get('pagedefs')
     if before_defs is not None:
         if after_defs is None or len(after_defs) != len(before_defs) + 1:
@@ -791,7 +850,7 @@ def plan_section_delete(request: Mapping[str, Any], doc: Mapping[str, Any], *, k
 
 def verify_section_delete(plan: Mapping[str, Any], doc_before: Mapping[str, Any], doc_after: Mapping[str, Any]) -> dict[str, Any]:
     reasons = _section_coldef_reasons(doc_before, doc_after, -1)
-    reasons += compare_documents(doc_before, doc_after, section_delta=-1, coldef_delta=len(doc_after['coldefs']) - len(doc_before['coldefs']), pagedefs='free', paragraphs='free', body_rule='section_delete')
+    reasons += compare_documents(doc_before, doc_after, section_delta=-1, coldef_delta=len(doc_after['coldefs']) - len(doc_before['coldefs']), pagedefs='free', paragraphs='free', body_rule='section_delete', section_index=plan['section_index'])
     before_defs, after_defs = doc_before.get('pagedefs'), doc_after.get('pagedefs')
     if before_defs is not None:
         removed = plan['section_index'] - 1

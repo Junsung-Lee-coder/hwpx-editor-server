@@ -113,9 +113,30 @@ from app.local_cli_layout import LocalCliLayoutMixin
 from app.local_cli_object_insert import LocalCliObjectInsertMixin
 
 
-# Bundle ops whose one logical edit can span several native editing actions
-# with no natively verified undo grouping; `undo` refuses after them.
-_UNDO_UNVERIFIED_BUNDLE_OPS = frozenset({'object_insert_exact', 'layout_exact'})
+# How `hwpx undo` may count a bundle step that changed the document. This
+# table is the only authority; a step's own `undo` report (for example
+# `single_undo_expected`) is advisory and never makes an edit undoable.
+#   'refuse'             - never counted: `undo` refuses after the step.
+#   'single_native_edit' - one undo unit only when the step succeeded and its
+#                          result reports exactly one native edit.
+# Ops not listed count one undo unit per changed step.
+_BUNDLE_UNDO_POLICY: dict[str, str] = {
+    'layout_exact': 'refuse',
+    'object_insert_exact': 'refuse',
+    'table_structure_exact': 'single_native_edit',
+}
+_UNDO_UNVERIFIED_BUNDLE_OPS = frozenset(_BUNDLE_UNDO_POLICY)
+
+
+def _bundle_step_single_undo(step: dict[str, Any]) -> bool:
+    policy = _BUNDLE_UNDO_POLICY.get(str(step.get('op')))
+    if policy is None:
+        return True
+    if policy != 'single_native_edit':
+        return False
+    result = step.get('result') if isinstance(step.get('result'), dict) else {}
+    undo = result.get('undo') if isinstance(result.get('undo'), dict) else {}
+    return step.get('ok') is True and undo.get('native_editing_actions') == 1
 
 
 def _record_bundle_undo_state(binding: dict[str, Any], steps: list[Any], prior: dict[str, Any]) -> None:
@@ -130,10 +151,12 @@ def _record_bundle_undo_state(binding: dict[str, Any], steps: list[Any], prior: 
     if not dirty_steps:
         binding.update(prior)
         return
-    unverified = sorted({str(step.get('op')) for step in dirty_steps if step.get('op') in _UNDO_UNVERIFIED_BUNDLE_OPS})
+    unverified = sorted({str(step.get('op')) for step in dirty_steps if not _bundle_step_single_undo(step)})
     if unverified:
         binding['pending_logical_undo_count'] = None
-        binding['logical_undo_unverified'] = f'{", ".join(unverified)} changed the document with native actions whose undo grouping is not verified'
+        binding['logical_undo_unverified'] = (
+            f'{", ".join(unverified)} changed the document with native actions that cannot be undone as one counted step'
+        )
     else:
         binding['pending_logical_undo_count'] = len(dirty_steps)
         # Drop this bundle's own start marker; an older unverified edit below
@@ -6904,9 +6927,9 @@ class LocalCliService(
             }
 
         prior_native_sequence = binding.get('native_command_sequence', 0)
-        # Exact ops whose undo grouping is unverified: refuse undo from the
-        # start, so a timeout or crash mid-bundle cannot leave an older undo
-        # count in place. Restored below only if the bundle proves clean.
+        # Ops in _BUNDLE_UNDO_POLICY refuse undo from the start, so a timeout
+        # or crash mid-bundle cannot leave an older undo count in place;
+        # _record_bundle_undo_state settles it once the steps are known.
         prior_undo_state = {key: binding.get(key) for key in ('pending_logical_undo_count', 'logical_undo_unverified')}
         exact_ops = sorted({str(step.get('op')) for step in cleaned_steps if step.get('op') in _UNDO_UNVERIFIED_BUNDLE_OPS})
         if exact_ops:
@@ -7175,8 +7198,7 @@ class LocalCliService(
         blocked = binding.get('logical_undo_unverified')
         if blocked and not isinstance(undo_count_raw, int):
             # Fail closed: counting native Undo steps could revert part of an
-            # edit, or an older edit too. The last recorded edit (or one before
-            # an already-undone edit) has no verified undo unit count.
+            # edit, or an older edit too.
             raise LocalCliRuntimeError(
                 f'undo refused: {blocked}. Close the working copy without saving and reopen it instead of counting undos.'
             )

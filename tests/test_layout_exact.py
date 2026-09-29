@@ -438,21 +438,34 @@ class ReadbackTests(unittest.TestCase):
                     plan_columns(request, COLDEF, doc)
 
     def test_body_tokens_allow_only_the_requested_change(self) -> None:
+        raws: dict[int, str] = {}
+
+        def _raw_doc(parsed: dict[str, Any]) -> str:
+            return raws[id(parsed)]
+
         def doc(*, secdef: str = '<SECDEF TextDirection="0"><PAGEDEF Width="100"/></SECDEF>', coldef: str = '<COLDEF Count="1"/>',
                 p1: str = 'ParaShape="1" Style="0"', run: str = '<TEXT CharShape="0"><CHAR>a  b</CHAR><PICTURE Id="p"/><CHAR>c</CHAR></TEXT>',
                 note: str = '<FOOTNOTE Number="1"><PARALIST><P><TEXT><CHAR>n</CHAR></TEXT></P></PARALIST></FOOTNOTE>') -> dict[str, Any]:
-            return parse_layout_xml(f'<HWPML><HEAD/><BODY><SECTION><P ParaShape="1"><TEXT>{secdef}{coldef}<CHAR>x</CHAR></TEXT></P>'
-                                    f'<P {p1}>{run}</P><P ParaShape="1"><TEXT><CHAR>y</CHAR>{note}</TEXT></P></SECTION></BODY></HWPML>')
+            xml = (f'<HWPML><HEAD/><BODY><SECTION><P ParaShape="1"><TEXT>{secdef}{coldef}<CHAR>x</CHAR></TEXT></P>'
+                   f'<P {p1}>{run}</P><P ParaShape="1"><TEXT><CHAR>y</CHAR>{note}</TEXT></P></SECTION></BODY></HWPML>')
+            parsed = parse_layout_xml(xml)
+            raws[id(parsed)] = xml
+            return parsed
         base = doc()
         allowed = (
             ('page_setup', doc(secdef='<SECDEF TextDirection="0"><PAGEDEF Width="200"/></SECDEF>')),
             ('columns', doc(coldef='<COLDEF Count="2"/>')),
-            ('columns', doc(coldef='<COLDEF Count="1"/><COLDEF Count="2"/>')),
             ('hanging_indent', doc(p1='ParaShape="9" Style="0"')),
         )
         for rule, after in allowed:
             with self.subTest(allowed=rule):
                 self.assertEqual(body_token_reasons(rule, base, after), [])
+        new_block = doc(coldef='<COLDEF Count="1"/><COLDEF Count="2"/>')
+        self.assertEqual(body_token_reasons('columns_new', base, new_block, caret=[0, 0, 0]), [])
+        self.assertTrue(body_token_reasons('columns', base, new_block))
+        self.assertIn('not at the caret', ' '.join(body_token_reasons('columns_new', base, new_block, caret=[0, 1, 0])))
+        moved = parse_layout_xml(_raw_doc(base).replace('<COLDEF Count="1"/><CHAR>x', '<CHAR>x', 1).replace('<CHAR>y</CHAR>', '<COLDEF Count="1"/><CHAR>y</CHAR>', 1))
+        self.assertTrue(body_token_reasons('columns', base, moved), 'a COLDEF moved to another paragraph')
         unrequested = (
             ('whitespace count', doc(run='<TEXT CharShape="0"><CHAR>a b</CHAR><PICTURE Id="p"/><CHAR>c</CHAR></TEXT>')),
             ('existing run CharShape', doc(run='<TEXT CharShape="5"><CHAR>a  b</CHAR><PICTURE Id="p"/><CHAR>c</CHAR></TEXT>')),
@@ -475,15 +488,30 @@ class ReadbackTests(unittest.TestCase):
             return f'<SECTION><P ParaShape="1"><TEXT>{secdef}{body}</TEXT></P></SECTION>'
         one = parse_layout_xml(f'<HWPML><BODY>{section("<CHAR>ab</CHAR>")}</BODY></HWPML>')
         two = parse_layout_xml(f'<HWPML><BODY>{section("<CHAR>a</CHAR>")}{section("<CHAR>b</CHAR>")}</BODY></HWPML>')
-        self.assertEqual(body_token_reasons('section_insert', one, two), [])
-        self.assertEqual(body_token_reasons('section_delete', two, one), [])
+        self.assertEqual(body_token_reasons('section_insert', one, two, caret=[0, 0, 1]), [])
+        self.assertEqual(body_token_reasons('section_delete', two, one, section_index=2), [])
+        self.assertIn('not at the caret', ' '.join(body_token_reasons('section_insert', one, two, caret=[0, 0, 2])))
+        self.assertIn('not at the caret', ' '.join(body_token_reasons('section_insert', one, two)))
+        self.assertIn('section 2, not section 3', ' '.join(body_token_reasons('section_delete', two, one, section_index=3)))
+        other_para = parse_layout_xml('<HWPML><BODY><SECTION><P ParaShape="1"><TEXT><SECDEF><PAGEDEF Width="1"/></SECDEF><COLDEF Count="1"/>'
+                                      '<CHAR>ab</CHAR></TEXT></P><P ParaShape="1"><TEXT><CHAR>cd</CHAR></TEXT></P></SECTION></BODY></HWPML>')
+        broken_later = parse_layout_xml('<HWPML><BODY><SECTION><P ParaShape="1"><TEXT><SECDEF><PAGEDEF Width="1"/></SECDEF><COLDEF Count="1"/>'
+                                        '<CHAR>ab</CHAR></TEXT></P><P ParaShape="1"><TEXT><CHAR>c</CHAR></TEXT></P></SECTION>'
+                                        + section('<CHAR>d</CHAR>') + '</BODY></HWPML>')
+        self.assertIn('paragraph 1, but the caret is in paragraph 0', ' '.join(body_token_reasons('section_insert', other_para, broken_later, caret=[0, 0, 1])))
+        for label, secdef in (('SECDEF attribute', '<SECDEF TextDirection="1"><PAGEDEF Width="1"/></SECDEF><COLDEF Count="1"/>'),
+                              ('PAGEDEF', '<SECDEF><PAGEDEF Width="2"/></SECDEF><COLDEF Count="1"/>'),
+                              ('COLDEF', '<SECDEF><PAGEDEF Width="1"/></SECDEF><COLDEF Count="2"/>')):
+            with self.subTest(copied=label):
+                changed = parse_layout_xml(f'<HWPML><BODY>{section("<CHAR>a</CHAR>")}{section("<CHAR>b</CHAR>", secdef)}</BODY></HWPML>')
+                self.assertIn('is not a copy', ' '.join(body_token_reasons('section_insert', one, changed, caret=[0, 0, 1])))
         second = section('<CHAR>b</CHAR>').replace('ParaShape="1"', 'ParaShape="1" PageBreak="true"')
         restyled = parse_layout_xml('<HWPML><BODY>' + section('<CHAR>a</CHAR>') + second + '</BODY></HWPML>')
-        self.assertTrue(body_token_reasons('section_insert', one, restyled))
+        self.assertTrue(body_token_reasons('section_insert', one, restyled, caret=[0, 0, 1]))
         eaten = parse_layout_xml(f'<HWPML><BODY>{section("<CHAR>a</CHAR>")}{section("<CHAR>c</CHAR>")}</BODY></HWPML>')
-        self.assertTrue(body_token_reasons('section_insert', one, eaten))
+        self.assertTrue(body_token_reasons('section_insert', one, eaten, caret=[0, 0, 1]))
         extra = parse_layout_xml('<HWPML><BODY>' + section('<CHAR>a</CHAR>') + section('<BOOKMARK Name="x"/><CHAR>b</CHAR>') + '</BODY></HWPML>')
-        self.assertTrue(body_token_reasons('section_insert', one, extra))
+        self.assertTrue(body_token_reasons('section_insert', one, extra, caret=[0, 0, 1]))
 
     def test_compare_documents_detects_controls_and_shapes(self) -> None:
         base = parse_layout_xml('<HWPML><BODY><SECTION><P ParaShape="1"><TEXT><CHAR>x</CHAR></TEXT></P><P ParaShape="1"><TEXT><CHAR>y</CHAR></TEXT></P></SECTION></BODY></HWPML>')

@@ -365,7 +365,7 @@ MAX_DESCENT = 16
 _attrs = attrs
 
 
-def linearize(container: ET.Element) -> list[tuple[tuple[Any, ...], ET.Element | None]]:
+def linearize(container: ET.Element, cache: dict[int, str] | None = None) -> list[tuple[tuple[Any, ...], ET.Element | None]]:
     """Document-order tokens under ``container`` (not including it).
 
     ``('E', tag, attrs)`` / ``('/E', tag)`` open and close every element other
@@ -373,7 +373,9 @@ def linearize(container: ET.Element) -> list[tuple[tuple[Any, ...], ET.Element |
     ``('T', char, char_shape)`` is one run character, and ``('C', key,
     signature)`` is a whole control, which is atomic here (see
     ``evaluate_insert`` for descending into one). Each token
-    is paired with its element (controls) or None.
+    is paired with its element (controls) or None. ``cache`` (one per tree)
+    keeps control signatures across calls, so descending a level does not
+    re-serialize the controls nested below it.
     """
     tokens: list[tuple[tuple[Any, ...], ET.Element | None]] = []
 
@@ -384,7 +386,7 @@ def linearize(container: ET.Element) -> list[tuple[tuple[Any, ...], ET.Element |
     def walk(element: ET.Element, shape: str | None, in_run: bool) -> None:
         key = control_key(element)
         if key is not None:
-            tokens.append((('C', key, signature(element)), element))
+            tokens.append((('C', key, signature(element, cache=cache, cache_tags=CONTROL_TAGS)), element))
             return
         # Run wrappers (TEXT, CHAR) may split or merge around a new control, so
         # they carry no token of their own; every other element opens and
@@ -486,7 +488,13 @@ def _control_tally(tokens: list[Any]) -> Counter[str]:
     return Counter(token[1] for token, _element in tokens if token[0] == 'C')
 
 
-def _locate_insert(plan: Mapping[str, Any], before_tokens: list[Any], after_tokens: list[Any], path: list[str]) -> tuple[ET.Element | None, list[str]]:
+def _locate_insert(
+    plan: Mapping[str, Any],
+    before_tokens: list[Any],
+    after_tokens: list[Any],
+    path: list[str],
+    caches: tuple[dict[int, str], dict[int, str]] | None = None,
+) -> tuple[ET.Element | None, list[str]]:
     """Find the one inserted control; returns (element, reasons). Descends into one changed container."""
     key = plan['tag_key']
     field = bool(plan.get('companions'))
@@ -500,7 +508,8 @@ def _locate_insert(plan: Mapping[str, Any], before_tokens: list[Any], after_toke
         if len(path) >= MAX_DESCENT:
             return None, [f'the change is nested deeper than {MAX_DESCENT} controls']
         path.append(old[0][1].tag)
-        return _locate_insert(plan, linearize(old[0][1]), linearize(new[0][1]), path)
+        before_cache, after_cache = caches or ({}, {})
+        return _locate_insert(plan, linearize(old[0][1], before_cache), linearize(new[0][1], after_cache), path, (before_cache, after_cache))
     reasons: list[str] = []
     head = new[0] if new else None
     starts_ok = head is not None and head[0][0] == 'C' and head[0][1] == key
@@ -577,7 +586,8 @@ def evaluate_insert(plan: Mapping[str, Any], before: ET.Element, after: ET.Eleme
         if delta.get(name, 0) != want:
             reasons.append(f'{name} count changed by {delta.get(name, 0)}, expected exactly +{want}')
     if not reasons:
-        matched, found = _locate_insert(plan, linearize(_body(before)), linearize(_body(after)), path)
+        caches: tuple[dict[int, str], dict[int, str]] = ({}, {})
+        matched, found = _locate_insert(plan, linearize(_body(before), caches[0]), linearize(_body(after), caches[1]), path, caches)
         reasons.extend(found)
     reasons.extend(head_tail_reasons(before, after))
     return {
@@ -592,25 +602,40 @@ def evaluate_insert(plan: Mapping[str, Any], before: ET.Element, after: ET.Eleme
 
 
 def dry_run_proof(plan: Mapping[str, Any], before: ET.Element) -> None:
-    """Do the work of the after-edit proof on the before-document, without a verdict.
+    """Do at least the work of the after-edit proof on the before-document, without a verdict.
 
     ``evaluate_insert(plan, before, before)`` stops at the control-count check
-    and would under-measure; this always runs the summaries, both body
-    linearizations, the prefix/suffix scan and the HEAD/TAIL comparison, and
-    then linearizes every top-level control's subtree twice more, the upper
-    bound of descending into one changed container (a table cell, a note).
+    and would under-measure. This always runs the summaries, both body
+    linearizations (each with its own signature cache, as the before and
+    after trees have), the prefix/suffix scan and the HEAD/TAIL comparison,
+    and then, for every control at every depth up to ``MAX_DESCENT``, the two
+    linearizations and the scan that descending into it would cost. A real
+    proof descends along one path only, so this bounds it from above.
     Used only to time the proof before any mutation.
     """
     summarize(before)
     summarize(before)
     body = _body(before)
-    tokens = linearize(body)
-    _middle(tokens, linearize(body))
+    caches: tuple[dict[int, str], dict[int, str]] = ({}, {})
+    # Token lists stay alive down the descent, as the real proof's do.
+    top = (linearize(body, caches[0]), linearize(body, caches[1]))
+    _middle(*top)
     head_tail_reasons(before, before)
-    for token, element in tokens:
-        if token[0] == 'C' and element is not None and len(element):
-            linearize(element)
-            linearize(element)
+
+    def descend(element: ET.Element, depth: int) -> None:
+        for child in element:
+            if control_key(child) is not None and len(child):
+                if depth >= MAX_DESCENT:
+                    continue
+                level = (linearize(child, caches[0]), linearize(child, caches[1]))
+                _middle(*level)
+                descend(child, depth + 1)
+                del level
+            else:
+                descend(child, depth)
+
+    descend(body, 0)
+    del top
 
 
 def public_counts(summary: Mapping[str, Any]) -> dict[str, int]:

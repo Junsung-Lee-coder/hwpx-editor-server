@@ -4,6 +4,7 @@ import json
 import unittest
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 from xml.sax.saxutils import escape, quoteattr
 
 from app.command_packages.commands.object_insert_exact.run import validate_step
@@ -15,6 +16,7 @@ from app.object_insert import (
     PARAM_KEYS,
     ObjectInsertError,
     check_before,
+    dry_run_proof,
     evaluate_insert,
     mm_to_hwpunit,
     normalize_step,
@@ -213,6 +215,11 @@ class VerifierTests(unittest.TestCase):
             ('child added inside an existing entry', head.replace('<CHARSHAPE Id="0" Height="1000"/>', '<CHARSHAPE Id="0" Height="1000"><UNDERLINE/></CHARSHAPE>')),
             ('entry appended to a non-growable list', head.replace('</MAPPINGTABLE>', '<STYLELIST Count="0"/></MAPPINGTABLE>').replace('<MAPPINGTABLE>', '<MAPPINGTABLE>')),
             ('wrong entry tag appended', head.replace('Count="1"><CHARSHAPE Id="0" Height="1000"/>', 'Count="2"><CHARSHAPE Id="0" Height="1000"/><PARASHAPE Id="1"/>')),
+            ('Count not updated', grown.replace('Count="2"', 'Count="1"')),
+            ('Count overshoots', grown.replace('Count="2"', 'Count="3"')),
+            ('duplicate Id', grown.replace('<CHARSHAPE Id="1"', '<CHARSHAPE Id="0"')),
+            ('Id skips ahead', grown.replace('<CHARSHAPE Id="1"', '<CHARSHAPE Id="5"')),
+            ('Id missing', grown.replace('<CHARSHAPE Id="1" ', '<CHARSHAPE ')),
         ):
             with self.subTest(label=label):
                 result = _evaluate(_plan(), before, doc(after_head, *inserted))
@@ -220,6 +227,44 @@ class VerifierTests(unittest.TestCase):
                 self.assertIn('HEAD', ' '.join(result['reasons']))
         dropped = doc(head, *inserted).replace('<TAIL><BINDATASTORAGE>QUJD</BINDATASTORAGE></TAIL>', '<TAIL/>')
         self.assertIn('TAIL changed', ' '.join(_evaluate(_plan(), before, dropped)['reasons']))
+
+    def test_dry_run_does_at_least_the_real_proof_work_at_any_depth(self) -> None:
+        from app import object_insert
+
+        def table(inner: str, rows: int = 3) -> str:
+            filler = ''.join('<ROW><CELL><PARALIST><P><TEXT>' + _char('x' * 20) + '</TEXT></P></PARALIST></CELL></ROW>' for _ in range(rows))
+            return f'<TABLE>{filler}<ROW><CELL><PARALIST><P><TEXT>{inner}</TEXT></P></PARALIST></CELL></ROW></TABLE>'
+
+        notes = ''.join(f'<ENDNOTE><PARALIST><P><TEXT>{_char("z" * 30)}</TEXT></P></PARALIST></ENDNOTE>' for _ in range(5))
+        spot = _char('ab')
+        cases = (
+            ('body', spot, _plan()),
+            ('table', table(spot), _plan()),
+            ('table in table in table', table(table(table(spot))), _plan()),
+            ('endnote in table with notes', table(spot + notes), _plan(kind='endnote')),
+            ('sibling tables', table(_char('q')) * 4 + table(spot), _plan()),
+        )
+        for label, inner, plan in cases:
+            with self.subTest(label=label):
+                tag = 'ENDNOTE' if plan['kind'] == 'endnote' else 'FOOTNOTE'
+                note = f'<{tag}><PARALIST><P><TEXT>{_char("note")}</TEXT></P></PARALIST></{tag}>'
+                before = parse_hwpml(_doc(inner + _char('tail'), _char('Second')))
+                after = parse_hwpml(_doc(inner.replace(spot, _char('a') + note + _char('b'), 1) + _char('tail'), _char('Second')))
+                work: list[int] = []
+
+                def counting(container: Any, cache: Any = None, _real: Any = object_insert.linearize, _work: list[int] = work) -> Any:
+                    tokens = _real(container, cache)
+                    _work.append(len(tokens))
+                    return tokens
+
+                with patch.object(object_insert, 'linearize', counting):
+                    dry_run_proof(plan, before)
+                    dry, work[:] = sum(work), []
+                    result = evaluate_insert(plan, before, after)
+                    real = sum(work)
+                self.assertTrue(result['ok'], result)
+                # The after-tree holds exactly one token more: the new control itself.
+                self.assertGreaterEqual(dry + 1, real, (label, dry, real, result['inserted_at']))
 
     def test_check_before_refuses_unverifiable_or_conflicting_documents(self) -> None:
         header = '<HEADER ApplyPageType="Both"><PARALIST><P><TEXT>' + _char('x') + '</TEXT></P></PARALIST></HEADER>'

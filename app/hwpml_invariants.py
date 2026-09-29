@@ -25,6 +25,8 @@ from collections.abc import Iterable, Mapping
 VOLATILE_ATTRS: dict[str, frozenset[str]] = {'*': frozenset({'InstId'}), 'AUTONUM': frozenset({'Number'})}
 # Attribute that counts a HEAD list's entries; it may follow appended entries.
 LIST_COUNT_ATTR = 'Count'
+# Attribute that identifies a HEAD list entry (referenced as CharShape="n" etc.).
+ENTRY_ID_ATTR = 'Id'
 # HEAD lists an exact edit may append entries to (list tag -> entry tag):
 # a new char shape for a link, a paragraph shape or tab definition for an
 # indent, a border fill for a drawing object, a memo shape for a memo.
@@ -70,15 +72,55 @@ def attrs(element: ET.Element, ignore: Mapping[str, frozenset[str]] | None = Non
     return tuple(sorted((key, value) for key, value in element.attrib.items() if key not in skip))
 
 
-def signature(element: ET.Element, ignore: Mapping[str, frozenset[str]] | None = None, omit: frozenset[str] = frozenset()) -> str:
+def signature(
+    element: ET.Element,
+    ignore: Mapping[str, frozenset[str]] | None = None,
+    omit: frozenset[str] = frozenset(),
+    cache: dict[int, str] | None = None,
+    cache_tags: frozenset[str] = frozenset(),
+) -> str:
     """Canonical form of an element's whole subtree, text and tails included.
 
     ``ignore`` names further per-tag attributes, and ``omit`` whole child
-    subtrees (by tag), that a caller checks elsewhere.
+    subtrees (by tag), that a caller checks elsewhere. With ``cache``, the
+    signature of every element whose tag is in ``cache_tags`` is kept by
+    ``id`` so a nested control is serialized once per tree, not once per
+    level (the cache must only be used with one tree and one ignore/omit).
     """
+    if cache is not None and element.tag in cache_tags:
+        known = cache.get(id(element))
+        if known is not None:
+            return known
     own = ''.join(f' {key}={value!r}' for key, value in attrs(element, ignore))
-    children = ''.join(signature(child, ignore, omit) + f'~{child.tail or ""!r}' for child in element if child.tag not in omit)
-    return f'<{element.tag}{own}>{element.text or ""!r}{children}</{element.tag}>'
+    children = ''.join(
+        signature(child, ignore, omit, cache, cache_tags) + f'~{child.tail or ""!r}' for child in element if child.tag not in omit
+    )
+    result = f'<{element.tag}{own}>{element.text or ""!r}{children}</{element.tag}>'
+    if cache is not None and element.tag in cache_tags:
+        cache[id(element)] = result
+    return result
+
+
+def _list_growth_reasons(where: str, before: ET.Element, after: ET.Element, old_len: int, appended: list[ET.Element]) -> list[str]:
+    """A grown list must stay self-consistent: its Count follows exactly and new Ids are new and sequential."""
+    reasons: list[str] = []
+    old_count, new_count = before.get(LIST_COUNT_ATTR), after.get(LIST_COUNT_ATTR)
+    if old_count is not None or new_count is not None:
+        try:
+            expected = int(old_count) + len(appended) if old_count is not None else None
+            got = int(new_count) if new_count is not None else None
+        except ValueError:
+            expected, got = None, -1
+        if got != expected:
+            reasons.append(f'{where} {LIST_COUNT_ATTR} is {new_count!r} after appending {len(appended)} entries to {old_count!r}')
+    old_ids = [child.get(ENTRY_ID_ATTR) for child in list(after)[:old_len]]
+    new_ids = [child.get(ENTRY_ID_ATTR) for child in appended]
+    if any(value is not None for value in old_ids + new_ids):
+        if None in new_ids or len(set(new_ids)) != len(new_ids) or set(new_ids) & set(old_ids):
+            reasons.append(f'{where} appended entries whose {ENTRY_ID_ATTR}s are missing, repeated or already used: {new_ids}')
+        elif old_ids == [str(index) for index in range(old_len)] and new_ids != [str(index) for index in range(old_len, old_len + len(appended))]:
+            reasons.append(f'{where} appended {ENTRY_ID_ATTR}s {new_ids} do not continue 0..{old_len - 1}')
+    return reasons
 
 
 def _head_growth_reasons(before: ET.Element, after: ET.Element, path: str, allow: Mapping[str, Iterable[str]], out: list[str]) -> None:
@@ -114,6 +156,8 @@ def _head_growth_reasons(before: ET.Element, after: ET.Element, path: str, allow
         return
     if any(child.tag != entry_tag for child in appended):
         out.append(f'{where} gained entries other than {entry_tag}')
+    if appended:
+        out.extend(_list_growth_reasons(where, before, after, len(old_children), appended))
     for index, (old, new) in enumerate(zip(old_children, new_children)):
         if entry_tag:
             if signature(old) != signature(new):

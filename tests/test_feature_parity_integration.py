@@ -208,6 +208,20 @@ class UndoAfterUnverifiedOpsTests(unittest.TestCase):
                 _record_bundle_undo_state(binding, steps, prior)
                 self.assertEqual((binding['pending_logical_undo_count'], binding['logical_undo_unverified']), (1, expected))
 
+    def test_policy_table_decides_not_the_step_report(self) -> None:
+        single = {'native_editing_actions': 1, 'single_undo_expected': True, 'verified_natively': False}
+        cases = (
+            ('object_insert_exact', single, None),
+            ('layout_exact', single, None),
+            ('table_structure_exact', single, 1),
+            ('table_structure_exact', {**single, 'native_editing_actions': 3, 'single_undo_expected': False}, None),
+        )
+        for op, report, expected in cases:
+            with self.subTest(op=op, actions=report['native_editing_actions']):
+                binding: dict[str, Any] = {}
+                _record_bundle_undo_state(binding, [{'op': op, 'dirty': True, 'ok': True, 'result': {'undo': report}}], {})
+                self.assertEqual(binding['pending_logical_undo_count'], expected)
+
     def test_other_dirty_bundles_keep_their_step_count(self) -> None:
         binding: dict[str, Any] = {}
         _record_bundle_undo_state(binding, [{'op': 'insert_text', 'dirty': True}, {'op': 'where', 'dirty': False}, {'op': 'insert_text', 'dirty': True}], {})
@@ -339,9 +353,9 @@ class ReadbackLimitTests(unittest.TestCase):
         calls: list[str] = []
         real = object_insert.linearize
 
-        def counting(container: Any) -> Any:
+        def counting(container: Any, cache: Any = None) -> Any:
             calls.append(container.tag)
-            return real(container)
+            return real(container, cache)
 
         with patch.object(object_insert, 'linearize', counting):
             _run_object_insert(_FakeHwp())

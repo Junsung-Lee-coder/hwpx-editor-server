@@ -260,7 +260,7 @@ class LocalCliLayoutMixin:
         self._layout_raise_if_failed(result)
         after = self._layout_read_coldef(hwp, pset)
         doc_after = self._layout_document(hwp, where='after edit')
-        verification = verify_columns(plan, after, doc_before, doc_after, caret_section=caret_section)
+        verification = verify_columns(plan, after, doc_before, doc_after, caret_section=caret_section, caret=expected_pos)
         self._layout_raise_if_unverified(verification)
         return {'plan': plan, 'native_actions': [result], 'verification': verification,
                 'document_before': public_document(doc_before), 'document_after': public_document(doc_after)}
@@ -274,7 +274,7 @@ class LocalCliLayoutMixin:
         result = self._layout_native_run(hwp, 'BreakSection', mutation)
         self._layout_raise_if_failed(result)
         doc_after = self._layout_document(hwp, where='after edit')
-        verification = verify_section_insert(doc_before, doc_after)
+        verification = verify_section_insert(doc_before, doc_after, caret=expected_pos)
         self._layout_raise_if_unverified(verification)
         return {'plan': plan, 'native_actions': [result], 'verification': verification,
                 'document_before': public_document(doc_before), 'document_after': public_document(doc_after)}
