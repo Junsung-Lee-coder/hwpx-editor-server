@@ -31,12 +31,13 @@ class _Mutation:
     native_edits = 0
 
 
-def _undo_report(mutation: _Mutation) -> dict[str, Any]:
-    """How `hwpx undo` may treat this edit: one native edit is one undo unit; anything else is unverified."""
+def _undo_report(mutation: _Mutation, *, succeeded: bool) -> dict[str, Any]:
+    """What `hwpx undo` will do after this edit (_BUNDLE_UNDO_POLICY): one step only for one successful native edit."""
+    one_step = succeeded and mutation.native_edits == 1
     return {
         'native_editing_actions': mutation.native_edits,
-        'single_undo_expected': mutation.native_edits == 1,
-        'verified_natively': False,
+        'hwpx_undo': 'one_step' if one_step else 'refused',
+        'undo_units_verified': False,
     }
 
 
@@ -379,7 +380,7 @@ class LocalCliTableStructureMixin:
                 'goto': goto,
                 'before_grid': public_grid(before),
                 'native_actions': actions,
-                'undo': _undo_report(mutation),
+                'undo': _undo_report(mutation, succeeded=True),
                 'after_grid': public_grid(after),
                 'verification': verification,
                 'next_proof_required': 'Render the page (page-screenshot or export-proof-range) and review it before saving; the target proof_hash changes after this edit, so re-inventory before another exact edit.',
@@ -390,7 +391,7 @@ class LocalCliTableStructureMixin:
                 raise
             message = str(exc) if isinstance(exc, LocalCliRuntimeError) else f'{OP} failed after native mutation started: {type(exc).__name__}: {exc}'
             rollback = dict(_ROLLBACK_HINT)
-            rollback['undo'] = _undo_report(mutation)
+            rollback['undo'] = _undo_report(mutation, succeeded=False)
             raise LocalCliMutationError(message, mutation_may_have_persisted=True, rollback=rollback) from exc
         finally:
             if original_pos is not None and len(original_pos) >= 3:

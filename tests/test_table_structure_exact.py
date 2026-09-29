@@ -861,6 +861,7 @@ class BundleUndoTests(unittest.TestCase):
         service, result = self._bundle(hwp, store, action='insert_row_below', row=3, count=3)
         self.assertTrue(result['ok'], result)
         self.assertEqual(result['steps'][0]['result']['undo']['native_editing_actions'], 3)
+        self.assertEqual(result['steps'][0]['result']['undo']['hwpx_undo'], 'refused')
         self.assertIsNone(store['binding']['pending_logical_undo_count'])
         with self.assertRaisesRegex(LocalCliRuntimeError, 'undo refused'):
             service.undo()
@@ -873,6 +874,7 @@ class BundleUndoTests(unittest.TestCase):
         self.assertFalse(result['ok'])
         self.assertTrue(result['steps'][0]['mutation_may_have_persisted'])
         self.assertEqual(result['steps'][0]['rollback']['undo']['native_editing_actions'], 2)
+        self.assertEqual(result['steps'][0]['rollback']['undo']['hwpx_undo'], 'refused')
         self.assertIn('without saving and reopen', result['steps'][0]['rollback']['hint'])
         with self.assertRaisesRegex(LocalCliRuntimeError, 'undo refused'):
             service.undo()
@@ -882,6 +884,7 @@ class BundleUndoTests(unittest.TestCase):
         store = self._store()
         _service_obj, result = self._bundle(hwp, store, action='insert_row_below', row=3)
         self.assertTrue(result['ok'], result)
+        self.assertEqual(result['steps'][0]['result']['undo']['hwpx_undo'], 'one_step')
         self.assertEqual(store['binding']['pending_logical_undo_count'], 1)
         self.assertIsNone(store['binding'].get('logical_undo_unverified'))
         older = self._store()
@@ -890,7 +893,7 @@ class BundleUndoTests(unittest.TestCase):
         self.assertEqual((older['binding']['pending_logical_undo_count'], older['binding']['logical_undo_unverified']), (1, 'an older multi-edit'))
 
     def test_policy_table_decides_not_the_step_report(self) -> None:
-        single = {'native_editing_actions': 1, 'single_undo_expected': True, 'verified_natively': False}
+        single = {'native_editing_actions': 1, 'hwpx_undo': 'one_step', 'single_undo_expected': True}
         for op, report, ok, expected in (
             ('table_structure_exact', single, True, 1),
             ('table_structure_exact', single, False, None),
