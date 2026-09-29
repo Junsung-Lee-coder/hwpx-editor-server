@@ -200,11 +200,19 @@ class UndoAfterUnverifiedOpsTests(unittest.TestCase):
         binding['pending_logical_undo_count'] = None  # what undo() stores after it runs
         self.assertIn('undo refused', self._undo(binding)[0])
 
+    def test_counted_bundle_drops_its_start_marker_but_keeps_an_older_block(self) -> None:
+        steps = [{'op': 'object_insert_exact', 'dirty': False}, {'op': 'insert_text', 'dirty': True}]
+        for prior, expected in (({}, None), ({'logical_undo_unverified': 'older'}, 'older')):
+            with self.subTest(prior=prior):
+                binding: dict[str, Any] = {'pending_logical_undo_count': None, 'logical_undo_unverified': 'bundle started'}
+                _record_bundle_undo_state(binding, steps, prior)
+                self.assertEqual((binding['pending_logical_undo_count'], binding['logical_undo_unverified']), (1, expected))
+
     def test_other_dirty_bundles_keep_their_step_count(self) -> None:
         binding: dict[str, Any] = {}
         _record_bundle_undo_state(binding, [{'op': 'insert_text', 'dirty': True}, {'op': 'where', 'dirty': False}, {'op': 'insert_text', 'dirty': True}], {})
         self.assertEqual(binding['pending_logical_undo_count'], 2)
-        self.assertNotIn('logical_undo_unverified', binding)
+        self.assertIsNone(binding.get('logical_undo_unverified'))
         self.assertEqual(self._undo(binding), ['undo'])
 
 

@@ -136,6 +136,9 @@ def _record_bundle_undo_state(binding: dict[str, Any], steps: list[Any], prior: 
         binding['logical_undo_unverified'] = f'{", ".join(unverified)} changed the document with native actions whose undo grouping is not verified'
     else:
         binding['pending_logical_undo_count'] = len(dirty_steps)
+        # Drop this bundle's own start marker; an older unverified edit below
+        # these steps still blocks undo once they are undone.
+        binding['logical_undo_unverified'] = prior.get('logical_undo_unverified')
 
 
 class LocalCliService(
