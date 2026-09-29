@@ -49,6 +49,9 @@ from .output_parser import (
 )
 from .readback_diff import format_readback_diff_human, load_readback_manifest, summarize_readback_diff
 from .gate_verdict import load_manifest as load_gate_manifest, summarize_gate_verdict
+from . import reading_cli
+from .hwpx_new import HwpxNewError, write_blank_hwpx
+from .mermaid_render import MermaidRenderError, render_png
 from .proof_packet import ProofPacketError, build_proof_packet, seal_native_border_readback
 from .safe_schema import build_safe_agent_schema
 from .static_inspector import (
@@ -109,10 +112,13 @@ LOCAL_METADATA_NOTES: dict[str, str] = {
     'static-read': 'local read-only secondary HWPX package/static text/table/header/footer/footnote/equation/image inventory; no mutation; Hancom-native corroboration required',
     'static-compare': 'local read-only secondary source-vs-candidate static comparison; no mutation; mismatch cannot PASS without Hancom-native evidence',
     'static-render': 'local read-only secondary quick HTML/SVG preview; non-authoritative; Hancom render remains required for QA PASS',
+    'new': 'writes a minimal blank .hwpx locally (paper size and margins only); no server call; Hancom validity is proven only by `hwpx open`',
+    'mermaid-render': 'renders a local Mermaid source to PNG with mermaid-cli (mmdc); no server call; insert the PNG with `hwpx image`',
     'field-fill-plan': 'planning-only placeholder/field fill manifest; no mutation; production writes must use Hancom-native commands and proof',
     'output-format-policy': 'planning-only output extension/save/export policy manifest; no mutation; requires Hancom-native save/export proof',
     'gate-verdict': 'local read-only Hancom-primary gate verdict merger for hashes/tokens/counts/render proof/static supplements; no mutation and no external send',
 }
+LOCAL_METADATA_NOTES.update(reading_cli.READING_COMMAND_NOTES)
 
 DIRECT_ROUTE_NOTES: dict[str, str] = {
     'command-reconcile': 'durable timed-out native command reconciliation through the server route; no retry is admitted until terminal outcome',
@@ -268,6 +274,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     subparsers = parser.add_subparsers(dest='command', required=True)
+    reading_cli.register(subparsers)
 
     help_parser = subparsers.add_parser('help', help='Show HWPX safe workflow help')
     help_parser.add_argument('topic', nargs='?', choices=('workflow', 'commands'), default='workflow')
@@ -281,6 +288,27 @@ def build_parser() -> argparse.ArgumentParser:
     command_reconcile_parser.add_argument('--command-id', required=True)
     command_reconcile_parser.add_argument('--session-id', default=None)
     command_reconcile_parser.add_argument('--json', action='store_true', help='Print reconciliation JSON')
+
+    new_parser = subparsers.add_parser('new', help='Write a minimal blank .hwpx locally, then open it with `hwpx open`')
+    new_parser.add_argument('file', type=Path)
+    new_parser.add_argument('--paper', default='A4', help='Paper name: A3, A4, A5, B4, B5, LETTER, LEGAL (default A4, portrait)')
+    new_parser.add_argument('--width-mm', type=float, default=None, help='Custom paper width in mm (with --height-mm)')
+    new_parser.add_argument('--height-mm', type=float, default=None, help='Custom paper height in mm (with --width-mm)')
+    for margin in ('top', 'bottom', 'left', 'right', 'header', 'footer', 'gutter'):
+        new_parser.add_argument(f'--margin-{margin}-mm', type=float, default=None, help=f'{margin} margin in mm (default: Hancom A4 default)')
+    new_parser.add_argument('--title', default='', help='Document title metadata')
+    new_parser.add_argument('--force', action='store_true', help='Replace an existing file')
+    new_parser.add_argument('--json', action='store_true', help='Print the result JSON')
+
+    mermaid_parser = subparsers.add_parser('mermaid-render', help='Render a Mermaid diagram to PNG with mermaid-cli (mmdc) for `hwpx image`')
+    mermaid_parser.add_argument('source', type=Path, help='UTF-8 Mermaid source file (.mmd)')
+    mermaid_parser.add_argument('--out', type=Path, required=True, help='Output .png path')
+    mermaid_parser.add_argument('--scale', type=float, default=2.0, help='Render scale 0.5..5 (default 2)')
+    mermaid_parser.add_argument('--width', type=int, default=None, help='Render width in px (100..8000)')
+    mermaid_parser.add_argument('--background', choices=('white', 'transparent'), default='white')
+    mermaid_parser.add_argument('--mmdc', default=None, help='Path to mmdc (default: HWPX_MMDC, then PATH)')
+    mermaid_parser.add_argument('--timeout', type=int, default=90, help='Renderer timeout in seconds')
+    mermaid_parser.add_argument('--json', action='store_true', help='Print the result JSON')
 
     open_parser = subparsers.add_parser('open', help='Open a local HWP/HWPX file into a live server session')
     open_parser.add_argument('file', type=Path)
@@ -2820,6 +2848,9 @@ def main(argv: list[str] | None = None) -> int:
     base_url = _resolve_base_url(args.base_url)
 
     try:
+        if args.command in reading_cli.READING_COMMANDS:
+            return reading_cli.dispatch(args)
+
         if args.command == 'help':
             if args.topic == 'commands':
                 _print_command_status()
@@ -3145,6 +3176,49 @@ def main(argv: list[str] | None = None) -> int:
                 artifact_dir=args.artifact_dir.expanduser() if args.artifact_dir else None,
             )
             print(json.dumps(payload, ensure_ascii=False, indent=2))
+            return 0
+
+        if args.command == 'new':
+            margins = {name: getattr(args, f'margin_{name}_mm') for name in ('top', 'bottom', 'left', 'right', 'header', 'footer', 'gutter')}
+            try:
+                result = write_blank_hwpx(
+                    args.file,
+                    overwrite=args.force,
+                    title=args.title,
+                    paper=args.paper,
+                    width_mm=args.width_mm,
+                    height_mm=args.height_mm,
+                    margins_mm=margins,
+                )
+            except HwpxNewError as exc:
+                raise ApiError(str(exc)) from exc
+            if args.json:
+                print(json.dumps(result, ensure_ascii=False, indent=2))
+            else:
+                paper = result['paper_mm']
+                print(f"created: {result['path']} ({paper['width']} x {paper['height']} mm, portrait)")
+                print('evidence: generated package only; Hancom validity is proven by opening it')
+                print(f"next: hwpx open {result['path']}")
+            return 0
+
+        if args.command == 'mermaid-render':
+            try:
+                result = render_png(
+                    args.source,
+                    args.out,
+                    scale=args.scale,
+                    width=args.width,
+                    background=args.background,
+                    renderer=args.mmdc,
+                    timeout=args.timeout,
+                )
+            except MermaidRenderError as exc:
+                raise ApiError(str(exc)) from exc
+            if args.json:
+                print(json.dumps(result, ensure_ascii=False, indent=2))
+            else:
+                print(f"rendered: {result['path']} ({result['width_px']} x {result['height_px']} px, sha256 {result['sha256'][:16]})")
+                print(f"next: hwpx image {result['path']}  (add --fit-cell when the caret is in a table cell)")
             return 0
 
         if args.command == 'static-render':

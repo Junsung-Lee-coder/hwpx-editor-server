@@ -94,6 +94,7 @@ from app.local_cli_service_support import (
     _MACRO_PREVIEW_STRING_CHARS,
     _MACRO_PREVIEW_ITEMS,
     _BUNDLE_MAX_STEPS,
+    _BUNDLE_WHOLE_DOCUMENT_PROOF_OPS,
     _BUNDLE_ALLOWED_OPS,
     _BUNDLE_SAFE_HACTION_NAMES,
     _BUNDLE_SAFE_PYHWPX_CALLS,
@@ -109,12 +110,67 @@ from app.local_cli_service_support import (  # noqa: F401
 from app.local_cli_bundle_controls import LocalCliBundleControlsMixin
 from app.local_cli_bundle_paragraphs import LocalCliBundleParagraphsMixin
 from app.local_cli_cell_margins import LocalCliCellMarginsMixin
+from app.local_cli_layout import LocalCliLayoutMixin
+from app.local_cli_object_insert import LocalCliObjectInsertMixin
+
+
+# How `hwpx undo` may count a bundle step that changed the document. This
+# table is the only authority; a step's own `undo` report (`hwpx_undo`)
+# restates it for the caller and never makes an edit undoable by itself.
+#   'refuse'             - never counted: `undo` refuses after the step.
+#   'single_native_edit' - one undo unit only when the step succeeded and its
+#                          result reports exactly one native edit.
+# Ops not listed count one undo unit per changed step.
+_BUNDLE_UNDO_POLICY: dict[str, str] = {
+    'layout_exact': 'refuse',
+    'object_insert_exact': 'refuse',
+    'table_structure_exact': 'single_native_edit',
+}
+_UNDO_UNVERIFIED_BUNDLE_OPS = frozenset(_BUNDLE_UNDO_POLICY)
+
+
+def _bundle_step_single_undo(step: dict[str, Any]) -> bool:
+    policy = _BUNDLE_UNDO_POLICY.get(str(step.get('op')))
+    if policy is None:
+        return True
+    if policy != 'single_native_edit':
+        return False
+    result = step.get('result') if isinstance(step.get('result'), dict) else {}
+    undo = result.get('undo') if isinstance(result.get('undo'), dict) else {}
+    return step.get('ok') is True and undo.get('native_editing_actions') == 1
+
+
+def _record_bundle_undo_state(binding: dict[str, Any], steps: list[Any], prior: dict[str, Any]) -> None:
+    """Set how `undo` may revert this bundle: a native step count, refusal, or the prior state.
+
+    Only steps that changed (or may have changed) the document count. A
+    bundle with no such step, even on an already-dirty document, leaves the
+    undo state exactly as it was before the bundle (``prior``), so it can
+    never turn an earlier refusal into a one-step Undo.
+    """
+    dirty_steps = [step for step in steps if isinstance(step, dict) and step.get('dirty')]
+    if not dirty_steps:
+        binding.update(prior)
+        return
+    unverified = sorted({str(step.get('op')) for step in dirty_steps if not _bundle_step_single_undo(step)})
+    if unverified:
+        binding['pending_logical_undo_count'] = None
+        binding['logical_undo_unverified'] = (
+            f'{", ".join(unverified)} changed the document with native actions that cannot be undone as one counted step'
+        )
+    else:
+        binding['pending_logical_undo_count'] = len(dirty_steps)
+        # Drop this bundle's own start marker; an older unverified edit below
+        # these steps still blocks undo once they are undone.
+        binding['logical_undo_unverified'] = prior.get('logical_undo_unverified')
 
 
 class LocalCliService(
     LocalCliBundleControlsMixin,
     LocalCliBundleParagraphsMixin,
     LocalCliCellMarginsMixin,
+    LocalCliObjectInsertMixin,
+    LocalCliLayoutMixin,
 ):
     def __init__(self, *, settings: Any, interactive_sessions: Any):
         self.settings = settings
@@ -2813,6 +2869,49 @@ class LocalCliService(
                 'split_group_count',
                 'split_group_hash',
             },
+            'object_insert_exact': {
+                'op',
+                'operation',
+                'label',
+                'kind',
+                'expected_pos',
+                'confirm_mutation',
+                'text',
+                'url',
+                'display_text',
+                'name',
+                'script',
+                'width_mm',
+                'height_mm',
+                'treat_as_char',
+                'apply_to',
+            },
+            'layout_exact': {
+                'op',
+                'operation',
+                'label',
+                'kind',
+                'expected_pos',
+                'paper_width_mm',
+                'paper_height_mm',
+                'landscape',
+                'margin_top_mm',
+                'margin_bottom_mm',
+                'margin_left_mm',
+                'margin_right_mm',
+                'header_len_mm',
+                'footer_len_mm',
+                'gutter_len_mm',
+                'count',
+                'gap_mm',
+                'same_width',
+                'apply_to',
+                'section_index',
+                'marker_text',
+                'expected_before',
+                'confirm_layout',
+            },
+            'layout_inspect': {'op', 'operation', 'label'},
             'table_split_exact': {
                 'op',
                 'operation',
@@ -3457,6 +3556,14 @@ class LocalCliService(
                     )
 
             cleaned.append(step)
+        # Counted on normalized ops ('operation' alias, whitespace): each exact step
+        # needs two whole-document proofs within one bundle time limit.
+        exact_steps = [step['op'] for step in cleaned if step['op'] in _BUNDLE_WHOLE_DOCUMENT_PROOF_OPS]
+        if len(exact_steps) > 1:
+            raise LocalCliServiceError(
+                f'command-bundle accepts at most one whole-document exact edit step ({", ".join(sorted(_BUNDLE_WHOLE_DOCUMENT_PROOF_OPS))}); got {len(exact_steps)}',
+                status_code=400,
+            )
         return cleaned
 
     def _execute_command_bundle_step(
@@ -3648,14 +3755,32 @@ class LocalCliService(
             return result, False, warnings
 
         if op == 'where':
-            location = snapshot_live_location(
-                hwp=handle.hwp,
-                source_filename=handle.source_filename,
-                working_copy_id=handle.session_id,
-            )
+            location = self._bundle_where_location(handle.hwp, source_filename=handle.source_filename, working_copy_id=handle.session_id)
             return {'location': self._bundle_compact_location(location)}, False, warnings
 
         raise LocalCliRuntimeError(f'Unsupported command-bundle op: {op}')
+
+    def _bundle_where_location(self, hwp: Any, *, source_filename: str, working_copy_id: str) -> dict[str, Any]:
+        """Read-only location for a bundle ``where`` step that never disturbs a live selection.
+
+        The nearby-paragraph capture moves the caret to read neighbouring
+        paragraphs and restores only the caret, which drops a selection that a
+        later step (hyperlink, memo) depends on; the compact bundle location
+        does not report that preview, so it is skipped here. The selection
+        range is re-read afterwards and any change is refused.
+        """
+        before = _snapshot_cursor_context(hwp)
+        location = snapshot_live_location(
+            hwp=hwp,
+            source_filename=source_filename,
+            working_copy_id=working_copy_id,
+            include_nearby_context=False,
+        )
+        after = _snapshot_cursor_context(hwp)
+        for key in ('pos', 'selected_pos', 'has_selection'):
+            if before.get(key) != after.get(key):
+                raise LocalCliRuntimeError(f'command-bundle where changed the live {key} ({before.get(key)!r} -> {after.get(key)!r}); refusing to continue')
+        return location
 
     def _record_local_cli_command(
         self,
@@ -6803,6 +6928,15 @@ class LocalCliService(
             }
 
         prior_native_sequence = binding.get('native_command_sequence', 0)
+        # Ops in _BUNDLE_UNDO_POLICY refuse undo from the start, so a timeout
+        # or crash mid-bundle cannot leave an older undo count in place;
+        # _record_bundle_undo_state settles it once the steps are known.
+        prior_undo_state = {key: binding.get(key) for key in ('pending_logical_undo_count', 'logical_undo_unverified')}
+        exact_ops = sorted({str(step.get('op')) for step in cleaned_steps if step.get('op') in _UNDO_UNVERIFIED_BUNDLE_OPS})
+        if exact_ops:
+            binding['pending_logical_undo_count'] = None
+            binding['logical_undo_unverified'] = f'{", ".join(exact_ops)} bundle started and its outcome was not recorded'
+            binding = self._save_binding(binding)
         result = self._execute_live(
             binding=binding,
             command_name='command-bundle',
@@ -6842,10 +6976,8 @@ class LocalCliService(
             clear_last_find=dirty,
             clear_selection_cache=dirty,
         )
-        if dirty:
-            dirty_step_count = sum(1 for step in (result.get('steps') or []) if isinstance(step, dict) and step.get('dirty'))
-            binding['pending_logical_undo_count'] = max(1, dirty_step_count)
-            binding = self._save_binding(binding)
+        _record_bundle_undo_state(binding, result.get('steps') or [], prior_undo_state)
+        binding = self._save_binding(binding)
         summary = f"command-bundle {'succeeded' if result.get('ok') else 'stopped'}: {len(result.get('steps') or [])}/{len(cleaned_steps)} step(s)"
         self._record_local_cli_command(
             'command-bundle',
@@ -7064,6 +7196,13 @@ class LocalCliService(
     def undo(self, *, session_id: str | None = None) -> dict[str, Any]:
         binding = self._load_active_binding(session_id=session_id)
         undo_count_raw = binding.get('pending_logical_undo_count')
+        blocked = binding.get('logical_undo_unverified')
+        if blocked and not isinstance(undo_count_raw, int):
+            # Fail closed: counting native Undo steps could revert part of an
+            # edit, or an older edit too.
+            raise LocalCliRuntimeError(
+                f'undo refused: {blocked}. Close the working copy without saving and reopen it instead of counting undos.'
+            )
         undo_count = int(undo_count_raw) if isinstance(undo_count_raw, int) and undo_count_raw > 1 else 1
 
         def _handler(handle: LocalCliRuntimeHandle) -> dict[str, Any]:

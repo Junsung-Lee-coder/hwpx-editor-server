@@ -152,6 +152,9 @@ _VALIDATION_SAMPLES: dict[str, dict[str, object]] = {
         'confirm_layout': True,
     },
     'table_split_exact': {'page_from': 1, 'target_id': 'ctrl/1', 'expected_hash': 'sha256:abc', 'expected_page': 1, 'down_rows': 1, 'confirm_layout': True},
+    'object_insert_exact': {'kind': 'bookmark', 'name': 'b1', 'expected_pos': [0, 1, 2], 'confirm_mutation': True},
+    'layout_exact': {'kind': 'section_insert', 'expected_pos': [0, 1, 2], 'confirm_layout': True},
+    'layout_inspect': {},
     'where': {},
 }
 

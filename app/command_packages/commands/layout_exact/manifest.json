@@ -1,0 +1,33 @@
+{
+  "op": "layout_exact",
+  "version": "local-cli/layout-exact/v1-package",
+  "summary": "Exact layout edits (page setup, columns, section break insert/delete, hanging indent) with strict caret/state preconditions and parameter-set plus HWPML readback.",
+  "module": "app.command_packages.commands.layout_exact.run",
+  "read_only": false,
+  "dirty_default": true,
+  "allowed_keys": [
+    "op",
+    "operation",
+    "label",
+    "kind",
+    "expected_pos",
+    "paper_width_mm",
+    "paper_height_mm",
+    "landscape",
+    "margin_top_mm",
+    "margin_bottom_mm",
+    "margin_left_mm",
+    "margin_right_mm",
+    "header_len_mm",
+    "footer_len_mm",
+    "gutter_len_mm",
+    "count",
+    "gap_mm",
+    "same_width",
+    "apply_to",
+    "section_index",
+    "marker_text",
+    "expected_before",
+    "confirm_layout"
+  ]
+}
