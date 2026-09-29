@@ -223,6 +223,9 @@ class LocalCliLayoutMixin:
         pset = self._layout_pset(hwp, 'HColDef')
         before = self._layout_read_coldef(hwp, pset)
         doc_before = self._layout_document(hwp, where='before edit')
+        _count, caret_section = self._layout_key_indicator(hwp)
+        if doc_before['section_count'] > 1 and caret_section is None:
+            raise LocalCliRuntimeError(f'{OP} refused before mutation: KeyIndicator does not report the caret section, so a column change cannot be scoped')
         plan = self._layout_plan(lambda: plan_columns(request, before, doc_before))
         self._layout_get_default(hwp, 'MultiColumn', pset)
         for item, value in plan['targets'].items():
@@ -233,7 +236,7 @@ class LocalCliLayoutMixin:
         self._layout_raise_if_failed(result)
         after = self._layout_read_coldef(hwp, pset)
         doc_after = self._layout_document(hwp, where='after edit')
-        verification = verify_columns(plan, after, doc_before, doc_after)
+        verification = verify_columns(plan, after, doc_before, doc_after, caret_section=caret_section)
         self._layout_raise_if_unverified(verification)
         return {'plan': plan, 'native_actions': [result], 'verification': verification,
                 'document_before': public_document(doc_before), 'document_after': public_document(doc_after)}

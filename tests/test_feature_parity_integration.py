@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import unittest
 from typing import Any
+from unittest.mock import patch
 
 from app.command_packages.runtime import get_command_package_registry
+from app.local_cli_runtime import LocalCliRuntimeError, snapshot_live_location
 from app.local_cli_service import LocalCliService, LocalCliServiceError
 from app.local_cli_service_support import _BUNDLE_ALLOWED_OPS
 from local_cli_v1.bundles import BUNDLE_SERVER_OPS, BundleError, build_named_bundle
 from tests.test_layout_exact import A4, _FakeLayoutHwp
+from tests.test_object_insert_exact import _FakeHwp
 
 
 def _service() -> LocalCliService:
@@ -110,6 +113,51 @@ class LayoutInspectTests(unittest.TestCase):
         }])[0]
         result = service._bundle_layout_exact(hwp, step)
         self.assertTrue(result['succeeded'])
+
+
+class _SelectingHwp(_FakeHwp):
+    """Object-insert fake whose paragraph reads select text and whose set_pos drops the selection, like Hancom."""
+
+    def select_text(self, spara: int, spos: int, epara: int, epos: int, slist: int = 0) -> bool:
+        self.selection = (spos, len(self.paras[spara]) if epos == -1 else epos)
+        return True
+
+    def set_pos(self, list_id: int, para: int, pos: int) -> bool:
+        self.caret, self.selection = [list_id, para, pos], None
+        return True
+
+
+class WhereKeepsSelectionTests(unittest.TestCase):
+    def test_nearby_capture_is_what_drops_a_selection(self) -> None:
+        hwp = _SelectingHwp()
+        hwp.select(6, 11)
+        snapshot_live_location(hwp=hwp, source_filename='a.hwpx', working_copy_id='s')
+        self.assertIsNone(hwp.selection)
+
+    def test_where_then_hyperlink_recipe_keeps_the_selection(self) -> None:
+        hwp = _SelectingHwp()
+        hwp.select(6, 11)
+        service = _service()
+        steps = build_named_bundle('object-insert-exact', ['--kind', 'hyperlink', '--url', 'https://example.com/a', '--display-text', 'world',
+                                                           '--expected-pos', '0,0,11', '--confirm-mutation']).server_payload()['steps']
+        self.assertEqual(steps[0]['op'], 'where')
+        service._bundle_where_location(hwp, source_filename='a.hwpx', working_copy_id='s')
+        self.assertEqual(hwp.selection, (6, 11))
+        step = service._validate_command_bundle_steps(steps)[1]
+        result = service._bundle_object_insert_exact(hwp, step)
+        self.assertTrue(result['verification']['ok'], result['verification'])
+
+    def test_where_refuses_if_the_selection_moved(self) -> None:
+        hwp = _SelectingHwp()
+        hwp.select(6, 11)
+
+        def clobber(**kwargs: Any) -> dict[str, Any]:
+            kwargs['hwp'].selection = None
+            return {}
+
+        with patch('app.local_cli_service.snapshot_live_location', side_effect=clobber), \
+                self.assertRaisesRegex(LocalCliRuntimeError, 'where changed the live'):
+            _service()._bundle_where_location(hwp, source_filename='a.hwpx', working_copy_id='s')
 
 
 if __name__ == '__main__':

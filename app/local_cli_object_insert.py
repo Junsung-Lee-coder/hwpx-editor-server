@@ -24,12 +24,26 @@ from app.object_insert import (
 )
 
 _ROLLBACK_HINT = {'attempted': False, 'hint': 'Inspect rendered proof; use undo or reopen the working copy before saving.'}
+_UNDO_NOTE = (
+    'Hancom records each native editing action as its own undo unit, and the grouping is not verified natively; '
+    'when more than one editing action ran, do not assume one undo reverts the insertion; reopen the working copy instead.'
+)
 
 
 class _Mutation:
-    """Tracks whether a native mutating action has been issued."""
+    """Tracks whether a native mutating action has been issued, and how many editing actions ran."""
 
     started = False
+    editing_actions = 0
+
+
+def _undo_report(mutation: _Mutation) -> dict[str, Any]:
+    return {
+        'native_editing_actions': mutation.editing_actions,
+        'single_undo_expected': mutation.editing_actions == 1,
+        'verified_natively': False,
+        'note': _UNDO_NOTE,
+    }
 
 
 class LocalCliObjectInsertMixin:
@@ -150,16 +164,19 @@ class LocalCliObjectInsertMixin:
         if native['mode'] == 'run':
             self._object_insert_require(hwp, plan, where=f'before {native["action"]}')
             mutation.started = True
+            mutation.editing_actions += 1
             result = self._object_insert_run(hwp, native['action'])
         else:
             execute, hset = self._object_insert_prepare_pset(hwp, native['action'], native['pset'], native_items(plan))
             self._object_insert_require(hwp, plan, where=f'before {native["action"]}')
             mutation.started = True
+            mutation.editing_actions += 1
             result = self._object_insert_execute(execute, hset, native['action'])
         actions.append(result)
         if not result['succeeded']:
             raise LocalCliRuntimeError(f'{OP} native action did not succeed: {result!r}')
         if native.get('types_text'):
+            mutation.editing_actions += 1
             try:
                 insert_text_at_caret(hwp, plan['text'])
                 actions.append({'action': 'InsertText', 'succeeded': True, 'chars': len(plan['text'])})
@@ -207,6 +224,7 @@ class LocalCliObjectInsertMixin:
                 'before_controls': public_counts(before),
                 'after_controls': public_counts(summarize(after_root)),
                 'verification': verification,
+                'undo': _undo_report(mutation),
                 'next_proof_required': 'Render the page (page-screenshot or export-proof-range) and review it before saving; re-run where before another caret-bound edit.',
                 'warnings': [],
             }
@@ -214,4 +232,8 @@ class LocalCliObjectInsertMixin:
             if not mutation.started:
                 raise
             message = str(exc) if isinstance(exc, LocalCliRuntimeError) else f'{OP} failed after native mutation started: {type(exc).__name__}: {exc}'
-            raise LocalCliMutationError(message, mutation_may_have_persisted=True, rollback=dict(_ROLLBACK_HINT)) from exc
+            rollback = dict(_ROLLBACK_HINT)
+            rollback['undo'] = _undo_report(mutation)
+            if mutation.editing_actions > 1:
+                rollback['hint'] = f'{mutation.editing_actions} native editing actions ran; reopen the working copy rather than counting undos.'
+            raise LocalCliMutationError(message, mutation_may_have_persisted=True, rollback=rollback) from exc

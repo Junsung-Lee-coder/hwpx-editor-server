@@ -3,7 +3,9 @@
 Nothing here touches Hancom. The service mixin reads the whole document as
 HWPML (``GetTextFile('HWPML2X', '')``) before and after one native insert,
 and these helpers decide whether the observed document proves that exactly
-one expected object was added and nothing else changed.
+one expected object was added and nothing else changed. The proof is
+positional (see ``evaluate_insert``): the requested properties are checked on
+the control found at the insertion point, never on any matching control.
 
 The HWPML element names below are HWPML 2.x names taken from the task
 specification; they are **not natively verified** yet. Every name the
@@ -355,13 +357,92 @@ def element_text(element: ET.Element) -> str:
     return _norm(''.join(element.itertext()))
 
 
+# Attributes that may legitimately differ between two readbacks of an unchanged
+# object (per tag; '*' applies to every tag). UNVERIFIED natively: InstId is
+# Hancom's per-instance id and AUTONUM Number renumbers when a note is added
+# before an existing one.
+VOLATILE_ATTRS: dict[str, frozenset[str]] = {'*': frozenset({'InstId'}), 'AUTONUM': frozenset({'Number'})}
+# Elements outside BODY that must survive byte-for-byte (after dropping
+# volatile attributes): embedded pictures and their binary storage.
+PRESERVED_OUTSIDE_BODY = ('BINDATALIST', 'BINDATASTORAGE')
+TEXT_RUN_TAG = 'TEXT'
+CHAR_SHAPE_ATTR = 'CharShape'
+MAX_DESCENT = 16
+
+
+def _attrs(element: ET.Element) -> tuple[tuple[str, str], ...]:
+    volatile = VOLATILE_ATTRS['*'] | VOLATILE_ATTRS.get(element.tag, frozenset())
+    return tuple(sorted((key, value) for key, value in element.attrib.items() if key not in volatile))
+
+
+def signature(element: ET.Element) -> str:
+    """Canonical form of an element's whole subtree, text and tails included."""
+    attrs = ''.join(f' {key}={value!r}' for key, value in _attrs(element))
+    children = ''.join(signature(child) + f'~{child.tail or ""!r}' for child in element)
+    return f'<{element.tag}{attrs}>{element.text or ""!r}{children}</{element.tag}>'
+
+
+def linearize(container: ET.Element) -> list[tuple[tuple[Any, ...], ET.Element | None]]:
+    """Document-order tokens under ``container`` (not including it).
+
+    ``('P', attrs)`` opens a paragraph, ``('T', char, char_shape)`` is one run
+    character, and ``('C', key, signature)`` is a whole control, which is
+    atomic here (see ``evaluate_insert`` for descending into one). Each token
+    is paired with its element (controls) or None.
+    """
+    tokens: list[tuple[tuple[Any, ...], ET.Element | None]] = []
+
+    def chars(value: str | None, shape: str | None) -> None:
+        for char in value or '':
+            tokens.append((('T', char, shape), None))
+
+    def walk(element: ET.Element, shape: str | None, in_run: bool) -> None:
+        key = control_key(element)
+        if key is not None:
+            tokens.append((('C', key, signature(element)), element))
+            return
+        if element.tag == PARAGRAPH_TAG:
+            tokens.append((('P', _attrs(element)), None))
+        if element.tag == TEXT_RUN_TAG:
+            shape = element.get(CHAR_SHAPE_ATTR, shape)
+        run = in_run or element.tag in TEXT_TAGS
+        if element.tag in TEXT_TAGS:
+            chars(element.text, shape)
+        for child in element:
+            walk(child, shape, run)
+            if run:
+                chars(child.tail, shape)
+
+    for child in container:
+        walk(child, None, False)
+    return tokens
+
+
+def _middle(before: list[Any], after: list[Any]) -> tuple[int, list[Any], list[Any]]:
+    """Strip the longest common prefix and suffix (by token); return (prefix length, before middle, after middle)."""
+    limit = min(len(before), len(after))
+    prefix = 0
+    while prefix < limit and before[prefix][0] == after[prefix][0]:
+        prefix += 1
+    suffix = 0
+    while suffix < limit - prefix and before[len(before) - 1 - suffix][0] == after[len(after) - 1 - suffix][0]:
+        suffix += 1
+    return prefix, before[prefix:len(before) - suffix], after[prefix:len(after) - suffix]
+
+
+def _field_command_target(command: str) -> str:
+    """First ';' segment of a field Command with backslash escapes (e.g. ``\\:``) removed."""
+    first = command.split(';', 1)[0]
+    return re.sub(r'\\(.)', r'\1', first)
+
+
 def _element_reasons(plan: Mapping[str, Any], element: ET.Element) -> list[str]:
     kind = plan['kind']
     reasons: list[str] = []
-    if 'text' in plan and _norm(plan['text']) not in element_text(element):
-        reasons.append(f'new {element.tag} does not contain the requested text')
-    if kind == 'hyperlink' and plan['url'] not in (element.get(ATTRS['field_command']) or ''):
-        reasons.append('new hyperlink Command does not contain the url')
+    if 'text' in plan and element_text(element) != _norm(plan['text']):
+        reasons.append(f'new {element.tag} text is not exactly the requested text')
+    if kind == 'hyperlink' and _field_command_target(element.get(ATTRS['field_command']) or '') != plan['url']:
+        reasons.append('new hyperlink Command does not name exactly the url')
     if kind == 'bookmark' and element.get(ATTRS['bookmark_name']) != plan['name']:
         reasons.append('new BOOKMARK Name differs from the requested name')
     if kind == 'equation':
@@ -409,13 +490,85 @@ def check_before(plan: Mapping[str, Any], before: ET.Element) -> dict[str, Any]:
     return summary
 
 
+def _preserved_outside_body(root: ET.Element) -> list[str]:
+    return [signature(element) for tag in PRESERVED_OUTSIDE_BODY for element in root.iter(tag)]
+
+
+def _control_tally(tokens: list[Any]) -> Counter[str]:
+    return Counter(token[1] for token, _element in tokens if token[0] == 'C')
+
+
+def _locate_insert(plan: Mapping[str, Any], before_tokens: list[Any], after_tokens: list[Any], path: list[str]) -> tuple[ET.Element | None, list[str]]:
+    """Find the one inserted control; returns (element, reasons). Descends into one changed container."""
+    key = plan['tag_key']
+    field = bool(plan.get('companions'))
+    prefix, old, new = _middle(before_tokens, after_tokens)
+    if not old and not new:
+        return None, ['the document is unchanged']
+    if (
+        len(old) == 1 and len(new) == 1 and old[0][0][0] == 'C' and new[0][0][0] == 'C'
+        and old[0][1].tag == new[0][1].tag and _attrs(old[0][1]) == _attrs(new[0][1])
+    ):
+        if len(path) >= MAX_DESCENT:
+            return None, [f'the change is nested deeper than {MAX_DESCENT} controls']
+        path.append(old[0][1].tag)
+        return _locate_insert(plan, linearize(old[0][1]), linearize(new[0][1]), path)
+    reasons: list[str] = []
+    head = new[0] if new else None
+    starts_ok = head is not None and head[0][0] == 'C' and head[0][1] == key
+    if field:
+        tail = new[-1] if len(new) >= 2 else None
+        inner, wrapped = new[1:-1], old
+        if not starts_ok:
+            reasons.append(f'the change does not start with the new {key}')
+        if tail is None or tail[0][0] != 'C' or tail[1].tag != 'FIELDEND':
+            reasons.append('the new field is not closed by its own FIELDEND right after the wrapped text')
+        elif tail[1].get(ATTRS['field_type']) not in (None, KIND_TAGS[plan['kind']][1]):
+            reasons.append(f'the new FIELDEND Type is {tail[1].get(ATTRS["field_type"])!r}')
+        elif any(token[0] != 'T' for token, _element in inner + wrapped):
+            reasons.append('the new field wraps something other than plain text, or other content changed')
+        elif [token[1] for token, _element in inner] != [token[1] for token, _element in wrapped]:
+            reasons.append('document text outside the new object changed')
+        elif plan['kind'] == 'hyperlink' and ''.join(token[1] for token, _element in inner) != plan['display_text']:
+            reasons.append('the new hyperlink does not wrap exactly display_text')
+    elif not (starts_ok and len(new) == 1 and not old):
+        added = _control_tally(new)
+        if added[key] > 0:
+            added[key] -= 1
+        changed = {name: added[name] - _control_tally(old)[name] for name in set(added) | set(_control_tally(old))}
+        changed = {name: value for name, value in sorted(changed.items()) if value}
+        if changed:
+            reasons.append(f'other controls changed: {changed}')
+        if any(token[0] == 'P' for token, _element in new + old):
+            reasons.append('paragraph structure changed')
+        if any(token[0] == 'T' for token, _element in new + old):
+            reasons.append('document text outside the new object changed')
+        if not reasons:
+            reasons.append(f'the change is not exactly one new {key}: content next to it changed')
+    if reasons:
+        return None, reasons
+    assert head is not None
+    own = _element_reasons(plan, head[1])
+    if own:
+        return None, own
+    path.append(f'token {prefix}')
+    return head[1], []
+
+
 def evaluate_insert(plan: Mapping[str, Any], before: ET.Element, after: ET.Element) -> dict[str, Any]:
     """Prove the after-document is the before-document plus exactly one new object.
 
-    Accepts only if some element with the target key, once its subtree (and
-    the declared field companions) is removed, leaves control counts and body
-    run text identical to the before-document, and that element carries the
-    requested text/url/name/script/size. ``reasons`` lists up to ten problems.
+    Both readbacks are linearized into document-order tokens (paragraph
+    starts with their attributes, run characters with their CharShape,
+    controls as whole-subtree signatures). The after tokens must equal the
+    before tokens with a single contiguous insertion: the new control (for a
+    field, FIELDBEGIN ... FIELDEND around the unchanged wrapped text). When
+    the caret sat inside a control (a table cell, a note), that one control
+    is descended into and the same rule applies there. The requested
+    text/url/name/script/size is checked on the control found at that
+    position, so a pre-existing twin can never stand in for it. Pictures'
+    BinData outside BODY must be unchanged. ``reasons`` lists up to ten
+    problems.
     """
     key = plan['tag_key']
     companions: Mapping[str, int] = plan.get('companions') or {}
@@ -425,40 +578,23 @@ def evaluate_insert(plan: Mapping[str, Any], before: ET.Element, after: ET.Eleme
     delta = {name: value for name, value in sorted(delta.items()) if value}
     reasons: list[str] = []
     matched: ET.Element | None = None
+    path: list[str] = []
     if delta.get(key, 0) != 1:
         reasons.append(f'{key} count changed by {delta.get(key, 0)}, expected exactly +1')
-    else:
-        wanted_counts = base['counts'] + Counter(companions)
-        candidates = [element for element in _body(after).iter() if control_key(element) == key]
-        if len(candidates) > MAX_CANDIDATES:
-            reasons.append(f'{len(candidates)} {key} elements exceed the verifier limit {MAX_CANDIDATES}')
-            candidates = []
-        candidate_reasons: list[str] = []
-        for element in candidates:
-            own = _element_reasons(plan, element)
-            if own:
-                candidate_reasons.extend(own)
-                continue
-            rest = summarize(after, element)
-            counts = +rest['counts']
-            if counts != +wanted_counts:
-                extra = {name: counts[name] - wanted_counts[name] for name in set(counts) | set(wanted_counts) if counts[name] != wanted_counts[name]}
-                candidate_reasons.append(f'other controls changed: {dict(sorted(extra.items()))}')
-                continue
-            if rest['text'] != base['text']:
-                candidate_reasons.append('document text outside the new object changed')
-                continue
-            matched = element
-            break
-        if matched is None:
-            unique = list(dict.fromkeys(candidate_reasons))
-            reasons.append(f'no {key} element accounts for the whole change')
-            reasons.extend(unique[:9])
+    for name, want in companions.items():
+        if delta.get(name, 0) != want:
+            reasons.append(f'{name} count changed by {delta.get(name, 0)}, expected exactly +{want}')
+    if not reasons:
+        matched, found = _locate_insert(plan, linearize(_body(before)), linearize(_body(after)), path)
+        reasons.extend(found)
+    if _preserved_outside_body(before) != _preserved_outside_body(after):
+        reasons.append('embedded binary data (BINDATALIST/BINDATASTORAGE) changed')
     return {
         'ok': not reasons,
         'target': key,
         'expected_delta': {key: 1, **companions},
         'observed_delta': delta,
+        'inserted_at': path if matched is not None else None,
         'matched_text_chars': len(element_text(matched)) if matched is not None else None,
         'reasons': reasons[:10],
     }

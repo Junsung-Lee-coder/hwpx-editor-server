@@ -3695,14 +3695,32 @@ class LocalCliService(
             return result, False, warnings
 
         if op == 'where':
-            location = snapshot_live_location(
-                hwp=handle.hwp,
-                source_filename=handle.source_filename,
-                working_copy_id=handle.session_id,
-            )
+            location = self._bundle_where_location(handle.hwp, source_filename=handle.source_filename, working_copy_id=handle.session_id)
             return {'location': self._bundle_compact_location(location)}, False, warnings
 
         raise LocalCliRuntimeError(f'Unsupported command-bundle op: {op}')
+
+    def _bundle_where_location(self, hwp: Any, *, source_filename: str, working_copy_id: str) -> dict[str, Any]:
+        """Read-only location for a bundle ``where`` step that never disturbs a live selection.
+
+        The nearby-paragraph capture moves the caret to read neighbouring
+        paragraphs and restores only the caret, which drops a selection that a
+        later step (hyperlink, memo) depends on; the compact bundle location
+        does not report that preview, so it is skipped here. The selection
+        range is re-read afterwards and any change is refused.
+        """
+        before = _snapshot_cursor_context(hwp)
+        location = snapshot_live_location(
+            hwp=hwp,
+            source_filename=source_filename,
+            working_copy_id=working_copy_id,
+            include_nearby_context=False,
+        )
+        after = _snapshot_cursor_context(hwp)
+        for key in ('pos', 'selected_pos', 'has_selection'):
+            if before.get(key) != after.get(key):
+                raise LocalCliRuntimeError(f'command-bundle where changed the live {key} ({before.get(key)!r} -> {after.get(key)!r}); refusing to continue')
+        return location
 
     def _record_local_cli_command(
         self,

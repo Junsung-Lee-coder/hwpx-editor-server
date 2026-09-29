@@ -86,7 +86,7 @@ class VerifierTests(unittest.TestCase):
         after = _doc(_char('Hello') + _footnote('note') + _char(' wor'), _char('Second'))
         self.assertIn('document text outside the new object changed', _evaluate(_plan(), BEFORE, after)['reasons'])
         after = _doc(_char('Hello') + _footnote('other') + _char(' world'), _char('Second'))
-        self.assertIn('does not contain the requested text', ' '.join(_evaluate(_plan(), BEFORE, after)['reasons']))
+        self.assertIn('text is not exactly the requested text', ' '.join(_evaluate(_plan(), BEFORE, after)['reasons']))
 
     def test_hyperlink_keeps_display_text_and_needs_url_in_command(self) -> None:
         plan = _plan(kind='hyperlink', text=None, url='https://example.com/a', display_text='world')
@@ -94,9 +94,9 @@ class VerifierTests(unittest.TestCase):
         after = _doc(_char('Hello ') + link + _char('world') + '<FIELDEND Type="Hyperlink"/>', _char('Second'))
         self.assertTrue(_evaluate(plan, BEFORE, after)['ok'])
         wrong = after.replace('example.com/a', 'example.org/a')
-        self.assertIn('Command does not contain the url', ' '.join(_evaluate(plan, BEFORE, wrong)['reasons']))
+        self.assertIn('Command does not name exactly the url', ' '.join(_evaluate(plan, BEFORE, wrong)['reasons']))
         no_end = after.replace('<FIELDEND Type="Hyperlink"/>', '')
-        self.assertIn("'FIELDEND': -1", ' '.join(_evaluate(plan, BEFORE, no_end)['reasons']))
+        self.assertIn('FIELDEND count changed by 0', ' '.join(_evaluate(plan, BEFORE, no_end)['reasons']))
         memo_type = after.replace('Type="Hyperlink" Command', 'Type="Memo" Command')
         self.assertIn('FIELDBEGIN:Hyperlink count changed by 0', ' '.join(_evaluate(plan, BEFORE, memo_type)['reasons']))
 
@@ -120,6 +120,68 @@ class VerifierTests(unittest.TestCase):
                 self.assertTrue(_evaluate(plan, BEFORE, after)['ok'], _evaluate(plan, BEFORE, after))
                 self.assertIn(good, after)
                 self.assertFalse(_evaluate(plan, BEFORE, after.replace(good, bad, 1))['ok'])
+
+    def test_proof_is_bound_to_the_new_control_not_a_preexisting_twin(self) -> None:
+        eq = lambda script: f'<EQUATION><SCRIPT>{script}</SCRIPT></EQUATION>'
+        link = lambda command: f'<FIELDBEGIN Type="Hyperlink" Command="{command}"/>'
+        good_link = 'https://example.com/a;1;0;0;'
+        rect = lambda w: _shape('RECTANGLE', w, mm_to_hwpunit(10))
+        cases = (
+            (_plan(kind='equation', text=None, script='a over b'),
+             _doc(eq('a over b') + _char('Hello world'), _char('Second')),
+             _doc(eq('a over b') + _char('Hello') + eq('a over c') + _char(' world'), _char('Second')),
+             'script differs'),
+            (_plan(kind='hyperlink', text=None, url='https://example.com/a', display_text='world'),
+             _doc(link(good_link) + _char('Hello') + '<FIELDEND Type="Hyperlink"/>' + _char(' world'), _char('Second')),
+             _doc(link(good_link) + _char('Hello') + '<FIELDEND Type="Hyperlink"/>' + _char(' ') + link('') + _char('world') + '<FIELDEND Type="Hyperlink"/>', _char('Second')),
+             'does not name exactly the url'),
+            (_plan(kind='rectangle', text=None, width_mm=20, height_mm=10),
+             _doc(rect(mm_to_hwpunit(20)) + _char('Hello world'), _char('Second')),
+             _doc(rect(mm_to_hwpunit(20)) + _char('Hello') + rect(1000) + _char(' world'), _char('Second')),
+             'Width is'),
+        )
+        for plan, before, after, reason in cases:
+            with self.subTest(kind=plan['kind']):
+                result = _evaluate(plan, before, after)
+                self.assertFalse(result['ok'], result)
+                self.assertIn(reason, ' '.join(result['reasons']))
+                twin_ok = after.replace('a over c', 'a over b').replace('Command=""', f'Command="{good_link}"').replace('Width="1000"', f'Width="{mm_to_hwpunit(20)}"')
+                self.assertTrue(_evaluate(plan, before, twin_ok)['ok'], _evaluate(plan, before, twin_ok))
+
+    def test_hyperlink_must_wrap_exactly_display_text(self) -> None:
+        plan = _plan(kind='hyperlink', text=None, url='https://example.com/a', display_text='world')
+        link = '<FIELDBEGIN Type="Hyperlink" Command="https\\://example.com/a;1;0;0;"/>'
+        after = _doc(_char('Hello ') + link + _char('world') + '<FIELDEND Type="Hyperlink"/>', _char('Second'))
+        self.assertTrue(_evaluate(plan, BEFORE, after)['ok'], _evaluate(plan, BEFORE, after))
+        short = _doc(_char('Hello ') + link + _char('wor') + '<FIELDEND Type="Hyperlink"/>' + _char('ld'), _char('Second'))
+        self.assertIn('does not wrap exactly display_text', ' '.join(_evaluate(plan, BEFORE, short)['reasons']))
+
+    def test_paragraph_structure_char_shape_and_bindata_are_preserved(self) -> None:
+        after_ok = _doc(_char('Hello') + _footnote('note') + _char(' world'), _char('Second'))
+        split = _doc(_char('Hello') + _footnote('note'), _char(' world'), _char('Second'))
+        self.assertIn('paragraph structure changed', ' '.join(_evaluate(_plan(), BEFORE, split)['reasons']))
+        restyled = after_ok.replace('<TEXT><CHAR>Second', '<TEXT CharShape="7"><CHAR>Second')
+        self.assertIn('document text outside the new object changed', ' '.join(_evaluate(_plan(), BEFORE, restyled)['reasons']))
+        para_shape = after_ok.replace('<P><TEXT><CHAR>Second', '<P ParaShape="3"><TEXT><CHAR>Second')
+        self.assertFalse(_evaluate(_plan(), BEFORE, para_shape)['ok'])
+        bindata = after_ok.replace('QUJD', 'QUJE')
+        self.assertIn('BINDATASTORAGE', ' '.join(_evaluate(_plan(), BEFORE, bindata)['reasons']))
+        pic_before = _doc('<PICTURE><IMAGE BinItem="1"/></PICTURE>' + _char('Hello world'), _char('Second'))
+        pic_after = _doc('<PICTURE><IMAGE BinItem="2"/></PICTURE>' + _char('Hello') + _footnote('note') + _char(' world'), _char('Second'))
+        self.assertFalse(_evaluate(_plan(), pic_before, pic_after)['ok'])
+        self.assertTrue(_evaluate(_plan(), pic_before, pic_after.replace('BinItem="2"', 'BinItem="1"'))['ok'])
+
+    def test_insert_inside_a_table_cell_descends_into_that_table_only(self) -> None:
+        table = lambda cell_a, cell_b: (
+            '<TABLE><ROW><CELL><PARALIST><P><TEXT>' + cell_a + '</TEXT></P></PARALIST></CELL>'
+            '<CELL><PARALIST><P><TEXT>' + cell_b + '</TEXT></P></PARALIST></CELL></ROW></TABLE>')
+        before = _doc(table(_char('ab'), _char('cd')) + _char('Hello'), _char('Second'))
+        after = _doc(table(_char('a') + _footnote('note') + _char('b'), _char('cd')) + _char('Hello'), _char('Second'))
+        result = _evaluate(_plan(), before, after)
+        self.assertTrue(result['ok'], result)
+        self.assertEqual(result['inserted_at'][0], 'TABLE')
+        other_cell = _doc(table(_char('a') + _footnote('note') + _char('b'), _char('cX')) + _char('Hello'), _char('Second'))
+        self.assertFalse(_evaluate(_plan(), before, other_cell)['ok'])
 
     def test_check_before_refuses_unverifiable_or_conflicting_documents(self) -> None:
         header = '<HEADER ApplyPageType="Both"><PARALIST><P><TEXT>' + _char('x') + '</TEXT></P></PARALIST></HEADER>'
@@ -446,6 +508,10 @@ class ServiceFlowTests(unittest.TestCase):
                 self.assertIn(marker, hwp.xml())
                 self.assertEqual(hwp.readbacks, 2)
                 self.assertNotIn('text', result['plan'])
+                typed = fields['kind'] in ('footnote', 'endnote', 'memo', 'header', 'footer')
+                self.assertEqual(result['undo']['native_editing_actions'], 2 if typed else 1)
+                self.assertIs(result['undo']['single_undo_expected'], not typed)
+                self.assertIs(result['undo']['verified_natively'], False)
 
     def test_hyperlink_wraps_the_proven_selection(self) -> None:
         hwp = _FakeHwp()
@@ -516,6 +582,10 @@ class ServiceFlowTests(unittest.TestCase):
                 self.assertTrue(caught.exception.mutation_may_have_persisted)
                 self.assertIn(reason, str(caught.exception))
                 self.assertEqual(caught.exception.rollback['attempted'], False)
+                actions = caught.exception.rollback['undo']['native_editing_actions']
+                self.assertGreaterEqual(actions, 1)
+                if actions > 1:
+                    self.assertIn('reopen the working copy', caught.exception.rollback['hint'])
 
     def test_raising_native_action_is_not_retried(self) -> None:
         for fields, action in (({}, 'InsertFootnote'), ({'kind': 'bookmark', 'text': None, 'name': 'b'}, 'Bookmark')):

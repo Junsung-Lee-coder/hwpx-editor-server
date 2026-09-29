@@ -207,11 +207,13 @@ class _FakeLayoutHwp:
             values = {item: getattr(psets.HColDef, item) for item in COLDEF}
             if self.faults.get('coldef_ignores_gap'):
                 values['SameGap'] = self.sections[section_index]['coldefs'][-1]['SameGap']
-            coldefs = self.sections[section_index]['coldefs']
-            if apply_to == 6:
-                coldefs.append(values)
-            else:
-                coldefs[-1] = values
+            targets = self.sections if self.faults.get('coldef_applies_to_all') else [self.sections[section_index]]
+            for section in targets:
+                coldefs = section['coldefs']
+                if apply_to == 6:
+                    coldefs.append(dict(values))
+                else:
+                    coldefs[-1] = dict(values)
             return True
         raise AssertionError(f'unexpected Execute({name})')
 
@@ -577,6 +579,27 @@ class ColumnFlowTests(unittest.TestCase):
         hwp = _FakeLayoutHwp(coldef_ignores_gap=True)
         with self.assertRaisesRegex(LocalCliMutationError, 'SameGap'):
             _run(hwp, self._step())
+
+    def test_multi_section_change_must_stay_in_the_caret_section(self) -> None:
+        sections = [['one'], ['two'], ['three']]
+        hwp = _FakeLayoutHwp(sections)
+        hwp.caret = (0, 1, 0)
+        result = _run(hwp, self._step(expected_pos=[0, 1, 0]))
+        self.assertTrue(result['verification']['ok'])
+        self.assertEqual([len(s['coldefs']) and s['coldefs'][-1]['Count'] for s in hwp.sections], [1, 2, 1])
+        for apply_to in ('current_section', 'from_caret_new'):
+            with self.subTest(apply_to=apply_to):
+                hwp = _FakeLayoutHwp(sections, coldef_applies_to_all=True)
+                hwp.caret = (0, 1, 0)
+                with self.assertRaisesRegex(LocalCliMutationError, r'sections \[1, 2, 3\], expected only section 2'):
+                    _run(hwp, self._step(expected_pos=[0, 1, 0], apply_to=apply_to))
+
+    def test_multi_section_without_caret_section_is_refused_before_mutation(self) -> None:
+        hwp = _FakeLayoutHwp([['one'], ['two']])
+        hwp.KeyIndicator = lambda: None  # type: ignore[method-assign]
+        with self.assertRaisesRegex(LocalCliRuntimeError, 'cannot be scoped'):
+            _run(hwp, self._step())
+        self.assertEqual(hwp.mutations(), [])
 
     def test_stale_expected_before(self) -> None:
         hwp = _FakeLayoutHwp()

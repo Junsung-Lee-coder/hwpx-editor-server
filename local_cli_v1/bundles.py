@@ -2174,7 +2174,7 @@ def _build_object_insert_exact(argv: Sequence[str]) -> BundleSpec:
         name='object-insert-exact',
         summary=f'Insert one {args.kind} at the proven caret; whole-document HWPML readback must show exactly that one new object.',
         where=f'Caret at {fields["expected_pos"]} as reported by `hwpx where` (hyperlink: the current selection must equal --display-text).',
-        how='Runs read-only where, then one `object_insert_exact` primitive: read the document, re-prove caret and edit state, run the documented Hancom action once, and read the document again.',
+        how='Runs read-only where (it never moves the caret or selection), then one `object_insert_exact` primitive: read the document, re-prove caret and edit state, run the documented Hancom action once, and read the document again.',
         changed='Adds exactly one object of the requested kind; the step fails with mutation_may_have_persisted if the readback shows anything else.',
         steps=(
             _where_step('where:before-object-insert'),
@@ -2185,7 +2185,7 @@ def _build_object_insert_exact(argv: Sequence[str]) -> BundleSpec:
             {
                 'type': 'documented-native-action',
                 'hancom_actions': 'InsertFootnote / InsertEndnote / InsertFieldMemo / InsertHyperlink (HHyperLink) / Bookmark (HBookMark) / EquationCreate (HEqEdit) / DrawObjCreator* (HShapeObject) / HeaderFooter (HHeaderFooter)',
-                'readback': 'GetTextFile("HWPML2X", "") before and after: control counts, the new element, and body text',
+                'readback': 'GetTextFile("HWPML2X", "") before and after: document-order paragraphs, characters and controls must differ by one contiguous insertion holding the new control; embedded BinData unchanged',
                 'risk_note': 'Native paths are not yet verified on a Hancom desktop; shapes and header/footer are the least certain. Review rendered proof before saving.',
             },
         ),

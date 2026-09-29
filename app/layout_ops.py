@@ -275,6 +275,8 @@ def parse_layout_xml(xml_text: Any) -> dict[str, Any]:
     * ``pagedefs``: canonical PAGEDEF per SECDEF in order, or None when any
       SECDEF lacks exactly one PAGEDEF (per-section page checks then fail closed).
     * ``coldefs``: canonical COLDEF elements in document order.
+    * ``coldefs_by_section``: the same COLDEFs grouped by the section they
+      follow (one list per SECDEF, or per SECTION element without SECDEFs).
     * ``text``: all CHAR text joined without separators, whitespace runs
       collapsed, so splitting or joining paragraphs does not change it.
     * ``controls``: tags of TEXT children other than CHAR/SECDEF/COLDEF.
@@ -302,6 +304,7 @@ def parse_layout_xml(xml_text: Any) -> dict[str, Any]:
     if not secdefs:
         pagedefs = None
     coldefs = [_canonical(element) for element in body.iter('COLDEF')]
+    coldefs_by_section = _coldefs_by_section(body, len(secdefs) if secdefs else section_elements)
     chars = ''.join(''.join(char.itertext()) for char in body.iter('CHAR'))
     controls = Counter(child.tag for text_el in body.iter('TEXT') for child in text_el if child.tag != 'CHAR' and child.tag not in _LAYOUT_TAGS)
     paragraphs = list(body.iter('P'))
@@ -314,11 +317,44 @@ def parse_layout_xml(xml_text: Any) -> dict[str, Any]:
         'section_elements': section_elements,
         'pagedefs': pagedefs,
         'coldefs': coldefs,
+        'coldefs_by_section': coldefs_by_section,
         'text': ' '.join(chars.split()),
         'controls': dict(sorted(controls.items())),
         'paragraph_count': len(paragraphs),
         'para_shapes': [p.get('ParaShape') for p in paragraphs],
     }
+
+
+def _coldefs_by_section(body: ET.Element, section_count: int) -> list[list[str]]:
+    groups: list[list[str]] = [[] for _ in range(max(section_count, 1))]
+    if any(True for _ in body.iter('SECDEF')):
+        index = 0
+        for element in body.iter():
+            if element.tag == 'SECDEF':
+                index += 1
+            elif element.tag == 'COLDEF':
+                groups[min(max(index - 1, 0), len(groups) - 1)].append(_canonical(element))
+        return groups
+    for index, section in enumerate(body.findall('SECTION')):
+        groups[min(index, len(groups) - 1)].extend(_canonical(element) for element in section.iter('COLDEF'))
+    return groups
+
+
+def _column_scope_reasons(plan: Mapping[str, Any], doc_before: Mapping[str, Any], doc_after: Mapping[str, Any], caret_section: int | None) -> list[str]:
+    """The column change must land in the caret's section and nowhere else."""
+    before, after = doc_before['coldefs_by_section'], doc_after['coldefs_by_section']
+    if len(before) != len(after):
+        return [f'per-section column readback moved from {len(before)} to {len(after)} sections']
+    changed = [index for index, (old, new) in enumerate(zip(before, after)) if old != new]
+    if len(before) == 1:
+        target = 0
+    elif caret_section is None or not 1 <= caret_section <= len(before):
+        return [f'the caret section is unknown ({caret_section!r}), so a column change in a {len(before)}-section document cannot be scoped']
+    else:
+        target = caret_section - 1
+    if changed != [target]:
+        return [f'{plan["apply_to"]} changed the column definitions of sections {[index + 1 for index in changed]}, expected only section {target + 1}']
+    return []
 
 
 def public_document(doc: Mapping[str, Any]) -> dict[str, Any]:
@@ -538,7 +574,14 @@ def plan_columns(request: Mapping[str, Any], before_raw: Mapping[str, Any], doc:
     }
 
 
-def verify_columns(plan: Mapping[str, Any], after_raw: Mapping[str, Any], doc_before: Mapping[str, Any], doc_after: Mapping[str, Any]) -> dict[str, Any]:
+def verify_columns(
+    plan: Mapping[str, Any],
+    after_raw: Mapping[str, Any],
+    doc_before: Mapping[str, Any],
+    doc_after: Mapping[str, Any],
+    *,
+    caret_section: int | None,
+) -> dict[str, Any]:
     after = _read_optional_ints(after_raw, COLDEF_ITEMS)
     reasons: list[str] = []
     for item, want in plan['targets'].items():
@@ -561,6 +604,7 @@ def verify_columns(plan: Mapping[str, Any], after_raw: Mapping[str, Any], doc_be
                 remaining.remove(old)
         if len(remaining) != 1:
             reasons.append('an existing column definition (COLDEF) changed besides the new one')
+    reasons += _column_scope_reasons(plan, doc_before, doc_after, caret_section)
     return {'ok': not reasons, 'reasons': reasons[:10], 'after': after}
 
 
