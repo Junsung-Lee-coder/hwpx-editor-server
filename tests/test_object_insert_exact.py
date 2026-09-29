@@ -620,10 +620,9 @@ class ServiceFlowTests(unittest.TestCase):
                 self.assertTrue(caught.exception.mutation_may_have_persisted)
                 self.assertIn(reason, str(caught.exception))
                 self.assertEqual(caught.exception.rollback['attempted'], False)
-                actions = caught.exception.rollback['undo']['native_editing_actions']
-                self.assertGreaterEqual(actions, 1)
-                if actions > 1:
-                    self.assertIn('reopen the working copy', caught.exception.rollback['hint'])
+                self.assertGreaterEqual(caught.exception.rollback['undo']['native_editing_actions'], 1)
+                self.assertIn('without saving and reopen', caught.exception.rollback['hint'])
+                self.assertNotIn('use undo', caught.exception.rollback['hint'])
 
     def test_raising_native_action_is_not_retried(self) -> None:
         for fields, action in (({}, 'InsertFootnote'), ({'kind': 'bookmark', 'text': None, 'name': 'b'}, 'Bookmark')):

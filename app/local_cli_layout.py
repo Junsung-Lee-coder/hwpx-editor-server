@@ -40,7 +40,7 @@ from app.layout_ops import (
 from app.local_cli_runtime import LocalCliRuntimeError
 from app.local_cli_service_support import LocalCliMutationError
 
-_ROLLBACK_HINT = {'attempted': False, 'hint': 'Inspect rendered proof; use undo or reopen the working copy before saving.'}
+_ROLLBACK_HINT = {'attempted': False, 'hint': 'Close the working copy without saving and reopen it; a single Undo does not guarantee a full rollback of this edit.'}
 # Kinds whose caret position stays meaningful after the edit and is restored.
 _RESTORE_CARET_KINDS = frozenset({'page_setup', 'columns', 'hanging_indent'})
 
@@ -174,7 +174,7 @@ class LocalCliLayoutMixin:
                     return None, None
         return None, None
 
-    def _layout_document(self, hwp: Any, *, where: str) -> dict[str, Any]:
+    def _layout_document(self, hwp: Any, *, where: str, body_rule: str | None = None) -> dict[str, Any]:
         get_text = getattr(hwp, 'GetTextFile', None)
         if not callable(get_text):
             raise LocalCliRuntimeError(f'{OP} needs GetTextFile for HWPML readback')
@@ -191,7 +191,9 @@ class LocalCliLayoutMixin:
         # dry-run the whole-document comparison to time the after-edit proof.
         slow = None
         if where == 'before edit':
-            compare_documents(doc, doc, body_rule='hanging_indent')
+            if body_rule is None:
+                raise LocalCliRuntimeError(f'{OP} internal error: a before-edit readback needs its body rule for the proof budget')
+            compare_documents(doc, doc, body_rule=body_rule)
             slow = before_budget_reason(time.monotonic() - started)
         if slow:
             raise LocalCliRuntimeError(f'{OP} refused before mutation: {slow}')
@@ -220,7 +222,7 @@ class LocalCliLayoutMixin:
         self._layout_require(hwp, expected_pos, where='before page setup readback')
         pset = self._layout_pset(hwp, 'HSecDef')
         before = self._layout_read_pagedef(hwp, pset)
-        doc_before = self._layout_document(hwp, where='before edit')
+        doc_before = self._layout_document(hwp, where='before edit', body_rule='page_setup')
         _count, caret_section = self._layout_key_indicator(hwp)
         plan = self._layout_plan(lambda: plan_page_setup(request, before, doc_before))
         # Fresh defaults for the caret's section, then only the requested items.
@@ -244,7 +246,7 @@ class LocalCliLayoutMixin:
         self._layout_require(hwp, expected_pos, where='before column readback', body_only=True)
         pset = self._layout_pset(hwp, 'HColDef')
         before = self._layout_read_coldef(hwp, pset)
-        doc_before = self._layout_document(hwp, where='before edit')
+        doc_before = self._layout_document(hwp, where='before edit', body_rule='columns')
         _count, caret_section = self._layout_key_indicator(hwp)
         if doc_before['section_count'] > 1 and caret_section is None:
             raise LocalCliRuntimeError(f'{OP} refused before mutation: KeyIndicator does not report the caret section, so a column change cannot be scoped')
@@ -266,7 +268,7 @@ class LocalCliLayoutMixin:
     def _layout_section_insert(self, hwp: Any, request: dict[str, Any], mutation: _Mutation) -> dict[str, Any]:
         expected_pos = request['expected_pos']
         self._layout_require(hwp, expected_pos, where='before section readback', body_only=True)
-        doc_before = self._layout_document(hwp, where='before edit')
+        doc_before = self._layout_document(hwp, where='before edit', body_rule='section_insert')
         plan = self._layout_plan(lambda: plan_section_insert(doc_before))
         self._layout_require(hwp, expected_pos, where='before BreakSection', body_only=True)
         result = self._layout_native_run(hwp, 'BreakSection', mutation)
@@ -301,7 +303,7 @@ class LocalCliLayoutMixin:
         expected_pos = request['expected_pos']
         self._layout_require(hwp, expected_pos, where='before section-start proof', body_only=True)
         proof = self._layout_prove_section_start(hwp, request)
-        doc_before = self._layout_document(hwp, where='before edit')
+        doc_before = self._layout_document(hwp, where='before edit', body_rule='section_delete')
         plan = self._layout_plan(lambda: plan_section_delete(request, doc_before, key_indicator_sections=proof['section_count']))
         self._layout_require(hwp, expected_pos, where='before DeleteBack', body_only=True)
         result = self._layout_native_run(hwp, 'DeleteBack', mutation)
@@ -343,7 +345,7 @@ class LocalCliLayoutMixin:
         if selected != marker:
             raise LocalCliRuntimeError(f'{OP} refused before mutation: characters 0..{len(marker)} of the paragraph read {selected!r}, not marker_text {marker!r}')
         self._layout_require(hwp, marker_pos, where='after placing the caret behind the marker')
-        doc_before = self._layout_document(hwp, where='before edit')
+        doc_before = self._layout_document(hwp, where='before edit', body_rule='hanging_indent')
         self._layout_require(hwp, marker_pos, where='before ParagraphShapeIndentAtCaret')
         result = self._layout_native_run(hwp, 'ParagraphShapeIndentAtCaret', mutation)
         self._layout_raise_if_failed(result)

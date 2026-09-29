@@ -320,21 +320,47 @@ class ReadbackLimitTests(unittest.TestCase):
         step = build_named_bundle('object-insert-exact', ['--kind', 'bookmark', '--name', 'a', '--expected-pos', '0,0,0', '--confirm-mutation']).server_payload()['steps'][1]
         layout = build_named_bundle('layout-exact', ['--kind', 'section_insert', '--expected-pos', '0,0,0', '--confirm-layout']).server_payload()['steps'][1]
         _service()._validate_command_bundle_steps([step])
-        for pair in ([step, dict(step)], [step, layout]):
+        aliased = {key: value for key, value in step.items() if key != 'op'} | {'operation': ' object_insert_exact '}
+        spaced = dict(layout, op=' layout_exact')
+        for pair in ([step, dict(step)], [step, layout], [step, aliased], [spaced, aliased]):
             with self.assertRaisesRegex(LocalCliServiceError, 'at most one exact'):
                 _service()._validate_command_bundle_steps(pair)
 
-    def test_before_budget_includes_a_dry_run_of_the_proof(self) -> None:
+    def test_object_dry_run_does_the_full_proof_work(self) -> None:
+        from app import object_insert
         calls: list[str] = []
-        real = __import__('app.local_cli_object_insert', fromlist=['evaluate_insert']).evaluate_insert
+        real = object_insert.linearize
 
-        def spy(plan: Any, before: Any, after: Any) -> Any:
-            calls.append('same' if before is after else 'after')
-            return real(plan, before, after)
+        def counting(container: Any) -> Any:
+            calls.append(container.tag)
+            return real(container)
 
-        with patch('app.local_cli_object_insert.evaluate_insert', spy):
+        with patch.object(object_insert, 'linearize', counting):
             _run_object_insert(_FakeHwp())
-        self.assertEqual(calls, ['same', 'after'])
+        # dry run: the body twice before any native action; real proof: the body twice after it
+        self.assertEqual(calls.count('BODY'), 4)
+        hwp = _FakeHwp()
+        dry: list[str] = []
+        with patch('app.local_cli_object_insert.dry_run_proof', side_effect=lambda plan, root: dry.append(str(len(hwp.log)))):
+            _run_object_insert(hwp)
+        self.assertEqual(dry, ['0'])
+
+    def test_layout_dry_run_uses_each_kinds_body_rule(self) -> None:
+        from app import local_cli_layout
+        seen: list[str | None] = []
+        real = local_cli_layout.compare_documents
+
+        def spy(before: Any, after: Any, **kwargs: Any) -> Any:
+            if before is after:
+                seen.append(kwargs.get('body_rule'))
+            return real(before, after, **kwargs)
+
+        with patch.object(local_cli_layout, 'compare_documents', spy):
+            _run_layout(_FakeLayoutHwp(), {'kind': 'columns', 'expected_pos': [0, 0, 0], 'confirm_layout': True, 'count': 2})
+            hwp = _FakeLayoutHwp([['hello world', 'next']])
+            hwp.caret = (0, 0, 6)
+            _run_layout(hwp, {'kind': 'section_insert', 'expected_pos': [0, 0, 6], 'confirm_layout': True})
+        self.assertEqual(seen, ['columns', 'section_insert'])
 
     def test_oversized_readback_is_refused_before_mutation(self) -> None:
         with patch('app.hwpml_invariants.MAX_READBACK_CHARS', 50):

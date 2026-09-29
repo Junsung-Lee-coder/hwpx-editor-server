@@ -2564,10 +2564,6 @@ class LocalCliService(
             raise LocalCliServiceError('command-bundle steps must not be empty', status_code=400)
         if len(steps) > _BUNDLE_MAX_STEPS:
             raise LocalCliServiceError(f'command-bundle accepts at most {_BUNDLE_MAX_STEPS} steps', status_code=400)
-        exact_steps = [step.get('op') for step in steps if isinstance(step, dict) and step.get('op') in _UNDO_UNVERIFIED_BUNDLE_OPS]
-        if len(exact_steps) > 1:
-            # Each exact step needs two whole-document proofs within one bundle time limit.
-            raise LocalCliServiceError(f'command-bundle accepts at most one exact document edit step ({", ".join(sorted(_UNDO_UNVERIFIED_BUNDLE_OPS))}); got {len(exact_steps)}', status_code=400)
 
         allowed_keys: dict[str, set[str]] = {
             'context': {'op', 'operation', 'label'},
@@ -3533,6 +3529,14 @@ class LocalCliService(
                     )
 
             cleaned.append(step)
+        # Counted on normalized ops ('operation' alias, whitespace): each exact step
+        # needs two whole-document proofs within one bundle time limit.
+        exact_steps = [step['op'] for step in cleaned if step['op'] in _UNDO_UNVERIFIED_BUNDLE_OPS]
+        if len(exact_steps) > 1:
+            raise LocalCliServiceError(
+                f'command-bundle accepts at most one exact document edit step ({", ".join(sorted(_UNDO_UNVERIFIED_BUNDLE_OPS))}); got {len(exact_steps)}',
+                status_code=400,
+            )
         return cleaned
 
     def _execute_command_bundle_step(

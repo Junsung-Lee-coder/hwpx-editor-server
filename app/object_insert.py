@@ -591,5 +591,27 @@ def evaluate_insert(plan: Mapping[str, Any], before: ET.Element, after: ET.Eleme
     }
 
 
+def dry_run_proof(plan: Mapping[str, Any], before: ET.Element) -> None:
+    """Do the work of the after-edit proof on the before-document, without a verdict.
+
+    ``evaluate_insert(plan, before, before)`` stops at the control-count check
+    and would under-measure; this always runs the summaries, both body
+    linearizations, the prefix/suffix scan and the HEAD/TAIL comparison, and
+    then linearizes every top-level control's subtree twice more, the upper
+    bound of descending into one changed container (a table cell, a note).
+    Used only to time the proof before any mutation.
+    """
+    summarize(before)
+    summarize(before)
+    body = _body(before)
+    tokens = linearize(body)
+    _middle(tokens, linearize(body))
+    head_tail_reasons(before, before)
+    for token, element in tokens:
+        if token[0] == 'C' and element is not None and len(element):
+            linearize(element)
+            linearize(element)
+
+
 def public_counts(summary: Mapping[str, Any]) -> dict[str, int]:
     return dict(sorted(summary['counts'].items()))

@@ -16,6 +16,7 @@ from app.object_insert import (
     SHAPE_KINDS,
     ObjectInsertError,
     check_before,
+    dry_run_proof,
     evaluate_insert,
     native_items,
     normalize_step,
@@ -25,7 +26,7 @@ from app.object_insert import (
     summarize,
 )
 
-_ROLLBACK_HINT = {'attempted': False, 'hint': 'Inspect rendered proof; use undo or reopen the working copy before saving.'}
+_ROLLBACK_HINT = {'attempted': False, 'hint': 'Close the working copy without saving and reopen it; a single Undo does not guarantee a full rollback of this edit.'}
 _UNDO_NOTE = (
     'Hancom records each native editing action as its own undo unit, and the grouping is not verified natively; '
     'when more than one editing action ran, do not assume one undo reverts the insertion; reopen the working copy instead.'
@@ -212,7 +213,7 @@ class LocalCliObjectInsertMixin:
             before_root = self._object_insert_readback(hwp, where='before insert')
             # Dry run of the after-edit proof (its cost, not its verdict) so an
             # edit whose proof cannot finish in time is refused before mutating.
-            evaluate_insert(plan, before_root, before_root)
+            dry_run_proof(plan, before_root)
             slow = before_budget_reason(time.monotonic() - started)
             if slow:
                 raise LocalCliRuntimeError(f'{OP} refused before mutation: {slow}')
@@ -246,6 +247,4 @@ class LocalCliObjectInsertMixin:
             message = str(exc) if isinstance(exc, LocalCliRuntimeError) else f'{OP} failed after native mutation started: {type(exc).__name__}: {exc}'
             rollback = dict(_ROLLBACK_HINT)
             rollback['undo'] = _undo_report(mutation)
-            if mutation.editing_actions > 1:
-                rollback['hint'] = f'{mutation.editing_actions} native editing actions ran; reopen the working copy rather than counting undos.'
             raise LocalCliMutationError(message, mutation_may_have_persisted=True, rollback=rollback) from exc
