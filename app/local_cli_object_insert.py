@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import time
 from typing import Any
 
 from app.edit_ops import _get_pos, _get_selected_pos, _get_selected_text
+from app.hwpml_invariants import before_budget_reason, readback_size_reason
 from app.local_cli_runtime import LocalCliRuntimeError, insert_text_at_caret
 from app.local_cli_service_support import LocalCliMutationError
 from app.object_insert import (
@@ -105,6 +107,9 @@ class LocalCliObjectInsertMixin:
             xml_text = get_text('HWPML2X', '')
         except Exception as exc:
             raise LocalCliRuntimeError(f'{OP} {where}: HWPML readback failed: {type(exc).__name__}: {exc}') from exc
+        too_big = readback_size_reason(xml_text)
+        if too_big:
+            raise LocalCliRuntimeError(f'{OP} {where}: {too_big}')
         try:
             return parse_hwpml(xml_text)
         except ObjectInsertError as exc:
@@ -203,7 +208,11 @@ class LocalCliObjectInsertMixin:
             raise LocalCliRuntimeError(f'{OP} refused: {exc}') from exc
         mutation = _Mutation()
         try:
+            started = time.monotonic()
             before_root = self._object_insert_readback(hwp, where='before insert')
+            slow = before_budget_reason(time.monotonic() - started)
+            if slow:
+                raise LocalCliRuntimeError(f'{OP} refused before mutation: {slow}')
             try:
                 before = check_before(plan, before_root)
             except ObjectInsertError as exc:

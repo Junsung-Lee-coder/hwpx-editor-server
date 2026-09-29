@@ -31,7 +31,7 @@ from collections import Counter
 from typing import Any, Mapping
 
 from app.hwpml_invariants import head_tail_reasons, signature
-from app.object_insert import CONTROL_TAGS
+from app.object_insert import CONTROL_TAGS, linearize
 
 OP = 'layout_exact'
 SCHEMA_VERSION = 'local-cli/layout-exact/v1'
@@ -287,7 +287,7 @@ def parse_layout_xml(xml_text: Any) -> dict[str, Any]:
     * ``coldefs_by_section``: the same COLDEFs grouped per SECTION element, or
       None when the SECDEF-then-COLDEF order per section cannot be proven.
     * ``control_signatures``: every non-layout control's subtree in order.
-    * ``_root``: the parsed readback, for HEAD/TAIL invariants.
+    * ``_root`` / ``_body``: the parsed readback, for HEAD/TAIL and body token checks.
     * ``text``: all CHAR text joined without separators, whitespace runs
       collapsed, so splitting or joining paragraphs does not change it.
     * ``controls``: tags of TEXT children other than CHAR/SECDEF/COLDEF.
@@ -335,6 +335,7 @@ def parse_layout_xml(xml_text: Any) -> dict[str, Any]:
         'coldefs_by_section': coldefs_by_section,
         'control_signatures': control_signatures,
         '_root': root,
+        '_body': body,
         'text': ' '.join(chars.split()),
         'controls': dict(sorted(controls.items())),
         'paragraph_count': len(paragraphs),
@@ -381,6 +382,104 @@ def _column_scope_reasons(plan: Mapping[str, Any], doc_before: Mapping[str, Any]
     return []
 
 
+# ---------------------------------------------------------------- body tokens
+#
+# The whole BODY is compared as document-order tokens (``object_insert.linearize``:
+# element open/close with attributes, run characters with CharShape, controls
+# as whole-subtree signatures). Each kind may change only what it asks for:
+#
+# * page_setup: PAGEDEF inside SECDEF (checked per section elsewhere).
+# * columns: COLDEF (checked per section elsewhere); nothing else.
+# * hanging_indent: the ParaShape attribute of at most one paragraph.
+# * section_insert / section_delete: one contiguous insertion / removal made
+#   only of a paragraph split (close + open with the split paragraph's own
+#   attributes), a SECTION boundary, one SECDEF and at most one COLDEF.
+#
+# Everything else (whitespace, run CharShapes, paragraph attributes such as
+# Style or PageBreak, object positions, other SECDEF attributes) must match.
+
+BODY_RULES = ('page_setup', 'columns', 'hanging_indent', 'section_insert', 'section_delete')
+_SECTION_BREAK_TOKENS = {('/E', 'P'), ('E', 'P'), ('/E', 'SECTION'), ('E', 'SECTION'), ('C', 'SECDEF'), ('C', 'COLDEF')}
+
+
+def _body_tokens(doc: Mapping[str, Any], *, omit: frozenset[str] = frozenset(), drop: frozenset[str] = frozenset()) -> list[tuple[Any, ...]]:
+    tokens: list[tuple[Any, ...]] = []
+    for token, element in linearize(doc['_body']):
+        if token[0] == 'C':
+            if token[1] in drop:
+                continue
+            if omit and element is not None:
+                token = ('C', token[1], signature(element, omit=omit))
+        tokens.append(token)
+    return tokens
+
+
+def _first_difference(before: list[Any], after: list[Any]) -> str:
+    for index, (old, new) in enumerate(zip(before, after)):
+        if old != new:
+            return f'token {index}: {old[:2]!r} -> {new[:2]!r}'
+    return f'length {len(before)} -> {len(after)}'
+
+
+def _section_break_reasons(before: list[Any], after: list[Any], *, inserted: bool) -> list[str]:
+    shorter, longer = (before, after) if inserted else (after, before)
+    limit = len(shorter)
+    prefix = 0
+    while prefix < limit and shorter[prefix] == longer[prefix]:
+        prefix += 1
+    suffix = 0
+    while suffix < limit - prefix and shorter[len(shorter) - 1 - suffix] == longer[len(longer) - 1 - suffix]:
+        suffix += 1
+    if len(shorter) - suffix != prefix:
+        return [f'the body changed outside the section break ({_first_difference(before, after)})']
+    extra = longer[prefix:len(longer) - suffix]
+    kinds = [token[:2] for token in extra]
+    reasons: list[str] = []
+    stray = sorted({kind for kind in kinds if kind not in _SECTION_BREAK_TOKENS})
+    if stray:
+        reasons.append(f'the section break also {"added" if inserted else "removed"} {stray}')
+    if kinds.count(('/E', 'P')) != 1 or kinds.count(('E', 'P')) != 1:
+        reasons.append('the section break did not split (or join) exactly one paragraph')
+    if kinds.count(('/E', 'SECTION')) != kinds.count(('E', 'SECTION')) or kinds.count(('E', 'SECTION')) > 1:
+        reasons.append('the section break changed SECTION elements unevenly')
+    if kinds.count(('C', 'SECDEF')) != 1 or kinds.count(('C', 'COLDEF')) > 1:
+        reasons.append('the section break did not add (or remove) exactly one SECDEF and at most one COLDEF')
+    if inserted and not reasons:
+        opened = next(token for token in extra if token[:2] == ('E', 'P'))
+        split = [token for token in longer[:prefix] if token[:2] == ('E', 'P')]
+        if not split or split[-1] != opened:
+            reasons.append('the paragraph after the new section break does not keep the split paragraph\'s attributes')
+    return reasons
+
+
+def body_token_reasons(rule: str, before: Mapping[str, Any], after: Mapping[str, Any]) -> list[str]:
+    """Body changes that ``rule`` (one of ``BODY_RULES``) does not allow."""
+    if '_body' not in before or '_body' not in after:
+        return ['whole-document readback is unavailable for the body token check']
+    if rule == 'page_setup':
+        old, new = _body_tokens(before, omit=frozenset({'PAGEDEF'})), _body_tokens(after, omit=frozenset({'PAGEDEF'}))
+    elif rule == 'columns':
+        mask = frozenset({'COLDEF'})
+        old, new = _body_tokens(before, omit=mask, drop=mask), _body_tokens(after, omit=mask, drop=mask)
+    else:
+        old, new = _body_tokens(before), _body_tokens(after)
+    if rule in ('section_insert', 'section_delete'):
+        return _section_break_reasons(old, new, inserted=rule == 'section_insert')
+    if rule == 'hanging_indent' and len(old) == len(new):
+        changed = [(a, b) for a, b in zip(old, new) if a != b]
+        if not changed:
+            return []
+        if len(changed) == 1 and changed[0][0][:2] == ('E', 'P') == changed[0][1][:2]:
+            keep_old = [item for item in changed[0][0][2] if item[0] != 'ParaShape']
+            keep_new = [item for item in changed[0][1][2] if item[0] != 'ParaShape']
+            if keep_old == keep_new:
+                return []
+        return [f'the body changed beyond one paragraph shape ({_first_difference(old, new)})']
+    if old != new:
+        return [f'the body changed outside the requested {rule} ({_first_difference(old, new)})']
+    return []
+
+
 def public_document(doc: Mapping[str, Any]) -> dict[str, Any]:
     """Document summary for responses: counts and short hashes, no text."""
     pagedefs = doc.get('pagedefs')
@@ -406,6 +505,7 @@ def compare_documents(
     pagedefs: str = 'same',
     coldefs_may_change: bool = False,
     paragraphs: str = 'same',
+    body_rule: str | None = None,
 ) -> list[str]:
     """Differences between two document summaries that the planned edit does not explain.
 
@@ -418,6 +518,8 @@ def compare_documents(
         reasons.append('whole-document readback is unavailable for HEAD/TAIL checks')
     else:
         reasons += head_tail_reasons(before['_root'], after['_root'], allow_head_attrs=_SECTION_COUNT_ATTRS if section_delta else None)
+    if body_rule is not None:
+        reasons += body_token_reasons(body_rule, before, after)
     if after.get('control_signatures') != before.get('control_signatures'):
         reasons.append('an embedded object (picture, table, note, field) changed')
     if after['text'] != before['text']:
@@ -551,7 +653,7 @@ def verify_page_setup(
     for item in PAGEDEF_ITEMS:
         if item not in plan['targets'] and after[item] != plan['before'][item]:
             reasons.append(f'{item} changed from {plan["before"][item]} to {after[item]} although it was not requested')
-    reasons += compare_documents(doc_before, doc_after, pagedefs='free')
+    reasons += compare_documents(doc_before, doc_after, pagedefs='free', body_rule='page_setup')
     before_defs, after_defs = doc_before.get('pagedefs'), doc_after.get('pagedefs')
     if doc_before['section_count'] > 1 or before_defs is not None:
         if before_defs is None or after_defs is None or len(before_defs) != len(after_defs):
@@ -627,7 +729,7 @@ def verify_columns(
         if plan['before'][item] is not None and after[item] != plan['before'][item]:
             reasons.append(f'{item} changed from {plan["before"][item]} to {after[item]} although it was not requested')
     new_block = plan['apply_to'] == 'from_caret_new'
-    reasons += compare_documents(doc_before, doc_after, coldef_delta=1 if new_block else 0, coldefs_may_change=not new_block)
+    reasons += compare_documents(doc_before, doc_after, coldef_delta=1 if new_block else 0, coldefs_may_change=not new_block, body_rule='columns')
     if new_block and len(doc_after['coldefs']) == len(doc_before['coldefs']) + 1:
         # Every pre-existing column definition must survive unchanged around the new one.
         remaining = list(doc_after['coldefs'])
@@ -649,7 +751,7 @@ def plan_section_insert(doc: Mapping[str, Any]) -> dict[str, Any]:
 
 def verify_section_insert(doc_before: Mapping[str, Any], doc_after: Mapping[str, Any]) -> dict[str, Any]:
     reasons = _section_coldef_reasons(doc_before, doc_after, 1)
-    reasons += compare_documents(doc_before, doc_after, section_delta=1, coldef_delta=len(doc_after['coldefs']) - len(doc_before['coldefs']), pagedefs='free', paragraphs='free')
+    reasons += compare_documents(doc_before, doc_after, section_delta=1, coldef_delta=len(doc_after['coldefs']) - len(doc_before['coldefs']), pagedefs='free', paragraphs='free', body_rule='section_insert')
     before_defs, after_defs = doc_before.get('pagedefs'), doc_after.get('pagedefs')
     if before_defs is not None:
         if after_defs is None or len(after_defs) != len(before_defs) + 1:
@@ -689,7 +791,7 @@ def plan_section_delete(request: Mapping[str, Any], doc: Mapping[str, Any], *, k
 
 def verify_section_delete(plan: Mapping[str, Any], doc_before: Mapping[str, Any], doc_after: Mapping[str, Any]) -> dict[str, Any]:
     reasons = _section_coldef_reasons(doc_before, doc_after, -1)
-    reasons += compare_documents(doc_before, doc_after, section_delta=-1, coldef_delta=len(doc_after['coldefs']) - len(doc_before['coldefs']), pagedefs='free', paragraphs='free')
+    reasons += compare_documents(doc_before, doc_after, section_delta=-1, coldef_delta=len(doc_after['coldefs']) - len(doc_before['coldefs']), pagedefs='free', paragraphs='free', body_rule='section_delete')
     before_defs, after_defs = doc_before.get('pagedefs'), doc_after.get('pagedefs')
     if before_defs is not None:
         removed = plan['section_index'] - 1
@@ -764,7 +866,7 @@ def verify_hanging_indent(
             reasons.append(f'paragraph shape {key} changed from {before.get(key)!r} to {after.get(key)!r}')
     if text_after != text_before:
         reasons.append('the paragraph text changed')
-    reasons += compare_documents(doc_before, doc_after, paragraphs='one_shape')
+    reasons += compare_documents(doc_before, doc_after, paragraphs='one_shape', body_rule='hanging_indent')
     return {
         'ok': not reasons,
         'reasons': reasons[:10],

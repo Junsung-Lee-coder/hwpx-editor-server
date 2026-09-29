@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import time
 from typing import Any, Callable
 
 from app.edit_ops import _get_current_paragraph_text_at_cursor, _get_pos, _get_selected_text, _set_pos
+from app.hwpml_invariants import before_budget_reason, readback_size_reason
 from app.layout_ops import (
     COLDEF_ITEMS,
     OP,
@@ -170,10 +172,20 @@ class LocalCliLayoutMixin:
         get_text = getattr(hwp, 'GetTextFile', None)
         if not callable(get_text):
             raise LocalCliRuntimeError(f'{OP} needs GetTextFile for HWPML readback')
+        started = time.monotonic()
         try:
-            return parse_layout_xml(get_text('HWPML2X', ''))
+            xml_text = get_text('HWPML2X', '')
+            too_big = readback_size_reason(xml_text)
+            if too_big:
+                raise LayoutError(too_big)
+            doc = parse_layout_xml(xml_text)
         except LayoutError as exc:
             raise LocalCliRuntimeError(f'{OP} {where}: HWPML readback failed: {exc}') from exc
+        # Every 'before edit' readback runs before the single native action.
+        slow = before_budget_reason(time.monotonic() - started) if where == 'before edit' else None
+        if slow:
+            raise LocalCliRuntimeError(f'{OP} refused before mutation: {slow}')
+        return doc
 
     def _layout_plan(self, build: Callable[[], dict[str, Any]]) -> dict[str, Any]:
         try:

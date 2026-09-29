@@ -7,6 +7,7 @@ from app.command_packages.runtime import get_command_package_registry
 from app.layout_ops import (
     HWPUNIT_PER_MM,
     LayoutError,
+    body_token_reasons,
     compare_documents,
     hwpunit_to_mm,
     mm_to_hwpunit,
@@ -423,6 +424,54 @@ class ReadbackTests(unittest.TestCase):
                 request = normalize_request({'kind': 'columns', 'expected_pos': [0, 0, 0], 'confirm_layout': True, 'count': 2})
                 with self.assertRaisesRegex(LayoutError, 'cannot be proven'):
                     plan_columns(request, COLDEF, doc)
+
+    def test_body_tokens_allow_only_the_requested_change(self) -> None:
+        def doc(*, secdef: str = '<SECDEF TextDirection="0"><PAGEDEF Width="100"/></SECDEF>', coldef: str = '<COLDEF Count="1"/>',
+                p1: str = 'ParaShape="1" Style="0"', run: str = '<TEXT CharShape="0"><CHAR>a  b</CHAR><PICTURE Id="p"/><CHAR>c</CHAR></TEXT>',
+                note: str = '<FOOTNOTE Number="1"><PARALIST><P><TEXT><CHAR>n</CHAR></TEXT></P></PARALIST></FOOTNOTE>') -> dict[str, Any]:
+            return parse_layout_xml(f'<HWPML><HEAD/><BODY><SECTION><P ParaShape="1"><TEXT>{secdef}{coldef}<CHAR>x</CHAR></TEXT></P>'
+                                    f'<P {p1}>{run}</P><P ParaShape="1"><TEXT><CHAR>y</CHAR>{note}</TEXT></P></SECTION></BODY></HWPML>')
+        base = doc()
+        allowed = (
+            ('page_setup', doc(secdef='<SECDEF TextDirection="0"><PAGEDEF Width="200"/></SECDEF>')),
+            ('columns', doc(coldef='<COLDEF Count="2"/>')),
+            ('columns', doc(coldef='<COLDEF Count="1"/><COLDEF Count="2"/>')),
+            ('hanging_indent', doc(p1='ParaShape="9" Style="0"')),
+        )
+        for rule, after in allowed:
+            with self.subTest(allowed=rule):
+                self.assertEqual(body_token_reasons(rule, base, after), [])
+        unrequested = (
+            ('whitespace count', doc(run='<TEXT CharShape="0"><CHAR>a b</CHAR><PICTURE Id="p"/><CHAR>c</CHAR></TEXT>')),
+            ('existing run CharShape', doc(run='<TEXT CharShape="5"><CHAR>a  b</CHAR><PICTURE Id="p"/><CHAR>c</CHAR></TEXT>')),
+            ('paragraph Style', doc(p1='ParaShape="1" Style="3"')),
+            ('paragraph PageBreak', doc(p1='ParaShape="1" Style="0" PageBreak="true"')),
+            ('picture position', doc(run='<TEXT CharShape="0"><CHAR>a</CHAR><PICTURE Id="p"/><CHAR>  bc</CHAR></TEXT>')),
+            ('SECDEF attribute', doc(secdef='<SECDEF TextDirection="1"><PAGEDEF Width="100"/></SECDEF>')),
+            ('footnote attribute', doc(note='<FOOTNOTE Number="1" NumberShape="2"><PARALIST><P><TEXT><CHAR>n</CHAR></TEXT></P></PARALIST></FOOTNOTE>')),
+            ('paragraph split', doc(run='<TEXT CharShape="0"><CHAR>a </CHAR></TEXT></P><P ParaShape="1" Style="0"><TEXT CharShape="0"><CHAR> b</CHAR><PICTURE Id="p"/><CHAR>c</CHAR></TEXT>')),
+        )
+        for label, after in unrequested:
+            for rule in ('page_setup', 'columns', 'hanging_indent'):
+                with self.subTest(label=label, rule=rule):
+                    self.assertTrue(body_token_reasons(rule, base, after))
+        with self.subTest('hanging_indent plus Style'):
+            self.assertTrue(body_token_reasons('hanging_indent', base, doc(p1='ParaShape="9" Style="3"')))
+
+    def test_section_break_tokens(self) -> None:
+        def section(body: str, secdef: str = '<SECDEF><PAGEDEF Width="1"/></SECDEF><COLDEF Count="1"/>') -> str:
+            return f'<SECTION><P ParaShape="1"><TEXT>{secdef}{body}</TEXT></P></SECTION>'
+        one = parse_layout_xml(f'<HWPML><BODY>{section("<CHAR>ab</CHAR>")}</BODY></HWPML>')
+        two = parse_layout_xml(f'<HWPML><BODY>{section("<CHAR>a</CHAR>")}{section("<CHAR>b</CHAR>")}</BODY></HWPML>')
+        self.assertEqual(body_token_reasons('section_insert', one, two), [])
+        self.assertEqual(body_token_reasons('section_delete', two, one), [])
+        second = section('<CHAR>b</CHAR>').replace('ParaShape="1"', 'ParaShape="1" PageBreak="true"')
+        restyled = parse_layout_xml('<HWPML><BODY>' + section('<CHAR>a</CHAR>') + second + '</BODY></HWPML>')
+        self.assertTrue(body_token_reasons('section_insert', one, restyled))
+        eaten = parse_layout_xml(f'<HWPML><BODY>{section("<CHAR>a</CHAR>")}{section("<CHAR>c</CHAR>")}</BODY></HWPML>')
+        self.assertTrue(body_token_reasons('section_insert', one, eaten))
+        extra = parse_layout_xml('<HWPML><BODY>' + section('<CHAR>a</CHAR>') + section('<BOOKMARK Name="x"/><CHAR>b</CHAR>') + '</BODY></HWPML>')
+        self.assertTrue(body_token_reasons('section_insert', one, extra))
 
     def test_compare_documents_detects_controls_and_shapes(self) -> None:
         base = parse_layout_xml('<HWPML><BODY><SECTION><P ParaShape="1"><TEXT><CHAR>x</CHAR></TEXT></P><P ParaShape="1"><TEXT><CHAR>y</CHAR></TEXT></P></SECTION></BODY></HWPML>')

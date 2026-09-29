@@ -6884,6 +6884,15 @@ class LocalCliService(
             }
 
         prior_native_sequence = binding.get('native_command_sequence', 0)
+        # Exact ops whose undo grouping is unverified: refuse undo from the
+        # start, so a timeout or crash mid-bundle cannot leave an older undo
+        # count in place. Restored below only if the bundle proves clean.
+        prior_undo_state = {key: binding.get(key) for key in ('pending_logical_undo_count', 'logical_undo_unverified')}
+        exact_ops = sorted({str(step.get('op')) for step in cleaned_steps if step.get('op') in _UNDO_UNVERIFIED_BUNDLE_OPS})
+        if exact_ops:
+            binding['pending_logical_undo_count'] = None
+            binding['logical_undo_unverified'] = f'{", ".join(exact_ops)} bundle started and its outcome was not recorded'
+            binding = self._save_binding(binding)
         result = self._execute_live(
             binding=binding,
             command_name='command-bundle',
@@ -6925,6 +6934,9 @@ class LocalCliService(
         )
         if dirty:
             _record_bundle_undo_state(binding, result.get('steps') or [])
+            binding = self._save_binding(binding)
+        elif exact_ops:
+            binding.update(prior_undo_state)
             binding = self._save_binding(binding)
         summary = f"command-bundle {'succeeded' if result.get('ok') else 'stopped'}: {len(result.get('steps') or [])}/{len(cleaned_steps)} step(s)"
         self._record_local_cli_command(

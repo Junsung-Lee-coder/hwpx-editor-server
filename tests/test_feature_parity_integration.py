@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import unittest
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import patch
 
@@ -16,7 +17,9 @@ from app.local_cli_service import (
 from app.local_cli_service_support import _BUNDLE_ALLOWED_OPS
 from local_cli_v1.bundles import BUNDLE_SERVER_OPS, BundleError, build_named_bundle
 from tests.test_layout_exact import A4, _FakeLayoutHwp
+from tests.test_layout_exact import _run as _run_layout
 from tests.test_object_insert_exact import _FakeHwp
+from tests.test_object_insert_exact import _run as _run_object_insert
 
 
 def _service() -> LocalCliService:
@@ -203,6 +206,119 @@ class UndoAfterUnverifiedOpsTests(unittest.TestCase):
         self.assertEqual(binding['pending_logical_undo_count'], 2)
         self.assertNotIn('logical_undo_unverified', binding)
         self.assertEqual(self._undo(binding), ['undo'])
+
+
+class BundlePathUndoTests(unittest.TestCase):
+    """`command_bundle` end to end (validation, step dispatch, binding update), then `undo`."""
+
+    def _run_bundle(self, hwp: Any, steps: list[dict[str, Any]]) -> tuple[LocalCliService, dict[str, Any], dict[str, Any]]:
+        service = _service()
+        store: dict[str, Any] = {'binding': {'session_id': 's', 'command_generation': 0, 'native_command_sequence': 0}}
+        undo_dispatched: list[str] = []
+
+        def execute_live(*, handler: Any, command_name: str = '', **kwargs: Any) -> Any:
+            if command_name == 'undo':
+                undo_dispatched.append(command_name)
+                raise AssertionError('undo reached the live document')
+            return handler(SimpleNamespace(hwp=hwp, source_filename='a.hwpx', session_id='s'))
+
+        def save(binding: dict[str, Any]) -> dict[str, Any]:
+            store['binding'] = binding
+            return binding
+
+        service._load_active_binding = lambda session_id=None: store['binding']  # type: ignore[method-assign]
+        service._save_binding = save  # type: ignore[method-assign]
+        service._update_live_binding = lambda current, **kwargs: current  # type: ignore[method-assign]
+        service._record_local_cli_command = lambda *args, **kwargs: None  # type: ignore[method-assign]
+        service._execute_live = execute_live  # type: ignore[method-assign]
+        with patch('app.local_cli_service.snapshot_live_location', return_value={}):
+            result = service.command_bundle(steps=steps)
+        return service, store, result
+
+    def _object_steps(self, hwp: Any) -> list[dict[str, Any]]:
+        pos = ','.join(str(item) for item in hwp.caret)
+        return build_named_bundle('object-insert-exact', ['--kind', 'footnote', '--text', 'note', '--expected-pos', pos, '--confirm-mutation']).server_payload()['steps']
+
+    def test_undo_refused_after_successful_object_insert_bundle(self) -> None:
+        hwp = _SelectingHwp()
+        service, store, result = self._run_bundle(hwp, self._object_steps(hwp))
+        self.assertTrue(result['ok'], result)
+        self.assertTrue(result['dirty'])
+        self.assertIn('object_insert_exact', store['binding']['logical_undo_unverified'])
+        with self.assertRaisesRegex(LocalCliRuntimeError, 'undo refused'):
+            service.undo()
+
+    def test_undo_refused_after_failed_object_insert_bundle(self) -> None:
+        hwp = _SelectingHwp(noop={'InsertFootnote'})
+        service, _store, result = self._run_bundle(hwp, self._object_steps(hwp))
+        self.assertFalse(result['ok'])
+        self.assertTrue(result['dirty'])
+        self.assertTrue(result['steps'][1]['mutation_may_have_persisted'])
+        with self.assertRaisesRegex(LocalCliRuntimeError, 'undo refused'):
+            service.undo()
+
+    def test_undo_refused_after_layout_bundle(self) -> None:
+        hwp = _FakeLayoutHwp()
+        steps = build_named_bundle('layout-exact', ['--kind', 'columns', '--count', '2', '--expected-pos', '0,0,0', '--confirm-layout']).server_payload()['steps']
+        with patch.object(LocalCliService, '_bundle_compact_snapshot', lambda self, _hwp: {
+                'pos': list(hwp.caret), 'is_cell': False, 'has_selection': False, 'selection_mode': 0}):
+            service, _store, result = self._run_bundle(hwp, steps)
+        self.assertTrue(result['ok'], result)
+        with self.assertRaisesRegex(LocalCliRuntimeError, 'undo refused'):
+            service.undo()
+
+
+    def test_timeout_mid_bundle_leaves_undo_refused(self) -> None:
+        hwp = _SelectingHwp()
+        service = _service()
+        store: dict[str, Any] = {'binding': {'session_id': 's', 'pending_logical_undo_count': 1}}
+        service._load_active_binding = lambda session_id=None: store['binding']  # type: ignore[method-assign]
+        service._save_binding = lambda binding: store.__setitem__('binding', binding) or binding  # type: ignore[method-assign]
+
+        def timed_out(**kwargs: Any) -> Any:
+            raise TimeoutError('bundle exceeded 120s')
+
+        service._execute_live = timed_out  # type: ignore[method-assign]
+        with self.assertRaises(TimeoutError):
+            service.command_bundle(steps=self._object_steps(hwp))
+        with self.assertRaisesRegex(LocalCliRuntimeError, 'undo refused'):
+            service.undo()
+
+    def test_clean_exact_bundle_restores_the_prior_undo_state(self) -> None:
+        hwp = _SelectingHwp()
+        hwp.caret = [0, 1, 0]  # the recipe's expected position no longer matches
+        steps = build_named_bundle('object-insert-exact', ['--kind', 'footnote', '--text', 'n', '--expected-pos', '0,0,5', '--confirm-mutation']).server_payload()['steps']
+        _service_obj, store, result = self._run_bundle(hwp, steps)
+        self.assertFalse(result['ok'])
+        self.assertFalse(result['dirty'])
+        self.assertIsNone(store['binding'].get('logical_undo_unverified'))
+
+
+class ReadbackLimitTests(unittest.TestCase):
+    def test_oversized_readback_is_refused_before_mutation(self) -> None:
+        with patch('app.hwpml_invariants.MAX_READBACK_CHARS', 50):
+            hwp = _FakeHwp()
+            with self.assertRaisesRegex(LocalCliRuntimeError, 'above the 50 limit'):
+                _run_object_insert(hwp)
+            self.assertEqual(hwp.log, [])
+            layout = _FakeLayoutHwp()
+            with self.assertRaisesRegex(LocalCliRuntimeError, 'above the 50 limit'):
+                _run_layout(layout, {'kind': 'columns', 'expected_pos': [0, 0, 0], 'confirm_layout': True, 'count': 2})
+            self.assertEqual(layout.mutations(), [])
+
+    def test_slow_before_readback_is_refused_before_mutation(self) -> None:
+        clock = iter([0.0, 25.0])
+        with patch('app.local_cli_object_insert.time.monotonic', lambda: next(clock)):
+            hwp = _FakeHwp()
+            with self.assertRaisesRegex(LocalCliRuntimeError, 'took 25.0s'):
+                _run_object_insert(hwp)
+            self.assertEqual(hwp.log, [])
+        clock = iter([0.0, 25.0])
+        with patch('app.local_cli_layout.time.monotonic', lambda: next(clock)):
+            layout = _FakeLayoutHwp()
+            with self.assertRaisesRegex(LocalCliRuntimeError, 'took 25.0s'):
+                _run_layout(layout, {'kind': 'columns', 'expected_pos': [0, 0, 0], 'confirm_layout': True, 'count': 2})
+            self.assertEqual(layout.mutations(), [])
 
 
 if __name__ == '__main__':

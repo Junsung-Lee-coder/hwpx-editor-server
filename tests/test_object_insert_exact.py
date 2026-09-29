@@ -199,11 +199,20 @@ class VerifierTests(unittest.TestCase):
         inserted = (_char('Hello') + _footnote('note') + _char(' world'), _char('Second'))
         before = doc(head, _char('Hello world'), _char('Second'))
         self.assertTrue(_evaluate(_plan(), before, doc(grown, *inserted))['ok'])
+        for tag, entry, child in (('TABDEF', 'TABITEM', 'TABDEFLIST'), ('NUMBERING', 'PARAHEAD', 'NUMBERINGLIST'), ('STYLE', 'STYLEPR', 'STYLELIST')):
+            with self.subTest(grow_inside=tag):
+                listed = head.replace('</MAPPINGTABLE>', f'<{child} Count="1"><{tag} Id="0"/></{child}></MAPPINGTABLE>')
+                changed = listed.replace(f'<{tag} Id="0"/>', f'<{tag} Id="0"><{entry}/></{tag}>')
+                result = _evaluate(_plan(), doc(listed, _char('Hello world'), _char('Second')), doc(changed, *inserted))
+                self.assertFalse(result['ok'], result)
         for label, after_head in (
             ('existing shape changed', head.replace('Height="1000"', 'Height="1200"')),
             ('entry dropped', head.replace('Count="1"><CHARSHAPE Id="0" Height="1000"/>', 'Count="0">')),
             ('section count', head.replace('SecCnt="1"', 'SecCnt="2"')),
             ('non-list growth', head.replace('</MAPPINGTABLE>', '</MAPPINGTABLE><COMPATIBLEDOCUMENT/>')),
+            ('child added inside an existing entry', head.replace('<CHARSHAPE Id="0" Height="1000"/>', '<CHARSHAPE Id="0" Height="1000"><UNDERLINE/></CHARSHAPE>')),
+            ('entry appended to a non-growable list', head.replace('</MAPPINGTABLE>', '<STYLELIST Count="0"/></MAPPINGTABLE>').replace('<MAPPINGTABLE>', '<MAPPINGTABLE>')),
+            ('wrong entry tag appended', head.replace('Count="1"><CHARSHAPE Id="0" Height="1000"/>', 'Count="2"><CHARSHAPE Id="0" Height="1000"/><PARASHAPE Id="1"/>')),
         ):
             with self.subTest(label=label):
                 result = _evaluate(_plan(), before, doc(after_head, *inserted))
