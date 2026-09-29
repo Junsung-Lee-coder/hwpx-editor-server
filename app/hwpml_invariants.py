@@ -39,11 +39,15 @@ GROWABLE_HEAD_LISTS: dict[str, str] = {
 BODY_TAG = 'BODY'
 HEAD_TAG = 'HEAD'
 MAX_REASONS = 5
-# Whole-document readback limits. A bundle has 120 s in total; the after-edit
-# readback must still fit, so an edit is refused *before* mutation when the
-# document is too large or its before-edit readback (read + parse) is slow.
-MAX_READBACK_CHARS = 16 * 1024 * 1024
-BEFORE_READBACK_BUDGET_SECONDS = 20.0
+# Whole-document readback limits. A bundle has 120 s in total and the proof
+# needs one readback + verification before the edit and one after. Before
+# mutating, an edit reads the document and dry-runs the full verification on
+# it; if that exceeds PROOF_BUDGET_SECONDS the after-edit proof may not finish
+# in time, so the edit is refused while nothing has changed yet. Portable
+# measurement: a text-dense 4M-character readback verifies in about 6 s and
+# 0.6 GB peak memory; slower machines are caught by the timed dry run.
+MAX_READBACK_CHARS = 4 * 1024 * 1024
+PROOF_BUDGET_SECONDS = 30.0
 
 
 def readback_size_reason(xml_text: object) -> str | None:
@@ -53,8 +57,8 @@ def readback_size_reason(xml_text: object) -> str | None:
 
 
 def before_budget_reason(seconds: float) -> str | None:
-    if seconds > BEFORE_READBACK_BUDGET_SECONDS:
-        return (f'the before-edit HWPML readback took {seconds:.1f}s (budget {BEFORE_READBACK_BUDGET_SECONDS:.0f}s); '
+    if seconds > PROOF_BUDGET_SECONDS:
+        return (f'the before-edit readback plus a dry run of the proof took {seconds:.1f}s (budget {PROOF_BUDGET_SECONDS:.0f}s); '
                 'the after-edit proof might not finish within the bundle time limit')
     return None
 

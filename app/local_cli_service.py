@@ -118,15 +118,24 @@ from app.local_cli_object_insert import LocalCliObjectInsertMixin
 _UNDO_UNVERIFIED_BUNDLE_OPS = frozenset({'object_insert_exact', 'layout_exact'})
 
 
-def _record_bundle_undo_state(binding: dict[str, Any], steps: list[Any]) -> None:
-    """Set how `undo` may revert a dirty bundle: a native step count, or refusal."""
+def _record_bundle_undo_state(binding: dict[str, Any], steps: list[Any], prior: dict[str, Any]) -> None:
+    """Set how `undo` may revert this bundle: a native step count, refusal, or the prior state.
+
+    Only steps that changed (or may have changed) the document count. A
+    bundle with no such step, even on an already-dirty document, leaves the
+    undo state exactly as it was before the bundle (``prior``), so it can
+    never turn an earlier refusal into a one-step Undo.
+    """
     dirty_steps = [step for step in steps if isinstance(step, dict) and step.get('dirty')]
+    if not dirty_steps:
+        binding.update(prior)
+        return
     unverified = sorted({str(step.get('op')) for step in dirty_steps if step.get('op') in _UNDO_UNVERIFIED_BUNDLE_OPS})
     if unverified:
         binding['pending_logical_undo_count'] = None
         binding['logical_undo_unverified'] = f'{", ".join(unverified)} changed the document with native actions whose undo grouping is not verified'
     else:
-        binding['pending_logical_undo_count'] = max(1, len(dirty_steps))
+        binding['pending_logical_undo_count'] = len(dirty_steps)
 
 
 class LocalCliService(
@@ -2555,6 +2564,10 @@ class LocalCliService(
             raise LocalCliServiceError('command-bundle steps must not be empty', status_code=400)
         if len(steps) > _BUNDLE_MAX_STEPS:
             raise LocalCliServiceError(f'command-bundle accepts at most {_BUNDLE_MAX_STEPS} steps', status_code=400)
+        exact_steps = [step.get('op') for step in steps if isinstance(step, dict) and step.get('op') in _UNDO_UNVERIFIED_BUNDLE_OPS]
+        if len(exact_steps) > 1:
+            # Each exact step needs two whole-document proofs within one bundle time limit.
+            raise LocalCliServiceError(f'command-bundle accepts at most one exact document edit step ({", ".join(sorted(_UNDO_UNVERIFIED_BUNDLE_OPS))}); got {len(exact_steps)}', status_code=400)
 
         allowed_keys: dict[str, set[str]] = {
             'context': {'op', 'operation', 'label'},
@@ -6932,12 +6945,8 @@ class LocalCliService(
             clear_last_find=dirty,
             clear_selection_cache=dirty,
         )
-        if dirty:
-            _record_bundle_undo_state(binding, result.get('steps') or [])
-            binding = self._save_binding(binding)
-        elif exact_ops:
-            binding.update(prior_undo_state)
-            binding = self._save_binding(binding)
+        _record_bundle_undo_state(binding, result.get('steps') or [], prior_undo_state)
+        binding = self._save_binding(binding)
         summary = f"command-bundle {'succeeded' if result.get('ok') else 'stopped'}: {len(result.get('steps') or [])}/{len(cleaned_steps)} step(s)"
         self._record_local_cli_command(
             'command-bundle',

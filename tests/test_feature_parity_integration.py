@@ -186,7 +186,7 @@ class UndoAfterUnverifiedOpsTests(unittest.TestCase):
         for op in ('object_insert_exact', 'layout_exact'):
             with self.subTest(op=op):
                 binding: dict[str, Any] = {}
-                _record_bundle_undo_state(binding, [{'op': 'where', 'dirty': False}, {'op': op, 'dirty': True}])
+                _record_bundle_undo_state(binding, [{'op': 'where', 'dirty': False}, {'op': op, 'dirty': True}], {})
                 self.assertIsNone(binding['pending_logical_undo_count'])
                 result = self._undo(binding)
                 self.assertIn('undo refused', result[0])
@@ -194,7 +194,7 @@ class UndoAfterUnverifiedOpsTests(unittest.TestCase):
 
     def test_later_counted_edit_can_be_undone_once_then_refused_again(self) -> None:
         binding: dict[str, Any] = {}
-        _record_bundle_undo_state(binding, [{'op': 'object_insert_exact', 'dirty': True}])
+        _record_bundle_undo_state(binding, [{'op': 'object_insert_exact', 'dirty': True}], {})
         binding['pending_logical_undo_count'] = 1  # a later edit recorded its own undo count
         self.assertEqual(self._undo(binding), ['undo'])
         binding['pending_logical_undo_count'] = None  # what undo() stores after it runs
@@ -202,7 +202,7 @@ class UndoAfterUnverifiedOpsTests(unittest.TestCase):
 
     def test_other_dirty_bundles_keep_their_step_count(self) -> None:
         binding: dict[str, Any] = {}
-        _record_bundle_undo_state(binding, [{'op': 'insert_text', 'dirty': True}, {'op': 'where', 'dirty': False}, {'op': 'insert_text', 'dirty': True}])
+        _record_bundle_undo_state(binding, [{'op': 'insert_text', 'dirty': True}, {'op': 'where', 'dirty': False}, {'op': 'insert_text', 'dirty': True}], {})
         self.assertEqual(binding['pending_logical_undo_count'], 2)
         self.assertNotIn('logical_undo_unverified', binding)
         self.assertEqual(self._undo(binding), ['undo'])
@@ -211,9 +211,10 @@ class UndoAfterUnverifiedOpsTests(unittest.TestCase):
 class BundlePathUndoTests(unittest.TestCase):
     """`command_bundle` end to end (validation, step dispatch, binding update), then `undo`."""
 
-    def _run_bundle(self, hwp: Any, steps: list[dict[str, Any]]) -> tuple[LocalCliService, dict[str, Any], dict[str, Any]]:
+    def _run_bundle(self, hwp: Any, steps: list[dict[str, Any]], store: dict[str, Any] | None = None) -> tuple[LocalCliService, dict[str, Any], dict[str, Any]]:
         service = _service()
-        store: dict[str, Any] = {'binding': {'session_id': 's', 'command_generation': 0, 'native_command_sequence': 0}}
+        if store is None:
+            store = {'binding': {'session_id': 's', 'command_generation': 0, 'native_command_sequence': 0}}
         undo_dispatched: list[str] = []
 
         def execute_live(*, handler: Any, command_name: str = '', **kwargs: Any) -> Any:
@@ -268,6 +269,26 @@ class BundlePathUndoTests(unittest.TestCase):
             service.undo()
 
 
+    def test_later_no_change_bundles_on_a_dirty_document_keep_undo_refused(self) -> None:
+        for label in ('refused before mutation', 'where only'):
+            with self.subTest(label=label):
+                hwp = _SelectingHwp()
+                store: dict[str, Any] = {'binding': {'session_id': 's', 'command_generation': 0, 'native_command_sequence': 0,
+                                                     'working_copy_dirty': True, 'pending_logical_undo_count': 1}}
+                _service_obj, store, first = self._run_bundle(hwp, self._object_steps(hwp), store)
+                self.assertTrue(first['ok'], first)
+                if label == 'where only':
+                    steps = [{'op': 'where', 'label': 'where:only'}]
+                else:
+                    steps = build_named_bundle('object-insert-exact', ['--kind', 'footnote', '--text', 'n', '--expected-pos', '0,1,0',
+                                                                       '--confirm-mutation']).server_payload()['steps']
+                service, store, second = self._run_bundle(hwp, steps, store)
+                self.assertTrue(second['dirty'], 'the document stays dirty from the first edit')
+                self.assertFalse(any(step.get('dirty') for step in second['steps']))
+                self.assertIsNone(store['binding']['pending_logical_undo_count'])
+                with self.assertRaisesRegex(LocalCliRuntimeError, 'undo refused'):
+                    service.undo()
+
     def test_timeout_mid_bundle_leaves_undo_refused(self) -> None:
         hwp = _SelectingHwp()
         service = _service()
@@ -295,6 +316,26 @@ class BundlePathUndoTests(unittest.TestCase):
 
 
 class ReadbackLimitTests(unittest.TestCase):
+    def test_one_exact_step_per_bundle(self) -> None:
+        step = build_named_bundle('object-insert-exact', ['--kind', 'bookmark', '--name', 'a', '--expected-pos', '0,0,0', '--confirm-mutation']).server_payload()['steps'][1]
+        layout = build_named_bundle('layout-exact', ['--kind', 'section_insert', '--expected-pos', '0,0,0', '--confirm-layout']).server_payload()['steps'][1]
+        _service()._validate_command_bundle_steps([step])
+        for pair in ([step, dict(step)], [step, layout]):
+            with self.assertRaisesRegex(LocalCliServiceError, 'at most one exact'):
+                _service()._validate_command_bundle_steps(pair)
+
+    def test_before_budget_includes_a_dry_run_of_the_proof(self) -> None:
+        calls: list[str] = []
+        real = __import__('app.local_cli_object_insert', fromlist=['evaluate_insert']).evaluate_insert
+
+        def spy(plan: Any, before: Any, after: Any) -> Any:
+            calls.append('same' if before is after else 'after')
+            return real(plan, before, after)
+
+        with patch('app.local_cli_object_insert.evaluate_insert', spy):
+            _run_object_insert(_FakeHwp())
+        self.assertEqual(calls, ['same', 'after'])
+
     def test_oversized_readback_is_refused_before_mutation(self) -> None:
         with patch('app.hwpml_invariants.MAX_READBACK_CHARS', 50):
             hwp = _FakeHwp()
@@ -307,16 +348,16 @@ class ReadbackLimitTests(unittest.TestCase):
             self.assertEqual(layout.mutations(), [])
 
     def test_slow_before_readback_is_refused_before_mutation(self) -> None:
-        clock = iter([0.0, 25.0])
+        clock = iter([0.0, 35.0])
         with patch('app.local_cli_object_insert.time.monotonic', lambda: next(clock)):
             hwp = _FakeHwp()
-            with self.assertRaisesRegex(LocalCliRuntimeError, 'took 25.0s'):
+            with self.assertRaisesRegex(LocalCliRuntimeError, 'took 35.0s'):
                 _run_object_insert(hwp)
             self.assertEqual(hwp.log, [])
-        clock = iter([0.0, 25.0])
+        clock = iter([0.0, 35.0])
         with patch('app.local_cli_layout.time.monotonic', lambda: next(clock)):
             layout = _FakeLayoutHwp()
-            with self.assertRaisesRegex(LocalCliRuntimeError, 'took 25.0s'):
+            with self.assertRaisesRegex(LocalCliRuntimeError, 'took 35.0s'):
                 _run_layout(layout, {'kind': 'columns', 'expected_pos': [0, 0, 0], 'confirm_layout': True, 'count': 2})
             self.assertEqual(layout.mutations(), [])
 

@@ -5,7 +5,12 @@ from __future__ import annotations
 import time
 from typing import Any, Callable
 
-from app.edit_ops import _get_current_paragraph_text_at_cursor, _get_pos, _get_selected_text, _set_pos
+from app.edit_ops import (
+    _get_current_paragraph_text_at_cursor,
+    _get_pos,
+    _get_selected_text,
+    _set_pos,
+)
 from app.hwpml_invariants import before_budget_reason, readback_size_reason
 from app.layout_ops import (
     COLDEF_ITEMS,
@@ -14,9 +19,10 @@ from app.layout_ops import (
     PARASHAPE_ITEMS,
     SCHEMA_VERSION,
     LayoutError,
+    compare_documents,
     hwpunit_to_mm,
-    pagedef_mm,
     normalize_request,
+    pagedef_mm,
     parse_layout_xml,
     plan_columns,
     plan_hanging_indent,
@@ -181,8 +187,12 @@ class LocalCliLayoutMixin:
             doc = parse_layout_xml(xml_text)
         except LayoutError as exc:
             raise LocalCliRuntimeError(f'{OP} {where}: HWPML readback failed: {exc}') from exc
-        # Every 'before edit' readback runs before the single native action.
-        slow = before_budget_reason(time.monotonic() - started) if where == 'before edit' else None
+        # Every 'before edit' readback runs before the single native action;
+        # dry-run the whole-document comparison to time the after-edit proof.
+        slow = None
+        if where == 'before edit':
+            compare_documents(doc, doc, body_rule='hanging_indent')
+            slow = before_budget_reason(time.monotonic() - started)
         if slow:
             raise LocalCliRuntimeError(f'{OP} refused before mutation: {slow}')
         return doc

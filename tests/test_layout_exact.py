@@ -77,10 +77,10 @@ class _FakeHAction:
         return self.hwp.get_default(name, hset)
 
     def Execute(self, name: str, hset: _HSet) -> bool:  # noqa: N802
-        return self.hwp.execute(name, hset)
+        return self.hwp.drift_after(name, self.hwp.execute(name, hset))
 
     def Run(self, name: str) -> bool:  # noqa: N802
-        return self.hwp.run(name)
+        return self.hwp.drift_after(name, self.hwp.run(name))
 
 
 class _FakeLayoutHwp:
@@ -165,7 +165,7 @@ class _FakeLayoutHwp:
                 if index == 0:
                     controls += ''.join(f'<COLDEF Count="{c["Count"]}" SameSize="{c["SameSize"]}" SameGap="{c["SameGap"]}"/>' for c in section['coldefs'])
                 shape_id = abs(hash(tuple(sorted(para['shape'].items())))) % 10**6
-                paras.append(f'<P ParaShape="{shape_id}"><TEXT>{controls}<CHAR>{para["text"]}</CHAR></TEXT></P>')
+                paras.append(f'<P ParaShape="{shape_id}" Style="{para.get("style", "0")}"><TEXT>{controls}<CHAR>{para["text"]}</CHAR></TEXT></P>')
             out.append(f'<SECTION>{"".join(paras)}</SECTION>')
         return f'<?xml version="1.0" encoding="UTF-16" standalone="no"?><HWPML><HEAD/><BODY>{"".join(out)}</BODY></HWPML>'
 
@@ -279,6 +279,18 @@ class _FakeLayoutHwp:
             self.selection = None
             return True
         raise AssertionError(f'unexpected Run({name})')
+
+    def drift_after(self, name: str, result: bool) -> bool:
+        """``drift`` fault: a mutating action also restyles the last paragraph away from the caret.
+
+        Only the body-token comparison sees a paragraph Style change (text,
+        controls and ParaShape ids stay the same).
+        """
+        if self.faults.get('drift') and name in self.MUTATING:
+            flat = self._flat()
+            index = next(i for i in range(len(flat) - 1, -1, -1) if i != self.caret[1])
+            flat[index][1]['style'] = '9'
+        return result
 
     def mutations(self) -> list[str]:
         return [entry for entry in self.log if entry in self.MUTATING]
@@ -695,6 +707,29 @@ class ColumnFlowTests(unittest.TestCase):
         with self.assertRaises(LocalCliMutationError):
             _run(hwp, self._step())
         self.assertEqual(hwp.mutations(), ['MultiColumn'])
+
+
+class BodyDriftFlowTests(unittest.TestCase):
+    """Each kind's real verifier path must reject an unrequested body change (here a paragraph Style)."""
+
+    def test_every_kind_rejects_style_drift_elsewhere(self) -> None:
+        cases = (
+            ('page_setup', [['a'], ['b']], (0, 0, 0), _page_step()),
+            ('columns', None, (0, 0, 0), {'kind': 'columns', 'expected_pos': [0, 0, 0], 'confirm_layout': True, 'count': 2}),
+            ('section_insert', [['hello world', 'next']], (0, 0, 6), {'kind': 'section_insert', 'expected_pos': [0, 0, 6], 'confirm_layout': True}),
+            ('section_delete', [['a', 'b'], ['c', 'd'], ['e']], (0, 2, 0),
+             {'kind': 'section_delete', 'expected_pos': [0, 2, 0], 'confirm_layout': True, 'section_index': 2}),
+            ('hanging_indent', None, (0, 0, 0), {'kind': 'hanging_indent', 'expected_pos': [0, 0, 0], 'confirm_layout': True, 'marker_text': '1. '}),
+        )
+        for kind, sections, caret, step in cases:
+            with self.subTest(kind=kind):
+                clean = _FakeLayoutHwp(sections)
+                clean.caret = caret
+                self.assertTrue(_run(clean, dict(step))['succeeded'])
+                hwp = _FakeLayoutHwp(sections, drift=True)
+                hwp.caret = caret
+                with self.assertRaisesRegex(LocalCliMutationError, 'body changed|section break'):
+                    _run(hwp, dict(step))
 
 
 class SectionFlowTests(unittest.TestCase):

@@ -210,6 +210,9 @@ class LocalCliObjectInsertMixin:
         try:
             started = time.monotonic()
             before_root = self._object_insert_readback(hwp, where='before insert')
+            # Dry run of the after-edit proof (its cost, not its verdict) so an
+            # edit whose proof cannot finish in time is refused before mutating.
+            evaluate_insert(plan, before_root, before_root)
             slow = before_budget_reason(time.monotonic() - started)
             if slow:
                 raise LocalCliRuntimeError(f'{OP} refused before mutation: {slow}')
