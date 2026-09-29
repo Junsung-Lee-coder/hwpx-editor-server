@@ -112,6 +112,44 @@ from app.local_cli_cell_margins import LocalCliCellMarginsMixin
 from app.local_cli_table_structure import LocalCliTableStructureMixin
 
 
+# Bundle ops that may run several native edits for one logical request
+# (e.g. insert_row_below count=3). `undo` may count one native Undo per
+# step only when such a step succeeded with exactly one native edit.
+_UNDO_UNVERIFIED_BUNDLE_OPS = frozenset({'table_structure_exact'})
+
+
+def _bundle_step_single_undo(step: dict[str, Any]) -> bool:
+    if step.get('op') not in _UNDO_UNVERIFIED_BUNDLE_OPS:
+        return True
+    result = step.get('result') if isinstance(step.get('result'), dict) else {}
+    undo = result.get('undo') if isinstance(result.get('undo'), dict) else {}
+    return step.get('ok') is True and undo.get('native_editing_actions') == 1
+
+
+def _record_bundle_undo_state(binding: dict[str, Any], steps: list[Any], prior: dict[str, Any]) -> None:
+    """Set how `undo` may revert this bundle: a native step count, refusal, or the prior state.
+
+    Only steps that changed (or may have changed) the document count. A
+    bundle with no such step leaves the undo state exactly as it was before
+    the bundle (``prior``).
+    """
+    dirty_steps = [step for step in steps if isinstance(step, dict) and step.get('dirty')]
+    if not dirty_steps:
+        binding.update(prior)
+        return
+    unverified = sorted({str(step.get('op')) for step in dirty_steps if not _bundle_step_single_undo(step)})
+    if unverified:
+        binding['pending_logical_undo_count'] = None
+        binding['logical_undo_unverified'] = (
+            f'{", ".join(unverified)} ran several native edits, or failed part-way, so one logical undo cannot be counted'
+        )
+    else:
+        binding['pending_logical_undo_count'] = len(dirty_steps)
+        # Drop this bundle's own start marker; an older unverified edit below
+        # these steps still blocks undo once they are undone.
+        binding['logical_undo_unverified'] = prior.get('logical_undo_unverified')
+
+
 class LocalCliService(
     LocalCliBundleControlsMixin,
     LocalCliBundleParagraphsMixin,
@@ -6829,6 +6867,15 @@ class LocalCliService(
             }
 
         prior_native_sequence = binding.get('native_command_sequence', 0)
+        # Refuse undo from the start for multi-edit ops, so a timeout or crash
+        # mid-bundle cannot leave an older undo count in place; restored below
+        # when no step changed the document.
+        prior_undo_state = {key: binding.get(key) for key in ('pending_logical_undo_count', 'logical_undo_unverified')}
+        exact_ops = sorted({str(step.get('op')) for step in cleaned_steps if step.get('op') in _UNDO_UNVERIFIED_BUNDLE_OPS})
+        if exact_ops:
+            binding['pending_logical_undo_count'] = None
+            binding['logical_undo_unverified'] = f'{", ".join(exact_ops)} bundle started and its outcome was not recorded'
+            binding = self._save_binding(binding)
         result = self._execute_live(
             binding=binding,
             command_name='command-bundle',
@@ -6868,10 +6915,8 @@ class LocalCliService(
             clear_last_find=dirty,
             clear_selection_cache=dirty,
         )
-        if dirty:
-            dirty_step_count = sum(1 for step in (result.get('steps') or []) if isinstance(step, dict) and step.get('dirty'))
-            binding['pending_logical_undo_count'] = max(1, dirty_step_count)
-            binding = self._save_binding(binding)
+        _record_bundle_undo_state(binding, result.get('steps') or [], prior_undo_state)
+        binding = self._save_binding(binding)
         summary = f"command-bundle {'succeeded' if result.get('ok') else 'stopped'}: {len(result.get('steps') or [])}/{len(cleaned_steps)} step(s)"
         self._record_local_cli_command(
             'command-bundle',
@@ -7090,6 +7135,13 @@ class LocalCliService(
     def undo(self, *, session_id: str | None = None) -> dict[str, Any]:
         binding = self._load_active_binding(session_id=session_id)
         undo_count_raw = binding.get('pending_logical_undo_count')
+        blocked = binding.get('logical_undo_unverified')
+        if blocked and not isinstance(undo_count_raw, int):
+            # Fail closed: counting native Undo steps could revert part of an
+            # edit, or an older edit too.
+            raise LocalCliRuntimeError(
+                f'undo refused: {blocked}. Close the working copy without saving and reopen it instead of counting undos.'
+            )
         undo_count = int(undo_count_raw) if isinstance(undo_count_raw, int) and undo_count_raw > 1 else 1
 
         def _handler(handle: LocalCliRuntimeHandle) -> dict[str, Any]:

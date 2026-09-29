@@ -21,13 +21,23 @@ from app.table_structure import (
     public_grid,
 )
 
-_ROLLBACK_HINT = {'attempted': False, 'hint': 'Inspect rendered proof; use undo or reopen the working copy before saving.'}
+_ROLLBACK_HINT = {'attempted': False, 'hint': 'Close the working copy without saving and reopen it; a single Undo does not guarantee a full rollback of this edit.'}
 
 
 class _Mutation:
-    """Tracks whether a native mutating action has been issued."""
+    """Tracks whether a native mutating action has been issued, and how many."""
 
     started = False
+    native_edits = 0
+
+
+def _undo_report(mutation: _Mutation) -> dict[str, Any]:
+    """How `hwpx undo` may treat this edit: one native edit is one undo unit; anything else is unverified."""
+    return {
+        'native_editing_actions': mutation.native_edits,
+        'single_undo_expected': mutation.native_edits == 1,
+        'verified_natively': False,
+    }
 
 
 class LocalCliTableStructureMixin:
@@ -233,6 +243,7 @@ class LocalCliTableStructureMixin:
 
     def _table_structure_native(self, hwp: Any, action_name: str, mutation: _Mutation) -> dict[str, Any]:
         mutation.started = True
+        mutation.native_edits += 1
         return {'action': action_name, **self._table_structure_run_action(hwp, action_name)}
 
     def _table_structure_mutate(self, hwp: Any, plan: dict[str, Any], target_inst: str, mutation: _Mutation) -> list[dict[str, Any]]:
@@ -368,6 +379,7 @@ class LocalCliTableStructureMixin:
                 'goto': goto,
                 'before_grid': public_grid(before),
                 'native_actions': actions,
+                'undo': _undo_report(mutation),
                 'after_grid': public_grid(after),
                 'verification': verification,
                 'next_proof_required': 'Render the page (page-screenshot or export-proof-range) and review it before saving; the target proof_hash changes after this edit, so re-inventory before another exact edit.',
@@ -377,7 +389,9 @@ class LocalCliTableStructureMixin:
             if not mutation.started:
                 raise
             message = str(exc) if isinstance(exc, LocalCliRuntimeError) else f'{OP} failed after native mutation started: {type(exc).__name__}: {exc}'
-            raise LocalCliMutationError(message, mutation_may_have_persisted=True, rollback=dict(_ROLLBACK_HINT)) from exc
+            rollback = dict(_ROLLBACK_HINT)
+            rollback['undo'] = _undo_report(mutation)
+            raise LocalCliMutationError(message, mutation_may_have_persisted=True, rollback=rollback) from exc
         finally:
             if original_pos is not None and len(original_pos) >= 3:
                 try:

@@ -1,11 +1,17 @@
 from __future__ import annotations
 
 import unittest
+from types import SimpleNamespace
 from typing import Any, Callable
+from unittest.mock import patch
 
 from app.command_packages.runtime import get_command_package_registry
 from app.local_cli_runtime import LocalCliRuntimeError
-from app.local_cli_service import LocalCliMutationError, LocalCliService, LocalCliServiceError
+from app.local_cli_service import (
+    LocalCliMutationError,
+    LocalCliService,
+    LocalCliServiceError,
+)
 from app.table_structure import (
     TableStructureError,
     cell_address,
@@ -817,6 +823,78 @@ class CliBundleTests(unittest.TestCase):
                                (['--action', 'split_cell'], 'at least two cells')):
             with self.subTest(extra=extra), self.assertRaisesRegex(BundleError, message):
                 build_named_bundle('table-structure-exact', self.BASE + extra)
+
+
+class BundleUndoTests(unittest.TestCase):
+    """`command_bundle` end to end with the real step dispatch, then `hwpx undo`."""
+
+    def _bundle(self, hwp: _FakeTableHwp, store: dict[str, Any], **overrides: Any) -> tuple[LocalCliService, dict[str, Any]]:
+        service = _service(hwp)
+        service.command_packages = get_command_package_registry()
+
+        def execute_live(*, handler: Any, command_name: str = '', **kwargs: Any) -> Any:
+            if command_name == 'undo':
+                store['undo_dispatched'] = True
+                return {'snapshot': {}, 'context': {}, 'location': {}}
+            return handler(SimpleNamespace(hwp=hwp, source_filename='a.hwpx', session_id='s'))
+
+        def save(binding: dict[str, Any]) -> dict[str, Any]:
+            store['binding'] = binding
+            return binding
+
+        service._load_active_binding = lambda session_id=None: store['binding']  # type: ignore[method-assign]
+        service._save_binding = save  # type: ignore[method-assign]
+        service._update_live_binding = lambda current, **kwargs: current  # type: ignore[method-assign]
+        service._record_local_cli_command = lambda *args, **kwargs: None  # type: ignore[method-assign]
+        service._execute_live = execute_live  # type: ignore[method-assign]
+        with patch('app.local_cli_service.snapshot_live_location', return_value={}):
+            result = service.command_bundle(steps=[_exec_step(hwp.grid.rows, hwp.grid.cols, page_from=1, page_to=1, **overrides)])
+        return service, result
+
+    def _store(self) -> dict[str, Any]:
+        return {'binding': {'session_id': 's', 'command_generation': 0, 'native_command_sequence': 0, 'pending_logical_undo_count': 1}}
+
+    def test_multi_row_insert_refuses_undo(self) -> None:
+        hwp = _FakeTableHwp(3, 2)
+        store = self._store()
+        service, result = self._bundle(hwp, store, action='insert_row_below', row=3, count=3)
+        self.assertTrue(result['ok'], result)
+        self.assertEqual(result['steps'][0]['result']['undo']['native_editing_actions'], 3)
+        self.assertIsNone(store['binding']['pending_logical_undo_count'])
+        with self.assertRaisesRegex(LocalCliRuntimeError, 'undo refused'):
+            service.undo()
+        self.assertNotIn('undo_dispatched', store)
+
+    def test_failure_after_mutation_refuses_undo(self) -> None:
+        hwp = _FakeTableHwp(3, 2, noop={'TableInsertLowerRow'})
+        store = self._store()
+        service, result = self._bundle(hwp, store, action='insert_row_below', row=3, count=2)
+        self.assertFalse(result['ok'])
+        self.assertTrue(result['steps'][0]['mutation_may_have_persisted'])
+        self.assertEqual(result['steps'][0]['rollback']['undo']['native_editing_actions'], 2)
+        self.assertIn('without saving and reopen', result['steps'][0]['rollback']['hint'])
+        with self.assertRaisesRegex(LocalCliRuntimeError, 'undo refused'):
+            service.undo()
+
+    def test_single_native_edit_keeps_one_undo(self) -> None:
+        hwp = _FakeTableHwp(3, 2)
+        store = self._store()
+        _service_obj, result = self._bundle(hwp, store, action='insert_row_below', row=3)
+        self.assertTrue(result['ok'], result)
+        self.assertEqual(store['binding']['pending_logical_undo_count'], 1)
+        self.assertIsNone(store['binding'].get('logical_undo_unverified'))
+        older = self._store()
+        older['binding'].update(pending_logical_undo_count=None, logical_undo_unverified='an older multi-edit')
+        _service_obj, result = self._bundle(_FakeTableHwp(3, 2), older, action='insert_row_below', row=3)
+        self.assertEqual((older['binding']['pending_logical_undo_count'], older['binding']['logical_undo_unverified']), (1, 'an older multi-edit'))
+
+    def test_refused_before_mutation_restores_prior_undo_state(self) -> None:
+        hwp = _FakeTableHwp(3, 2)
+        store = self._store()
+        _service_obj, result = self._bundle(hwp, store, action='insert_row_below', row=3, expected_rows=9)
+        self.assertFalse(result['ok'])
+        self.assertEqual(store['binding']['pending_logical_undo_count'], 1)
+        self.assertIsNone(store['binding'].get('logical_undo_unverified'))
 
 
 if __name__ == '__main__':
