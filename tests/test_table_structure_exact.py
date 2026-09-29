@@ -11,6 +11,7 @@ from app.local_cli_service import (
     LocalCliMutationError,
     LocalCliService,
     LocalCliServiceError,
+    _record_bundle_undo_state,
 )
 from app.table_structure import (
     TableStructureError,
