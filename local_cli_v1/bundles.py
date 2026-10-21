@@ -27,6 +27,8 @@ BUNDLE_SERVER_OPS = frozenset(
         'typography_overview',
         'style_inspect',
         'paragraph_style_apply_exact',
+        'page_number_apply',
+        'official_numbering_apply',
         'paragraph_delete_exact',
         'control_delete_exact',
         'exact_control_select_proof',
@@ -102,6 +104,12 @@ _STEP_KEYS: dict[str, frozenset[str]] = {
             'pagebreak_before',
             'confirm_layout',
         }
+    ),
+    'page_number_apply': frozenset(
+        {'op', 'operation', 'label', 'position', 'start_number', 'side_char', 'confirm_layout'}
+    ),
+    'official_numbering_apply': frozenset(
+        {'op', 'operation', 'label', 'match', 'expected_page', 'level', 'confirm_layout'}
     ),
     'paragraph_delete_exact': frozenset(
         {
@@ -1471,6 +1479,109 @@ def _build_paragraph_style_apply_exact(argv: Sequence[str]) -> BundleSpec:
     )
 
 
+_PAGE_NUMBER_POSITIONS = ('top-left', 'top-center', 'top-right', 'bottom-left', 'bottom-center', 'bottom-right')
+_PAGE_NUMBER_START_RANGE = (1, 65535)
+
+
+def _page_number_side_char(args: argparse.Namespace) -> str:
+    prefix, suffix = args.prefix, args.suffix
+    pair_given = prefix is not None or suffix is not None
+    pair_side: str | None = None
+    if pair_given:
+        if prefix is None or suffix is None:
+            raise BundleError('page-number-apply requires --prefix and --suffix together.')
+        if (prefix, suffix) == ('-', '-'):
+            pair_side = 'dash'
+        elif (prefix, suffix) == ('', ''):
+            pair_side = 'none'
+        else:
+            raise BundleError(
+                "page-number-apply supports only no side characters or '-' on both sides; "
+                'arbitrary --prefix/--suffix text is not supported by the native page-number action.'
+            )
+    if args.side_char is not None and pair_side is not None and args.side_char != pair_side:
+        raise BundleError('page-number-apply --side-char conflicts with --prefix/--suffix.')
+    return args.side_char or pair_side or 'none'
+
+
+def _build_page_number_apply(argv: Sequence[str]) -> BundleSpec:
+    parser = _parser('page-number-apply', 'Insert one native page number at a fixed top/bottom left/center/right position.')
+    parser.add_argument('--position', required=True, choices=_PAGE_NUMBER_POSITIONS, help='Native page-number position')
+    parser.add_argument('--start-number', type=int, default=1, help='First page number, 1-65535 (default 1)')
+    parser.add_argument('--side-char', choices=('none', 'dash'), help="Side characters: none, or '-' on both sides")
+    parser.add_argument('--prefix', help="Only '-' (paired with --suffix '-') or '' is supported")
+    parser.add_argument('--suffix', help="Only '-' (paired with --prefix '-') or '' is supported")
+    parser.add_argument('--confirm-layout', action='store_true', required=True, help='Required explicit confirmation for page layout mutation')
+    args = _parse_bundle_args(parser, argv)
+    low, high = _PAGE_NUMBER_START_RANGE
+    if not low <= int(args.start_number) <= high:
+        raise BundleError(f'start_number must be between {low} and {high}.')
+    side_char = _page_number_side_char(args)
+    fields: dict[str, Any] = {
+        'position': args.position,
+        'start_number': int(args.start_number),
+        'side_char': side_char,
+        'confirm_layout': bool(args.confirm_layout),
+    }
+    return BundleSpec(
+        name='page-number-apply',
+        summary='Insert one native page number; refuse when a different page number already exists.',
+        where=f'Whole document, position {args.position}, start number {fields["start_number"]}.',
+        how='Runs read-only where, then one `page_number_apply` primitive that drives the documented PageNumPos action only after a control census proves no conflicting page number and a structural snapshot of the live document (body, run/paragraph/table/picture formatting, header/footer, styles, numberings, media references) is readable; an unreadable snapshot is refused before any mutation, and a changed or unreadable snapshot after the call is reported as an unknown outcome, not as inserted.',
+        changed='Inserts one native page-number control; header/footer content, body, styles and unrelated state are fingerprinted before and after, and any difference or unreadable post-state is reported as an unknown outcome with the document left as is. Rendered proof of every page is required before acceptance.',
+        steps=(
+            _where_step('where:before-page-number'),
+            _step('page_number_apply', 'mutate:page-number-apply', **fields),
+            _where_step('where:after-page-number'),
+        ),
+        sources=(
+            {
+                'type': 'page-number-mutation',
+                'position': args.position,
+                'risk_note': 'Commit does not save automatically; accept only after rendered proof of every page on a disposable or working copy.',
+            },
+        ),
+    )
+
+
+def _build_official_numbering_apply(argv: Sequence[str]) -> BundleSpec:
+    parser = _parser('official-numbering-apply', 'Apply native automatic outline numbering (levels 1-4) to one text match on the expected page.')
+    parser.add_argument('--match', required=True, help='Unique paragraph text/anchor to number')
+    parser.add_argument('--expected-page', type=int, required=True, help='Required rendered/page evidence for the target before mutation')
+    parser.add_argument('--level', type=int, required=True, choices=(1, 2, 3, 4), help='Official outline level 1-4')
+    parser.add_argument('--confirm-layout', action='store_true', required=True, help='Required explicit confirmation for numbering mutation')
+    args = _parse_bundle_args(parser, argv)
+    match = _bounded_text(args.match, field='match')
+    if '\n' in match or '\r' in match:
+        raise BundleError('match must be a single line.')
+    expected_page = _positive_int(args.expected_page, field='expected_page')
+    fields: dict[str, Any] = {
+        'match': match,
+        'expected_page': expected_page,
+        'level': int(args.level),
+        'confirm_layout': bool(args.confirm_layout),
+    }
+    return BundleSpec(
+        name='official-numbering-apply',
+        summary='Apply native outline numbering at one level to one matched paragraph; fail closed on match/page proof.',
+        where=f'Match {match!r} on expected page {expected_page}.',
+        how='Runs read-only where, then one `official_numbering_apply` primitive that proves a unique target, verifies the current section\'s outline definition is the four-level 1. / 가. / 1) / 가) system (defining it only when no other outline paragraph in that section depends on it), and applies native outline numbering metadata (one native ParagraphShape action when the verified definition already exists) without touching paragraph text. The whole-document structural snapshot must be readable before the call and unchanged outside the target paragraph numbering afterwards; otherwise the step is refused or reported as an unknown outcome.',
+        changed=f'Sets native outline level {fields["level"]} on the matched paragraph only; the four-level 1. / 가. / 1) / 가) definition is verified by readback (an unverified format is not reported as success) and no number text is typed.',
+        steps=(
+            _where_step('where:before-official-numbering'),
+            _step('official_numbering_apply', 'mutate:official-numbering-apply', **fields),
+            _where_step('where:after-official-numbering'),
+        ),
+        sources=(
+            {
+                'type': 'official-numbering-mutation',
+                'level': fields['level'],
+                'risk_note': 'Commit does not save automatically; accept only after rendered proof of the numbering sequence on a disposable or working copy.',
+            },
+        ),
+    )
+
+
 def _build_paragraph_delete_exact(argv: Sequence[str]) -> BundleSpec:
     parser = _parser('paragraph-delete-exact', 'Delete one exact paragraph/text row after page and neighbor proof.')
     parser.add_argument('--match', required=True, help='Exact text/anchor in the paragraph to remove, e.g. a hyphen-only scaffold cell/row')
@@ -2188,6 +2299,8 @@ _RECIPES: dict[str, BundleRecipe] = {
     'table-column-width-exact': BundleRecipe('table-column-width-exact', 'Apply guarded native exact table column widths with preservation and rollback proof.', _build_table_column_width_exact),
     'table-split-exact': BundleRecipe('table-split-exact', 'Split one exact pre-proven table with documented TableSplitTable.', _build_table_split_exact),
     'paragraph-style-apply-exact': BundleRecipe('paragraph-style-apply-exact', 'Apply exact paragraph style toggles with fail-closed match/page proof.', _build_paragraph_style_apply_exact),
+    'page-number-apply': BundleRecipe('page-number-apply', 'Insert one native page number with fail-closed duplicate/conflict checks.', _build_page_number_apply),
+    'official-numbering-apply': BundleRecipe('official-numbering-apply', 'Apply native outline numbering levels 1-4 to one proven paragraph.', _build_official_numbering_apply),
     'paragraph-delete-exact': BundleRecipe('paragraph-delete-exact', 'Delete one exact paragraph/row after page and neighbor proof.', _build_paragraph_delete_exact),
     'style-apply': BundleRecipe('style-apply', 'Guarded dump-only style clone/apply proof; no mutation.', _build_style_apply),
     'style-clone': BundleRecipe('style-clone', 'Alias of guarded dump-only style apply proof; no mutation.', _build_style_clone),
@@ -2261,6 +2374,10 @@ def bundle_help(name: str) -> str:
         return 'usage: hwpx bundle-dump typography-overview [--max-samples N] [--max-sections N] [--max-styles N]\n       hwpx typography-overview [--json]\n       read-only live Hancom GetTextFile(HWPML2X) font/size/bold/style overview with a raw JSON artifact path'
     if bundle_name == 'paragraph-style-apply-exact':
         return 'usage: hwpx bundle-dump --with-meta paragraph-style-apply-exact --match TEXT --expected-page N (--keep-with-next on|off | --widow-orphan on|off | --pagebreak-before 0|1) [more style fields] --confirm-layout\n       hwpx paragraph-style-apply-exact --match TEXT --expected-page N [style fields] --confirm-layout'
+    if bundle_name == 'page-number-apply':
+        return "usage: hwpx bundle-dump --with-meta page-number-apply --position top-left|top-center|top-right|bottom-left|bottom-center|bottom-right [--start-number 1-65535] [--side-char none|dash | --prefix - --suffix -] --confirm-layout\n       hwpx page-number-apply --position bottom-center [--start-number N] --confirm-layout\n       inserts one native page number; arbitrary prefix/suffix text is refused; rendered proof of every page is required before acceptance"
+    if bundle_name == 'official-numbering-apply':
+        return 'usage: hwpx bundle-dump --with-meta official-numbering-apply --match TEXT --expected-page N --level 1|2|3|4 --confirm-layout\n       hwpx official-numbering-apply --match TEXT --expected-page N --level N --confirm-layout\n       applies native outline numbering metadata to one proven paragraph; no number text is typed; rendered proof of the numbering sequence is required'
     if bundle_name == 'paragraph-delete-exact':
         return 'usage: hwpx bundle-dump --with-meta paragraph-delete-exact --match TEXT --expected-page N [--occurrence-on-page N] [--expected-previous-contains TEXT] [--expected-next-contains TEXT] [--max-page-after N] --confirm-remove\n       deletes one exact paragraph/row after page and optional neighbor proof; rendered before/after proof is required before save/final delivery'
     if bundle_name in {'style-apply', 'style-clone'}:

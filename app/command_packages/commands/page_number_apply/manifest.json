@@ -1,0 +1,17 @@
+{
+  "op": "page_number_apply",
+  "version": "local-cli/page-number-apply/v1-package",
+  "summary": "Command-bundle package for page_number_apply: native PageNumPos insertion with explicit position, start number and SideChar decoration.",
+  "module": "app.command_packages.commands.page_number_apply.run",
+  "read_only": false,
+  "dirty_default": true,
+  "allowed_keys": [
+    "op",
+    "operation",
+    "label",
+    "position",
+    "start_number",
+    "side_char",
+    "confirm_layout"
+  ]
+}

@@ -22,6 +22,7 @@ runtime_stub.LocalCliRuntimeError = LocalCliRuntimeError
 # The static helper never exercises timeout construction; alias the
 # dependency-light error class so the service import remains complete.
 setattr(runtime_stub, 'LocalCliRuntimeTimeoutError', LocalCliRuntimeError)
+setattr(runtime_stub, 'LocalCliNativeCustodyHeldError', LocalCliRuntimeError)
 runtime_stub.LocalCliRuntimeHandle = type('LocalCliRuntimeHandle', (), {})
 runtime_stub._RECOVERY_STATES = {
     'none', 'pending_execution', 'quarantined', 'saving', 'failed', 'preserved',

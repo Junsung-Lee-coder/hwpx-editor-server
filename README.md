@@ -10,6 +10,7 @@ What you get:
 
 - **Find and navigate:** text search with page and cursor context, table and control inventories.
 - **Targeted edits:** text entry, character styles, bullets, tables, cell formatting, paragraph and control operations. Each edit is validated before it touches the document.
+- **Page numbers and official-document numbering:** `hwpx page-number-apply` inserts one native page number at one of six top/bottom positions with a start number and optional native dash side characters (arbitrary prefix/suffix text is refused). Before editing it reads an in-memory structural snapshot of the live document (body, run/paragraph/table/picture formatting, headers/footers, styles, numberings, media references) and refuses with no mutation when that snapshot is unreadable; afterwards only the new native page-number control and its settings may differ, and a changed or unreadable post-state is reported as an unknown outcome (not as inserted) with the document left as is. `hwpx official-numbering-apply` applies native outline numbering levels 1-4 (`1.` → `가.` → `1)` → `가)`) to one proven paragraph, verifying the current section's outline definition by readback and defining it only when no other outline paragraph in that section depends on it. It applies the level with one native ParagraphShape action (HeadingType plus Level) when the verified definition already exists, requires the same structural snapshot to be readable before the call and unchanged outside the target paragraph's numbering afterwards, and refuses a target it cannot identify uniquely. Both are bundle-backed, do not save automatically, and need rendered proof before save. A bounded Windows/Hancom check has confirmed bottom-center page numbering starting at 7 without dash decoration through save and reopen. The saved HWPX contains native page-number and page-restart controls, and the protected-content checks passed. Rendered numbering on every page, other settings, insertion/deletion renumbering, Undo, and native official-document numbering remain unverified.
 - **Rendered proof:** page screenshots and PDF renders, so you check the edit visually. Page count alone is never treated as proof.
 - **Honest failure reporting:** when Hancom's outcome is unknown, the server says so and keeps the evidence. It does not guess or silently retry.
 
@@ -59,6 +60,24 @@ status -> open -> find/where/select -> edit -> render proof -> save -> close
 The CLI turns each command into an explicit command bundle, the server runs it against Hancom under a runtime lock, and the CLI formats the structured result locally. Review the rendered proof before treating an edit as done.
 
 The CLI picks its server in this order: `--base-url`, the URL cached by `open`, `HWPX_BASE_URL`, then `http://127.0.0.1:8765`.
+
+### Native page numbers and official-document numbering
+
+After opening a working copy, use the existing bundle-backed commands:
+
+```text
+hwpx page-number-apply --position bottom-center --start-number 3 --side-char dash --confirm-layout
+hwpx official-numbering-apply --match "First item" --expected-page 1 --level 1 --confirm-layout
+hwpx official-numbering-apply --match "Second item" --expected-page 1 --level 2 --confirm-layout
+hwpx official-numbering-apply --match "Third item" --expected-page 1 --level 3 --confirm-layout
+hwpx official-numbering-apply --match "Fourth item" --expected-page 1 --level 4 --confirm-layout
+```
+
+- Page positions are `top-left`, `top-center`, `top-right`, `bottom-left`, `bottom-center`, `bottom-right`. Start numbers are integers from 1 through 65535. `--side-char dash` (or the pair `--prefix - --suffix -`) requests native `- 1 -` decoration; `none` is the default. Arbitrary prefix/suffix strings are not supported.
+- Official levels are native outline metadata, not characters inserted into the paragraph. Use a unique match in the intended body paragraph and its observed page. If match text begins with a hyphen, keep it attached to its option, for example `--match=--항목`.
+- Applying identical page settings or the same verified outline level again is a no-op: no native mutation is issued and the step reports `dirty=false`. It does not clear dirtiness from earlier edits. A conflicting existing page number or a paragraph using another list/bullet is refused rather than overwritten.
+- These two commands, and `bundle-run`, `bundle` and `tx-commit`, exit 0 only when the backend explicitly reports `ok=true`; a refusal or uncertain outcome exits 1, including with `--json`. Failure output keeps the step error and mutation evidence and does not claim successful execution. An unknown native outcome is not permission to retry, save, close or discard automatically.
+- No command here saves automatically. Render all affected pages before accepting the working copy. Native Hancom save/reopen, automatic renumbering and Undo behavior still require separate Windows evidence; portable tests do not establish them. Stateless queued numbering jobs remain unsupported.
 
 ## Security
 

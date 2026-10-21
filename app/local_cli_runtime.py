@@ -46,6 +46,25 @@ class LocalCliRuntimeTimeoutError(LocalCliRuntimeError):
         self.command_state = command_state
 
 
+class LocalCliNativeCustodyHeldError(LocalCliRuntimeError):
+    """A command reached a native mutator and its outcome is unknown; the owning STA is retained, not released.
+
+    The original cause (an exception or a control-flow signal such as ``KeyboardInterrupt``) is ``__cause__``.
+    Errors raised while reporting the held state (journal/status/pruning) are kept in ``reporting_errors``.
+    """
+
+    mutation_state = 'unknown'
+    mutation_may_have_persisted = True
+
+    def __init__(self, message: str):
+        super().__init__(message)
+        self.reporting_errors: list[BaseException] = []
+
+
+_HELD_CLOSE_MESSAGE = (
+    'The live local CLI session holds a numbering command whose native outcome is unknown; '
+    'it is retained and is not closed, discarded or released by this runtime.'
+)
 MAX_RUNTIME_COMMAND_HISTORY = 100
 MAX_RUNTIME_JOURNAL_VALUE_CHARS = 2048
 MAX_RUNTIME_JOURNAL_LIST_ITEMS = 100
@@ -1071,6 +1090,7 @@ class LocalCliRuntimeHandle:
     source_filename: str
     log_path: Path
     hwp: object
+    hold_native_custody: Callable[[str, BaseException | None], None] | None = None
 
 
 @dataclass
@@ -1094,6 +1114,7 @@ class _LiveCommand:
     failed_step_count: int = 0
     reconciliation_data: dict[str, Any] = dataclass_field(default_factory=dict)
     recovery_for_command_id: str | None = None
+    custody_held: bool = False
     completed_event: threading.Event = dataclass_field(default_factory=threading.Event)
 
 
@@ -1129,6 +1150,8 @@ class LocalCliLiveSession:
         self._terminal_error: LocalCliRuntimeError | None = None
         self._quarantined = False
         self._allow_native_cleanup = False
+        self._native_custody_held = False
+        self._active_command: _LiveCommand | None = None
         self._active_hwp: object | None = None
         self._active_handle: LocalCliRuntimeHandle | None = None
         self._recovery_target_id: str | None = None
@@ -1166,6 +1189,8 @@ class LocalCliLiveSession:
             'step_count': int(command.step_count),
             'failed_step_count': int(command.failed_step_count),
         }
+        if command.custody_held:
+            record['custody_held'] = True
         if command.result is not None and command.state in {
             'succeeded', 'failed', 'completed_after_timeout', 'failed_after_timeout',
         }:
@@ -1375,6 +1400,7 @@ class LocalCliLiveSession:
                 item for item in commands
                 if item.get('state') == 'timed_out_pending_reconciliation'
                 or (bool(item.get('timed_out')) and not bool(item.get('reconciled')))
+                or bool(item.get('custody_held'))
             ]
             settled = [item for item in commands if item not in protected]
             payload['commands'] = settled[-MAX_RUNTIME_COMMAND_HISTORY:] + protected
@@ -1404,6 +1430,7 @@ class LocalCliLiveSession:
             command for command in commands
             if command.state == 'timed_out_pending_reconciliation'
             or (command.timed_out and not command.reconciled)
+            or command.custody_held
         ]
         settled = [command for command in commands if command not in protected]
         keep = {command.command_id for command in settled[-MAX_RUNTIME_COMMAND_HISTORY:]}
@@ -1414,9 +1441,78 @@ class LocalCliLiveSession:
             elif command.reconciled:
                 command.handler = None
 
+    def _hold_native_custody(self, command: _LiveCommand, reason: str, cause: BaseException | None) -> None:
+        """Retain the owning STA after a numbering mutator was reached with an unknown outcome.
+
+        Only in-memory state is changed here, so the hold is published before any journal/status write can fail.
+        There is no operator release in this runtime: the hold lasts for the life of the process.
+        """
+
+        with self._state_lock:
+            error = command.error if isinstance(command.error, LocalCliNativeCustodyHeldError) else LocalCliNativeCustodyHeldError(reason)
+            if cause is not None and error.__cause__ is None:
+                error.__cause__ = cause
+            command.error = error
+            command.custody_held = True
+            command.may_have_mutated = True
+            self._native_custody_held = True
+            self._quarantined = True
+            self._allow_native_cleanup = False
+            if self._terminal_error is None:
+                self._terminal_error = error
+            data = self._ensure_reconciliation_data(command)
+            data['may_have_mutated'] = True
+            data['error_code'] = 'NATIVE_CUSTODY_HELD'
+            data['recovery'] = {'state': 'quarantined'}
+
+    def _hold_active_command_custody(self, reason: str, cause: BaseException | None = None) -> None:
+        command = self._active_command
+        if command is None:
+            raise LocalCliRuntimeError('No local CLI command is active on the owning thread.')
+        self._hold_native_custody(command, reason, cause)
+
+    def _settle_held_command(
+        self,
+        command: _LiveCommand,
+        *,
+        result: Any = None,
+        escaped: bool = False,
+        reporting_error: BaseException | None = None,
+    ) -> None:
+        """Record a held command as failed/unknown and resolve its waiting caller without raising."""
+
+        error = command.error if isinstance(command.error, LocalCliNativeCustodyHeldError) else None
+        if error is None:
+            error = LocalCliNativeCustodyHeldError('The native command outcome is unknown and the session is held.')
+            command.error = error
+        if reporting_error is not None:
+            error.reporting_errors.append(reporting_error)
+        command.semantic_ok = False
+        command.may_have_mutated = True
+        command.state = 'failed_after_timeout' if command.timed_out else 'failed'
+        try:
+            self._persist_command(command)
+        except BaseException as persist_error:  # noqa: BLE001 - the hold is already published; keep the owning thread
+            error.reporting_errors.append(persist_error)
+        if not command.future.done():
+            if escaped or error.reporting_errors:
+                command.future.set_exception(error)
+            else:
+                command.future.set_result(result)
+
+    def _flush_held_custody_journal(self) -> None:
+        for command in list(self._commands_by_id.values()):
+            if command.custody_held:
+                try:
+                    self._persist_command(command)
+                except Exception:
+                    pass
+
     def has_unreconciled_reconciliation(self) -> bool:
         self._ensure_lifecycle_state()
         with self._state_lock:
+            if self._native_custody_held:
+                return True
             return any(
                 command.timed_out
                 and command.state in {
@@ -1442,6 +1538,9 @@ class LocalCliLiveSession:
             if command is None:
                 return read_command_journal(self.session_root, command_id)
             if command.reconciled:
+                return self._command_record(command)
+            if self._native_custody_held:
+                self._flush_held_custody_journal()
                 return self._command_record(command)
             if command.state == 'timed_out_pending_reconciliation':
                 return self._command_record(command)
@@ -1506,6 +1605,9 @@ class LocalCliLiveSession:
             command = self._commands_by_id.get(command_id)
             if command is None:
                 return read_command_journal(self.session_root, command_id)
+            if self._native_custody_held:
+                self._flush_held_custody_journal()
+                return self._command_record(command)
             data = self._ensure_reconciliation_data(command)
             recovery = data.get('recovery') if isinstance(data.get('recovery'), dict) else {}
             if recovery.get('state') != 'preserved':
@@ -1647,6 +1749,9 @@ class LocalCliLiveSession:
         with self._state_lock:
             if self._closed.is_set():
                 return
+            if self._native_custody_held and not self._allow_native_cleanup:
+                self._flush_held_custody_journal()
+                raise LocalCliRuntimeError(_HELD_CLOSE_MESSAGE)
             if self._quarantined and not self._allow_native_cleanup:
                 raise LocalCliRuntimeError(
                     'The live local CLI session is quarantined; reconcile and commit the recovery artifact before close.'
@@ -1847,6 +1952,10 @@ class LocalCliLiveSession:
             self._quarantined = False
         if not hasattr(self, '_allow_native_cleanup'):
             self._allow_native_cleanup = False
+        if not hasattr(self, '_native_custody_held'):
+            self._native_custody_held = False
+        if not hasattr(self, '_active_command'):
+            self._active_command = None
         if not hasattr(self, '_active_hwp'):
             self._active_hwp = None
         if not hasattr(self, '_active_handle'):
@@ -2070,6 +2179,7 @@ class LocalCliLiveSession:
                 source_filename=self.source_filename,
                 log_path=self.log_path,
                 hwp=hwp,
+                hold_native_custody=self._hold_active_command_custody,
             )
             self._active_hwp = hwp
             self._active_handle = handle
@@ -2108,11 +2218,33 @@ class LocalCliLiveSession:
             while True:
                 command = self._commands.get()
                 if command.name == '__close__':
+                    refusal: LocalCliRuntimeError | None = None
                     with self._state_lock:
-                        command.state = 'running'
-                        command.result = {'ok': True}
-                        self._apply_normalized_outcome(command, command.result)
-                        command.state = 'completed_after_timeout' if command.timed_out else 'succeeded'
+                        if self._native_custody_held and not self._allow_native_cleanup:
+                            # Admitted before a numbering callback became held; custody is re-checked at dequeue.
+                            refusal = LocalCliRuntimeError(_HELD_CLOSE_MESSAGE)
+                            command.error = refusal
+                            self._apply_normalized_outcome(command, error=refusal)
+                            command.state = 'failed'
+                            self._closing = False
+                            self._close_future = None
+                            held_commands = [c for c in self._commands_by_id.values() if c.custody_held]
+                            if held_commands:
+                                self._last_command_id = max(held_commands, key=lambda c: c.sequence).command_id
+                        else:
+                            command.state = 'running'
+                            command.result = {'ok': True}
+                            self._apply_normalized_outcome(command, command.result)
+                            command.state = 'completed_after_timeout' if command.timed_out else 'succeeded'
+                    if refusal is not None:
+                        command.completed_event.set()
+                        if not command.future.done():
+                            command.future.set_exception(refusal)
+                        try:
+                            self._persist_command(command)
+                        except Exception:
+                            pass
+                        continue
                     command.completed_event.set()
                     self._persist_command(command)
                     if not command.future.done():
@@ -2161,6 +2293,7 @@ class LocalCliLiveSession:
                             command.completed_event.set()
                         continue
                     command.state = 'running'
+                self._active_command = command
                 try:
                     update_runtime_status(
                         self.log_path,
@@ -2188,30 +2321,58 @@ class LocalCliLiveSession:
                         # future resolution together.  A request timeout must
                         # not observe a half-committed successful mutation and
                         # relabel it as a failed/retryable command.
+                        if command.custody_held:
+                            self._settle_held_command(command, result=command.result)
+                        else:
+                            self._persist_command(command)
+                            if not command.future.done():
+                                command.future.set_result(command.result)
+                except Exception as exc:
+                    if command.custody_held:
+                        with self._state_lock:
+                            self._settle_held_command(command, reporting_error=exc)
+                    else:
+                        command.error = exc
+                        self._apply_normalized_outcome(command, error=exc)
+                        with self._state_lock:
+                            command.state = 'failed_after_timeout' if command.timed_out else 'failed'
+                            if command.timed_out:
+                                data = self._ensure_reconciliation_data(command)
+                                recovery = data.get('recovery') if isinstance(data.get('recovery'), dict) else {}
+                                recovery['state'] = 'quarantined'
+                                data['recovery'] = recovery
+                        if isinstance(exc, LocalCliRuntimeError):
+                            wrapped = exc
+                        else:
+                            wrapped = LocalCliRuntimeError(str(exc))
                         self._persist_command(command)
                         if not command.future.done():
-                            command.future.set_result(command.result)
-                except Exception as exc:
-                    command.error = exc
-                    self._apply_normalized_outcome(command, error=exc)
+                            command.future.set_exception(wrapped)
+                except BaseException as signal:
+                    if getattr(signal, 'mutation_may_have_persisted', False) is not True:
+                        raise
+                    self._hold_native_custody(
+                        command,
+                        f'A native numbering command was interrupted by {type(signal).__name__} after it reached a '
+                        'mutating call; its outcome is unknown and the session is held.',
+                        signal,
+                    )
+                    self._apply_normalized_outcome(command, error=command.error)
                     with self._state_lock:
-                        command.state = 'failed_after_timeout' if command.timed_out else 'failed'
-                        if command.timed_out:
-                            data = self._ensure_reconciliation_data(command)
-                            recovery = data.get('recovery') if isinstance(data.get('recovery'), dict) else {}
-                            recovery['state'] = 'quarantined'
-                            data['recovery'] = recovery
-                    if isinstance(exc, LocalCliRuntimeError):
-                        wrapped = exc
-                    else:
-                        wrapped = LocalCliRuntimeError(str(exc))
-                    self._persist_command(command)
-                    if not command.future.done():
-                        command.future.set_exception(wrapped)
+                        self._settle_held_command(command, escaped=True)
                 finally:
+                    self._active_command = None
                     command.completed_event.set()
-                    self._persist_command(command)
-                    self._prune_in_memory_commands()
+                    if command.custody_held:
+                        for report in (lambda: self._persist_command(command), self._prune_in_memory_commands):
+                            try:
+                                report()
+                            except BaseException as report_error:  # noqa: BLE001 - held command; keep the owning thread
+                                if isinstance(command.error, LocalCliNativeCustodyHeldError):
+                                    command.error.reporting_errors.append(report_error)
+                    else:
+                        self._persist_command(command)
+                        self._prune_in_memory_commands()
         except Exception as exc:
             wrapped = exc if isinstance(exc, LocalCliRuntimeError) else LocalCliRuntimeError(str(exc))
             if not self._start_future.done():

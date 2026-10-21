@@ -375,6 +375,8 @@ _BUNDLE_ALLOWED_OPS = {
     'typography_overview',
     'style_inspect',
     'paragraph_style_apply_exact',
+    'page_number_apply',
+    'official_numbering_apply',
     'paragraph_delete_exact',
     'paragraph_join_previous_exact',
     'paragraph_join_next_exact',

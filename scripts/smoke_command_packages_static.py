@@ -69,6 +69,8 @@ _VALIDATION_SAMPLES: dict[str, dict[str, object]] = {
     'typography_overview': {'scope': 'document', 'max_samples': 3, 'max_sections': 3, 'max_styles': 3},
     'style_inspect': {'match': 'hello', 'keep_position': True},
     'paragraph_style_apply_exact': {'match': 'hello', 'expected_page': 1, 'confirm_layout': True},
+    'page_number_apply': {'position': 'bottom-center', 'start_number': 1, 'side_char': 'none', 'confirm_layout': True},
+    'official_numbering_apply': {'match': 'hello', 'expected_page': 1, 'level': 1, 'confirm_layout': True},
     'paragraph_delete_exact': {'match': 'hello', 'expected_page': 1, 'confirm_remove': True},
     'paragraph_join_previous_exact': {'match': 'hello', 'expected_page': 1, 'confirm_layout': True},
     'paragraph_join_next_exact': {'match': 'hello', 'expected_page': 1, 'confirm_layout': True},

@@ -171,6 +171,8 @@ BUNDLE_COMMAND_NOTES: dict[str, str] = {
     'qa-profile': 'export_pdf bundle plus local token/freshness QA manifest',
     'paragraph-style-apply-exact': 'bundle-backed paragraph style mutation; no auto-save; rendered proof required before save',
     'paragraph-delete-exact': 'bundle-backed guarded paragraph removal; page/neighbor guards and rendered proof required before save',
+    'page-number-apply': 'bundle-backed native page-number insertion; refuses conflicting existing page numbers and arbitrary prefix/suffix; no auto-save; rendered proof of every page required before save',
+    'official-numbering-apply': 'bundle-backed native outline numbering (levels 1-4) on one proven paragraph; no number text typed; no auto-save; rendered proof of the numbering sequence required before save',
     'text-table-to-native': 'bundle-backed native table insertion from a parsed pipe table, with optional split-by-column planning; no source text deletion; rendered proof required before cleanup/save',
     'text-table-cleanup-selected': 'bundle-backed cleanup mutation; deletes only exact active selected source text outside table/cell context; rendered before/after proof required before save',
     'table4-anchor-range-replace': 'bundle-backed guarded Table 4 range replacement; selects/hashes start→before Figure 5, deletes old source text, inserts native 4-column table; rendered proof required before save',
@@ -587,6 +589,33 @@ def build_parser() -> argparse.ArgumentParser:
     paragraph_style_parser.add_argument('--pagebreak-before', type=int, choices=(0, 1), help='Set native PagebreakBefore paragraph flag to 0 or 1')
     paragraph_style_parser.add_argument('--confirm-layout', action='store_true', required=True, help='Required explicit confirmation for paragraph layout/style mutation')
     paragraph_style_parser.add_argument('--json', action='store_true', help='Print normalized command-bundle parser JSON')
+
+    page_number_parser = subparsers.add_parser(
+        'page-number-apply',
+        help='Bundle-backed native page-number insertion; requires position and layout confirmation',
+    )
+    page_number_parser.add_argument(
+        '--position',
+        required=True,
+        choices=('top-left', 'top-center', 'top-right', 'bottom-left', 'bottom-center', 'bottom-right'),
+        help='Native page-number position',
+    )
+    page_number_parser.add_argument('--start-number', type=int, default=1, help='First page number, 1-65535 (default 1)')
+    page_number_parser.add_argument('--side-char', choices=('none', 'dash'), help="Side characters: none, or '-' on both sides")
+    page_number_parser.add_argument('--prefix', help="Only '-' (paired with --suffix '-') or '' is supported")
+    page_number_parser.add_argument('--suffix', help="Only '-' (paired with --prefix '-') or '' is supported")
+    page_number_parser.add_argument('--confirm-layout', action='store_true', required=True, help='Required explicit confirmation for page layout mutation')
+    page_number_parser.add_argument('--json', action='store_true', help='Print normalized command-bundle parser JSON')
+
+    official_numbering_parser = subparsers.add_parser(
+        'official-numbering-apply',
+        help='Bundle-backed native outline numbering (levels 1-4) for one paragraph; requires match, expected page, level, and confirmation',
+    )
+    official_numbering_parser.add_argument('--match', required=True, help='Unique paragraph text/anchor to number')
+    official_numbering_parser.add_argument('--expected-page', type=int, required=True, help='Expected rendered/page evidence for the target')
+    official_numbering_parser.add_argument('--level', type=int, required=True, help='Official outline level 1-4')
+    official_numbering_parser.add_argument('--confirm-layout', action='store_true', required=True, help='Required explicit confirmation for numbering mutation')
+    official_numbering_parser.add_argument('--json', action='store_true', help='Print normalized command-bundle parser JSON')
 
     paragraph_delete_parser = subparsers.add_parser(
         'paragraph-delete-exact',
@@ -1632,6 +1661,27 @@ def _paragraph_style_apply_bundle_args(args: argparse.Namespace) -> list[str]:
         bundle_args.extend(['--widow-orphan', args.widow_orphan])
     if args.pagebreak_before is not None:
         bundle_args.extend(['--pagebreak-before', str(args.pagebreak_before)])
+    if args.confirm_layout:
+        bundle_args.append('--confirm-layout')
+    return bundle_args
+
+
+def _page_number_apply_bundle_args(args: argparse.Namespace) -> list[str]:
+    bundle_args = ['--position', args.position, '--start-number', str(args.start_number)]
+    if args.side_char is not None:
+        bundle_args.extend(['--side-char', args.side_char])
+    if args.prefix is not None:
+        bundle_args.extend(['--prefix', args.prefix])
+    if args.suffix is not None:
+        bundle_args.extend(['--suffix', args.suffix])
+    if args.confirm_layout:
+        bundle_args.append('--confirm-layout')
+    return bundle_args
+
+
+def _official_numbering_apply_bundle_args(args: argparse.Namespace) -> list[str]:
+    # This parsed text is data, even when it starts with an option-like hyphen.
+    bundle_args = [f'--match={args.match}', '--expected-page', str(args.expected_page), '--level', str(args.level)]
     if args.confirm_layout:
         bundle_args.append('--confirm-layout')
     return bundle_args
@@ -3499,6 +3549,34 @@ def main(argv: list[str] | None = None) -> int:
             _print_bundle_payload(payload, json_output=bool(args.json))
             return 0
 
+        if args.command in {'page-number-apply', 'official-numbering-apply'}:
+            is_page_number = args.command == 'page-number-apply'
+            bundle_args = _page_number_apply_bundle_args(args) if is_page_number else _official_numbering_apply_bundle_args(args)
+            spec, payload = _execute_named_bundle(base_url, args.command, bundle_args)
+            succeeded = payload.get('ok') is True
+            op = 'page_number_apply' if is_page_number else 'official_numbering_apply'
+            unchanged = succeeded and any(
+                step.get('op') == op and step.get('result', {}).get('result', {}).get('changed') is False
+                for step in payload.get('steps', [])
+            )
+            if not args.json:
+                if unchanged:
+                    print(f'bundle: {spec.name}')
+                    print('commit: requested native numbering already applied; no document change; not saved')
+                elif succeeded:
+                    _print_bundle_plan(spec.name, spec.local_metadata())
+                    action = 'page-number action' if is_page_number else 'outline numbering'
+                    print(f'commit: native {action} executed against the working copy; not saved')
+                else:
+                    print('commit: numbering command stopped; not saved')
+                if succeeded:
+                    scope = 'every page' if is_page_number else 'the numbering sequence'
+                    print(f'next: run rendered proof of {scope} before save; use `hwpx save` only after proof passes.')
+                else:
+                    print('next: inspect the failure evidence; an unknown native outcome must not be retried, saved or closed automatically.')
+            _print_bundle_payload(payload, json_output=bool(args.json))
+            return 0 if succeeded else 1
+
         if args.command == 'paragraph-delete-exact':
             bundle_args = _paragraph_delete_bundle_args(args)
             spec, payload = _execute_named_bundle(base_url, 'paragraph-delete-exact', bundle_args)
@@ -4056,12 +4134,17 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == 'tx-commit':
             request_payload = _load_tx_server_payload(args.plan_json)
             payload = post_json(base_url, '/local-cli/command-bundle', request_payload)
+            succeeded = payload.get('ok') is True
             if not args.json:
-                print('transaction committed: server_payload from preview was posted unchanged')
+                outcome = 'committed' if succeeded else 'stopped'
+                print(f'transaction {outcome}: server_payload from preview was posted unchanged')
                 print('commit: working copy may be dirty; not saved')
-                print('next: run rendered proof before save; use `hwpx save` only after proof passes.')
+                if succeeded:
+                    print('next: run rendered proof before save; use `hwpx save` only after proof passes.')
+                else:
+                    print('next: inspect failure evidence; do not retry an unknown native outcome automatically.')
             _print_bundle_payload(payload, json_output=bool(args.json))
-            return 0
+            return 0 if succeeded else 1
 
         if args.command == 'bundle-dump':
             spec = build_named_bundle(args.bundle_name, args.bundle_args)
@@ -4083,16 +4166,16 @@ def main(argv: list[str] | None = None) -> int:
 
         if args.command == 'bundle-run':
             spec, payload = _execute_named_bundle(base_url, args.bundle_name, args.bundle_args)
-            if not args.json:
+            if not args.json and payload.get('ok') is True:
                 _print_bundle_plan(spec.name, spec.local_metadata())
             _print_bundle_payload(payload, json_output=args.json)
-            return 0
+            return 0 if payload.get('ok') is True else 1
 
         if args.command == 'bundle':
             request_payload = _load_bundle_payload(args.json_file)
             payload = post_json(base_url, '/local-cli/command-bundle', request_payload)
             _print_bundle_payload(payload, json_output=args.json)
-            return 0
+            return 0 if payload.get('ok') is True else 1
     except (ApiError, BundleError, StatePersistenceError) as exc:
         message = exc.message if isinstance(exc, ApiError) else str(exc)
         print(f'error: {message}', file=sys.stderr)

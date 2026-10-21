@@ -53,6 +53,7 @@ from app.local_cli_runtime import (
     _bounded_journal_value,
     LocalCliRuntimeError,
     LocalCliRuntimeHandle,
+    LocalCliNativeCustodyHeldError,
     LocalCliRuntimeTimeoutError,
     apply_char_style,
     capture_screenshot_artifact,
@@ -107,12 +108,14 @@ from app.local_cli_service_support import (  # noqa: F401
     _require_observed_cell_format_mutation,
 )
 from app.local_cli_bundle_controls import LocalCliBundleControlsMixin
+from app.local_cli_bundle_numbering import LocalCliBundleNumberingMixin
 from app.local_cli_bundle_paragraphs import LocalCliBundleParagraphsMixin
 from app.local_cli_cell_margins import LocalCliCellMarginsMixin
 
 
 class LocalCliService(
     LocalCliBundleControlsMixin,
+    LocalCliBundleNumberingMixin,
     LocalCliBundleParagraphsMixin,
     LocalCliCellMarginsMixin,
 ):
@@ -2660,6 +2663,24 @@ class LocalCliService(
                 'pagebreak_before',
                 'confirm_layout',
             },
+            'page_number_apply': {
+                'op',
+                'operation',
+                'label',
+                'position',
+                'start_number',
+                'side_char',
+                'confirm_layout',
+            },
+            'official_numbering_apply': {
+                'op',
+                'operation',
+                'label',
+                'match',
+                'expected_page',
+                'level',
+                'confirm_layout',
+            },
             'paragraph_delete_exact': {
                 'op',
                 'operation',
@@ -3756,6 +3777,9 @@ class LocalCliService(
                     'semantic_ok': command_status.get('semantic_ok'),
                     'recovery': command_status.get('recovery'),
                 }
+                if command_status.get('custody_held') is True:
+                    result['native_custody_held'] = True
+                    result['_local_cli_command']['custody_held'] = True
             command_sequence = command_status.get('sequence')
             if isinstance(command_sequence, int) and command_sequence >= native_command_sequence:
                 binding['_expected_native_command_sequence'] = native_command_sequence
@@ -3763,6 +3787,28 @@ class LocalCliService(
                 binding.pop('pending_command', None)
             return result
         except LocalCliRuntimeError as exc:
+            if isinstance(exc, LocalCliNativeCustodyHeldError):
+                # The owning STA is retained with a numbering outcome that is not proven. Project the dirty,
+                # held state into the binding and report an error; never treat the held session as stale.
+                binding['_expected_command_generation'] = command_generation
+                try:
+                    held_sequence = int(self.runtime_manager.command_status(session_id).get('sequence'))
+                except (TypeError, ValueError, LocalCliRuntimeError):
+                    held_sequence = native_command_sequence
+                binding['_expected_native_command_sequence'] = native_command_sequence
+                binding['native_command_sequence'] = max(native_command_sequence, held_sequence)
+                binding['working_copy_dirty'] = True
+                binding['native_custody_held'] = True
+                try:
+                    self._save_binding(binding)
+                except Exception as save_error:
+                    exc.reporting_errors.append(save_error)
+                raise LocalCliServiceError(
+                    'Local CLI native command left the live session held: a numbering command reached a native '
+                    'mutator and its outcome is unknown. The session is retained and is not closed, retried or '
+                    'released by this service.',
+                    status_code=500,
+                ) from exc
             if isinstance(exc, LocalCliRuntimeTimeoutError):
                 try:
                     command_status = self.runtime_manager.command_status(session_id, exc.command_id)
@@ -4570,9 +4616,13 @@ class LocalCliService(
         if isinstance(active_binding, dict) and session_id:
             if pending_reconciliation is not None:
                 live_bound = False
+            elif active_binding.get('native_custody_held') is True:
+                live_bound = False
             elif live_bound:
                 live_bound = self._probe_live_binding(active_binding)
-            if not live_bound:
+            if not live_bound and not (
+                isinstance(active_binding, dict) and active_binding.get('native_custody_held') is True
+            ):
                 active_binding = self._read_binding()
                 if isinstance(active_binding, dict):
                     if self._binding_has_pending_reconciliation(active_binding):
@@ -4620,6 +4670,10 @@ class LocalCliService(
                 f'reconcile command {pending_reconciliation.get("command_id")}'
                 if pending_reconciliation is not None
                 else
+                f'session {session_id} is held after a numbering command with an unknown native outcome; '
+                'it is retained and needs operator release'
+                if isinstance(active_binding, dict) and active_binding.get('native_custody_held') is True
+                else
                 f'retry close cleanup for session {session_id}'
                 if cleanup_pending
                 else
@@ -4638,6 +4692,7 @@ class LocalCliService(
             ),
             'live_session_bound': live_bound,
             'command_reconciliation': pending_reconciliation,
+            'native_custody_held': bool((active_binding or {}).get('native_custody_held')),
             'working_copy_dirty': bool((active_binding or {}).get('working_copy_dirty')),
             'command_bundle_route_active': True,
             'server_primitive_version': 'local-cli-command-bundle/v2-style-inspect',
@@ -6739,6 +6794,7 @@ class LocalCliService(
             artifacts: dict[str, Any] = {}
             dirty = False
             ok = True
+            custody_held = False
 
             for index, step in enumerate(cleaned_steps, start=1):
                 step_before = self._bundle_compact_snapshot(handle.hwp)
@@ -6759,9 +6815,12 @@ class LocalCliService(
                         'warnings': step_warnings,
                     }
                     warnings.extend(step_warnings)
-                except Exception as exc:
-                    ok = False
+                except BaseException as exc:
                     mutation_may_have_persisted = bool(getattr(exc, 'mutation_may_have_persisted', False))
+                    held = mutation_may_have_persisted and self._hold_unknown_numbering(handle, step, exc)
+                    if not isinstance(exc, Exception) and not held:
+                        raise
+                    ok = False
                     rollback = getattr(exc, 'rollback', {})
                     if not isinstance(rollback, dict):
                         rollback = {}
@@ -6773,7 +6832,7 @@ class LocalCliService(
                         'ok': False,
                         'dirty': mutation_may_have_persisted,
                         'before': step_before,
-                        'after': self._bundle_compact_snapshot(handle.hwp),
+                        'after': {} if held else self._bundle_compact_snapshot(handle.hwp),
                         'error': f'{type(exc).__name__}: {exc}',
                         'mutation_may_have_persisted': mutation_may_have_persisted,
                         'rollback': rollback,
@@ -6782,11 +6841,14 @@ class LocalCliService(
                             'rollback': rollback,
                         },
                     }
+                    if held:
+                        status['native_custody_held'] = True
+                        custody_held = True
                     step_results.append(status)
                     break
                 step_results.append(status)
 
-            after_location = snapshot_live_location(
+            after_location = {} if custody_held else snapshot_live_location(
                 hwp=handle.hwp,
                 source_filename=handle.source_filename,
                 working_copy_id=handle.session_id,
@@ -6834,14 +6896,27 @@ class LocalCliService(
             binding=binding,
             artifacts=result.get('artifacts') if isinstance(result.get('artifacts'), dict) else {},
         )
-        binding = self._update_live_binding(
-            binding,
-            location=location,
-            artifacts=artifacts,
-            dirty=dirty,
-            clear_last_find=dirty,
-            clear_selection_cache=dirty,
-        )
+        native_custody_held = result.get('native_custody_held') is True
+        if native_custody_held:
+            # The live document state after the numbering mutator is unknown, so the last known location and
+            # selection are not refreshed from it; the binding records only the dirty, held state.
+            dirty = True
+            binding['working_copy_dirty'] = True
+            binding['native_custody_held'] = True
+            binding['last_find'] = None
+            binding['selected_range'] = None
+            binding['last_selection'] = None
+            binding['unsafe_selection_for_type'] = None
+            binding['updated_at'] = utc_now_iso()
+        else:
+            binding = self._update_live_binding(
+                binding,
+                location=location,
+                artifacts=artifacts,
+                dirty=dirty,
+                clear_last_find=dirty,
+                clear_selection_cache=dirty,
+            )
         if dirty:
             dirty_step_count = sum(1 for step in (result.get('steps') or []) if isinstance(step, dict) and step.get('dirty'))
             binding['pending_logical_undo_count'] = max(1, dirty_step_count)
@@ -6882,6 +6957,7 @@ class LocalCliService(
                 binding=binding,
             ),
             **self._compact_state_payload(location=location),
+            **({'native_custody_held': True} if native_custody_held else {}),
         }
 
     def screenshot(self, *, session_id: str | None = None) -> dict[str, Any]:
