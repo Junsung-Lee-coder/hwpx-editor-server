@@ -79,6 +79,7 @@ class LocalCliCellReplaceRequest(BaseModel):
 
 class LocalCliFontSizeRequest(BaseModel):
     size_pt: float = Field(gt=0)
+    at_caret: bool = False
     session_id: str | None = None
 
 
@@ -89,6 +90,7 @@ class LocalCliBoldRequest(BaseModel):
 
 class LocalCliFontRequest(BaseModel):
     face_name: str
+    at_caret: bool = False
     session_id: str | None = None
 
 
@@ -121,6 +123,7 @@ class LocalCliPyCallRequest(BaseModel):
 
 class LocalCliActionRequest(BaseModel):
     action_name: str
+    allow_media_change: bool = False
     session_id: str | None = None
 
 
@@ -391,7 +394,7 @@ def build_local_cli_router(*, settings: Any, interactive_sessions: Any, service:
     @router.post('/local-cli/fontsize')
     def local_cli_fontsize(request: LocalCliFontSizeRequest) -> dict[str, Any]:
         try:
-            return service.font_size(size_pt=request.size_pt, session_id=request.session_id)
+            return service.font_size(size_pt=request.size_pt, at_caret=request.at_caret, session_id=request.session_id)
         except Exception as exc:
             raise as_http_error(exc) from exc
 
@@ -405,7 +408,7 @@ def build_local_cli_router(*, settings: Any, interactive_sessions: Any, service:
     @router.post('/local-cli/font')
     def local_cli_font(request: LocalCliFontRequest) -> dict[str, Any]:
         try:
-            return service.font_family(face_name=request.face_name, session_id=request.session_id)
+            return service.font_family(face_name=request.face_name, at_caret=request.at_caret, session_id=request.session_id)
         except Exception as exc:
             raise as_http_error(exc) from exc
 
@@ -466,7 +469,9 @@ def build_local_cli_router(*, settings: Any, interactive_sessions: Any, service:
     @router.post('/local-cli/action')
     def local_cli_action(request: LocalCliActionRequest) -> dict[str, Any]:
         try:
-            return service.action(action_name=request.action_name, session_id=request.session_id)
+            return service.action(
+                action_name=request.action_name, allow_media_change=request.allow_media_change, session_id=request.session_id
+            )
         except Exception as exc:
             raise as_http_error(exc) from exc
 

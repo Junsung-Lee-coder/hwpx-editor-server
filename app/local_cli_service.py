@@ -115,6 +115,7 @@ from app.local_cli_cell_margins import LocalCliCellMarginsMixin
 from app.local_cli_table_structure import LocalCliTableStructureMixin
 from app.local_cli_layout import LocalCliLayoutMixin
 from app.local_cli_object_insert import LocalCliObjectInsertMixin
+from app.media_guard import MediaGuardError, media_change_reasons, media_inventory, public_counts
 
 
 # How `hwpx undo` may count a bundle step that changed the document. This
@@ -166,6 +167,12 @@ def _record_bundle_undo_state(binding: dict[str, Any], steps: list[Any], prior: 
         # Drop this bundle's own start marker; an older unverified edit below
         # these steps still blocks undo once they are undone.
         binding['logical_undo_unverified'] = prior.get('logical_undo_unverified')
+
+
+_STYLE_SELECTION_CONSUMED_WARNING = (
+    'No active selection remains after this style edit; reselect the range before the next font or fontsize '
+    'command, or pass --at-caret to style the caret position on purpose.'
+)
 
 
 class LocalCliService(
@@ -2356,6 +2363,23 @@ class LocalCliService(
 
     def _style_scope_label(self, snapshot: dict[str, Any]) -> str:
         return 'current selection' if bool(snapshot.get('has_selection')) else 'current caret position'
+
+    def _style_selection_refusal(self, binding: dict[str, Any], before: dict[str, Any], *, command: str, at_caret: bool) -> str | None:
+        """Refuse a caret-only style edit right after a selected-range style edit whose selection did not survive (issue #2)."""
+        marker = binding.get('style_selection_consumed')
+        if at_caret or not isinstance(marker, dict) or before.get('has_selection') is True:
+            return None
+        return (
+            f"{command} refused; no change was made: the previous {marker.get('command') or 'style'} command applied to a "
+            'selection that is no longer active, so this command would only affect the caret position. Reselect the '
+            f'range (hwpx select ...) and run {command} again, once per property, or pass --at-caret to style the caret '
+            'position on purpose.'
+        )
+
+    def _style_selection_marker(self, command: str, before: dict[str, Any], after: dict[str, Any]) -> dict[str, Any] | None:
+        if before.get('has_selection') is True and after.get('has_selection') is not True:
+            return {'command': command, 'selected_pos': before.get('selected_pos')}
+        return None
 
     def _style_value_label(self, value: float) -> str:
         numeric = float(value)
@@ -6433,34 +6457,45 @@ class LocalCliService(
             'warnings': result.get('warnings'),
         }
 
-    def font_size(self, *, size_pt: float, session_id: str | None = None) -> dict[str, Any]:
+    def font_size(self, *, size_pt: float, at_caret: bool = False, session_id: str | None = None) -> dict[str, Any]:
         binding = self._load_active_binding(session_id=session_id)
         if isinstance(size_pt, bool) or float(size_pt) <= 0:
             raise LocalCliServiceError('fontsize must be a positive point value', status_code=400)
 
         def _handler(handle: LocalCliRuntimeHandle) -> dict[str, Any]:
             before = _snapshot_cursor_context(handle.hwp)
+            refusal = self._style_selection_refusal(binding, before, command='fontsize', at_caret=at_caret)
+            if refusal:
+                return {'refused': refusal}
             style_result = apply_char_style(handle.hwp, height_pt=float(size_pt))
             snapshot = _snapshot_cursor_context(handle.hwp)
             context = _capture_nearby_text_context(handle.hwp)
+            location = snapshot_live_location(
+                hwp=handle.hwp,
+                source_filename=handle.source_filename,
+                working_copy_id=handle.session_id,
+            )
             return {
                 'before': before,
                 'style_result': style_result,
                 'snapshot': snapshot,
                 'context': context,
-                'location': snapshot_live_location(
-                    hwp=handle.hwp,
-                    source_filename=handle.source_filename,
-                    working_copy_id=handle.session_id,
-                ),
+                'location': location,
+                # The context and location reads above select paragraphs, so the selection is judged after them.
+                'final_cursor': _snapshot_cursor_context(handle.hwp),
             }
 
         result = self._execute_live(binding=binding, command_name='fontsize', task_label='local_cli.fontsize', handler=_handler)
+        if result.get('refused'):
+            raise LocalCliServiceError(str(result['refused']), status_code=409)
         before = result.get('before') if isinstance(result.get('before'), dict) else {}
         style_result = result.get('style_result') if isinstance(result.get('style_result'), dict) else {}
         snapshot = result.get('snapshot') if isinstance(result.get('snapshot'), dict) else {}
         context = result.get('context') if isinstance(result.get('context'), dict) else {}
         location = result.get('location') if isinstance(result.get('location'), dict) else {}
+        final_cursor = result.get('final_cursor') if isinstance(result.get('final_cursor'), dict) else {}
+        marker = self._style_selection_marker('fontsize', before, final_cursor)
+        binding['style_selection_consumed'] = marker
         binding = self._update_live_binding(binding, location=location, dirty=True, clear_selection_cache=True)
         size_label = self._style_value_label(float(size_pt))
         scope_label = self._style_scope_label(before)
@@ -6494,6 +6529,8 @@ class LocalCliService(
             'next': 'Run `hwpx save` and rendered proof (`hwpx export-proof-range` or `hwpx page-screenshot`) before trusting layout.',
             'caret_pos': snapshot.get('pos'),
             'context': context,
+            'selection_consumed': marker is not None,
+            **({'warning': _STYLE_SELECTION_CONSUMED_WARNING} if marker is not None else {}),
             **self._compact_state_payload(location=location, context=context),
         }
 
@@ -6641,7 +6678,7 @@ class LocalCliService(
             **self._compact_state_payload(location=location, context=context),
         }
 
-    def font_family(self, *, face_name: str, session_id: str | None = None) -> dict[str, Any]:
+    def font_family(self, *, face_name: str, at_caret: bool = False, session_id: str | None = None) -> dict[str, Any]:
         binding = self._load_active_binding(session_id=session_id)
         normalized_face_name = str(face_name or '').strip()
         if not normalized_face_name:
@@ -6649,27 +6686,38 @@ class LocalCliService(
 
         def _handler(handle: LocalCliRuntimeHandle) -> dict[str, Any]:
             before = _snapshot_cursor_context(handle.hwp)
+            refusal = self._style_selection_refusal(binding, before, command='font', at_caret=at_caret)
+            if refusal:
+                return {'refused': refusal}
             style_result = apply_char_style(handle.hwp, face_name=normalized_face_name)
             snapshot = _snapshot_cursor_context(handle.hwp)
             context = _capture_nearby_text_context(handle.hwp)
+            location = snapshot_live_location(
+                hwp=handle.hwp,
+                source_filename=handle.source_filename,
+                working_copy_id=handle.session_id,
+            )
             return {
                 'before': before,
                 'style_result': style_result,
                 'snapshot': snapshot,
                 'context': context,
-                'location': snapshot_live_location(
-                    hwp=handle.hwp,
-                    source_filename=handle.source_filename,
-                    working_copy_id=handle.session_id,
-                ),
+                'location': location,
+                # The context and location reads above select paragraphs, so the selection is judged after them.
+                'final_cursor': _snapshot_cursor_context(handle.hwp),
             }
 
         result = self._execute_live(binding=binding, command_name='font', task_label='local_cli.font', handler=_handler)
+        if result.get('refused'):
+            raise LocalCliServiceError(str(result['refused']), status_code=409)
         before = result.get('before') if isinstance(result.get('before'), dict) else {}
         style_result = result.get('style_result') if isinstance(result.get('style_result'), dict) else {}
         snapshot = result.get('snapshot') if isinstance(result.get('snapshot'), dict) else {}
         context = result.get('context') if isinstance(result.get('context'), dict) else {}
         location = result.get('location') if isinstance(result.get('location'), dict) else {}
+        final_cursor = result.get('final_cursor') if isinstance(result.get('final_cursor'), dict) else {}
+        marker = self._style_selection_marker('font', before, final_cursor)
+        binding['style_selection_consumed'] = marker
         binding = self._update_live_binding(binding, location=location, dirty=True, clear_selection_cache=True)
         scope_label = self._style_scope_label(before)
         summary = (
@@ -6688,6 +6736,8 @@ class LocalCliService(
             'summary': summary,
             'caret_pos': snapshot.get('pos'),
             'context': context,
+            'selection_consumed': marker is not None,
+            **({'warning': _STYLE_SELECTION_CONSUMED_WARNING} if marker is not None else {}),
             **self._compact_state_payload(location=location, context=context),
         }
 
@@ -6850,7 +6900,19 @@ class LocalCliService(
             'summary': summary,
         }
 
-    def action(self, *, action_name: str, session_id: str | None = None) -> dict[str, Any]:
+    def _media_inventory_readback(self, hwp: Any) -> dict[str, Any]:
+        getter = getattr(hwp, 'get_text_file', None)
+        if not callable(getter):
+            getter = getattr(hwp, 'GetTextFile', None)
+        if not callable(getter):
+            raise MediaGuardError('get_text_file is unavailable on this machine')
+        try:
+            xml_text = getter('HWPML2X', '')
+        except Exception as exc:
+            raise MediaGuardError(f'HWPML2X readback failed: {type(exc).__name__}') from exc
+        return media_inventory(xml_text)
+
+    def action(self, *, action_name: str, allow_media_change: bool = False, session_id: str | None = None) -> dict[str, Any]:
         action = self._validate_action_name(action_name)
         binding = self._load_active_binding(session_id=session_id)
 
@@ -6858,31 +6920,84 @@ class LocalCliService(
             run = getattr(getattr(handle.hwp, 'HAction', None), 'Run', None)
             if not callable(run):
                 raise LocalCliRuntimeError('HAction.Run is unavailable on this machine')
+            before: dict[str, Any] | None = None
+            if not allow_media_change:
+                # A deletion over a text-looking selection can still remove an adjacent inline picture (issue #3), so
+                # the picture/BinData inventory is read first and the action runs only on the unmoved selection.
+                cursor = _snapshot_cursor_context(handle.hwp)
+                try:
+                    before = self._media_inventory_readback(handle.hwp)
+                except MediaGuardError as exc:
+                    return {'refused': f'the picture/BinData inventory could not be read before the action ({exc})'}
+                cursor_after_read = _snapshot_cursor_context(handle.hwp)
+                if any(cursor.get(key) != cursor_after_read.get(key) for key in ('pos', 'selected_pos', 'has_selection', 'selected_pos_error', 'selection_mode')):
+                    return {'refused': 'the caret or selection changed while the document was read'}
             raw_result = run(action)
-            return {
+            result: dict[str, Any] = {
                 'result_type': type(raw_result).__name__,
                 'result_preview': self._macro_result_preview(raw_result),
                 'succeeded': raw_result is None or bool(raw_result),
             }
+            if before is None:
+                result['media_guard'] = {'status': 'not_checked', 'reason': 'allow_media_change was requested'}
+                return result
+            try:
+                after = self._media_inventory_readback(handle.hwp)
+            except MediaGuardError as exc:
+                result['media_guard'] = {
+                    'status': 'unknown',
+                    'reasons': [f'the picture/BinData inventory could not be read after the action ({exc})'],
+                    'before': public_counts(before),
+                    'after': None,
+                }
+                return result
+            reasons = media_change_reasons(before, after)
+            result['media_guard'] = {
+                'status': 'changed' if reasons else 'unchanged',
+                'reasons': reasons,
+                'before': public_counts(before),
+                'after': public_counts(after),
+            }
+            return result
 
         result = self._execute_live(binding=binding, command_name='action', task_label='local_cli.action', handler=_handler)
+        if result.get('refused'):
+            raise LocalCliServiceError(f'action {action} refused; no native action was run: {result["refused"]}.', status_code=409)
         result_type = str(result.get('result_type') or 'NoneType')
         result_preview = result.get('result_preview')
         succeeded = bool(result.get('succeeded'))
-        binding = self._save_binding({**binding, 'last_find': None})
+        media_guard = result.get('media_guard') if isinstance(result.get('media_guard'), dict) else {}
         summary = f'action {action} -> {"ok" if succeeded else "false"}'
-        self._record_local_cli_command(
-            'action',
-            binding=binding,
-            summary=summary,
-            payload={
-                'action': action,
-                'succeeded': succeeded,
-                'result_type': result_type,
-                'result_preview': result_preview,
-                'macro_warning': 'action is a dev/macro escape hatch; run hwpx where/export after stateful actions before trusting layout.',
-            },
-        )
+        payload = {
+            'ok': succeeded,
+            'action': action,
+            'succeeded': succeeded,
+            'result_type': result_type,
+            'result_preview': result_preview,
+            'media_guard': media_guard,
+            'macro_warning': 'action is a dev/macro escape hatch; run hwpx where/export after stateful actions before trusting layout.',
+        }
+        if media_guard.get('status') in {'changed', 'unknown'}:
+            payload['ok'] = False
+            reasons = '; '.join(str(reason) for reason in media_guard.get('reasons') or [])
+            binding = self._save_binding(
+                {
+                    **binding,
+                    'last_find': None,
+                    'working_copy_dirty': True,
+                    'pending_logical_undo_count': None,
+                    'logical_undo_unverified': f'action {action} may have removed or changed pictures or embedded BinData',
+                }
+            )
+            self._record_local_cli_command('action', binding=binding, summary=f'action {action} changed pictures or BinData', payload=payload)
+            raise LocalCliServiceError(
+                f'action {action} ran, but pictures or embedded BinData may have changed: {reasons}. The edit may have '
+                'persisted in the working copy. Close the working copy without saving and reopen it; hwpx undo is '
+                'refused for this edit. Pass --allow-media-change only when removing or changing a picture is intended.',
+                status_code=409,
+            )
+        binding = self._save_binding({**binding, 'last_find': None})
+        self._record_local_cli_command('action', binding=binding, summary=summary, payload=payload)
         return {
             'ok': succeeded,
             'command': 'action',
@@ -6890,6 +7005,7 @@ class LocalCliService(
             'action': action,
             'result_type': result_type,
             'result_preview': result_preview,
+            'media_guard': media_guard,
             'warning': 'action is a dev/macro escape hatch; run hwpx where/export after stateful actions before trusting layout.',
             'summary': summary,
         }

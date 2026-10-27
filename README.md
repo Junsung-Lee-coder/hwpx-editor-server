@@ -80,6 +80,11 @@ hwpx official-numbering-apply --match "Fourth item" --expected-page 1 --level 4 
 - These two commands, and `bundle-run`, `bundle` and `tx-commit`, exit 0 only when the backend explicitly reports `ok=true`; a refusal or uncertain outcome exits 1, including with `--json`. Failure output keeps the step error and mutation evidence and does not claim successful execution. An unknown native outcome is not permission to retry, save, close or discard automatically.
 - No command here saves automatically. Render all affected pages before accepting the working copy. Native Hancom save/reopen, automatic renumbering and Undo behavior still require separate Windows evidence; portable tests do not establish them. Stateless queued numbering jobs remain unsupported.
 
+### Style and action guards
+
+- `hwpx font` and `hwpx fontsize`: after styling a selected range, no selection may remain (Hancom can collapse it, and the reply's paragraph-context reads replace it). The next `font` or `fontsize` without a selection is then refused instead of styling only the caret. Reselect the range for each property, or pass `--at-caret` to style the caret position on purpose. The reply reports `selection_consumed`.
+- `hwpx action NAME`: the picture and OLE controls, `BinItem` references and embedded BinData are read from the whole document before and after the action. If they cannot be read before (including a readback above 16M characters), or reading them moved the caret or selection, the action is not run. If any of them changed, or they cannot be read afterwards, the command fails with the reason, marks the working copy dirty and refuses `hwpx undo`; close the working copy without saving and reopen it. Pass `--allow-media-change` when removing or changing a picture is intended.
+
 ## Document tools
 
 Native edits (bundle recipes; each checks the caret from `hwpx where`, runs the Hancom action once, and reads the document back before it reports success):

@@ -858,12 +858,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     fontsize_parser = subparsers.add_parser('fontsize', help='Set font size on the current selection or caret position')
     fontsize_parser.add_argument('size_pt', type=float)
+    fontsize_parser.add_argument('--at-caret', action='store_true', help='Style the caret position on purpose after an earlier selected-range style edit')
 
     bold_parser = subparsers.add_parser('bold', help='Turn bold on or off for the proven current text selection')
     bold_parser.add_argument('value', choices=('on', 'off'))
 
     font_parser = subparsers.add_parser('font', help='Set font family on the current selection or caret position')
     font_parser.add_argument('face_name')
+    font_parser.add_argument('--at-caret', action='store_true', help='Style the caret position on purpose after an earlier selected-range style edit')
 
     bullet_parser = subparsers.add_parser('bullet', help='Create one bullet item at the current caret position')
     bullet_parser.add_argument('text')
@@ -878,6 +880,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     action_parser = subparsers.add_parser('action', help='Run a Hancom HAction by name')
     action_parser.add_argument('action_name')
+    action_parser.add_argument('--allow-media-change', action='store_true', help='Allow the action to remove or change pictures or embedded BinData')
 
     subparsers.add_parser('bundle-list', aliases=['bundles'], help='List local planner bundle recipes')
 
@@ -4140,7 +4143,7 @@ def main(argv: list[str] | None = None) -> int:
             payload = post_json(
                 base_url,
                 '/local-cli/fontsize',
-                {'size_pt': args.size_pt, 'session_id': _state_session_id()},
+                {'size_pt': args.size_pt, 'at_caret': bool(args.at_caret), 'session_id': _state_session_id()},
             )
             _print_command_payload(payload)
             return 0
@@ -4158,7 +4161,7 @@ def main(argv: list[str] | None = None) -> int:
             payload = post_json(
                 base_url,
                 '/local-cli/font',
-                {'face_name': args.face_name, 'session_id': _state_session_id()},
+                {'face_name': args.face_name, 'at_caret': bool(args.at_caret), 'session_id': _state_session_id()},
             )
             _print_command_payload(payload)
             return 0
@@ -4188,7 +4191,7 @@ def main(argv: list[str] | None = None) -> int:
             payload = post_json(
                 base_url,
                 '/local-cli/action',
-                {'action_name': args.action_name, 'session_id': _state_session_id()},
+                {'action_name': args.action_name, 'allow_media_change': bool(args.allow_media_change), 'session_id': _state_session_id()},
             )
             _print_macro_payload(payload)
             return 0
