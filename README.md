@@ -80,6 +80,30 @@ hwpx official-numbering-apply --match "Fourth item" --expected-page 1 --level 4 
 - These two commands, and `bundle-run`, `bundle` and `tx-commit`, exit 0 only when the backend explicitly reports `ok=true`; a refusal or uncertain outcome exits 1, including with `--json`. Failure output keeps the step error and mutation evidence and does not claim successful execution. An unknown native outcome is not permission to retry, save, close or discard automatically.
 - No command here saves automatically. Render all affected pages before accepting the working copy. Native Hancom save/reopen, automatic renumbering and Undo behavior still require separate Windows evidence; portable tests do not establish them. Stateless queued numbering jobs remain unsupported.
 
+## Document tools
+
+Native edits (bundle recipes; each checks the caret from `hwpx where`, runs the Hancom action once, and reads the document back before it reports success):
+
+| Recipe | What it does |
+|---|---|
+| `object-insert-exact` | Insert a footnote, endnote, memo, hyperlink, 책갈피 (named anchor), equation, line/rectangle/ellipse, header or footer |
+| `layout-inspect` | Read the page setup and column definition at the caret (read-only) |
+| `layout-exact` | Change paper size, orientation and margins; set columns; insert or remove a section break; apply an automatic hanging indent (내어쓰기) |
+
+Run a recipe with `python -m local_cli_v1.main bundle-run <recipe> ...` and see its options with `bundle-help <recipe>`. Images use the existing `image` command (`--fit-cell` inside a table cell). Resizing or deleting an image uses `section-control-move-resize-exact` / `section-control-delete-exact`.
+
+Local commands (no server call, no Hancom; their output is static evidence, not rendered proof):
+
+| Command | What it does |
+|---|---|
+| `new FILE.hwpx` | Write a minimal blank document (paper size and margins), then `open` it |
+| `mermaid-render SRC.mmd --out OUT.png` | Render a Mermaid diagram with mermaid-cli (`mmdc` on `PATH` or `HWPX_MMDC`), then insert it with `image` |
+| `doc-chunks`, `doc-search` | Split a document into chunks and search them |
+| `doc-index`, `doc-outline` | Paragraph position index; headings as a table of contents |
+| `doc-export --format text\|html`, `doc-stats` | Export as text or HTML; count characters, words and paragraphs |
+
+The native edits above have not yet been run on a Hancom desktop. They are designed to fail closed, so treat a first run on a disposable copy as verification.
+
 ## Security
 
 - The API binds to `127.0.0.1` by default and has no CORS.

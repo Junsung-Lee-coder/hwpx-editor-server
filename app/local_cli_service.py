@@ -95,6 +95,7 @@ from app.local_cli_service_support import (
     _MACRO_PREVIEW_STRING_CHARS,
     _MACRO_PREVIEW_ITEMS,
     _BUNDLE_MAX_STEPS,
+    _BUNDLE_WHOLE_DOCUMENT_PROOF_OPS,
     _BUNDLE_ALLOWED_OPS,
     _BUNDLE_SAFE_HACTION_NAMES,
     _BUNDLE_SAFE_PYHWPX_CALLS,
@@ -112,6 +113,8 @@ from app.local_cli_bundle_numbering import LocalCliBundleNumberingMixin
 from app.local_cli_bundle_paragraphs import LocalCliBundleParagraphsMixin
 from app.local_cli_cell_margins import LocalCliCellMarginsMixin
 from app.local_cli_table_structure import LocalCliTableStructureMixin
+from app.local_cli_layout import LocalCliLayoutMixin
+from app.local_cli_object_insert import LocalCliObjectInsertMixin
 
 
 # How `hwpx undo` may count a bundle step that changed the document. This
@@ -171,6 +174,8 @@ class LocalCliService(
     LocalCliBundleParagraphsMixin,
     LocalCliCellMarginsMixin,
     LocalCliTableStructureMixin,
+    LocalCliObjectInsertMixin,
+    LocalCliLayoutMixin,
 ):
     def __init__(self, *, settings: Any, interactive_sessions: Any):
         self.settings = settings
@@ -2911,6 +2916,49 @@ class LocalCliService(
                 'confirm_layout',
                 'max_controls',
             },
+            'object_insert_exact': {
+                'op',
+                'operation',
+                'label',
+                'kind',
+                'expected_pos',
+                'confirm_mutation',
+                'text',
+                'url',
+                'display_text',
+                'name',
+                'script',
+                'width_mm',
+                'height_mm',
+                'treat_as_char',
+                'apply_to',
+            },
+            'layout_exact': {
+                'op',
+                'operation',
+                'label',
+                'kind',
+                'expected_pos',
+                'paper_width_mm',
+                'paper_height_mm',
+                'landscape',
+                'margin_top_mm',
+                'margin_bottom_mm',
+                'margin_left_mm',
+                'margin_right_mm',
+                'header_len_mm',
+                'footer_len_mm',
+                'gutter_len_mm',
+                'count',
+                'gap_mm',
+                'same_width',
+                'apply_to',
+                'section_index',
+                'marker_text',
+                'expected_before',
+                'confirm_layout',
+            },
+            'layout_inspect': {'op', 'operation', 'label'},
             'table_split_exact': {
                 'op',
                 'operation',
@@ -3555,6 +3603,14 @@ class LocalCliService(
                     )
 
             cleaned.append(step)
+        # Counted on normalized ops ('operation' alias, whitespace): each exact step
+        # needs two whole-document proofs within one bundle time limit.
+        exact_steps = [step['op'] for step in cleaned if step['op'] in _BUNDLE_WHOLE_DOCUMENT_PROOF_OPS]
+        if len(exact_steps) > 1:
+            raise LocalCliServiceError(
+                f'command-bundle accepts at most one whole-document exact edit step ({", ".join(sorted(_BUNDLE_WHOLE_DOCUMENT_PROOF_OPS))}); got {len(exact_steps)}',
+                status_code=400,
+            )
         return cleaned
 
     def _execute_command_bundle_step(
@@ -3746,14 +3802,32 @@ class LocalCliService(
             return result, False, warnings
 
         if op == 'where':
-            location = snapshot_live_location(
-                hwp=handle.hwp,
-                source_filename=handle.source_filename,
-                working_copy_id=handle.session_id,
-            )
+            location = self._bundle_where_location(handle.hwp, source_filename=handle.source_filename, working_copy_id=handle.session_id)
             return {'location': self._bundle_compact_location(location)}, False, warnings
 
         raise LocalCliRuntimeError(f'Unsupported command-bundle op: {op}')
+
+    def _bundle_where_location(self, hwp: Any, *, source_filename: str, working_copy_id: str) -> dict[str, Any]:
+        """Read-only location for a bundle ``where`` step that never disturbs a live selection.
+
+        The nearby-paragraph capture moves the caret to read neighbouring
+        paragraphs and restores only the caret, which drops a selection that a
+        later step (hyperlink, memo) depends on; the compact bundle location
+        does not report that preview, so it is skipped here. The selection
+        range is re-read afterwards and any change is refused.
+        """
+        before = _snapshot_cursor_context(hwp)
+        location = snapshot_live_location(
+            hwp=hwp,
+            source_filename=source_filename,
+            working_copy_id=working_copy_id,
+            include_nearby_context=False,
+        )
+        after = _snapshot_cursor_context(hwp)
+        for key in ('pos', 'selected_pos', 'has_selection'):
+            if before.get(key) != after.get(key):
+                raise LocalCliRuntimeError(f'command-bundle where changed the live {key} ({before.get(key)!r} -> {after.get(key)!r}); refusing to continue')
+        return location
 
     def _record_local_cli_command(
         self,
