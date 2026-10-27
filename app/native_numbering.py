@@ -334,9 +334,11 @@ def _target_guard(hwp: Any, anchor: _TargetState) -> Callable[[bool, str], None]
         if _read_target_state(hwp) == anchor:
             return
         if mutated:
+            reason = _fixed_reason(lambda: _official_reason(['target_moved_after_define']))
             raise NativeNumberingMutationError(
                 f'the target caret/selection changed or could not be read {boundary} after the outline definition was written; '
-                'the paragraph write was not attempted, the caret was not recaptured and nothing was rolled back'
+                'the paragraph write was not attempted, the caret was not recaptured and nothing was rolled back',
+                fixed_reason=reason,
             )
         raise NativeNumberingRefusal(
             f'the target caret/selection changed or could not be read {boundary}; refusing before any mutation',
@@ -432,7 +434,7 @@ def _validated_census(raw: Any) -> dict[str, Any]:
     if header_footer is not None and (not isinstance(header_footer, list) or not all(isinstance(item, str) for item in header_footer)):
         raise RuntimeError('protection census header_footer must be a list of digests')
     census['header_footer'] = list(header_footer) if header_footer is not None else None
-    for field in ('body_sha256', 'styles_sha256', 'numberings_sha256', 'bindata_sha256'):
+    for field in ('body_sha256', 'styles_sha256', 'numberings_sha256', 'bindata_sha256', 'media_sha256'):
         value = raw.get(field)
         if value is not None and not isinstance(value, str):
             raise RuntimeError(f'protection census {field} must be a digest string')
@@ -460,6 +462,12 @@ def _validated_census(raw: Any) -> dict[str, Any]:
                 raise RuntimeError('protection census paragraph entry is malformed')
             if 'restart_stripped_sha256' in item and not isinstance(item['restart_stripped_sha256'], str):
                 raise RuntimeError('protection census paragraph restart_stripped_sha256 must be a digest string')
+            if item.get('inst_id') is not None and not isinstance(item['inst_id'], str):
+                raise RuntimeError('protection census paragraph inst_id must be a string')
+            if 'inst_ids' in item and not (isinstance(item['inst_ids'], list) and all(isinstance(value, str) for value in item['inst_ids'])):
+                raise RuntimeError('protection census paragraph inst_ids must be a list of strings')
+            if item.get('shares_outline_numbering') is not None and not isinstance(item['shares_outline_numbering'], bool):
+                raise RuntimeError('protection census paragraph shares_outline_numbering must be a boolean')
             checked.append(dict(item))
         paragraphs = checked
     census['paragraphs'] = paragraphs
@@ -557,7 +565,7 @@ _PAGE_NUMBER_COMPARED = (
     'definitions', 'outline_shapes', 'frame', 'paragraphs',
 )
 _OFFICIAL_COMPARED = (
-    'header_footer', 'body_sha256', 'styles_sha256', 'bindata_sha256', 'definitions', 'outline_shapes', 'frame', 'paragraphs',
+    'header_footer', 'body_sha256', 'styles_sha256', 'bindata_sha256', 'media_sha256', 'definitions', 'outline_shapes', 'frame', 'paragraphs',
 )
 _MAX_REPORTED_PROBLEMS = 5
 
@@ -600,6 +608,22 @@ def _require_complete(census: Mapping[str, Any]) -> None:
             + '), so the edit cannot be proven to leave the rest of the document unchanged; refusing before any mutation',
             code='preservation_unprovable',
         )
+
+
+def _official_text_evidence_complete(census: Mapping[str, Any]) -> bool:
+    """Additional proof required to replace UNICODE-export equality, not a general census waiver."""
+    if _incomplete(census):
+        return False
+    digests = [census.get(field) for field in ('body_sha256', 'styles_sha256', 'numberings_sha256', 'media_sha256')]
+    digests.extend(census['header_footer'])
+    digests.extend(census['outline_shapes'])
+    digests.extend(census['frame'][key] for key in ('sha256', 'stripped_sha256'))
+    for paragraph in census['paragraphs']:
+        digests.extend(paragraph.get(key) for key in ('text_sha256', 'sha256', 'masked_sha256', 'stripped_sha256'))
+    for entries in census['definitions'].values():
+        for sha, shell in entries:
+            digests.extend((sha, shell))
+    return all(type(value) is str and len(value) == 64 and all(c in '0123456789abcdef' for c in value) for value in digests)
 
 
 def _count(entries: list[tuple[str, str]]) -> dict[tuple[str, str], int]:
@@ -723,10 +747,73 @@ def _page_number_delta_problems(
     return problems
 
 
-def _official_delta_problems(
-    before: Mapping[str, Any], after: Mapping[str, Any], *, target_index: int, native_level: int, define: bool
+_NATIVE_INST_ID_MAX = 4294967295
+
+
+def _is_native_inst_id(value: Any) -> bool:
+    return (
+        isinstance(value, str) and value.isascii() and value.isdigit() and str(int(value)) == value and int(value) <= _NATIVE_INST_ID_MAX
+    )
+
+
+def _paragraph_inst_ids(item: Mapping[str, Any]) -> list[str]:
+    ids = item.get('inst_ids')
+    if ids is not None:
+        return list(ids)
+    single = item.get('inst_id')
+    return [] if single is None else [single]
+
+
+_UNDO_RESTORED_INST_ID_FLAG = 0x80000000
+
+
+def _target_inst_id_problems(
+    before: Mapping[str, Any], after: Mapping[str, Any], *, target_index: int, target_written: bool
 ) -> list[str]:
-    problems = _raw_field_problems(before, after, ('header_footer', 'body_sha256', 'styles_sha256', 'bindata_sha256'))
+    """The target may gain one new native paragraph identifier from the ParagraphShape write; nothing else may change it.
+
+    A paragraph restored by Undo carries its identifier with bit 31 set, and a ParagraphShape write on it
+    allocates a newer identifier of the same native sequence with bit 31 clear; that replacement is admitted.
+    A ParagraphShape write that moves an outline paragraph holding an identifier (bit 31 clear) to another
+    outline level likewise replaces it with a newer, previously unused identifier of the same sequence; that
+    replacement is admitted too.
+    """
+    left = _paragraph_inst_ids(before['paragraphs'][target_index])
+    right = _paragraph_inst_ids(after['paragraphs'][target_index])
+    if left == right:
+        return []
+    others = [_paragraph_inst_ids(item) for index, item in enumerate(after['paragraphs']) if index != target_index]
+    unambiguous = all(len(ids) <= 1 for ids in others)
+    if target_written and not left and len(right) == 1 and _is_native_inst_id(right[0]) and unambiguous and not any(right[0] in ids for ids in others):
+        return []
+    if (
+        target_written and len(left) == 1 and len(right) == 1 and _is_native_inst_id(left[0]) and _is_native_inst_id(right[0])
+        and int(left[0]) & _UNDO_RESTORED_INST_ID_FLAG and int(left[0]) - _UNDO_RESTORED_INST_ID_FLAG < int(right[0]) < _UNDO_RESTORED_INST_ID_FLAG
+        and unambiguous and not any(right[0] in ids for ids in others)
+    ):
+        return []
+    was, now = before['paragraphs'][target_index], after['paragraphs'][target_index]
+    if (
+        target_written and len(left) == 1 and len(right) == 1 and _is_native_inst_id(left[0]) and _is_native_inst_id(right[0])
+        and not int(left[0]) & _UNDO_RESTORED_INST_ID_FLAG and int(left[0]) < int(right[0]) < _UNDO_RESTORED_INST_ID_FLAG
+        and was.get('heading') == now.get('heading') == 'OUTLINE' and was.get('level') != now.get('level')
+        and unambiguous and not any(right[0] in ids for ids in others)
+        and not any(right[0] in _paragraph_inst_ids(item) for item in before['paragraphs'])
+    ):
+        return []
+    return ['the target paragraph identifier changed beyond one new native assignment']
+
+
+def _official_delta_problems(
+    before: Mapping[str, Any],
+    after: Mapping[str, Any],
+    *,
+    target_index: int,
+    native_level: int,
+    define: bool,
+    target_written: bool = False,
+) -> list[str]:
+    problems = _raw_field_problems(before, after, ('header_footer', 'body_sha256', 'styles_sha256', 'bindata_sha256', 'media_sha256'))
     if not define:
         problems.extend(_raw_field_problems(before, after, ('numberings_sha256',)))
     if before['frame']['sha256'] != after['frame']['sha256']:
@@ -738,6 +825,7 @@ def _official_delta_problems(
             elif index == target_index:
                 if left['masked_sha256'] != right['masked_sha256']:
                     problems.append('the target paragraph changed beyond its numbering')
+                problems.extend(_target_inst_id_problems(before, after, target_index=target_index, target_written=target_written))
                 if right['heading'] != 'OUTLINE' or right['level'] != native_level:
                     problems.append('the target paragraph is not an outline paragraph at the requested level')
             elif left['sha256'] != right['sha256']:
@@ -858,6 +946,19 @@ def _unavailable_reason(observations: list[tuple[str, str, Any]]) -> dict[str, A
 
 def _mismatch_reason(code: str, values: dict[str, Any]) -> dict[str, Any]:
     return {'schema': _FIXED_REASON_SCHEMA, 'judgements': [code], 'values': {name: _fixed_primitive(value) for name, value in values.items()}}
+
+
+_OFFICIAL_FIXED_REASON_SCHEMA = 'official-numbering-fixed-reason/1'
+
+
+def _official_reason(codes: list[str], *, exception: BaseException | None = None, **values: Any) -> dict[str, Any]:
+    """Fixed judgement codes chosen where the product adjudicates; values are already-returned primitives, never text."""
+    reason: dict[str, Any] = {'schema': _OFFICIAL_FIXED_REASON_SCHEMA, 'judgements': list(codes)}
+    if values:
+        reason['values'] = {name: _fixed_primitive(value) for name, value in values.items()}
+    if exception is not None:
+        reason['exception_class'] = _exception_class_label(exception)
+    return reason
 
 
 def apply_page_number(hwp: Any, request: Any, *, protection: Callable[[], Any] | None = None) -> dict[str, Any]:
@@ -1235,6 +1336,37 @@ def _prove_outline_scope(census: dict[str, Any] | None, target_find: str | None,
             'redefining it would change their numbers, so it is refused',
             code='foreign_outline_definition',
         )
+    shared = [item for item in paragraphs if item is not target and item.get('shares_outline_numbering') is True]
+    if shared:
+        raise NativeNumberingRefusal(
+            f'{len(shared)} numbered paragraph(s) use the numbering definition that the section outline uses; '
+            'redefining the outline would change their numbers, so it is refused',
+            code='foreign_outline_definition',
+        )
+    unknown = [
+        item for item in paragraphs
+        if item is not target and item['heading'] == 'NUMBER' and item.get('shares_outline_numbering') is not False
+    ]
+    if unknown:
+        raise NativeNumberingRefusal(
+            f'{len(unknown)} numbered paragraph(s) have no readable numbering reference, so it cannot be shown that they '
+            'do not use the section outline definition; redefining it is refused',
+            code='outline_usage_unprovable',
+        )
+    elsewhere = [item for item in paragraphs if item['section'] != target['section'] and item['heading'] == 'OUTLINE']
+    if elsewhere:
+        raise NativeNumberingRefusal(
+            f'{len(elsewhere)} outline paragraph(s) lie in another section, and nothing shows that they use a different '
+            'outline definition than the target section; redefining it is refused',
+            code='outline_usage_unprovable',
+        )
+    shapes = [shape for shape in census.get('outline_shapes') or () if shape != 'none']
+    if len(shapes) != len(set(shapes)):
+        raise NativeNumberingRefusal(
+            'more than one section references the same outline definition, so redefining it would change another section; '
+            'it is refused',
+            code='outline_usage_unprovable',
+        )
 
 
 class _MutationReach:
@@ -1280,21 +1412,30 @@ def _define_official_outline(hwp: Any, haction: Any, guard: Callable[[bool, str]
     try:
         result = haction.Execute('OutlineNumber', hset.HSet)
     except Exception as exc:
+        reason = _fixed_reason(lambda: _official_reason(['define_execute_raised'], exception=exc))
         raise NativeNumberingMutationError(
-            f'native OutlineNumber raised {exc!r}; the section outline definition may or may not have changed and was not rolled back'
+            f'native OutlineNumber raised {exc!r}; the section outline definition may or may not have changed and was not rolled back',
+            fixed_reason=reason,
         ) from exc
     if not _action_confirmed(result):
+        reason = _fixed_reason(lambda: _official_reason(['define_not_confirmed'], observed=result))
         raise NativeNumberingMutationError(
             f'native OutlineNumber returned {_status_text(result)} instead of the documented BOOL True; '
-            'the section outline definition may or may not have changed and was not rolled back'
+            'the section outline definition may or may not have changed and was not rolled back',
+            fixed_reason=reason,
         )
     try:
         levels = _read_outline_definition(hwp, haction)
     except NativeNumberingRefusal as exc:
-        raise NativeNumberingMutationError(f'the section outline definition could not be verified after OutlineNumber: {exc}; nothing was rolled back') from exc
-    if not _outline_matches_official(levels):
+        reason = _fixed_reason(lambda: _official_reason(['define_readback_unverified']))
         raise NativeNumberingMutationError(
-            f'the section outline definition reads back {levels} after OutlineNumber, not the official levels; nothing was rolled back'
+            f'the section outline definition could not be verified after OutlineNumber: {exc}; nothing was rolled back', fixed_reason=reason
+        ) from exc
+    if not _outline_matches_official(levels):
+        reason = _fixed_reason(lambda: _official_reason(['define_readback_not_official']))
+        raise NativeNumberingMutationError(
+            f'the section outline definition reads back {levels} after OutlineNumber, not the official levels; nothing was rolled back',
+            fixed_reason=reason,
         )
 
 
@@ -1329,9 +1470,11 @@ def apply_official_numbering(
     except Exception as exc:
         if not reach.reached:
             raise
+        reason = _fixed_reason(lambda: _official_reason(['unexpected_exception_after_mutation'], exception=exc))
         raise NativeNumberingMutationError(
             f'outline numbering failed with {exc!r} after a native mutating call was issued; '
-            'the document state is not proven and nothing was rolled back'
+            'the document state is not proven and nothing was rolled back',
+            fixed_reason=reason,
         ) from exc
     except BaseException as exc:
         if reach.reached:
@@ -1409,16 +1552,28 @@ def _apply_official_numbering(
         try:
             _hset, redefined_heading, redefined_level = _read_paragraph_shape(hwp, haction)
         except NativeNumberingRefusal as exc:
+            reason = _fixed_reason(lambda: _official_reason(['paragraph_unverified_after_define']))
             raise NativeNumberingMutationError(
-                f'paragraph state could not be verified after the outline definition: {exc}; nothing was rolled back'
+                f'paragraph state could not be verified after the outline definition: {exc}; nothing was rolled back', fixed_reason=reason
             ) from exc
         if redefined_heading != heading or redefined_level != level:
+            reason = _fixed_reason(
+                lambda: _official_reason(
+                    ['paragraph_changed_during_define'],
+                    heading_before=heading,
+                    level_before=level,
+                    heading_after=redefined_heading,
+                    level_after=redefined_level,
+                )
+            )
             raise NativeNumberingMutationError(
                 f'the paragraph changed from HeadingType={heading}/Level={level} to {redefined_heading}/{redefined_level} '
-                'while its outline was defined; nothing was rolled back'
+                'while its outline was defined; nothing was rolled back',
+                fixed_reason=reason,
             )
     make_outline = heading == _HEADING_NONE
-    if make_outline or level != native_level:
+    paragraph_written = make_outline or level != native_level
+    if paragraph_written:
         actions.append(
             f'Execute:ParagraphShape(HeadingType={_HEADING_OUTLINE},Level={native_level})'
             if make_outline
@@ -1429,21 +1584,27 @@ def _apply_official_numbering(
                 _hset.HeadingType = _HEADING_OUTLINE
             _hset.Level = native_level
         except Exception as exc:
+            reason = _fixed_reason(lambda: _official_reason(['paragraph_shape_set_raised'], exception=exc))
             raise NativeNumberingMutationError(
-                f'native ParagraphShape raised {exc!r}; the paragraph may or may not have been changed and nothing was rolled back'
+                f'native ParagraphShape raised {exc!r}; the paragraph may or may not have been changed and nothing was rolled back',
+                fixed_reason=reason,
             ) from exc
         guard(defined, 'before the paragraph write')
         reach.reached = True
         try:
             execute_result = haction.Execute('ParagraphShape', _hset.HSet)
         except Exception as exc:
+            reason = _fixed_reason(lambda: _official_reason(['paragraph_shape_execute_raised'], exception=exc))
             raise NativeNumberingMutationError(
-                f'native ParagraphShape raised {exc!r}; the paragraph may or may not have been changed and nothing was rolled back'
+                f'native ParagraphShape raised {exc!r}; the paragraph may or may not have been changed and nothing was rolled back',
+                fixed_reason=reason,
             ) from exc
         if not _action_confirmed(execute_result):
+            reason = _fixed_reason(lambda: _official_reason(['paragraph_shape_not_confirmed'], observed=execute_result))
             raise NativeNumberingMutationError(
                 f'native ParagraphShape returned {_status_text(execute_result)} instead of the documented BOOL True; '
-                'the paragraph may or may not have been changed and nothing was rolled back'
+                'the paragraph may or may not have been changed and nothing was rolled back',
+                fixed_reason=reason,
             )
 
     try:
@@ -1451,40 +1612,73 @@ def _apply_official_numbering(
         final_hash, final_controls = _preflight_census(hwp)
         final_definition = _read_outline_definition(hwp, haction)
     except NativeNumberingRefusal as exc:
-        raise NativeNumberingMutationError(f'outline numbering outcome could not be verified: {exc}; nothing was rolled back') from exc
+        reason = _fixed_reason(lambda: _official_reason(['outcome_unverified']))
+        raise NativeNumberingMutationError(
+            f'outline numbering outcome could not be verified: {exc}; nothing was rolled back', fixed_reason=reason
+        ) from exc
     problems: list[str] = []
+    codes: list[str] = []
+    values: dict[str, Any] = {}
     if not _outline_matches_official(final_definition):
         problems.append('the section outline definition is not the official 1. 가. 1) 가) levels')
+        codes.append('outline_definition_not_official')
+    census_text_preserved = False
     protection_info: dict[str, Any] = {'checked': False, 'compared': [], 'unproven': []}
     if before_census is not None and protection is not None:
         try:
             after_census = _read_protection(protection)
         except Exception as exc:
+            reason = _fixed_reason(lambda: _official_reason(['protection_read_after_failed'], exception=exc))
             raise NativeNumberingMutationError(
-                f'document protection census could not be read after the native call: {exc}; nothing was rolled back'
+                f'document protection census could not be read after the native call: {exc}; nothing was rolled back',
+                fixed_reason=reason,
             ) from exc
         lost = _incomplete(after_census)
         if lost:
             problems.append('preservation evidence is incomplete after the native call (' + '; '.join(lost) + ')')
+            codes.append('preservation_evidence_incomplete')
         else:
             assert target_index is not None
-            problems.extend(
-                _official_delta_problems(
-                    before_census, after_census, target_index=target_index, native_level=native_level, define=not format_matches
-                )
+            delta = _official_delta_problems(
+                before_census,
+                after_census,
+                target_index=target_index,
+                native_level=native_level,
+                define=not format_matches,
+                target_written=paragraph_written,
+            )
+            problems.extend(delta)
+            if delta:
+                codes.append('census_delta_mismatch')
+            # UNICODE is a native plain-text export, not a literal-content oracle
+            # after numbering. Admit its delta only on the demonstrated paragraph-
+            # only path with complete, target-specific structural preservation.
+            # Definition-changing paths and absent/legacy evidence stay strict.
+            census_text_preserved = (
+                not defined and not delta
+                and _official_text_evidence_complete(before_census)
+                and _official_text_evidence_complete(after_census)
             )
         protection_info = {'checked': True, 'compared': list(_OFFICIAL_COMPARED), 'unproven': []}
     if final_heading != _HEADING_OUTLINE:
         problems.append(f'HeadingType is {final_heading}')
+        codes.append('heading_type_mismatch')
+        values['final_heading'] = final_heading
     if final_level != native_level:
         problems.append(f'native level reads {final_level} instead of {native_level}')
-    if final_hash != text_hash:
-        problems.append('document text changed')
+        codes.append('level_mismatch')
+        values.update(final_level=final_level, native_level=native_level)
+    if final_hash != text_hash and not census_text_preserved:
+        problems.append('document text changed without complete structural preservation proof')
+        codes.append('text_hash_mismatch')
     if [ctrl_id for _ctrl, ctrl_id in final_controls] != ids:
         problems.append('the main-list control sequence changed')
+        codes.append('control_sequence_mismatch')
     if problems:
+        reason = _fixed_reason(lambda: _official_reason(codes, **values))
         raise NativeNumberingMutationError(
-            'outline numbering outcome is not as requested: ' + '; '.join(problems) + '; nothing was rolled back'
+            'outline numbering outcome is not as requested: ' + '; '.join(problems) + '; nothing was rolled back',
+            fixed_reason=reason,
         )
     return _official_result(
         req, changed=True, status=status, actions=actions, format_status=format_status, definition=final_definition, protection_info=protection_info

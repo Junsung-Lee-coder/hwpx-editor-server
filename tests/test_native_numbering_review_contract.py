@@ -152,7 +152,7 @@ class ApplyClassRelationTests(unittest.TestCase):
 
     def test_widened_scope_is_still_an_unknown_outcome(self) -> None:
         hwp = doc(foreign=True)
-        hwp.other_section_shape = {**shape_items(FOREIGN), **TAIL}
+        hwp.other_section_shape = {**shape_items(FOREIGN[::-1]), **TAIL}
         hwp.paragraphs.append({'text': 'Next section', 'heading_type': 0, 'level': 0, 'section': 1})
         original = hwp.HAction.Execute
 

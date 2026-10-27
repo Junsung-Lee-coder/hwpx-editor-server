@@ -350,5 +350,189 @@ class RunStepWiringTests(unittest.TestCase):
             self.assertNotIn(forbidden, source)
 
 
+class NativeBinItemIdentityTests(unittest.TestCase):
+    """SYNTHETIC native-shaped metadata, not a claim of native execution.
+
+    The separate saved native raw witness is replayed by the offline release harness.
+    These mutants exercise identity refusal and preservation through the real reader.
+    """
+
+    @staticmethod
+    def native_xml(text: str, item: str = '<BINITEM BinData="1" Type="Embedding" Format="bmp"/>') -> str:
+        import re
+        text = re.sub(r'<BINDATA Id="1"[^>]*>.*?</BINDATA>', lambda _m: item, text)
+        return text.replace('</HWPML>', '<BINDATASTORAGE><BINDATA Id="1">PAYLOAD</BINDATA></BINDATASTORAGE></HWPML>')
+
+    def sample(self, item: str = '<BINITEM BinData="1" Type="Embedding" Format="bmp"/>') -> str:
+        return self.native_xml(hwpml([('Title', 0, 0), ('Item', 0, 0)], picture_width=400), item)
+
+    def refused(self, text: str) -> None:
+        from app.native_numbering_census import CensusError
+        try:
+            result = _census(text)
+        except CensusError:
+            return
+        self.assertIsNone(result['paragraphs'], 'ambiguous media must never be proven')
+
+    def test_native_bindata_identity_resolves_and_preserves_all_fingerprints(self) -> None:
+        before = _census(self.sample())
+        self.assertIsInstance(before['paragraphs'], list)
+        self.assertEqual(len(before['paragraphs']), 2)
+        for old, new in [('Format="bmp"', 'Format="png"'), ('Type="Embedding"', 'Type="Link"'),
+                         ('Width="400"', 'Width="401"'), ('PAYLOAD', 'LOST'),
+                         ('BinData="1"', 'BinData="2"')]:
+            with self.subTest(attribute=old):
+                after = _census(self.sample().replace(old, new))
+                self.assertNotEqual(before, after)
+                if old != 'Width="400"':
+                    self.assertNotEqual(before['media_sha256'], after['media_sha256'])
+
+    def test_historic_id_and_consistent_dual_identity_remain_supported(self) -> None:
+        for attrs in ('Id="1"', 'Id="1" BinData="1"', 'bindata="1"'):
+            with self.subTest(attrs=attrs):
+                self.assertIsInstance(_census(self.sample(f'<BINITEM {attrs} Format="bmp"/>'))['paragraphs'], list)
+        self.assertIsInstance(_census(hwpml([('Title', 0, 0)], picture_width=400))['paragraphs'], list)
+
+    def test_missing_blank_contradictory_and_duplicate_identity_attributes_refuse(self) -> None:
+        for attrs in ('', 'BinData=""', 'BinData=" "', 'Id="1" BinData="2"',
+                      'Id="" BinData="1"', 'BinData="1" bindata="2"',
+                      'Id="1" id="1" BinData="1"'):
+            with self.subTest(attrs=attrs):
+                self.refused(self.sample(f'<BINITEM {attrs} Format="bmp"/>'))
+
+    def test_duplicate_native_and_mixed_historic_entries_refuse(self) -> None:
+        first = '<BINITEM BinData="1" Format="bmp"/>'
+        for other in (first, '<BINITEM Id="1" Format="png"/>', '<BINDATA Id="1"/>'):
+            with self.subTest(other=other):
+                self.refused(self.sample(first + other))
+                self.refused(self.sample(other + first))
+
+    def test_unknown_empty_and_non_native_references_do_not_fall_back(self) -> None:
+        for ref in ('', '2', 'not-an-id'):
+            with self.subTest(ref=ref):
+                self.refused(self.sample().replace('BinItem="1"', f'BinItem="{ref}"'))
+        # BinData is not a general alternative Id for arbitrary list members.
+        self.refused(self.sample('<BINDATA BinData="1"/>'))
+        self.refused(self.sample().replace('<CHARSHAPE Id="1"', '<CHARSHAPE BinData="1"'))
+
+    def public_doc(self):
+        class NativeMediaHwp(_HwpmlHwp):
+            def get_text_file(inner, fmt='UNICODE', option=''):
+                text = super().get_text_file(fmt, option)
+                if fmt != 'HWPML2X':
+                    return text
+                text = self.native_xml(text, getattr(inner, 'media_item', '<BINITEM BinData="1" Type="Embedding" Format="bmp"/>'))
+                return text.replace('PAYLOAD', getattr(inner, 'media_payload', 'PAYLOAD'))
+        hwp = NativeMediaHwp(paragraphs=_paras(('Title', 0, 0), ('Item', 0, 0), ('Tail', 0, 0)), controls=[FakeCtrl('secd')])
+        hwp.hwpml_extras['picture_width'] = 400
+        return hwp
+
+    def test_public_official_apply_accepts_native_identity_through_live_reader(self) -> None:
+        hwp = self.public_doc()
+        reader = _Service()._numbering_protection_reader(SimpleNamespace(hwp=hwp))
+        result = _Service()._bundle_official_numbering_apply(hwp, dict(EndToEndThroughTheRealReaderTests.NUMBERING), protection=reader)
+        self.assertTrue(result['numbering_format_enforced'])
+        self.assertEqual([p['heading_type'] for p in hwp.paragraphs], [0, 1, 0])
+        self.assertGreater(hwp.hwpml_calls, 1)
+
+    def test_public_official_apply_refuses_protected_media_loss_after_mutation(self) -> None:
+        for field, value in (('media_payload', ''), ('media_item', ''),
+                             ('media_item', '<BINITEM BinData="1" Type="Link" Format="bmp"/>'),
+                             ('media_item', '<BINITEM BinData="1" Type="Embedding" Format="png"/>')):
+            with self.subTest(field=field, value=value):
+                hwp = self.public_doc()
+                reader = _Service()._numbering_protection_reader(SimpleNamespace(hwp=hwp))
+                original = hwp.HAction.Execute
+                def damage(name, hset):
+                    result = original(name, hset)
+                    setattr(hwp, field, value)
+                    return result
+                hwp.HAction.Execute = damage
+                with self.assertRaises(LocalCliMutationError) as ctx:
+                    _Service()._bundle_official_numbering_apply(hwp, dict(EndToEndThroughTheRealReaderTests.NUMBERING), protection=reader)
+                self.assertTrue(ctx.exception.mutation_may_have_persisted)
+                self.assertGreater(hwp.hwpml_calls, 1)
+
+
+class NativeBinDataStorageSizeTests(unittest.TestCase):
+    """SYNTHETIC native-shaped storage, not a claim of native execution.
+
+    Retained native HWPML2X reads of one unchanged embedded picture report BINDATA Size values 121, 125,
+    126, 127 and 129 for a byte-identical payload; the offline release harness replays those reads.
+    """
+
+    @staticmethod
+    def stored(text: str, *, size: str | None = '126', payload: str = 'PAYLOAD',
+               attrs: str = 'Compress="true" Encoding="Base64" Id="1"') -> str:
+        text = NativeBinItemIdentityTests.native_xml(text)
+        sized = f' Size="{size}"' if size is not None else ''
+        return text.replace('<BINDATA Id="1">PAYLOAD</BINDATA>', f'<BINDATA {attrs}{sized}>{payload}</BINDATA>')
+
+    def sample(self, **kw: Any) -> str:
+        return self.stored(hwpml([('Title', 0, 0), ('Item', 0, 0)], picture_width=400), **kw)
+
+    def test_storage_size_alone_changes_no_fingerprint(self) -> None:
+        before = _census(self.sample())
+        self.assertIsInstance(before['paragraphs'], list)
+        for size in ('121', '125', '127', '129'):
+            with self.subTest(size=size):
+                self.assertEqual(_census(self.sample(size=size)), before)
+
+    def test_payload_storage_attributes_and_size_presence_stay_bound(self) -> None:
+        before = _census(self.sample())
+        for name, kw in {'payload': dict(payload='LOST'), 'payload with another size': dict(payload='LOST', size='127'),
+                         'compress': dict(attrs='Compress="false" Encoding="Base64" Id="1"'),
+                         'encoding': dict(attrs='Compress="true" Encoding="Hex" Id="1"'),
+                         'storage id': dict(attrs='Compress="true" Encoding="Base64" Id="2"'),
+                         'size absent': dict(size=None)}.items():
+            with self.subTest(name=name):
+                self.assertNotEqual(_census(self.sample(**kw))['media_sha256'], before['media_sha256'])
+        extra = self.sample().replace('</BINDATASTORAGE>', '<BINDATA Compress="true" Encoding="Base64" Id="2" Size="1">X</BINDATA></BINDATASTORAGE>')
+        self.assertNotEqual(_census(extra)['media_sha256'], before['media_sha256'])
+
+    def test_size_outside_storage_stays_bound(self) -> None:
+        before = _census(self.sample())
+        after = _census(self.sample().replace('<BINITEM BinData="1"', '<BINITEM Size="5" BinData="1"'))
+        self.assertNotEqual(after['media_sha256'], before['media_sha256'])
+        self.assertNotEqual(after['bindata_sha256'], before['bindata_sha256'])
+
+    def public_doc(self) -> Any:
+        sizes = iter(('126', '129', '127', '121', '125') * 8)
+
+        class SizeVaryingHwp(_HwpmlHwp):
+            def get_text_file(inner, fmt='UNICODE', option=''):  # noqa: N805
+                text = super().get_text_file(fmt, option)
+                if fmt != 'HWPML2X':
+                    return text
+                return NativeBinDataStorageSizeTests.stored(text, size=next(sizes), payload=getattr(inner, 'media_payload', 'PAYLOAD'))
+
+        hwp = SizeVaryingHwp(paragraphs=_paras(('Title', 0, 0), ('Item', 0, 0), ('Tail', 0, 0)), controls=[FakeCtrl('secd')])
+        hwp.hwpml_extras['picture_width'] = 400
+        return hwp
+
+    def test_public_official_apply_accepts_a_storage_size_that_differs_between_reads(self) -> None:
+        hwp = self.public_doc()
+        reader = _Service()._numbering_protection_reader(SimpleNamespace(hwp=hwp))
+        result = _Service()._bundle_official_numbering_apply(hwp, dict(EndToEndThroughTheRealReaderTests.NUMBERING), protection=reader)
+        self.assertTrue(result['numbering_format_enforced'])
+        self.assertEqual([p['heading_type'] for p in hwp.paragraphs], [0, 1, 0])
+        self.assertGreater(hwp.hwpml_calls, 1)
+
+    def test_public_official_apply_still_refuses_payload_loss_when_size_also_differs(self) -> None:
+        hwp = self.public_doc()
+        reader = _Service()._numbering_protection_reader(SimpleNamespace(hwp=hwp))
+        original = hwp.HAction.Execute
+
+        def damage(name, hset):
+            result = original(name, hset)
+            hwp.media_payload = ''
+            return result
+
+        hwp.HAction.Execute = damage
+        with self.assertRaises(LocalCliMutationError) as ctx:
+            _Service()._bundle_official_numbering_apply(hwp, dict(EndToEndThroughTheRealReaderTests.NUMBERING), protection=reader)
+        self.assertTrue(ctx.exception.mutation_may_have_persisted)
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -408,9 +408,12 @@ class OfficialFormatTests(unittest.TestCase):
 
     def test_foreign_outline_paragraph_in_another_section_is_left_alone(self) -> None:
         hwp = self._doc(FOREIGN_LEVELS, extra=[('Other section heading', 1, 0, 1)])
-        nn.apply_official_numbering_at_match(hwp, find='Item text', level=1, protection=hwp.census)
-        self.assertEqual(self._outline_executes(hwp)[0][2]['ApplyTo'], 2)
-        self.assertEqual(hwp.other_section_shape, {**shape_items(OFFICIAL_SHAPE_LEVELS), **TAIL})
+        shapes_before = (dict(hwp.outline_shape), dict(hwp.other_section_shape))
+        with self.assertRaises(nn.NativeNumberingRefusal) as ctx:
+            nn.apply_official_numbering_at_match(hwp, find='Item text', level=1, protection=hwp.census)
+        self.assertEqual(ctx.exception.code, 'outline_usage_unprovable')
+        self.assertEqual(_mutating_calls(hwp), [])
+        self.assertEqual((hwp.outline_shape, hwp.other_section_shape), shapes_before)
         other = next(p for p in hwp.paragraphs if p['text'] == 'Other section heading')
         self.assertEqual((other['heading_type'], other['level']), (1, 0))
 
@@ -418,7 +421,14 @@ class OfficialFormatTests(unittest.TestCase):
         extra = [('Numbered', 2, 1, 0), ('Bullet', 3, 0, 0)]
         hwp = self._doc(FOREIGN_LEVELS, extra=extra)
         before = [dict(p) for p in hwp.paragraphs if p['text'] in {'Numbered', 'Bullet', 'Title', 'Tail'}]
-        nn.apply_official_numbering_at_match(hwp, find='Item text', level=3, protection=hwp.census)
+
+        def census_with_independent_numbering_proof():
+            value = hwp.census()
+            for item in value['paragraphs']:
+                item['shares_outline_numbering'] = False
+            return value
+
+        nn.apply_official_numbering_at_match(hwp, find='Item text', level=3, protection=census_with_independent_numbering_proof)
         after = [dict(p) for p in hwp.paragraphs if p['text'] in {'Numbered', 'Bullet', 'Title', 'Tail'}]
         self.assertEqual(after, before)
         self.assertEqual(hwp.package_state['numberings'], 'numberings-0')

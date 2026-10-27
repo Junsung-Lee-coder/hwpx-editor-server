@@ -60,6 +60,10 @@ def _lower_attrs(element: ET.Element) -> dict[str, str]:
     return {key.rsplit('}', 1)[-1].lower(): value for key, value in element.attrib.items()}
 
 
+def _lower_attrs_all(element: ET.Element) -> list[tuple[str, str]]:
+    return [(key.rsplit('}', 1)[-1].lower(), value) for key, value in element.attrib.items()]
+
+
 def _is_page_restart(element: ET.Element) -> bool:
     return _name(element) == 'newnum' and (_lower_attrs(element).get('numbertype') or '').strip().lower() == 'page'
 
@@ -166,22 +170,25 @@ def _digest_tokens(tokens: list[str]) -> str:
     return hashlib.sha256('\x1f'.join(tokens).encode('utf-8', 'surrogatepass')).hexdigest()
 
 
-def _canonical(element: ET.Element, out: list[str], depth: int = 0) -> None:
+def _canonical(element: ET.Element, out: list[str], depth: int = 0, *, storage: bool = False) -> None:
     if depth > _MAX_DEPTH:
         raise CensusError('HWPML2X nesting is too deep')
-    out.append('<' + _name(element))
+    name = _name(element)
+    out.append('<' + name)
     for key, value in sorted((k.rsplit('}', 1)[-1].lower(), v) for k, v in element.attrib.items()):
-        out.append(f'{key}={value}')
+        # Native reads report a different stored BINDATA Size for the same unchanged payload; only
+        # that value is elided. Its presence, the payload and every other attribute stay bound.
+        out.append(f'{key}=*' if storage and name == 'bindata' and key == 'size' else f'{key}={value}')
     out.append('>' + (element.text or ''))
     for child in element:
-        _canonical(child, out, depth + 1)
+        _canonical(child, out, depth + 1, storage=storage)
         out.append('|' + (child.tail or ''))
     out.append('/')
 
 
-def _element_digest(element: ET.Element) -> str:
+def _element_digest(element: ET.Element, *, storage: bool = False) -> str:
     tokens: list[str] = []
-    _canonical(element, tokens)
+    _canonical(element, tokens, storage=storage)
     return _digest_tokens(tokens)
 
 
@@ -224,6 +231,23 @@ def _shape_table(root: ET.Element) -> dict[str, tuple[str | None, int | None]]:
     return table
 
 
+def _number_refs(root: ET.Element) -> dict[str, str | None]:
+    refs: dict[str, str | None] = {}
+    for lst in root.iter():
+        if _name(lst) != 'parashapelist':
+            continue
+        for shape in lst:
+            shape_id = _attr(shape, 'id') if _name(shape) == 'parashape' else None
+            if shape_id is not None:
+                ref = _attr(shape, 'headingidref')
+                refs[shape_id.strip()] = ref.strip() if ref is not None else None
+    return refs
+
+
+def _outline_refs(body: ET.Element) -> set[str]:
+    return {ref.strip() for element in body.iter() if _name(element) == 'secdef' and (ref := _attr(element, 'outlineshape')) is not None}
+
+
 def _lists_digest(root: ET.Element, names: set[str]) -> str | None:
     found = [element for element in root.iter() if _name(element) in names]
     if not found:
@@ -253,11 +277,24 @@ class _Resolver:
                 self.items.setdefault(name, []).extend(list(child))
                 index = self.index.setdefault(name, {})
                 for item in child:
+                    native_binitem = name == 'bindatalist' and _name(item) == 'binitem'
                     item_id = _attr(item, 'id')
+                    if native_binitem:
+                        # Native BINDATALIST/BINITEM uses BinData; historical samples use Id.
+                        # This is an identity alias only, never a general reference fallback.
+                        identities = [(key, value.strip()) for key, value in _lower_attrs_all(item)
+                                      if key in {'id', 'bindata'}]
+                        if (not identities or any(not value for _key, value in identities)
+                                or len({key for key, _value in identities}) != len(identities)
+                                or len({value for _key, value in identities}) != 1):
+                            raise CensusError('BINITEM identity is missing or contradictory')
+                        item_id = identities[0][1]
                     if item_id is None:
                         continue
                     key = item_id.strip()
                     if key in index:
+                        if name == 'bindatalist' and (native_binitem or _name(index[key]) == 'binitem'):
+                            raise CensusError('BINITEM identity is duplicated')
                         self.ambiguous.add((name, key))
                     index[key] = item
             else:
@@ -317,8 +354,12 @@ class _Resolver:
             return None
         out = ['<' + name]
         heading = _HEADINGS.get((_attr(element, 'headingtype') or '').strip().lower())
-        for key, value in sorted((k.rsplit('}', 1)[-1].lower(), v) for k, v in element.attrib.items()):
+        attributes = sorted((k.rsplit('}', 1)[-1].lower(), v) for k, v in element.attrib.items())
+        single_inst_id = sum(1 for key, _value in attributes if key == 'instid') == 1
+        for key, value in attributes:
             if key == 'outlineshape':
+                continue
+            if mask_shape and root_paragraph and depth == 0 and key == 'instid' and single_inst_id:
                 continue
             if root_item and depth == 0 and key == 'id':
                 continue
@@ -362,6 +403,25 @@ class _Resolver:
         tokens = self.emit(element, **options)
         assert tokens is not None
         return _digest_tokens(tokens)
+
+
+def _outline_bindings_complete(resolver: _Resolver, body: ET.Element) -> bool:
+    sections = [element for element in body.iter() if _name(element) == 'section']
+    if not sections:
+        return False
+    for section in sections:
+        secdefs = [element for element in section.iter() if _name(element) == 'secdef']
+        if not secdefs:
+            return False
+        for secdef in secdefs:
+            ref = _attr(secdef, 'outlineshape')
+            if ref is None:
+                return False
+            try:
+                resolver.lookup('numberinglist', ref)
+            except _Unresolved:
+                return False
+    return True
 
 
 def live_protection_reader(hwp: Any) -> Callable[[], dict[str, Any]]:
@@ -423,7 +483,10 @@ def parse_hwpml2x_census(text: Any) -> dict[str, Any]:
         raise CensusError('HWPML2X text has no BODY element')
 
     shapes = _shape_table(root)
+    number_refs = _number_refs(root)
+    outline_refs = _outline_refs(body)
     resolver = _Resolver(root, body)
+    outline_bindings_complete = _outline_bindings_complete(resolver, body)
     raw_paragraphs: list[tuple[int, str, str | None, ET.Element]] = []
     header_footer_elements: list[ET.Element] = []
     section_counter = [-1]
@@ -460,13 +523,27 @@ def parse_hwpml2x_census(text: Any) -> dict[str, Any]:
         except _Unresolved:
             paragraphs = None
             break
+        number_ref = number_refs.get(shape_ref.strip()) if shape_ref is not None else None
+        inst_ids = [value for key, value in _lower_attrs_all(element) if key == 'instid']
+        shares_outline: bool | None
+        if heading != 'NUMBER':
+            shares_outline = False
+        elif number_ref is None:
+            shares_outline = None
+        elif number_ref in outline_refs:
+            shares_outline = True
+        else:
+            shares_outline = False if outline_bindings_complete else None
         paragraphs.append(
             {
+                'shares_outline_numbering': shares_outline,
                 'section': section,
                 'text': text_value,
                 'text_sha256': hashlib.sha256(text_value.encode('utf-8', 'surrogatepass')).hexdigest(),
                 'heading': heading,
                 'level': level,
+                'inst_id': inst_ids[0] if len(inst_ids) == 1 else None,
+                'inst_ids': sorted(inst_ids),
                 'sha256': full,
                 'masked_sha256': masked,
                 'stripped_sha256': stripped,
@@ -493,6 +570,13 @@ def parse_hwpml2x_census(text: Any) -> dict[str, Any]:
         'styles_sha256': _lists_digest(root, {'stylelist'}),
         'numberings_sha256': _lists_digest(root, {'numberinglist', 'bulletlist'}),
         'bindata_sha256': _lists_digest(root, {'bindatalist'}),
+        # Explicitly fingerprint both media metadata and payload storage, including
+        # observed absence. Unlike bindata_sha256=None, this is usable evidence
+        # for the official-numbering text guard; it does not change page policy.
+        'media_sha256': _digest_tokens([
+            _element_digest(element, storage=_name(element) == 'bindatastorage') for element in root.iter()
+            if _name(element) in {'bindatalist', 'bindatastorage'}
+        ]),
         'page_number_count': None,
         'paragraphs': paragraphs,
         'definitions': _definitions(resolver),
