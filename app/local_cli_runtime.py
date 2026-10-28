@@ -115,9 +115,53 @@ def _native_diagnostic(site: object, error: BaseException) -> dict[str, str]:
     """
     sites = ('command_handler', 'handler_returned', 'save_precondition', 'save_native', 'save_file_readback',
              'save_custody_readback', 'save_location_readback', 'action_pre_read',
-             'action_native', 'action_post_read', 'close_wrapper')
-    return {'site': site if type(site) is str and site in sites else 'UNKNOWN',
-            'causal_class': _exception_label(error)}
+             'action_native', 'action_post_read', 'close_wrapper', 'bundle_step')
+    diagnostic = {'site': site if type(site) is str and site in sites else 'UNKNOWN',
+                  'causal_class': _exception_label(error)}
+    if type(site) is str and site == 'bundle_step':
+        # The bundle catches this exception rather than letting it reach the
+        # worker's escaped-error diagnostic. Keep only exact trusted types and
+        # two explicit cause edges, never implicit context or arbitrary fields.
+        from app.edit_ops import EditOperationError
+        from app.local_cli_service_support import LocalCliMutationError
+        from app.native_numbering import (
+            NativeNumberingInputError, NativeNumberingRefusal, NativeNumberingMutationError,
+        )
+        diagnostic.update(cause_class='UNKNOWN', cause2_class='UNKNOWN', refusal_code='UNKNOWN')
+        current = error
+        for field in ('causal_class', 'cause_class', 'cause2_class'):
+            label = _exception_label(current)
+            for cls, name in ((EditOperationError, 'EditOperationError'),
+                              (LocalCliMutationError, 'LocalCliMutationError'),
+                              (NativeNumberingInputError, 'NativeNumberingInputError'),
+                              (NativeNumberingRefusal, 'NativeNumberingRefusal'),
+                              (NativeNumberingMutationError, 'NativeNumberingMutationError')):
+                if type(current) is cls:
+                    label = name
+                    break
+            diagnostic[field] = label
+            if label == 'UNKNOWN':
+                break
+            if type(current) is NativeNumberingRefusal:
+                data = BaseException.__dict__['__dict__'].__get__(current)
+                if type(data) is dict and len(data) <= 16:
+                    for key, value in dict.items(data):
+                        if type(key) is str and key == 'code' and type(value) is str and value in (
+                            'control_enumeration_unavailable', 'existing_number_or_bullet', 'existing_page_number',
+                            'foreign_outline_definition', 'header_footer_unprovable', 'native_defaults_unavailable',
+                            'native_parameters_unavailable', 'native_unavailable', 'outline_definition_unreadable',
+                            'outline_usage_unprovable', 'paragraph_shape_unreadable', 'preservation_unprovable',
+                            'protection_unavailable', 'section_count_unprovable', 'target_ambiguous', 'target_moved',
+                            'target_not_found', 'target_not_in_body', 'target_unidentifiable', 'target_unlocatable',
+                            'text_readback_unavailable',
+                        ):
+                            diagnostic['refusal_code'] = value
+            if field == 'cause2_class':
+                break
+            current = BaseException.__dict__['__cause__'].__get__(current)
+            if current is None:
+                break
+    return diagnostic
 
 
 def _exception_label(error: BaseException) -> str:
@@ -1641,6 +1685,10 @@ class LocalCliLiveSession:
         if command is None:
             raise LocalCliRuntimeError('No local CLI command is active on the owning thread.')
         self._hold_native_custody(command, reason, cause)
+        if command.name == 'command-bundle' and cause is not None:
+            # Existing bundle failure caller; custody is already published.
+            # Private journal only, no new SDK reads or release authority.
+            command.reconciliation_data['bundle_failure_diagnostic'] = _native_diagnostic('bundle_step', cause)
 
     def _settle_held_command(
         self,
