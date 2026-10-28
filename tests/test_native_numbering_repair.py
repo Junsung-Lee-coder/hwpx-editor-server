@@ -45,7 +45,7 @@ def _body(**kwargs) -> FakeHwp:
 
 
 class _Service(LocalCliBundleNumberingMixin):
-    def _find_text_on_expected_page(self, hwp, *, match, expected_page):
+    def _find_text_on_expected_page(self, hwp, *, match, expected_page, numbering_guard=False):
         for index, para in enumerate(hwp.paragraphs):
             if match in str(para['text']):
                 hwp.cursor = (0, index, 0)
@@ -523,8 +523,9 @@ class OfficialFormatTests(unittest.TestCase):
             nn.apply_official_numbering_at_match(hwp, find='Item text', level=1, protection=hwp.census)
 
     def test_bundle_mixin_reports_enforced_format_and_maps_unknown_outcomes(self) -> None:
+        from tests.test_numbering_guard_read_order import complete_protection
         hwp = self._doc(FOREIGN_LEVELS)
-        result = _Service()._bundle_official_numbering_apply(hwp, dict(NUMBERING_STEP), protection=hwp.census)
+        result = _Service()._bundle_official_numbering_apply(hwp, dict(NUMBERING_STEP), protection=complete_protection(hwp))
         self.assertIs(result['numbering_format_enforced'], True)
         self.assertTrue(self._official_in(hwp))
         self.assertFalse(any('not set or verified' in w for w in result['warnings']))
@@ -532,12 +533,12 @@ class OfficialFormatTests(unittest.TestCase):
         hwp = self._doc(FOREIGN_LEVELS)
         hwp.outline_mode = 'noop'
         with self.assertRaises(LocalCliMutationError) as ctx:
-            _Service()._bundle_official_numbering_apply(hwp, dict(NUMBERING_STEP), protection=hwp.census)
+            _Service()._bundle_official_numbering_apply(hwp, dict(NUMBERING_STEP), protection=complete_protection(hwp))
         self.assertTrue(ctx.exception.mutation_may_have_persisted)
 
         hwp = self._doc(FOREIGN_LEVELS, extra=[('Other heading', 1, 0, 0)])
         with self.assertRaises(LocalCliRuntimeError) as ctx2:
-            _Service()._bundle_official_numbering_apply(hwp, dict(NUMBERING_STEP), protection=hwp.census)
+            _Service()._bundle_official_numbering_apply(hwp, dict(NUMBERING_STEP), protection=complete_protection(hwp))
         self.assertNotIsInstance(ctx2.exception, LocalCliMutationError)
         self.assertEqual(_mutating_calls(hwp), [])
 

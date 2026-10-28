@@ -141,8 +141,8 @@ class _Service(LocalCliBundleNumberingMixin):
 
 
 def run_mixin(hwp):
-    return _Service()._bundle_official_numbering_apply(hwp, dict(BUNDLE_STEP), protection=hwp.census)
-
+    from tests.test_numbering_guard_read_order import complete_protection
+    return _Service()._bundle_official_numbering_apply(hwp, dict(BUNDLE_STEP), protection=complete_protection(hwp))
 
 def assert_tagged_noncomplete(case: unittest.TestCase, error: BaseException) -> None:
     if type(error) is _Terminate:
@@ -280,25 +280,26 @@ class BundleCaretTests(unittest.TestCase):
                 self.assertEqual(hwp.cursor, (0, 2, 3))
                 self.assertEqual(hwp.calls[-1], ('set_pos', 0, 2, 3))
 
-    def test_clean_typed_refusal_restores_the_caret(self) -> None:
+    def test_inner_native_refusal_does_not_issue_unproved_restoration(self) -> None:
         hwp = doc(foreign=True, texts=('Other heading', 'Title', 'Item text'))
         hwp.paragraphs[0]['heading_type'] = 1
         hwp.cursor = (0, 2, 3)
+        hwp.outline_unreadable = True  # SDK read failure; the healthy semantic lane is retained separately.
         with self.assertRaises(Exception) as ctx:
             run_mixin(hwp)
         self.assertNotIsInstance(ctx.exception, LocalCliMutationError)
-        self.assertEqual(hwp.cursor, (0, 2, 3))
-        self.assertEqual(hwp.calls[-1], ('set_pos', 0, 2, 3))
+        self.assertIs(type(ctx.exception.__cause__), nn.NativeNumberingRefusal)
+        self.assertNotIn(('set_pos', 0, 2, 3), hwp.calls, 'inner refusal is not restoration authority')
+        self.assertEqual([c for c in hwp.calls if c[0] == 'Execute'], [])
 
-    def test_ordinary_failure_before_any_mutator_restores_the_caret_and_is_not_relabelled(self) -> None:
+    def test_unknown_ordinary_failure_before_any_mutator_does_not_restore_the_caret(self) -> None:
         hwp = doc()
         hwp.cursor = (0, 2, 3)
         hwp.HParameterSet = _FailingParameters(hwp.HParameterSet, {'HParaShape', 'HSecDef'}, ORDINARY['RuntimeError'])
         with self.assertRaises(RuntimeError) as ctx:
             run_mixin(hwp)
         self.assertNotIsInstance(ctx.exception, LocalCliMutationError)
-        self.assertEqual(hwp.cursor, (0, 2, 3))
-        self.assertEqual(hwp.calls[-1], ('set_pos', 0, 2, 3))
+        self.assertNotIn(('set_pos', 0, 2, 3), hwp.calls, 'UNKNOWN must not navigate to restore')
 
 
 class CommandBundlePropagationTests(unittest.TestCase):
@@ -340,19 +341,20 @@ class CommandBundlePropagationTests(unittest.TestCase):
                 self.assertEqual(fault.attempted, attempted)
                 self.assertEqual(fault.after_calls(), [])
 
-    def test_success_and_clean_refusal_controls_are_not_dirty_when_nothing_was_attempted(self) -> None:
+    def test_inner_native_refusal_retains_possible_effect_without_a_mutator(self) -> None:
         hwp = _hwpml(foreign=True, texts=('Other heading', 'Title', 'Item text'))
         hwp.paragraphs[0]['heading_type'] = 1
+        hwp.outline_unreadable = True  # Eligible technical UNKNOWN, not a source-proven semantic refusal.
         fault = Fault(hwp, action='NoSuchAction', point='execute_after', make_exc=ORDINARY['RuntimeError'])
         result, persisted, _ = run_bundle(hwp, NUMBERING_STEP, real_snapshot=True)
         step = result['steps'][0]
         self.assertFalse(result['ok'])
-        self.assertFalse(step['mutation_may_have_persisted'])
-        self.assertFalse(step['dirty'])
-        self.assertFalse(persisted.get('dirty'))
+        self.assertTrue(step['mutation_may_have_persisted'])
+        self.assertTrue(step['dirty'])
+        self.assertTrue(persisted.get('dirty'))
         self.assertEqual(fault.attempted, [])
 
-    def test_ordinary_failure_before_any_mutator_is_not_labelled_dirty(self) -> None:
+    def test_unknown_ordinary_failure_before_any_mutator_keeps_possible_effect(self) -> None:
         hwp = _hwpml()
         fault = Fault(hwp, action='NoSuchAction', point='execute_after', make_exc=ORDINARY['RuntimeError'])
         original = hwp.HParameterSet
@@ -369,9 +371,9 @@ class CommandBundlePropagationTests(unittest.TestCase):
         result, persisted, _ = run_bundle(hwp, NUMBERING_STEP, real_snapshot=True)
         step = result['steps'][0]
         self.assertFalse(result['ok'])
-        self.assertFalse(step['mutation_may_have_persisted'])
-        self.assertFalse(step['dirty'])
-        self.assertFalse(persisted.get('dirty'))
+        self.assertTrue(step['mutation_may_have_persisted'])
+        self.assertTrue(step['dirty'])
+        self.assertTrue(persisted.get('dirty'))
         self.assertEqual(fault.attempted, [])
 
     def test_success_then_a_later_failure_keeps_the_earlier_dirty_state(self) -> None:

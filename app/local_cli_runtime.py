@@ -128,6 +128,25 @@ def _native_diagnostic(site: object, error: BaseException) -> dict[str, str]:
             NativeNumberingInputError, NativeNumberingRefusal, NativeNumberingMutationError,
         )
         diagnostic.update(cause_class='UNKNOWN', cause2_class='UNKNOWN', refusal_code='UNKNOWN')
+        # Optional fixed source-bound phase, never arbitrary error text or
+        # release authority. Exact containers/keys/values avoid callbacks even
+        # when a trusted exception's replaceable dictionary is hostile.
+        if type(error) is LocalCliRuntimeError or type(error) is LocalCliMutationError:
+            data = BaseException.__dict__['__dict__'].__get__(error)
+            phase = reason = None
+            if type(data) is dict and len(data) <= 16:
+                for key, value in dict.items(data):
+                    if type(key) is str and type(value) is str:
+                        if key == 'numbering_phase':
+                            phase = value
+                        elif key == 'numbering_reason':
+                            reason = value
+            if type(phase) is str and type(reason) is str and (phase, reason) in (
+                ('preflight', 'preservation_unproven'), ('pre_target', 'finder_failed'),
+                ('native', 'native_failed'), ('restore', 'restore_unproven'),
+                ('preservation', 'preservation_unproven'),
+            ):
+                diagnostic.update(numbering_phase=phase, numbering_reason=reason)
         current = error
         for field in ('causal_class', 'cause_class', 'cause2_class'):
             label = _exception_label(current)
@@ -1595,7 +1614,7 @@ class LocalCliLiveSession:
             elif command.reconciled:
                 command.handler = None
 
-    def _hold_native_custody(self, command: _LiveCommand, reason: str, cause: BaseException | None) -> None:
+    def _hold_native_custody(self, command: _LiveCommand, reason: str, cause: BaseException | None, *, may_have_mutated: bool = True) -> None:
         """Retain the owning STA after a numbering mutator was reached with an unknown outcome.
 
         Only in-memory state is changed here, so the hold is published before any journal/status write can fail.
@@ -1608,14 +1627,14 @@ class LocalCliLiveSession:
                 error.__cause__ = cause
             command.error = error
             command.custody_held = True
-            command.may_have_mutated = True
+            command.may_have_mutated = command.may_have_mutated or may_have_mutated
             self._native_custody_held = True
             self._quarantined = True
             self._allow_native_cleanup = False
             if self._terminal_error is None:
                 self._terminal_error = error
             data = self._ensure_reconciliation_data(command)
-            data['may_have_mutated'] = True
+            data['may_have_mutated'] = command.may_have_mutated
             data['error_code'] = 'NATIVE_CUSTODY_HELD'
             data['recovery'] = {'state': 'quarantined'}
 
@@ -1680,11 +1699,14 @@ class LocalCliLiveSession:
             raise LocalCliRuntimeError('Pre-Save observation lost healthy owning-STA authority.')
         return diagnostic
 
-    def _hold_active_command_custody(self, reason: str, cause: BaseException | None = None) -> None:
+    def _hold_active_command_custody(self, reason: str, cause: BaseException | None = None, *, may_have_mutated: bool = True) -> None:
         command = self._active_command
         if command is None:
             raise LocalCliRuntimeError('No local CLI command is active on the owning thread.')
-        self._hold_native_custody(command, reason, cause)
+        if may_have_mutated:
+            self._hold_native_custody(command, reason, cause)
+        else:
+            self._hold_native_custody(command, reason, cause, may_have_mutated=False)
         if command.name == 'command-bundle' and cause is not None:
             # Existing bundle failure caller; custody is already published.
             # Private journal only, no new SDK reads or release authority.
@@ -1707,7 +1729,7 @@ class LocalCliLiveSession:
         if reporting_error is not None:
             error.reporting_errors.append(reporting_error)
         command.semantic_ok = False
-        command.may_have_mutated = True
+        # The hold already recorded issued-edit uncertainty independently.
         command.state = 'failed_after_timeout' if command.timed_out else 'failed'
         try:
             self._persist_command(command)

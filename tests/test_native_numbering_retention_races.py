@@ -200,11 +200,11 @@ class QueuedCloseCleanControlTests(unittest.TestCase):
         entered, release = threading.Event(), threading.Event()
         original = owned.service._find_text_on_expected_page
 
-        def find(h, *, match, expected_page):
+        def find(h, *, match, expected_page, **kwargs):
             entered.set()
             if not release.wait(JOIN):
                 raise AssertionError('the in-flight numbering callback was never released')
-            return original(h, match=match, expected_page=expected_page)
+            return original(h, match=match, expected_page=expected_page, **kwargs)
 
         owned.service._find_text_on_expected_page = find
         return entered, release

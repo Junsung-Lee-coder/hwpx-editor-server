@@ -54,7 +54,7 @@ def _run_bundle(hwp, step):
     handle.mark_mutating_intent = lambda: setattr(handle, 'mutation_intent', True)
     service._execute_live = lambda *, handler, **kwargs: handler(handle)  # type: ignore[method-assign]
 
-    def find(handle_hwp, *, match, expected_page):
+    def find(handle_hwp, *, match, expected_page, numbering_guard=False):
         for index, para in enumerate(handle_hwp.paragraphs):
             if match in str(para['text']):
                 handle_hwp.cursor = (0, index, 0)
@@ -181,13 +181,15 @@ class OfficialNumberingBundleTranslationTests(unittest.TestCase):
         self.assertEqual(hwp.paragraphs[1]['text'], '1. Item')
         self.assertEqual(sum(1 for c in hwp.calls if c[0] == 'Execute' and c[1] == 'ParagraphShape'), 1)
 
-    def test_unverifiable_definition_is_a_clean_refusal_with_no_native_mutation(self) -> None:
+    def test_unverifiable_definition_retains_unknown_without_native_mutation(self) -> None:
         hwp = _doc()
         hwp.outline_unreadable = True
         result, persisted = _run_bundle(hwp, NUMBERING_STEP)
         self.assertFalse(result['ok'])
         step = result['steps'][0]
-        self.assertFalse(step['mutation_may_have_persisted'])
+        self.assertTrue(step['mutation_may_have_persisted'])
+        self.assertTrue(result['dirty'])
+        self.assertTrue(persisted['dirty'])
         self.assertEqual([c for c in hwp.calls if c[0] in {'Execute', 'Run'}], [])
         self.assertEqual([p['heading_type'] for p in hwp.paragraphs], [0, 0, 0])
 

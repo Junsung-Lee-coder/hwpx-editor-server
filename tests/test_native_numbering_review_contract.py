@@ -393,9 +393,12 @@ class PositionTypeTests(unittest.TestCase):
     def test_noncanonical_caret_before_a_page_number_is_never_coerced_into_a_restore(self) -> None:
         hwp = doc()
         hwp.get_pos = lambda: (0.0, 2.0, 5.0)
-        result = nn.apply_page_number(hwp, {'position': 'bottom-center'}, protection=hwp.census)
+        with self.assertRaises(nn.NativeNumberingRefusal) as refused:
+            nn.apply_page_number(hwp, {'position': 'bottom-center'}, protection=hwp.census)
         self.assertEqual([c for c in hwp.calls if c[0] == 'set_pos'], [])
-        self.assertTrue(any('could not be read' in w for w in result['warnings']))
+        self.assertEqual(refused.exception.code, 'target_unlocatable')
+        self.assertEqual(executes(hwp), [])
+        self.assertEqual([c for c in hwp.calls if c[0] == 'MoveDocBegin'], [])
 
 
 class NativeStatusDomainTests(unittest.TestCase):
@@ -546,11 +549,16 @@ def run_bundle(hwp, *steps, real_snapshot: bool = False):
     handle.mark_mutating_intent = lambda: setattr(handle, 'mutation_intent', True)
     service._execute_live = lambda *, handler, **kwargs: handler(handle)  # type: ignore[method-assign]
 
-    def find(handle_hwp, *, match, expected_page):
+    def find(handle_hwp, *, match, expected_page, numbering_guard=False):
         for index, para in enumerate(handle_hwp.paragraphs):
             if match in str(para['text']):
                 handle_hwp.cursor = (0, index, 0)
                 return {'page': expected_page, 'pos': [0, index, 0]}
+        if numbering_guard:
+            # This legacy locator adapter exhausted its synthetic body.
+            # New tests separately exercise the real strict SDK finder.
+            from app.local_cli_bundle_paragraphs import _NumberingTargetNotFound
+            raise _NumberingTargetNotFound('No target on the expected page.')
         raise LocalCliRuntimeError('target not found')
 
     def update_live_binding(current, **kwargs):
@@ -606,7 +614,7 @@ class LifecyclePropagationTests(unittest.TestCase):
         self.assertEqual(executes(hwp), ['OutlineNumber'])
         self.assertEqual(headings(hwp), [0, 0, 0])
 
-    def test_pre_mutation_drift_is_a_clean_refusal_through_the_real_bundle(self) -> None:
+    def test_unrestorable_pre_mutation_drift_is_held_through_the_real_bundle(self) -> None:
         hwp = _hwpml(foreign=True)
         original = hwp.census
 
@@ -619,8 +627,9 @@ class LifecyclePropagationTests(unittest.TestCase):
             result, persisted, _snapshots = run_bundle(hwp, NUMBERING_STEP)
         self.assertFalse(result['ok'])
         first = result['steps'][0]
-        self.assertFalse(first['mutation_may_have_persisted'])
-        self.assertFalse(first['dirty'])
+        self.assertTrue(first['mutation_may_have_persisted'])
+        self.assertTrue(first['dirty'])
+        self.assertTrue(persisted['dirty'])
         self.assertEqual(executes(hwp), [])
 
     def test_api_and_worker_seams_keep_the_unknown_outcome(self) -> None:
@@ -690,7 +699,9 @@ class SurfaceParityTests(unittest.TestCase):
                     self._api(api_hwp, 2, find)
                 cli = self._bundle(cli_hwp, 2, find)
                 self.assertFalse(cli['ok'])
-                self.assertFalse(cli['steps'][0]['mutation_may_have_persisted'])
+                # The strict missing-target guard proves restoration; an
+                # inner ambiguity refusal alone does not carry that proof.
+                self.assertEqual(cli['steps'][0]['mutation_may_have_persisted'], label == 'ambiguous')
                 self.assertEqual(executes(api_hwp), [])
                 self.assertEqual(executes(cli_hwp), [])
         for label, heading in (('bullet', 3), ('number', 2)):

@@ -374,12 +374,15 @@ class ServiceValidationParityTests(unittest.TestCase):
                 self._service_validate(dict(step))
 
 
+from tests.test_numbering_guard_read_order import complete_protection
+
+
 class _NumberingService(LocalCliBundleNumberingMixin):
     def __init__(self, expected_page_ok: bool = True) -> None:
         self.expected_page_ok = expected_page_ok
         self.finder_calls: list[tuple[str, int]] = []
 
-    def _find_text_on_expected_page(self, hwp, *, match, expected_page):
+    def _find_text_on_expected_page(self, hwp, *, match, expected_page, numbering_guard=False):
         self.finder_calls.append((match, expected_page))
         if not self.expected_page_ok:
             raise LocalCliRuntimeError('target not found on expected page')
@@ -449,7 +452,7 @@ class BundleMixinTests(unittest.TestCase):
     def test_official_numbering_apply_numbers_only_the_matched_paragraph(self) -> None:
         hwp = _doc()
         service = _NumberingService()
-        result = service._bundle_official_numbering_apply(hwp, dict(NUMBERING_FIELDS))
+        result = service._bundle_official_numbering_apply(hwp, dict(NUMBERING_FIELDS), protection=complete_protection(hwp))
         self.assertEqual(service.finder_calls, [('Item text', 2)])
         self.assertEqual([p['heading_type'] for p in hwp.paragraphs], [0, 1, 0])
         self.assertEqual([p['level'] for p in hwp.paragraphs], [0, 2, 0])
@@ -464,12 +467,12 @@ class BundleMixinTests(unittest.TestCase):
     def test_official_numbering_zero_mutation_when_target_is_not_provable(self) -> None:
         hwp = _doc(paragraphs=[{'text': 'Item text', 'heading_type': 0, 'level': 0}, {'text': 'Item text again', 'heading_type': 0, 'level': 0}])
         with self.assertRaises(LocalCliRuntimeError) as ctx:
-            _NumberingService()._bundle_official_numbering_apply(hwp, dict(NUMBERING_FIELDS))
+            _NumberingService()._bundle_official_numbering_apply(hwp, dict(NUMBERING_FIELDS), protection=complete_protection(hwp))
         self.assertNotIsInstance(ctx.exception, LocalCliMutationError)
         self.assertEqual(_mutations(hwp), [])
         hwp = _doc()
         with self.assertRaises(LocalCliRuntimeError):
-            _NumberingService(expected_page_ok=False)._bundle_official_numbering_apply(hwp, dict(NUMBERING_FIELDS))
+            _NumberingService(expected_page_ok=False)._bundle_official_numbering_apply(hwp, dict(NUMBERING_FIELDS), protection=complete_protection(hwp))
         self.assertEqual(_mutations(hwp), [])
 
     def test_official_numbering_invalid_step_has_zero_native_calls(self) -> None:
@@ -483,13 +486,13 @@ class BundleMixinTests(unittest.TestCase):
         hwp = _doc()
         hwp.HAction.shape_mode = 'prefix-text'
         with self.assertRaises(LocalCliMutationError) as ctx:
-            _NumberingService()._bundle_official_numbering_apply(hwp, {**NUMBERING_FIELDS, 'level': 1})
+            _NumberingService()._bundle_official_numbering_apply(hwp, {**NUMBERING_FIELDS, 'level': 1}, protection=complete_protection(hwp))
         self.assertTrue(ctx.exception.mutation_may_have_persisted)
 
     def test_official_numbering_refuses_existing_bullet_without_mutation(self) -> None:
         hwp = _doc(paragraphs=[{'text': 'Item text', 'heading_type': 3, 'level': 0}])
         with self.assertRaises(LocalCliRuntimeError) as ctx:
-            _NumberingService()._bundle_official_numbering_apply(hwp, dict(NUMBERING_FIELDS))
+            _NumberingService()._bundle_official_numbering_apply(hwp, dict(NUMBERING_FIELDS), protection=complete_protection(hwp))
         self.assertNotIsInstance(ctx.exception, LocalCliMutationError)
         self.assertEqual(_mutations(hwp), [])
 

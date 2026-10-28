@@ -214,7 +214,8 @@ class BundleOfficialNumberingNavigationTests(unittest.TestCase):
             return {'page': 1}
 
     def run_step(self, hwp):
-        return self.Service()._bundle_official_numbering_apply(hwp, dict(self.STEP), protection=hwp.census)
+        from tests.test_numbering_guard_read_order import complete_protection
+        return self.Service()._bundle_official_numbering_apply(hwp, dict(self.STEP), protection=complete_protection(hwp))
 
     def test_unknown_native_status_does_not_move_the_caret_afterwards(self) -> None:
         for label, returns in (('none', None), ('false', False), ('truthy-int', 1)):

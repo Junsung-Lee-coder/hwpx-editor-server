@@ -61,7 +61,7 @@ class _Workflow:
             handle.mark_mutating_intent = lambda: setattr(handle, 'mutation_intent', True)
             return handler(handle)
         service._execute_live = execute_live
-        service._bundle_page_evidence = lambda hwp: {'page': 1}
+        service._bundle_page_evidence = lambda hwp, **kwargs: {'page': 1}
         service._update_live_binding = self._update
         service._save_binding = self._save
         service._record_local_cli_command = lambda *a, **kw: None

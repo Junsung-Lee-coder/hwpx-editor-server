@@ -175,7 +175,7 @@ class Owned:
 
             service._execute_live = executor
 
-        def find(h, *, match, expected_page):
+        def find(h, *, match, expected_page, numbering_guard=False):
             for i, p in enumerate(h.paragraphs):
                 if match in str(p['text']):
                     h.cursor = (0, i, 0)
@@ -341,21 +341,18 @@ class OwningThreadSignalTests(CustodyAssertions, unittest.TestCase):
                 self.assertTrue(any(e is signal for e in chain(record.error)))
                 self.assert_custody_survives_follow_ons(owned)
 
-    def test_an_untagged_signal_before_any_mutator_is_not_swallowed(self):
+    def test_unknown_signal_before_any_mutator_is_retained_without_cleanup(self):
         hwp = make_hwp()
         owned = Owned(self, hwp)
         owned.arm('NoSuchAction')
-        owned.service._find_text_on_expected_page = lambda *a, **k: (_ for _ in ()).throw(Terminate())
+        signal = Terminate()
+        owned.service._find_text_on_expected_page = lambda *a, **k: (_ for _ in ()).throw(signal)
         result, error = owned.run(NUMBERING_STEP)
-        self.assertIsNone(result)
-        self.assertIsNotNone(error)
-        self.assertIsInstance(error, Terminate)
-        self.assertFalse(owned.session._lifetime_edit_possible)
-        owned.session._thread.join(.1)
-        self.assertEqual(owned.hook, [])
-        self.assertTrue(owned.session._thread.is_alive())
-        self.assertFalse(owned.session._closed.is_set())
-        self.assertEqual(owned.cleanup_events(), [])
+        self.assertIsNone(error)
+        self.assert_noncomplete_result(owned, result, error)
+        self.assertTrue(any(e is signal for e in chain(owned.session._commands_by_id[owned.command()['command_id']].error)))
+        self.assert_retained(owned)
+        self.assert_custody_survives_follow_ons(owned)
 
 
 class OrdinaryUnknownOutcomeTests(CustodyAssertions, unittest.TestCase):
@@ -416,21 +413,21 @@ class KnownOutcomeControlTests(CustodyAssertions, unittest.TestCase):
                 self.assertTrue(owned.session._lifetime_edit_possible)
                 self._assert_open_and_usable(owned)
 
-    def test_clean_typed_refusal_is_not_dirty_and_not_quarantined(self):
+    def test_inner_native_refusal_without_restoration_proof_is_held(self):
         hwp = make_hwp(foreign=True)
         hwp.paragraphs[0]['heading_type'] = 1
+        hwp.outline_unreadable = True  # Actual technical refusal, not healthy semantic foreign outline.
         owned = Owned(self, hwp)
         fault = owned.arm('NoSuchAction')
         result, error = owned.run(NUMBERING_STEP)
         self.assertIsNone(error)
         self.assertIs(result['ok'], False)
-        self.assertIs(result['dirty'], False)
-        self.assertIs(result['steps'][0]['mutation_may_have_persisted'], False)
+        self.assert_noncomplete_result(owned, result, error)
         self.assertEqual(fault.attempted, [])
-        self.assertFalse(owned.session._lifetime_edit_possible)
-        self._assert_open_and_usable(owned)
+        self.assert_retained(owned)
+        self.assert_custody_survives_follow_ons(owned)
 
-    def test_raw_exception_before_any_mutator_is_not_dirty_and_not_quarantined(self):
+    def test_raw_official_exception_before_any_mutator_retains_unknown_custody(self):
         for label, step in (('official', NUMBERING_STEP), ('page', PAGE_STEP)):
             with self.subTest(op=label):
                 hwp = make_hwp()
@@ -440,10 +437,23 @@ class KnownOutcomeControlTests(CustodyAssertions, unittest.TestCase):
                 result, error = owned.run(step)
                 self.assertIsNone(error)
                 self.assertIs(result['ok'], False)
-                self.assertIs(result['dirty'], False)
-                self.assertIs(result['steps'][0]['mutation_may_have_persisted'], False)
                 self.assertEqual(fault.attempted, [])
-                self._assert_open_and_usable(owned)
+                if label == 'official':
+                    self.assert_noncomplete_result(owned, result, error)
+                    self.assert_retained(owned)
+                    self.assert_custody_survives_follow_ons(owned)
+                else:
+                    self.assertIs(result['dirty'], False)
+                    self.assertIs(result['steps'][0]['mutation_may_have_persisted'], False)
+                    self.assertTrue(owned.session._native_custody_held)
+                    self.assertTrue(owned.session._quarantined)
+                    self.assertFalse(owned.session._closed.is_set())
+                    self.assertEqual(owned.cleanup_events(), [])
+                    before = list(hwp.calls)
+                    with self.assertRaises(LocalCliRuntimeError):
+                        owned.manager.execute(session_id=owned.sid, command_name='health_probe', handler=lambda h: h.hwp.MoveDocBegin(), timeout=5)
+                    self.assertEqual(hwp.calls, before)
+                    self.assertIs(owned.command().get('may_have_mutated'), False)
 
 
 class ReporterFailureCustodyTests(CustodyAssertions, unittest.TestCase):

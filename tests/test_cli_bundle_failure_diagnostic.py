@@ -88,12 +88,12 @@ class BundleFailureDiagnosticTests(unittest.TestCase):
         service._verify_artifact_readback = lambda *a, **k: wc
         service._artifact_name = lambda **k: 'fixture.hwpx'
         service._artifact_download_path = lambda **k: 'fixture-download'
-        service._bundle_page_evidence = lambda h: {'page': 1}
+        service._bundle_page_evidence = lambda h, **kwargs: {'page': 1}
         service._bundle_compact_snapshot = lambda h: {}
         hwp_calls_at_hold = []
         hold = session._hold_native_custody
-        def held(*args):
-            hold(*args)
+        def held(*args, **kwargs):
+            hold(*args, **kwargs)
             hwp_calls_at_hold.append(list(hwp.calls))
         self.enterContext(patch.object(session, '_hold_native_custody', held))
         self.enterContext(patch.object(svc, 'snapshot_live_location', lambda **k: {}))
@@ -122,10 +122,10 @@ class BundleFailureDiagnosticTests(unittest.TestCase):
         self.capture({'private_command': row, 'public_command': session.command_status()})
         return row['reconciliation_data']['bundle_failure_diagnostic']
 
-    def assert_held(self, manager, session, hwp, calls, at_hold):
+    def assert_held(self, manager, session, hwp, calls, at_hold, *, may_have_mutated=True):
         command = self.command(session)
         self.assertTrue(command.custody_held)
-        self.assertTrue(command.may_have_mutated)
+        self.assertIs(command.may_have_mutated, may_have_mutated)
         self.assertFalse(command.semantic_ok)
         self.assertFalse(command.timed_out)
         self.assertTrue(session._thread.is_alive())
@@ -141,25 +141,23 @@ class BundleFailureDiagnosticTests(unittest.TestCase):
         self.assertEqual(hwp.calls, at_hold[0])
         self.assertEqual(calls, ['initialize'])
 
-    def test_real_no_match_after_clean_save_has_private_fixed_class_not_a_cause_verdict(self):
+    def test_real_no_match_after_clean_save_is_a_verified_nonmutating_refusal(self):
         service, manager, session, hwp, calls, at_hold = self.prepare()
         self.assertTrue(service.save()['ok'])
         result = self.run_bundle(service, match='N2NOMATCH')
         self.assertFalse(result['ok'])
-        self.assertTrue(result['dirty'])
+        self.assertFalse(result['dirty'])
         self.assertEqual(len(result['steps']), 2)
-        self.assertEqual(result['steps'][1]['error'], 'native command step failed')
-        self.assertEqual(self.diagnostic(session), {'site': 'bundle_step',
-            'causal_class': 'LocalCliRuntimeError', 'cause_class': 'UNKNOWN',
-            'cause2_class': 'UNKNOWN', 'refusal_code': 'UNKNOWN'})
-        self.assert_held(manager, session, hwp, calls, at_hold)
+        self.assertEqual(result['steps'][1]['refusal_code'], 'target_not_found')
+        self.assertFalse(result['steps'][1]['mutation_may_have_persisted'])
+        self.assertFalse(self.command(session).custody_held)
+        self.assertEqual(at_hold, [])
+        self.assertEqual(calls, ['initialize'])
         journal = rt.command_journal_path(session.session_root)
         rows = json.loads(journal.read_text())['commands']
         self.capture({'private_journal': rows, 'public_bundle': result})
         self.assertEqual(rows[0]['save_diagnostic']['save_decision'], 'clean_noop')
-        self.assertEqual(rows[-1]['reconciliation_data']['bundle_failure_diagnostic'], self.diagnostic(session))
-        public = json.dumps([result, session.command_status(), rt.read_command_journal(session.session_root)])
-        self.assertNotIn('bundle_failure_diagnostic', public)
+        self.assertNotIn('bundle_failure_diagnostic', rows[-1].get('reconciliation_data', {}))
         self.assertNotIn('N2NOMATCH', journal.read_text())
         self.assertFalse(any(c[0] == 'Execute' for c in hwp.calls))
 
@@ -183,7 +181,16 @@ class BundleFailureDiagnosticTests(unittest.TestCase):
                 hwp.find = MethodType(LockedFindWrapper.find, hwp)
                 result = self.run_bundle(service, match='N2NOMATCH')
                 self.assertFalse(result['ok'])
-                self.assertEqual(self.diagnostic(session)['causal_class'], label)
+                if fault is None:
+                    self.assertFalse(result['dirty'])
+                    self.assertFalse(self.command(session).custody_held)
+                    self.assertEqual(result['steps'][1]['refusal_code'], 'target_not_found')
+                    continue
+                d = self.diagnostic(session)
+                self.assertEqual(d['causal_class'], 'LocalCliRuntimeError')
+                self.assertEqual(d['cause_class'], label)
+                self.assertEqual(d['numbering_phase'], 'pre_target')
+                self.assertEqual(d['numbering_reason'], 'finder_failed')
                 self.assertEqual(sum(c == ('locked_sdk_execute', 'RepeatFind') for c in hwp.calls), 1)
                 self.assertIn(('locked_message_mode', 1048575), hwp.calls)
                 self.assert_held(manager, session, hwp, calls, at_hold)
@@ -202,8 +209,10 @@ class BundleFailureDiagnosticTests(unittest.TestCase):
                 else:
                     hwp.HAction.execute_raises = RuntimeError('PRIVATE_NATIVE')
                 result = self.run_bundle(service)
-                diagnostic = self.diagnostic(session)
                 self.assertFalse(result['ok'])
+                diagnostic = self.diagnostic(session)
+                self.assertEqual(diagnostic['numbering_phase'], 'native')
+                self.assertEqual(diagnostic['numbering_reason'], 'native_failed')
                 self.assertEqual(diagnostic['site'], 'bundle_step')
                 self.assertEqual(diagnostic['causal_class'], 'LocalCliRuntimeError' if mode == 'refusal' else 'LocalCliMutationError')
                 self.assertEqual(diagnostic['cause_class'], 'NativeNumberingRefusal' if mode == 'refusal' else 'NativeNumberingMutationError')
@@ -241,8 +250,11 @@ class BundleFailureDiagnosticTests(unittest.TestCase):
                 result = self.run_bundle(service)
                 diagnostic = self.diagnostic(session)
                 self.assertFalse(result['ok'])
-                self.assertEqual(diagnostic['causal_class'], 'UNKNOWN' if type(fault) is Foreign else ('KeyboardInterrupt' if type(fault) is KeyboardInterrupt else 'SystemExit'))
+                self.assertEqual(diagnostic['causal_class'], 'LocalCliRuntimeError' if type(fault) is Foreign else ('KeyboardInterrupt' if type(fault) is KeyboardInterrupt else 'SystemExit'))
                 self.assertEqual(diagnostic['cause_class'], 'UNKNOWN' if type(fault) is Foreign else 'ValueError')
+                if type(fault) is Foreign:
+                    self.assertEqual(diagnostic['numbering_phase'], 'pre_target')
+                    self.assertEqual(diagnostic['numbering_reason'], 'finder_failed')
                 self.assert_held(manager, session, hwp, calls, at_hold)
                 self.assertNotIn('PRIVATE', rt.command_journal_path(session.session_root).read_text())
         self.assertEqual(callbacks, [])
@@ -288,6 +300,9 @@ class BundleFailureDiagnosticTests(unittest.TestCase):
         for fault in ('read', 'write', 'all_reports'):
             with self.subTest(fault=fault):
                 service, manager, session, hwp, calls, at_hold = self.prepare()
+                def fail_find(*a, **k):
+                    raise rt.LocalCliRuntimeError('PRIVATE_GENERIC_FIND')
+                hwp.find = fail_find
                 journal = rt.command_journal_path(session.session_root)
                 original_open, original_replace = type(journal).open, atomic_json.os.replace
                 persist = session._persist_command
@@ -362,8 +377,9 @@ class BundleFailureDiagnosticTests(unittest.TestCase):
         hwp.find = fail
         self.assertFalse(self.run_bundle(service)['ok'])
         self.assertEqual(self.diagnostic(session), {'site': 'bundle_step',
-            'causal_class': 'ValueError', 'cause_class': 'ValueError',
-            'cause2_class': 'ValueError', 'refusal_code': 'UNKNOWN'})
+            'causal_class': 'LocalCliRuntimeError', 'cause_class': 'ValueError',
+            'cause2_class': 'ValueError', 'refusal_code': 'UNKNOWN',
+            'numbering_phase': 'pre_target', 'numbering_reason': 'finder_failed'})
         self.assert_held(manager, session, hwp, calls, at_hold)
 
     def test_success_and_nonbundle_error_do_not_gain_a_private_bundle_diagnostic(self):

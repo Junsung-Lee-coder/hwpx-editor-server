@@ -6,7 +6,7 @@
 
 Normal `close` is implemented for the original constructor-owned instance with exactly one bound clean document and window. It calls raw void `Quit` once (not `pyhwpx.quit`, which hides a destructive Clear), verifies the original process handle exited, releases the SDK dispatch and observes both owning-STA COM balances. Dirty, unbound, timed-out, UNKNOWN or held state is retained with no teardown. A reporting-only failure after completion remains completed, with managed files retained for cleanup; Quit is never replayed. Download approved artifacts **before** successful close removes the managed root.
 
-Portable tests establish source behavior only. Real Windows SDK/COM/native-exit acceptance of this candidate still requires the separately admitted BOOK gate. See [native lifecycle contract](docs/NATIVE_LIFECYCLE.md) for the locked dependency, API sources, destructor balance and limits.
+Portable tests establish source behavior only. Real Windows SDK/COM/native-exit acceptance of this candidate still requires a separately reviewed verification run on an interactive Windows/Hancom desktop. See [native lifecycle contract](docs/NATIVE_LIFECYCLE.md) for the locked dependency, API sources, destructor balance and limits.
 
 
 Edit Hancom `.hwpx`/`.hwp` documents programmatically on Windows. A local HTTP API drives the real Hancom editor through [`pyhwpx`](https://pypi.org/project/pyhwpx/), and a thin command-line client (`hwpx`) plans each edit, sends it to the API, and prints structured proof of what changed.

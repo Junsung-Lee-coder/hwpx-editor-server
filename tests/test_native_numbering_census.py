@@ -216,7 +216,7 @@ class _HwpmlHwp(FakeHwp):
 
 
 class _Service(LocalCliBundleNumberingMixin):
-    def _find_text_on_expected_page(self, hwp, *, match, expected_page):
+    def _find_text_on_expected_page(self, hwp, *, match, expected_page, numbering_guard=False):
         for index, para in enumerate(hwp.paragraphs):
             if match in str(para['text']):
                 hwp.cursor = (0, index, 0)

@@ -3650,7 +3650,7 @@ class LocalCliService(
 
         # Numbering publishes intent at actual Execute boundaries. Other
         # packages are conservative before invocation, never error callbacks.
-        if op not in {'page_number_apply', 'official_numbering_apply', 'control_inventory', 'table_frame_inventory', 'style_inspect'}:
+        if op not in {'page_number_apply', 'official_numbering_apply', 'control_inventory', 'table_frame_inventory', 'style_inspect', 'where'}:
             if handle.mark_mutating_intent is not None:
                 handle.mark_mutating_intent()
         package = self.command_packages.get(op)
@@ -3973,13 +3973,25 @@ class LocalCliService(
                 # The owning STA is retained with a numbering outcome that is not proven. Project the dirty,
                 # held state into the binding and report an error; never treat the held session as stale.
                 binding['_expected_command_generation'] = command_generation
+                held_status = {}
                 try:
-                    held_sequence = int(self.runtime_manager.command_status(session_id).get('sequence'))
+                    held_status = self.runtime_manager.command_status(session_id)
+                    held_sequence = int(held_status.get('sequence'))
                 except (TypeError, ValueError, LocalCliRuntimeError):
                     held_sequence = native_command_sequence
                 binding['_expected_native_command_sequence'] = native_command_sequence
                 binding['native_command_sequence'] = max(native_command_sequence, held_sequence)
-                binding['working_copy_dirty'] = True
+                # Only the owning runtime's positive unissued command evidence
+                # can avoid new debt. Missing status remains conservative;
+                # custody and prior binding debt are never discharged here.
+                unissued_current = (held_status.get('command') == command_name
+                                    and type(held_status.get('sequence')) is int
+                                    and held_status['sequence'] > native_command_sequence
+                                    and held_status.get('custody_held') is True
+                                    and held_status.get('timed_out') is False
+                                    and held_status.get('may_have_mutated') is False)
+                binding['working_copy_dirty'] = (binding.get('working_copy_dirty') is True
+                                                 or binding.get('dirty') is True or not unissued_current)
                 binding['native_custody_held'] = True
                 try:
                     self._save_binding(binding)
@@ -7095,10 +7107,23 @@ class LocalCliService(
                 except BaseException as exc:
                     # Read no exception properties/callbacks before custody.
                     # Producer invocation intent is independent of error tags.
-                    mutation_may_have_persisted = handle.mutation_intent
+                    from app.native_numbering import NativeNumberingRefusal
+                    from app.local_cli_bundle_numbering import _NumberingPreEditHold, _NumberingSemanticRefusal
+                    numbering = step.get('op') in {'official_numbering_apply', 'page_number_apply'}
+                    target_refused = step.get('op') == 'official_numbering_apply' and (
+                        type(exc) is NativeNumberingRefusal or type(exc) is _NumberingSemanticRefusal
+                    )
+                    preedit_hold = step.get('op') == 'official_numbering_apply' and type(exc) is _NumberingPreEditHold
+                    mutation_may_have_persisted = handle.mutation_intent or (
+                        step.get('op') == 'official_numbering_apply' and not target_refused and not preedit_hold
+                    )
                     held = False
-                    if mutation_may_have_persisted and handle.hold_native_custody is not None:
-                        handle.hold_native_custody('Bundle mutator outcome unknown; session retained.', exc)
+                    if (mutation_may_have_persisted or (numbering and not target_refused)) and handle.hold_native_custody is not None:
+                        if mutation_may_have_persisted:
+                            handle.hold_native_custody('Bundle mutator outcome unknown; session retained.', exc)
+                        else:
+                            handle.hold_native_custody('Numbering inspection unproven before mutation; session retained.', exc,
+                                                       may_have_mutated=False)
                         held = True
                     if not isinstance(exc, Exception) and not held:
                         raise
@@ -7107,6 +7132,8 @@ class LocalCliService(
                     # text/rollback. Never inspect an arbitrary subclass's
                     # descriptors, metadata, metaclass name or representation.
                     error_text = 'Native command failed; outcome is unproven.'
+                    if target_refused:
+                        error_text = 'Numbering preflight refused; original state and preservation verified.'
                     rollback = {}
                     if type(exc) is LocalCliMutationError or type(exc) is LocalCliRuntimeError:
                         args = BaseException.__dict__['args'].__get__(exc)
@@ -7136,6 +7163,10 @@ class LocalCliService(
                             'rollback': rollback,
                         },
                     }
+                    if target_refused and not mutation_may_have_persisted:
+                        from app.local_cli_runtime import _native_diagnostic
+                        status['refusal_code'] = ('semantic_refusal' if type(exc) is _NumberingSemanticRefusal
+                                                  else _native_diagnostic('bundle_step', exc)['refusal_code'])
                     if held:
                         status['native_custody_held'] = True
                         custody_held = True
@@ -7202,10 +7233,10 @@ class LocalCliService(
         )
         native_custody_held = result.get('native_custody_held') is True
         if native_custody_held:
-            # The live document state after the numbering mutator is unknown, so the last known location and
-            # selection are not refreshed from it; the binding records only the dirty, held state.
-            dirty = True
-            binding['working_copy_dirty'] = True
+            # Custody also protects incomplete pre-edit inspections. It does
+            # not itself create edit debt; the reducer preserves all prior debt.
+            binding['working_copy_dirty'] = dirty
+            binding['dirty'] = dirty
             binding['native_custody_held'] = True
             binding['last_find'] = None
             binding['selected_range'] = None

@@ -221,7 +221,7 @@ def _read_text_hash(hwp: Any) -> str:
     if not callable(reader):
         raise RuntimeError('get_text_file is unavailable')
     text = reader('UNICODE', '')
-    if not isinstance(text, str):
+    if type(text) is not str:
         raise RuntimeError('get_text_file returned a non-text value')
     return hashlib.sha256(text.encode('utf-8')).hexdigest()
 
@@ -233,7 +233,10 @@ def _control_ids(hwp: Any) -> list[tuple[Any, str]]:
     for _ in range(_MAX_CONTROLS):
         if ctrl is None:
             return controls
-        controls.append((ctrl, str(ctrl.CtrlID)))
+        ctrl_id = ctrl.CtrlID
+        if type(ctrl_id) is not str or not ctrl_id:
+            raise RuntimeError('control identifier is not exact text')
+        controls.append((ctrl, ctrl_id))
         ctrl = ctrl.Next
     raise RuntimeError(f'control enumeration exceeded {_MAX_CONTROLS} controls')
 
@@ -260,23 +263,53 @@ def _exact_index(value: Any) -> bool:
     return type(value) is int and value >= 0
 
 
-def _get_pos(hwp: Any) -> tuple[int, int, int] | None:
-    """Caret as (list, para, pos); only three exact non-negative ints count, nothing is coerced."""
-    getter = getattr(hwp, 'get_pos', None) or getattr(hwp, 'GetPos', None)
-    if not callable(getter):
-        return None
+_NATIVE_ABSENT = object()
+
+
+def _native_member(hwp: Any, name: str) -> Any:
+    """Missing API is distinct from a declared descriptor that throws on entry."""
+    try:
+        return getattr(hwp, name)
+    except AttributeError:
+        # Builtin descriptors bypass metaclass metadata proxies. Do not turn
+        # a declared property's AttributeError into authority for another API.
+        mro = type.__dict__['__mro__'].__get__(type(hwp))
+        for base in mro:
+            fields = type.__dict__['__dict__'].__get__(base)
+            for key in fields:
+                if type(key) is str and key == name:
+                    raise
+        return _NATIVE_ABSENT
+
+
+def _native_method(hwp: Any, *names: str) -> Any:
+    for name in names:
+        method = _native_member(hwp, name)
+        if method is _NATIVE_ABSENT:
+            continue
+        if callable(method):
+            return method
+        break
+    raise NativeNumberingRefusal('required native API is unavailable', code='native_unavailable')
+
+
+def _get_pos(hwp: Any) -> tuple[int, int, int]:
+    """Exact caret or a stopping refusal; an entered/invalid read is never a missing-API fallback."""
+    getter = _native_method(hwp, 'get_pos', 'GetPos')
     try:
         value = getter()
-    except Exception:
-        return None
-    if isinstance(value, (list, tuple)) and len(value) == 3 and all(_exact_index(item) for item in value):
+    except Exception as exc:
+        raise NativeNumberingRefusal('native caret read failed', code='target_unlocatable') from exc
+    if (type(value) is list or type(value) is tuple) and len(value) == 3 and all(_exact_index(item) for item in value):
         return (value[0], value[1], value[2])
-    return None
+    raise NativeNumberingRefusal('native caret read is not canonical', code='target_unlocatable')
 
 
 def _parse_selected_pos(value: Any) -> tuple[int, ...] | None:
     """() = no selection, six exact ints = (slist, spara, spos, elist, epara, epos), None = not canonical."""
-    if not isinstance(value, (list, tuple)) or len(value) != 7 or type(value[0]) is not bool:
+    if (type(value) is not list and type(value) is not tuple) or len(value) != 7 or type(value[0]) is not bool:
+        return None
+    if not all(_exact_index(item) for item in value[1:]):
         return None
     if not value[0]:
         return ()
@@ -287,9 +320,7 @@ def _parse_selected_pos(value: Any) -> tuple[int, ...] | None:
 
 
 def _get_selection(hwp: Any) -> tuple[int, ...] | None:
-    getter = getattr(hwp, 'get_selected_pos', None) or getattr(hwp, 'GetSelectedPos', None)
-    if not callable(getter):
-        return None
+    getter = _native_method(hwp, 'get_selected_pos', 'GetSelectedPos')
     try:
         value = getter()
     except Exception:
@@ -302,11 +333,15 @@ _TargetState = tuple[tuple[int, int, int], tuple[int, ...]]
 
 def _read_target_state(hwp: Any) -> _TargetState | None:
     caret = _get_pos(hwp)
+    if caret is None:
+        return None
     selection = _get_selection(hwp)
+    if selection is None:
+        return None
     # One additional get_pos SDK expression after the selection getter, so a caret the getter moved or invalidated is
     # seen at this boundary; it assumes neither that the getters are side-effect free nor that the read costs no time.
     settled = _get_pos(hwp)
-    if caret is None or selection is None or settled != caret:
+    if settled is None or settled != caret:
         return None
     return caret, selection
 
@@ -349,10 +384,16 @@ def _target_guard(hwp: Any, anchor: _TargetState) -> Callable[[bool, str], None]
 
 
 def _set_pos(hwp: Any, pos: tuple[int, int, int]) -> None:
-    setter = getattr(hwp, 'set_pos', None) or getattr(hwp, 'SetPos', None)
-    if not callable(setter):
-        raise RuntimeError('set_pos is unavailable')
-    setter(pos[0], pos[1], pos[2])
+    setter = _native_method(hwp, 'set_pos', 'SetPos')
+    result = setter(pos[0], pos[1], pos[2])
+    _require_motion_result(result)
+
+
+def _require_motion_result(result: Any) -> None:
+    # Existing void wrappers return None; BOOL wrappers must return exact True.
+    # Neither False nor an arbitrary truthy object confirms a cursor operation.
+    if result is not None and result is not True:
+        raise RuntimeError('native cursor operation was not confirmed')
 
 
 def _page_number_props(
@@ -368,8 +409,14 @@ def _page_number_props(
         props = ctrl.Properties
         stage = 'Item'
         values = {}
-        for name in _PAGE_PROP_LIMITS:
-            values[name] = props.Item(name)
+        for name, limit in _PAGE_PROP_LIMITS.items():
+            value = props.Item(name)
+            if not (allow_unset_new_number and name == 'NewNumber' and value is None):
+                if type(value) is not int or value < 0 or value > limit:
+                    if _diagnostic is not None:
+                        _diagnostic.append(('validate', name, value))
+                    return None
+            values[name] = value
     except Exception as exc:
         if _diagnostic is not None:
             try:
@@ -377,16 +424,6 @@ def _page_number_props(
             except BaseException:
                 pass  # Diagnostic failure must not change the unreadable outcome.
         return None
-    for name, value in values.items():
-        if allow_unset_new_number and name == 'NewNumber' and value is None:
-            continue
-        if isinstance(value, bool) or not isinstance(value, int) or value < 0 or value > _PAGE_PROP_LIMITS[name]:
-            if _diagnostic is not None:
-                try:
-                    _diagnostic.append(('validate', name, value))
-                except BaseException:
-                    pass
-            return None
     return values
 
 
@@ -1058,17 +1095,17 @@ def _apply_page_number(hwp: Any, request: Any, *, protection: Callable[[], Any] 
     warnings: list[str] = []
     caret = _get_pos(hwp)
     try:
-        mover()
+        # A single-section PageNumPos default is independent of paragraph.
+        # Read/validate it before temporary navigation, so a failed getter
+        # leaves the original caret intact without any post-fault SDK call.
         hset = hwp.HParameterSet.HPageNumPos
         defaults_result = haction.GetDefault('PageNumPos', hset.HSet)
     except Exception as exc:
-        _restore_caret(hwp, caret, warnings)
         raise NativeNumberingRefusal(
             f'native PageNumPos defaults could not be read: exception of class {_exception_class_label(exc)}',
             code='native_defaults_unavailable',
         ) from exc
     if not _action_confirmed(defaults_result):
-        _restore_caret(hwp, caret, warnings)
         raise NativeNumberingRefusal(
             f'native PageNumPos defaults could not be read (GetDefault returned {_status_text(defaults_result)})',
             code='native_defaults_unavailable',
@@ -1080,12 +1117,12 @@ def _apply_page_number(hwp: Any, request: Any, *, protection: Callable[[], Any] 
         hset.NewNumber = req['start_number']
         hset.SideChar = req['side_char_code']
     except Exception as exc:
-        _restore_caret(hwp, caret, warnings)
         raise NativeNumberingRefusal(
             f'native PageNumPos parameters could not be set: exception of class {_exception_class_label(exc)}',
             code='native_parameters_unavailable',
         ) from exc
 
+    _require_motion_result(mover())
     # From here the outcome may be unknown, so no failure path below moves the caret.
     reach.issue()
     try:
@@ -1248,11 +1285,11 @@ def _read_paragraph_shape(hwp: Any, haction: Any) -> tuple[Any, int, int | None]
             f'current paragraph shape could not be read (GetDefault returned {_status_text(result)})', code='paragraph_shape_unreadable'
         )
     heading = getattr(hset, 'HeadingType', None)
-    if isinstance(heading, bool) or not isinstance(heading, int) or heading not in {0, 1, 2, 3}:
+    if type(heading) is not int or heading not in {0, 1, 2, 3}:
         raise NativeNumberingRefusal('current paragraph HeadingType could not be read', code='paragraph_shape_unreadable')
     level = getattr(hset, 'Level', None)
-    if isinstance(level, bool) or not isinstance(level, int):
-        level = None
+    if type(level) is not int or level < 0 or level > 255:
+        raise NativeNumberingRefusal('current paragraph Level could not be read', code='paragraph_shape_unreadable')
     return hset, heading, level
 
 
@@ -1283,11 +1320,11 @@ def _read_outline_definition(hwp: Any, haction: Any) -> list[dict[str, Any]]:
     for spec in OFFICIAL_OUTLINE_LEVELS:
         index = spec['native_level']
         text = getattr(shape, f'StrFormatLevel{index}', None)
+        if type(text) is not str:
+            raise NativeNumberingRefusal('outline level text could not be read', code='outline_definition_unreadable')
         number_format = getattr(shape, f'NumFormatLevel{index}', None)
         if (
-            not isinstance(text, str)
-            or isinstance(number_format, bool)
-            or not isinstance(number_format, int)
+            type(number_format) is not int
             or number_format < 0
             or number_format > 255
         ):
@@ -1313,7 +1350,8 @@ def _census_hits(paragraphs: list[dict[str, Any]] | None, find: str | None, matc
     return [index for index, item in enumerate(paragraphs) if needle in (item['text'] if match_case else item['text'].casefold())]
 
 
-def _prove_outline_scope(census: dict[str, Any] | None, target_find: str | None, match_case: bool = True) -> None:
+def _prove_outline_scope(census: dict[str, Any] | None, target_find: str | None, match_case: bool = True,
+                         on_semantic_refusal: Callable[[], None] | None = None) -> None:
     """Refuse (before mutation) unless redefining the caret section's outline cannot touch another outline paragraph."""
     paragraphs = census['paragraphs'] if census is not None else None
     if paragraphs is None or not target_find:
@@ -1331,6 +1369,8 @@ def _prove_outline_scope(census: dict[str, Any] | None, target_find: str | None,
     target = paragraphs[hits[0]]
     others = [item for item in paragraphs if item is not target and item['section'] == target['section'] and item['heading'] == 'OUTLINE']
     if others:
+        if on_semantic_refusal is not None:
+            on_semantic_refusal()  # Pure validated census; no SDK before the following refusal.
         raise NativeNumberingRefusal(
             f'the section already uses a different outline definition for {len(others)} other outline paragraph(s); '
             'redefining it would change their numbers, so it is refused',
@@ -1338,6 +1378,8 @@ def _prove_outline_scope(census: dict[str, Any] | None, target_find: str | None,
         )
     shared = [item for item in paragraphs if item is not target and item.get('shares_outline_numbering') is True]
     if shared:
+        if on_semantic_refusal is not None:
+            on_semantic_refusal()  # Pure validated census; no SDK before the following refusal.
         raise NativeNumberingRefusal(
             f'{len(shared)} numbered paragraph(s) use the numbering definition that the section outline uses; '
             'redefining the outline would change their numbers, so it is refused',
@@ -1460,6 +1502,7 @@ def apply_official_numbering(
     target_match_case: bool = True,
     target_anchor: _TargetState | None = None,
     on_mutating: Callable[[], None] | None = None,
+    on_semantic_refusal: Callable[[], None] | None = None,
 ) -> dict[str, Any]:
     """Set/verify the official 4-level outline definition, then number the paragraph holding the caret.
 
@@ -1477,6 +1520,7 @@ def apply_official_numbering(
             target_match_case=target_match_case,
             target_anchor=target_anchor,
             reach=reach,
+            on_semantic_refusal=on_semantic_refusal,
         )
     except NativeNumberingMutationError:
         raise
@@ -1504,6 +1548,7 @@ def _apply_official_numbering(
     target_match_case: bool,
     target_anchor: _TargetState | None,
     reach: _MutationReach,
+    on_semantic_refusal: Callable[[], None] | None,
 ) -> dict[str, Any]:
     req = normalize_official_numbering_request(request)
     haction = _require_haction(hwp, 'GetDefault', 'Execute')
@@ -1538,6 +1583,8 @@ def _apply_official_numbering(
 
     if heading in {2, 3}:
         kind = 'paragraph number' if heading == 2 else 'bullet'
+        if on_semantic_refusal is not None:
+            on_semantic_refusal()
         raise NativeNumberingRefusal(
             f'target paragraph already has a native {kind} list; outline numbering would replace it, so it is refused',
             code='existing_number_or_bullet',
@@ -1556,7 +1603,7 @@ def _apply_official_numbering(
     status = 'level_changed' if heading == _HEADING_OUTLINE else 'applied'
     format_status = 'verified_existing'
     if not format_matches:
-        _prove_outline_scope(before_census, target_find, target_match_case)
+        _prove_outline_scope(before_census, target_find, target_match_case, on_semantic_refusal)
         actions.append('Execute:OutlineNumber(ApplyTo=current section,levels 1-4)')
         _define_official_outline(hwp, haction, guard, reach)
         defined = True
@@ -1721,19 +1768,18 @@ def _official_result(
 
 
 def _locate_unique_body_paragraph(hwp: Any, find: str, *, match_case: bool) -> tuple[int, int]:
-    mover = getattr(hwp, 'MoveDocBegin', None)
-    finder = getattr(hwp, 'find', None)
-    selected_getter = getattr(hwp, 'get_selected_pos', None) or getattr(hwp, 'GetSelectedPos', None)
-    if not callable(mover) or not callable(finder) or not callable(selected_getter):
-        raise NativeNumberingRefusal('text search is unavailable on this machine', code='native_unavailable')
-    advance = getattr(hwp, 'MoveRight', None)
-    if not callable(advance):
-        raise NativeNumberingRefusal('MoveRight is unavailable on this machine', code='native_unavailable')
+    mover = _native_method(hwp, 'MoveDocBegin')
+    finder = _native_method(hwp, 'find')
+    selected_getter = _native_method(hwp, 'get_selected_pos', 'GetSelectedPos')
+    advance = _native_method(hwp, 'MoveRight')
 
     found: list[tuple[int, int]] = []
-    mover()
+    _require_motion_result(mover())
     for _ in range(_MAX_FIND_HITS):
-        if not finder(find, direction='Forward', MatchCase=1 if match_case else 0, WholeWordOnly=0):
+        matched = finder(find, direction='Forward', MatchCase=1 if match_case else 0, WholeWordOnly=0)
+        if type(matched) is not bool:
+            raise NativeNumberingRefusal('text search returned a non-Boolean result', code='target_unlocatable')
+        if matched is False:
             break
         try:
             selected = _parse_selected_pos(selected_getter())
@@ -1747,7 +1793,7 @@ def _locate_unique_body_paragraph(hwp: Any, find: str, *, match_case: bool) -> t
         key = (slist, spara)
         if key not in found:
             found.append(key)
-        advance()
+        _require_motion_result(advance())
     else:
         raise NativeNumberingRefusal('text search did not terminate', code='target_unlocatable')
 
@@ -1771,6 +1817,7 @@ def apply_official_numbering_at_match(
     match_case: bool = True,
     protection: Callable[[], Any] | None = None,
     on_mutating: Callable[[], None] | None = None,
+    on_semantic_refusal: Callable[[], None] | None = None,
 ) -> dict[str, Any]:
     req = normalize_official_numbering_request({'level': level})
     if not isinstance(find, str) or find == '' or '\n' in find or '\r' in find:
@@ -1794,6 +1841,7 @@ def apply_official_numbering_at_match(
         target_match_case=match_case,
         target_anchor=anchor,
         on_mutating=on_mutating,
+        on_semantic_refusal=on_semantic_refusal,
     )
     result['matches'] = 1
     return result

@@ -465,7 +465,7 @@ def _outline_shapes(resolver: _Resolver, body: ET.Element) -> list[str] | None:
 
 
 def parse_hwpml2x_census(text: Any) -> dict[str, Any]:
-    if not isinstance(text, str):
+    if type(text) is not str:
         raise CensusError('HWPML2X text must be a string')
     if not text.strip():
         raise CensusError('HWPML2X text is empty')
