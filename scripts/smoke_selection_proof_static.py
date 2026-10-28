@@ -45,7 +45,9 @@ def _bounded_journal_value(value, *, depth=0, key_hint=None):
     return value
 
 runtime_stub._bounded_journal_value = _bounded_journal_value
+# Selection proofs do not exercise runtime exception/journal reporting.
 for name in (
+    '_exception_label',
     'apply_char_style',
     'capture_screenshot_artifact',
     'create_table_at_cursor',

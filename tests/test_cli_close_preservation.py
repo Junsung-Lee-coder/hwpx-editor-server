@@ -9,7 +9,7 @@ import unittest
 from unittest.mock import patch
 from app import local_cli_runtime as rt
 from app import local_cli_service as svc
-import test_cli_native_close as fixture
+from tests import test_cli_native_close as fixture
 
 
 class ClosePreservationTests(unittest.TestCase):

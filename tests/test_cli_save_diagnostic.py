@@ -13,7 +13,7 @@ from unittest.mock import patch
 from app import atomic_json
 from app import local_cli_runtime as rt
 from app import local_cli_service as svc
-import test_cli_failure_recovery as recovery
+from tests import test_cli_failure_recovery as recovery
 
 
 class LockedSaveWrapper(recovery.LockedWrapper):
