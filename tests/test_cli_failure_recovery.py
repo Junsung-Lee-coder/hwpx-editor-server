@@ -142,6 +142,7 @@ class RecoveryTests(unittest.TestCase):
                     if fault == 'native':
                         raise ValueError('PRIVATE')
                     return True
+                wrapper.IsModified = True  # Eligible pre-Save observation; keep the original failure boundary.
                 wrapper.save = save
                 service = object.__new__(LocalCliService)
                 service._load_active_binding = lambda **k: {}

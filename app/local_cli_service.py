@@ -7305,8 +7305,12 @@ class LocalCliService(
         working_copy_path = self._working_copy_path(binding)
 
         def _handler(handle: LocalCliRuntimeHandle) -> dict[str, Any]:
+            handle.diagnostic_site = 'save_precondition'
+            if handle.observe_pre_save is None:
+                raise LocalCliRuntimeError('Pre-Save observation is unavailable on this runtime.')
+            diagnostic = handle.observe_pre_save()
             handle.diagnostic_site = 'save_native'
-            save_document(handle.hwp)
+            save_document(handle.hwp, diagnostic=diagnostic)
             handle.diagnostic_site = 'save_file_readback'
             if working_copy_path.is_symlink() or not working_copy_path.is_file():
                 raise LocalCliRuntimeError('Native save returned without a regular working-copy file.')

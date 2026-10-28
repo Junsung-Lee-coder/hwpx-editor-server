@@ -5,6 +5,7 @@ from dataclasses import dataclass, field as dataclass_field
 from pathlib import Path
 from queue import Empty, Queue
 import hashlib
+import math
 import os
 import threading
 import time
@@ -108,7 +109,7 @@ def _native_diagnostic(site: object, error: BaseException) -> dict[str, str]:
     This is a last-entered caller boundary, never a native root-cause verdict.
     Unknown classes and sites remain UNKNOWN; no messages, repr, traceback or SDK reads.
     """
-    sites = ('command_handler', 'handler_returned', 'save_native', 'save_file_readback',
+    sites = ('command_handler', 'handler_returned', 'save_precondition', 'save_native', 'save_file_readback',
              'save_custody_readback', 'save_location_readback', 'action_pre_read',
              'action_native', 'action_post_read', 'close_wrapper')
     return {'site': site if type(site) is str and site in sites else 'UNKNOWN',
@@ -705,7 +706,7 @@ def apply_char_style(
     raise LocalCliRuntimeError(native.error or 'pyhwpx set_font / CharShape is unavailable on this machine')
 
 
-def save_document(hwp: object) -> None:
+def save_document(hwp: object, *, diagnostic: dict[str, Any] | None = None) -> None:
     result: Any
     if hasattr(hwp, 'save'):
         result = hwp.save()
@@ -713,6 +714,10 @@ def save_document(hwp: object) -> None:
         result = hwp.Save()
     else:
         raise LocalCliRuntimeError('pyhwpx save/Save is unavailable on this machine')
+    if diagnostic is not None:
+        # Record arrival before the existing False branch; never coerce the return.
+        diagnostic['save_return_arrived'] = True
+        diagnostic['save_returned_false'] = result is False
     if result is False:
         raise LocalCliRuntimeError('Hancom save returned false for the active working copy.')
 
@@ -1113,6 +1118,7 @@ class LocalCliRuntimeHandle:
     diagnostic_site: str = 'command_handler'
     mark_mutating_intent: Callable[[], None] | None = None
     mutation_intent: bool = False
+    observe_pre_save: Callable[[], dict[str, Any]] | None = None
 
 
 @dataclass
@@ -1138,6 +1144,7 @@ class _LiveCommand:
     recovery_for_command_id: str | None = None
     custody_held: bool = False
     native_diagnostic: dict[str, str] | None = None
+    save_diagnostic: dict[str, Any] | None = None
     completed_event: threading.Event = dataclass_field(default_factory=threading.Event)
 
 
@@ -1219,6 +1226,8 @@ class LocalCliLiveSession:
             record['custody_held'] = True
         if command.native_diagnostic is not None:
             record['native_diagnostic'] = dict(command.native_diagnostic)
+        if include_private and command.save_diagnostic is not None:
+            record['save_diagnostic'] = dict(command.save_diagnostic)
         if command.result is not None and command.state in {
             'succeeded', 'failed', 'completed_after_timeout', 'failed_after_timeout',
         }:
@@ -1497,6 +1506,60 @@ class LocalCliLiveSession:
         self._lifetime_edit_possible = True
         if self._active_handle is not None:
             self._active_handle.mutation_intent = True
+
+    def _observe_pre_save_is_modified(self) -> dict[str, Any]:
+        """One non-defaulting owning-STA read, retained before ordinary Save.
+
+        Only exact Boolean observations permit continuation. Other bounded
+        primitives remain typed evidence, never clean-document or close proof.
+        write_returned describes the preceding journal call, not Save success
+        or a claim about an unreturned/failed receipt write.
+        """
+        command = self._active_command
+        if (threading.current_thread() is not self._thread or command is None
+                or self._native_custody_held or command.custody_held
+                or command.timed_out or self._terminal_error is not None):
+            raise LocalCliRuntimeError('Pre-Save observation requires the healthy owning STA.')
+        diagnostic = {
+            'read_return_arrived': False, 'is_modified_state': 'ERROR',
+            'is_modified_type': 'UNKNOWN', 'read_error': 'UNKNOWN',
+            'pre_save_receipt': 'pending', 'save_return_arrived': False,
+            'save_returned_false': None,
+        }
+        command.save_diagnostic = diagnostic
+        read_error = None
+        try:
+            value = self._active_handle.hwp.IsModified
+        except BaseException as exc:
+            read_error = exc
+            diagnostic['is_modified_state'] = 'UNAVAILABLE' if type(exc) is AttributeError else 'ERROR'
+            diagnostic['read_error'] = _exception_label(exc)
+        else:
+            diagnostic['read_return_arrived'] = True
+            diagnostic['is_modified_state'] = 'OTHER'
+            for cls, label in ((bool, 'bool'), (int, 'int'), (float, 'float'),
+                               (type(None), 'NoneType'), (str, 'str')):
+                if type(value) is cls:
+                    diagnostic['is_modified_type'] = label
+                    break
+            if (type(value) is bool or value is None
+                    or (type(value) is int and -(2**31) <= value < 2**31)
+                    or (type(value) is float and math.isfinite(value))):
+                diagnostic['is_modified_value'] = value
+            if type(value) is bool:
+                diagnostic['is_modified_state'] = 'TRUE' if value else 'FALSE'
+        try:
+            self._persist_command(command)
+        except BaseException:
+            diagnostic['pre_save_receipt'] = 'write_failed'
+            raise
+        diagnostic['pre_save_receipt'] = 'write_returned'
+        if diagnostic['is_modified_type'] != 'bool':
+            raise LocalCliRuntimeError('Pre-Save IsModified observation is not an exact Boolean.') from read_error
+        if (self._native_custody_held or command.custody_held or command.timed_out
+                or self._terminal_error is not None):
+            raise LocalCliRuntimeError('Pre-Save observation lost healthy owning-STA authority.')
+        return diagnostic
 
     def _hold_active_command_custody(self, reason: str, cause: BaseException | None = None) -> None:
         command = self._active_command
@@ -2233,6 +2296,7 @@ class LocalCliLiveSession:
                 hwp=hwp,
                 hold_native_custody=self._hold_active_command_custody,
                 mark_mutating_intent=self._mark_mutating_intent,
+                observe_pre_save=self._observe_pre_save_is_modified,
             )
             self._active_hwp = hwp
             self._active_handle = handle
