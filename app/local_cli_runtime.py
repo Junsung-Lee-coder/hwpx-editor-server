@@ -6,6 +6,9 @@ from pathlib import Path
 from queue import Empty, Queue
 import hashlib
 import math
+import csv
+import io
+import subprocess
 import os
 import threading
 import time
@@ -19,6 +22,7 @@ from app.runtime_state import update_runtime_status, utc_now_iso
 from app.worker import (
     close_hwp_instance,
     collect_hwp_snapshot,
+    collect_process_snapshot,
     create_hwp_instance_with_recovery,
     emit_runtime_observation,
     kill_hwp_runtime,
@@ -706,7 +710,7 @@ def apply_char_style(
     raise LocalCliRuntimeError(native.error or 'pyhwpx set_font / CharShape is unavailable on this machine')
 
 
-def save_document(hwp: object, *, diagnostic: dict[str, Any] | None = None) -> None:
+def save_document(hwp: object, *, diagnostic: dict[str, Any] | None = None) -> bool:
     result: Any
     if hasattr(hwp, 'save'):
         result = hwp.save()
@@ -720,6 +724,7 @@ def save_document(hwp: object, *, diagnostic: dict[str, Any] | None = None) -> N
         diagnostic['save_returned_false'] = result is False
     if result is False:
         raise LocalCliRuntimeError('Hancom save returned false for the active working copy.')
+    return result is True
 
 
 def checked_save_hwp_as(hwp: object, output_path: Path, fmt: str) -> dict[str, Any]:
@@ -1023,19 +1028,80 @@ def insert_numbered_list_at_cursor(hwp: object, *, count: int) -> dict[str, Any]
     }
 
 
-def discard_live_document(hwp: object) -> bool:
-    """One explicit Clear only; exact native True is the sole completion value.
+def _native_close_processes() -> frozenset[int] | None:
+    """Read-only constructor baseline. No native launch or broad cleanup."""
+    if os.sys.platform != 'win32':
+        return None  # portable runtimes have no native ownership proof
+    result = subprocess.run(['tasklist', '/FO', 'CSV', '/NH'], capture_output=True,
+                            text=True, timeout=5, check=True)
+    rows = list(csv.reader(io.StringIO(result.stdout)))
+    if not rows or any(len(row) != 5 for row in rows):
+        raise LocalCliRuntimeError('Native constructor process baseline is unavailable.')
+    return frozenset(int(row[1]) for row in rows if row[0].casefold() == 'hwp.exe')
 
-    This is NOT a full-session closure interface. In particular pyhwpx.quit
-    calls Clear again and hides Quit's return; callers cannot compose those
-    methods into proof of native closure. No signature retry after invocation.
+
+class _NativeCloseProcess:
+    """Private exact-process handle; wait only, never terminate or retry."""
+    def __init__(self, hwnd: int, before: frozenset[int]):
+        import win32api
+        import win32event
+        import win32process
+        import win32ts
+        from app.readiness import _process_start_identity
+        self.hwnd = hwnd
+        self.pid = win32process.GetWindowThreadProcessId(hwnd)[1]
+        if self.pid in before or self.pid == os.getpid():
+            raise LocalCliRuntimeError('Constructor did not return a new owned native process.')
+        process = collect_process_snapshot(self.pid)
+        if (process.get('alive') is not True or process.get('image_name', '').casefold() != 'hwp.exe'
+                or win32ts.ProcessIdToSessionId(self.pid) != win32ts.ProcessIdToSessionId(os.getpid())):
+            raise LocalCliRuntimeError('Native constructor process identity is unproved.')
+        self.generation = _process_start_identity(self.pid)
+        if not self.generation:
+            raise LocalCliRuntimeError('Native process generation is unavailable.')
+        self.handle = win32api.OpenProcess(0x100000 | 0x1000, False, self.pid)
+        try:
+            self.verify()
+        except BaseException:
+            self.handle.Close()
+            raise
+
+    def verify(self) -> None:
+        import win32event
+        import win32process
+        from app.readiness import _process_start_identity
+        if (win32event.WaitForSingleObject(self.handle, 0) != 258
+                or _process_start_identity(self.pid) != self.generation
+                or win32process.GetWindowThreadProcessId(self.hwnd)[1] != self.pid):
+            raise LocalCliRuntimeError('Original native process/window identity changed.')
+
+    def wait(self) -> None:
+        import win32event
+        # An exact handle avoids PID reuse. Timeout/WAIT_FAILED are not exit.
+        if win32event.WaitForSingleObject(self.handle, 5000) != 0:
+            raise LocalCliRuntimeError('Original native process exit is unproved.')
+
+    def close(self) -> None:
+        self.handle.Close()
+
+
+def _bind_native_close_process(hwnd: int, before: frozenset[int]) -> _NativeCloseProcess:
+    return _NativeCloseProcess(hwnd, before)
+
+
+def discard_live_document(hwp: object) -> bool:
+    """One explicit document Clear; True means only that its void call returned.
+
+    Hancom documents Clear as void (Automation manual, pp29/51). This helper
+    is NOT full-session closure or OS-exit proof and is not used by normal
+    close. Never compose it with wrapper.quit (which would Clear again).
     """
     clear_method = _safe_hwp_attr(hwp, 'clear')
     if not callable(clear_method):
         raise LocalCliRuntimeError('No supported explicit Clear interface.')
     result = clear_method(option=1)
-    if result is not True:
-        raise LocalCliRuntimeError('Native Clear completion is unproved.')
+    if result is not None:
+        raise LocalCliRuntimeError('Native Clear void return is unproved.')
     return True
 
 
@@ -1145,6 +1211,7 @@ class _LiveCommand:
     custody_held: bool = False
     native_diagnostic: dict[str, str] | None = None
     save_diagnostic: dict[str, Any] | None = None
+    native_close_diagnostic: dict[str, bool] | None = None
     completed_event: threading.Event = dataclass_field(default_factory=threading.Event)
 
 
@@ -1184,6 +1251,10 @@ class LocalCliLiveSession:
         # Sticky invocation intent, never cleared by a later clean envelope,
         # save, read, false dirty flag, exception attribute or diagnostic site.
         self._lifetime_edit_possible = False
+        # Unlike sticky invocation history, this preservation debt can only be
+        # discharged by a proved ordinary Save (or acknowledged recovery).
+        # Native clean/no-op/export projections cannot clear it.
+        self._normal_close_requires_save = False
         self._active_command: _LiveCommand | None = None
         self._active_hwp: object | None = None
         self._active_handle: LocalCliRuntimeHandle | None = None
@@ -1226,6 +1297,8 @@ class LocalCliLiveSession:
             record['custody_held'] = True
         if command.native_diagnostic is not None:
             record['native_diagnostic'] = dict(command.native_diagnostic)
+        if include_private and command.native_close_diagnostic is not None:
+            record['native_close_diagnostic'] = dict(command.native_close_diagnostic)
         if include_private and command.save_diagnostic is not None:
             record['save_diagnostic'] = dict(command.save_diagnostic)
         if command.result is not None and command.state in {
@@ -1504,6 +1577,8 @@ class LocalCliLiveSession:
 
     def _mark_mutating_intent(self) -> None:
         self._lifetime_edit_possible = True
+        if self._active_command is None or self._active_command.name != 'save':
+            self._normal_close_requires_save = True
         if self._active_handle is not None:
             self._active_handle.mutation_intent = True
 
@@ -1799,6 +1874,7 @@ class LocalCliLiveSession:
         handler: Callable[[LocalCliRuntimeHandle], Any],
         *,
         timeout: float = 90.0,
+        prior_dirty: bool = False,
     ) -> Any:
         self._ensure_lifecycle_state()
         with self._state_lock:
@@ -1808,6 +1884,8 @@ class LocalCliLiveSession:
                 raise LocalCliRuntimeError('The live local CLI session is closing.')
             if self._terminal_error is not None:
                 raise self._terminal_error
+            if prior_dirty:
+                self._normal_close_requires_save = True
             self._command_counter += 1
             command_id = f'{self.session_id}:command-{self._command_counter}'
             future: Future[Any] = Future()
@@ -1837,7 +1915,7 @@ class LocalCliLiveSession:
             )
             raise error from exc
 
-    def close(self, *, timeout: float = 30.0) -> None:
+    def close(self, *, timeout: float = 30.0, prior_dirty: bool = False) -> None:
         self._ensure_lifecycle_state()
         terminal_error: LocalCliRuntimeError | None = None
         future: Future[Any] | None = None
@@ -1845,6 +1923,8 @@ class LocalCliLiveSession:
         with self._state_lock:
             if self._closed.is_set():
                 return
+            if prior_dirty:
+                self._normal_close_requires_save = True
             if self._native_custody_held and not self._allow_native_cleanup:
                 self._flush_held_custody_journal()
                 raise LocalCliRuntimeError(_HELD_CLOSE_MESSAGE)
@@ -1913,6 +1993,10 @@ class LocalCliLiveSession:
             raise LocalCliRuntimeError(
                 'The live local CLI runtime is still releasing native resources; retry cleanup without replaying close.'
             )
+
+        self._thread.join(timeout=max(0.0, deadline - time.monotonic()))
+        if self._thread.is_alive():
+            raise LocalCliRuntimeError('Native close completed; final reporting thread is still settling. Do not replay teardown.')
 
     def is_terminal(self) -> bool:
         self._ensure_lifecycle_state()
@@ -2050,6 +2134,8 @@ class LocalCliLiveSession:
             self._allow_native_cleanup = False
         if not hasattr(self, '_native_custody_held'):
             self._native_custody_held = False
+        if not hasattr(self, '_normal_close_requires_save'):
+            self._normal_close_requires_save = False
         if not hasattr(self, '_active_command'):
             self._active_command = None
         if not hasattr(self, '_active_hwp'):
@@ -2111,6 +2197,84 @@ class LocalCliLiveSession:
         for command in changed:
             self._persist_command(command)
 
+    def _close_original_native(self, hwp: Any) -> None:
+        """One raw void Quit, no wrapper quit/hidden Clear and no save mode.
+
+        Locked 1.7.2 has an extra constructor CoInitialize and an unconditional
+        destructor CoUninitialize. Retire only this original pure-Python wrapper
+        after proven native exit: disable automatic destructor replay BEFORE
+        explicitly observing that exact destructor once on its owning STA.
+        Class retirement changes no COM interface and performs no native call.
+        """
+        owner = getattr(self, '_native_close_owner', None)
+        def healthy() -> None:
+            close = self._commands_by_id.get(f'{self.session_id}:close')
+            if (threading.current_thread() is not self._thread or self._native_custody_held
+                    or (self._quarantined and not self._allow_native_cleanup)
+                    or (close is not None and close.timed_out)):
+                raise LocalCliRuntimeError('Native close lost healthy owning-STA authority.')
+        healthy()
+        if self._normal_close_requires_save and not self._allow_native_cleanup:
+            raise LocalCliRuntimeError('Native close cannot discard unproved prior edits.')
+        if (owner is None or owner['wrapper'] is not hwp
+                or type(hwp) is not owner['wrapper_type']
+                or hwp.hwp is not owner['dispatch'] or hwp.on_quit is not False
+                or getattr(self, '_native_teardown_started', False)):
+            raise LocalCliRuntimeError('Qualified full native closure is unavailable: original constructor ownership is unproved.')
+        process = owner['process']
+        process.verify()
+        windows = hwp.XHwpWindows
+        window_count = windows.Count
+        if type(window_count) is not int or window_count != 1:
+            raise LocalCliRuntimeError('Native close requires exactly one window.')
+        window_handle = windows.Active_XHwpWindow.WindowHandle
+        if type(window_handle) is not int or window_handle != owner['hwnd']:
+            raise LocalCliRuntimeError('Native close window identity changed.')
+        docs = hwp.XHwpDocuments
+        document_count = docs.Count
+        if type(document_count) is not int or document_count != 1:
+            raise LocalCliRuntimeError('Native close requires exactly one document.')
+        document = docs.Active_XHwpDocument
+        document_id = document.DocumentID
+        if type(document_id) is not int or document_id != owner['document_id']:
+            raise LocalCliRuntimeError('Native close document identity changed.')
+        for source, attribute in ((document, 'FullName'), (hwp, 'Path')):
+            value = getattr(source, attribute)
+            if type(value) is not str or Path(value).resolve() != self.working_copy_path.resolve():
+                raise LocalCliRuntimeError('Native close document path changed.')
+        source = None
+        if hwp.IsModified is not False:
+            raise LocalCliRuntimeError('Native close requires an exact clean document; save explicitly first.')
+        # Drop local child COM references before Quit/release.
+        windows = docs = document = None
+        healthy()
+        process.verify()
+        close = self._commands_by_id.get(f'{self.session_id}:close')
+        diagnostic = {'quit_entered': True, 'quit_return_arrived': False, 'quit_void_return': False,
+                      'process_exit_confirmed': False, 'wrapper_com_return_arrived': False, 'runtime_com_return_arrived': False}
+        if close is not None:
+            close.native_close_diagnostic = diagnostic
+        self._native_teardown_started = True
+        # IHwpObject.Quit is void. None is a returned void call, NOT Boolean
+        # success; original OS exit and both COM balances are separate predicates.
+        result = hwp.hwp.Quit()
+        diagnostic['quit_return_arrived'] = True
+        diagnostic['quit_void_return'] = result is None
+        if result is not None:
+            raise LocalCliRuntimeError('Native Quit void contract did not return normally.')
+        healthy()
+        process.wait()
+        diagnostic['process_exit_confirmed'] = True
+        healthy()
+        original_type = owner['wrapper_type']
+        retired_type = type('_RetiredHwp', (original_type,), {'__slots__': (), '__del__': lambda self: None})
+        hwp.__class__ = retired_type
+        # Release the original dispatch only after exit, before COM uninit.
+        hwp.hwp = None
+        owner['dispatch'] = None
+        original_type.__del__(hwp)  # on_quit=False: no hidden Clear/Quit; observed constructor COM balance
+        diagnostic['wrapper_com_return_arrived'] = True
+
     def _finalize(
         self,
         *,
@@ -2120,14 +2284,7 @@ class LocalCliLiveSession:
         watchdog_stop: Any,
         watchdog_thread: Any,
     ) -> None:
-        """Never claim full native closure through an unqualified wrapper.
-
-        The locked pyhwpx quit includes hidden Clear and hides Quit's return.
-        No independently qualified owned/typed full-closure interface exists
-        here, so any live wrapper is retained before any destructive call.
-        An apartment with no returned wrapper may still be uninitialized.
-        Native OS exit and external operator closure remain separate proof.
-        """
+        """Own actual native exit and COM completion before reporting close success."""
         cleanup_errors: list[str] = []
         close = self._commands_by_id.get(f'{self.session_id}:close')
         permitted = not self._quarantined or self._allow_native_cleanup
@@ -2151,15 +2308,13 @@ class LocalCliLiveSession:
         if permitted and not cleanup_errors:
             try:
                 if hwp is not None:
-                    # The actual constructor returns a locked pyhwpx wrapper:
-                    # quit performs hidden Clear and discards Quit's return.
-                    # Neither it nor worker.close_hwp_instance qualifies an
-                    # owned, typed no-hidden-mutator full closure contract.
-                    # Retain custody BEFORE any destructive call; do not probe
-                    # arbitrary SDK attributes or invent ownership/exit proof.
-                    raise LocalCliRuntimeError('Qualified full native closure is unavailable; custody retained.')
+                    self._close_original_native(hwp)
+                elif getattr(self, '_constructor_invoked', False):
+                    raise LocalCliRuntimeError('Constructor effects unresolved; owning STA retained.')
                 if pythoncom is not None and coinitialized:
                     pythoncom.CoUninitialize()
+                    if close is not None and close.native_close_diagnostic is not None:
+                        close.native_close_diagnostic['runtime_com_return_arrived'] = True
                 native_complete = True
             except BaseException as exc:
                 # No fallible formatting or persistence before the hold.
@@ -2181,6 +2336,9 @@ class LocalCliLiveSession:
         # replay native teardown to repair a journal/status-only failure.
         if native_complete:
             self._closed.set()
+            owner = getattr(self, '_native_close_owner', None)
+            if owner is not None:
+                report('native_process_handle', owner['process'].close)
         if close is not None:
             if native_complete:
                 close.result = {'ok': True}
@@ -2212,7 +2370,7 @@ class LocalCliLiveSession:
                 close.future.set_exception(close.error or LocalCliRuntimeError('Close reporting incomplete; native teardown is not replayed.'))
         # Keep the real SDK wrapper, COM apartment and manager registration alive
         # after ambiguous cleanup. Normal public reconciliation cannot release a
-        # held session. _allow_native_cleanup is used only by existing test seams.
+        # held session. A test-only release seam must not grant native authority.
         while self._native_custody_held and not self._allow_native_cleanup:
             pending = self._commands.get()
             if not pending.future.done():
@@ -2249,12 +2407,37 @@ class LocalCliLiveSession:
                     f"current process session_id={process_session.get('session_id')} session_name={process_session.get('session_name')!r}."
                 )
 
+            before_native = _native_close_processes()
+            self._constructor_invoked = True
             hwp = create_hwp_instance_with_recovery(
                 Hwp,
                 log_path=self.log_path,
                 phase='local_cli_create_hwp_instance',
                 detail=f'open {self.source_filename}',
             )
+            self._active_hwp = hwp
+            if before_native is not None:
+                # Bind the original constructor object, not an injected close API.
+                if type(hwp) is not Hwp or hwp.on_quit is not False:
+                    raise LocalCliRuntimeError('Native constructor wrapper contract is unproved.')
+                windows = hwp.XHwpWindows
+                if type(windows.Count) is not int or windows.Count != 1:
+                    raise LocalCliRuntimeError('Native constructor window count is unproved.')
+                hwnd = windows.Active_XHwpWindow.WindowHandle
+                if type(hwnd) is not int or hwnd <= 0:
+                    raise LocalCliRuntimeError('Native constructor window identity is unproved.')
+                docs = hwp.XHwpDocuments
+                if type(docs.Count) is not int or docs.Count != 1:
+                    raise LocalCliRuntimeError('Native constructor document count is unproved.')
+                document_id = docs.Active_XHwpDocument.DocumentID
+                if type(document_id) is not int:
+                    raise LocalCliRuntimeError('Native constructor document identity is unproved.')
+                self._native_close_owner = {
+                    'wrapper': hwp, 'wrapper_type': Hwp, 'dispatch': hwp.hwp,
+                    'hwnd': hwnd, 'document_id': document_id,
+                    'process': _bind_native_close_process(hwnd, before_native),
+                }
+                windows = docs = None  # no child COM references survive into finalization
             update_runtime_status(
                 self.log_path,
                 phase='local_cli_create_hwp_instance_succeeded',
@@ -2280,6 +2463,8 @@ class LocalCliLiveSession:
                 document_path=self.working_copy_path,
                 log_path=self.log_path,
                 detail=f'open {self.source_filename}',
+                max_attempts=1,
+                probe_attempts=1,
             )
             update_runtime_status(
                 self.log_path,
@@ -2337,9 +2522,9 @@ class LocalCliLiveSession:
                 if command.name == '__close__':
                     refusal: LocalCliRuntimeError | None = None
                     with self._state_lock:
-                        if self._native_custody_held and not self._allow_native_cleanup:
+                        if (self._native_custody_held or self._normal_close_requires_save) and not self._allow_native_cleanup:
                             # Admitted before a numbering callback became held; custody is re-checked at dequeue.
-                            refusal = LocalCliRuntimeError(_HELD_CLOSE_MESSAGE)
+                            refusal = LocalCliRuntimeError(_HELD_CLOSE_MESSAGE if self._native_custody_held else 'Normal close requires proved preservation of prior edits.')
                             command.error = refusal
                             self._apply_normalized_outcome(command, error=refusal)
                             command.state = 'failed'
@@ -2352,12 +2537,12 @@ class LocalCliLiveSession:
                             command.state = 'running'
                     if refusal is not None:
                         command.completed_event.set()
-                        if not command.future.done():
-                            command.future.set_exception(refusal)
                         try:
                             self._persist_command(command)
                         except Exception:
                             pass
+                        if not command.future.done():
+                            command.future.set_exception(refusal)
                         continue
                     # Dequeue is not completion. The actual finalizer owns the
                     # result/future, including failure of the locked wrapper.
@@ -2450,6 +2635,10 @@ class LocalCliLiveSession:
                             self._settle_held_command(command, result=command.result)
                         else:
                             self._persist_command(command)
+                            if (command.name == 'save' and command.semantic_ok is True
+                                    and command.result.get('ordinary_save_confirmed') is True
+                                    and not command.timed_out and not self._quarantined):
+                                self._normal_close_requires_save = False
                             if not command.future.done():
                                 command.future.set_result(command.result)
                 except Exception as exc:
@@ -2490,8 +2679,18 @@ class LocalCliLiveSession:
                                 self._hold_native_custody(command, 'Session reporting failed; native custody retained.', report_error)
                             if isinstance(command.error, LocalCliNativeCustodyHeldError):
                                 command.error.reporting_errors.append(report_error)
-        except Exception as exc:
-            wrapped = exc if isinstance(exc, LocalCliRuntimeError) else LocalCliRuntimeError(str(exc))
+        except BaseException as exc:
+            # Startup may already have allocated or opened native state. Publish
+            # custody before resolving startup/reporting; never teardown UNKNOWN.
+            if getattr(self, '_constructor_invoked', False):
+                self._native_custody_held = self._quarantined = True
+                self._allow_native_cleanup = False
+                self._active_hwp = hwp
+                wrapped = LocalCliNativeCustodyHeldError('Native startup outcome is unknown; owning STA retained.')
+            else:
+                wrapped = LocalCliRuntimeError('Local CLI startup failed before native construction.')
+            wrapped.__cause__ = exc
+            self._terminal_error = wrapped
             if not self._start_future.done():
                 self._start_future.set_exception(wrapped)
         finally:
@@ -2558,17 +2757,18 @@ class LocalCliRuntimeManager:
         command_name: str,
         handler: Callable[[LocalCliRuntimeHandle], Any],
         timeout: float = 90.0,
+        prior_dirty: bool = False,
     ) -> Any:
         session = self.require_session(session_id)
         try:
-            return session.execute(command_name, handler, timeout=timeout)
+            return session.execute(command_name, handler, timeout=timeout, **({'prior_dirty': True} if prior_dirty else {}))
         except LocalCliRuntimeError:
             if not session.is_alive() and not session.is_terminal():
                 with self._lock:
                     self._sessions.pop(session_id, None)
             raise
 
-    def close_session(self, session_id: str, *, timeout: float = 30.0) -> None:
+    def close_session(self, session_id: str, *, timeout: float = 30.0, prior_dirty: bool = False) -> None:
         with self._lock:
             session = self._sessions.get(session_id)
         if session is None:
@@ -2576,7 +2776,7 @@ class LocalCliRuntimeManager:
         # Keep the live handle registered until native/COM cleanup has
         # completed. Status probes must not report a false closed state while
         # the close command is still releasing the runtime thread.
-        session.close(timeout=timeout)
+        session.close(timeout=timeout, **({'prior_dirty': True} if prior_dirty else {}))
         with self._lock:
             if self._sessions.get(session_id) is session:
                 if not getattr(session, 'has_unreconciled_reconciliation', lambda: False)():

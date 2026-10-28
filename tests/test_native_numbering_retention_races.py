@@ -172,14 +172,19 @@ class QueuedCloseBeforeHoldTests(CustodyAssertions, unittest.TestCase):
 
 
 class QueuedCloseCleanControlTests(unittest.TestCase):
-    def _assert_close_unavailable(self, owned, error):
-        self.assertIsInstance(error, rt.LocalCliNativeCustodyHeldError)
+    def _assert_close_unavailable(self, owned, error, *, preservation_required=False):
+        if preservation_required:
+            self.assertIs(type(error), LocalCliRuntimeError)
+            self.assertEqual(str(error), 'Normal close requires proved preservation of prior edits.')
+            self.assertTrue(owned.session._normal_close_requires_save)
+        else:
+            self.assertIsInstance(error, rt.LocalCliNativeCustodyHeldError)
+            self.assertIn('Qualified full native closure is unavailable', str(error.__cause__))
         self.assertNotIsInstance(error, LocalCliRuntimeTimeoutError)
-        self.assertIn('Qualified full native closure is unavailable', str(error.__cause__))
         s = owned.session
         self.assertTrue(s._thread.is_alive())
         self.assertFalse(s._closed.is_set())
-        self.assertTrue(s._native_custody_held)
+        self.assertIs(s._native_custody_held, not preservation_required)
         self.assertIs(owned.manager._sessions.get(owned.sid), s)
         self.assertEqual(owned.cleanup_events(), [])
         self.assertEqual(owned.hook, [])
@@ -245,7 +250,7 @@ class QueuedCloseCleanControlTests(unittest.TestCase):
         self.assertIsNone(error)
         self.assertIs(result['ok'], True)
         self.assertEqual(len(fault.attempted), 1)
-        self._assert_close_unavailable(owned, box['B'])
+        self._assert_close_unavailable(owned, box['B'], preservation_required=True)
 
     def test_close_queued_behind_a_clean_typed_refusal_still_closes(self):
         hwp = make_hwp(foreign=True)
@@ -270,9 +275,9 @@ class QueuedCloseCleanControlTests(unittest.TestCase):
         calls = list(owned.hwp.calls)
         sentinel = owned.root / 'retained.hwpx'
         sentinel.write_bytes(b'EXACT_SYNTHETIC_DOCUMENT_BYTES')
-        with self.assertRaises(rt.LocalCliNativeCustodyHeldError) as ctx:
+        with self.assertRaises(LocalCliRuntimeError) as ctx:
             owned.manager.close_session(owned.sid, timeout=JOIN)
-        self._assert_close_unavailable(owned, ctx.exception)
+        self._assert_close_unavailable(owned, ctx.exception, preservation_required=True)
         self.assertEqual(owned.hwp.calls, calls)
         self.assertEqual(sentinel.read_bytes(), b'EXACT_SYNTHETIC_DOCUMENT_BYTES')
 

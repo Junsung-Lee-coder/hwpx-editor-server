@@ -54,12 +54,12 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass `
   -ReceiptPath (Join-Path $env:LOCALAPPDATA 'HWPX\receipts\verify-fixture.json')
 ```
 
-The legacy verifier attempts `open -> status -> where -> page-screenshot -> close -> status`. Current runtime full native close is unsupported: this sequence must report NON-PASS at close, not native acceptance. The verifier runs it with a disposable CLI state file and checks that:
+The legacy verifier attempts `open -> status -> where -> page-screenshot -> close -> status`. Normal native close now requires original constructor ownership, one clean bound document/window, returned void Quit, original process exit and both COM balances. Any failed or unknown predicate must remain NON-PASS, not native acceptance. The verifier runs it with a disposable CLI state file and checks that:
 
 - the original fixture SHA-256 is unchanged;
 - open JSON identifies the exact managed fixture, session, and working copy;
 - every command returns parseable JSON and remains bound to the same explicit API URL, candidate generation, and live session until close;
-- native closure would require close JSON and post-close status to prove a closed session; current deliberate refusal retains custody and cannot satisfy this gate;
+- native closure requires close JSON and post-close status to prove a closed session; a held or incomplete close retains custody and cannot satisfy this gate;
 - the rendered PNG is a valid PNG with positive dimensions and sufficient non-white content in a deterministic bounded scan;
 - the page proof manifest exists, identifies the managed source/session/requested page, and matches the PNG size/SHA-256;
 - every sequence command returned exit code `0`.

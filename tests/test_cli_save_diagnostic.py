@@ -78,33 +78,68 @@ class SaveDiagnosticTests(unittest.TestCase):
         self.assertEqual(calls, ['initialize'])
         self.assertNotIn('readback', [e[0] for e in events])
 
-    def test_boolean_observation_durable_before_one_ordinary_save_and_false_stays_failure(self):
-        for modified in (True, False):
-            for result in (True, False, None):
-                with self.subTest(modified=modified, result=result):
-                    service, session, calls, events, before, journal = self.prepare(modified=modified, save_result=result)
-                    if result is False:
-                        with self.assertRaises(rt.LocalCliNativeCustodyHeldError):
-                            self.save(service)
-                        self.assert_held(session, calls, events)
-                    else:
-                        self.assertTrue(self.save(service)['ok'])
-                    self.assertEqual([e[0] for e in events][:2], ['read', 'save'])
-                    self.assertEqual(events[0][1], session._thread.ident)
-                    self.assertEqual(events[1], ('save', session._thread.ident, True))
-                    self.assertEqual(sum(e[0] == 'read' for e in events), 1)
-                    self.assertEqual(sum(e[0] == 'save' for e in events), 1)
-                    prior = before[0]['save_diagnostic']
-                    self.assertEqual(prior['is_modified_type'], 'bool')
-                    self.assertIs(prior['is_modified_value'], modified)
-                    self.assertIs(prior['read_return_arrived'], True)
-                    self.assertEqual(prior['pre_save_receipt'], 'pending')
-                    self.assertIs(prior['save_return_arrived'], False)
-                    final = json.loads(journal.read_text())['commands'][-1]['save_diagnostic']
-                    self.assertEqual(final['pre_save_receipt'], 'write_returned')
-                    self.assertIs(final['save_return_arrived'], True)
-                    self.assertIs(final['save_returned_false'], result is False)
-                    self.assertNotIn('save_diagnostic', session.command_status())
+    def test_exact_clean_observation_skips_save_without_fabricating_return(self):
+        for result in (True, False, None):
+            with self.subTest(result=result):
+                service, session, calls, events, before, journal = self.prepare(modified=False, save_result=result)
+                self.assertTrue(self.save(service)['ok'])
+                self.assertEqual([e[0] for e in events], ['read', 'readback'])
+                self.assertEqual(before, [])
+                final = json.loads(journal.read_text())['commands'][-1]['save_diagnostic']
+                self.assertEqual(final['save_decision'], 'clean_noop')
+                self.assertEqual(final['pre_save_receipt'], 'write_returned')
+                self.assertIs(final['is_modified_value'], False)
+                self.assertIs(final['save_return_arrived'], False)
+                self.assertIsNone(final['save_returned_false'])
+                self.assertNotIn('save_diagnostic', session.command_status())
+                row = session._commands_by_id[session._last_command_id]
+                self.assertIs(row.result['ordinary_save_confirmed'], False)
+                self.assertIs(row.result['clean_save_noop_confirmed'], True)
+
+    def test_dirty_observation_preserves_one_ordinary_save_and_false_failure(self):
+        for result in (True, False, None):
+            with self.subTest(result=result):
+                service, session, calls, events, before, journal = self.prepare(modified=True, save_result=result)
+                if result is not True:
+                    with self.assertRaises(rt.LocalCliNativeCustodyHeldError):
+                        self.save(service)
+                    self.assert_held(session, calls, events)
+                else:
+                    self.assertTrue(self.save(service)['ok'])
+                self.assertEqual([e[0] for e in events][:2], ['read', 'save'])
+                self.assertEqual(events[0][1], session._thread.ident)
+                self.assertEqual(events[1], ('save', session._thread.ident, True))
+                self.assertEqual(sum(e[0] == 'read' for e in events), 1)
+                self.assertEqual(sum(e[0] == 'save' for e in events), 1)
+                prior = before[0]['save_diagnostic']
+                self.assertEqual(prior['is_modified_type'], 'bool')
+                self.assertIs(prior['is_modified_value'], True)
+                self.assertIs(prior['read_return_arrived'], True)
+                self.assertEqual(prior['pre_save_receipt'], 'pending')
+                self.assertIs(prior['save_return_arrived'], False)
+                final = json.loads(journal.read_text())['commands'][-1]['save_diagnostic']
+                self.assertEqual(final['pre_save_receipt'], 'write_returned')
+                self.assertEqual(final['save_decision'], 'ordinary_save')
+                self.assertIs(final['save_return_arrived'], True)
+                self.assertIs(final['save_returned_false'], result is False)
+                self.assertNotIn('save_diagnostic', session.command_status())
+
+    def test_clean_noop_keeps_all_readbacks_and_readback_failure_held(self):
+        for site in ('save_file_readback', 'save_custody_readback', 'save_location_readback'):
+            with self.subTest(site=site):
+                service, session, calls, events, before, journal = self.prepare(modified=False)
+                def fail(*a, **k):
+                    raise OSError('PRIVATE')
+                if site == 'save_file_readback':
+                    service._working_copy_path({}).unlink()
+                elif site == 'save_custody_readback':
+                    service._verify_artifact_readback = fail
+                with patch.object(svc, 'snapshot_live_location', fail if site == 'save_location_readback' else lambda **k: {}):
+                    with self.assertRaises(rt.LocalCliNativeCustodyHeldError):
+                        service.save()
+                self.assertEqual(session.command_status()['native_diagnostic']['site'], site)
+                self.assertTrue(session._native_custody_held)
+                self.assertNotIn('save', [e[0] for e in events])
 
     def test_nonbool_primitives_and_objects_are_not_clean_or_coerced(self):
         callbacks = []

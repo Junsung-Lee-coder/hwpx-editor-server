@@ -1,8 +1,12 @@
 # Testing
 
-## Current full-close limitation
+## Native save and normal close contract
 
-Full native closure is **unsupported** in this integration, even after a clean command or successful numbering/save. `close` refuses before Clear, hidden Clear, Quit and CoUninitialize; owning STA, wrapper, registry and managed files remain retained. Explicit typed Clear is not full closure. A refusal is not native acceptance, first-Clear/hidden-Clear fault coverage, or permission to replay cleanup. Separately authorized external operators may close only an exact-owned disposable instance using real native authority and evidence; no such product interface exists here. The legacy Windows verification close gate must remain NON-PASS until that separate boundary is genuinely qualified.
+`save` reads exact typed `IsModified` on the healthy owning STA and journals it before proceeding. Exact `False` deliberately skips ordinary Save as a **clean no-op**; the working-copy/file/custody/location readbacks still run. It does not fabricate a Save return or clear prior dirty evidence. Exact `True` calls the unchanged ordinary Save once; native False, errors, UNKNOWN and receipt/readback failures retain custody, with no forced Save or retry. Historical failed Saves remain failures.
+
+Normal `close` is implemented for the original constructor-owned instance with exactly one bound clean document and window. It calls raw void `Quit` once (not `pyhwpx.quit`, which hides a destructive Clear), verifies the original process handle exited, releases the SDK dispatch and observes both owning-STA COM balances. Dirty, unbound, timed-out, UNKNOWN or held state is retained with no teardown. A reporting-only failure after completion remains completed, with managed files retained for cleanup; Quit is never replayed. Download approved artifacts **before** successful close removes the managed root.
+
+Portable tests establish source behavior only. Real Windows SDK/COM/native-exit acceptance of this candidate still requires the separately admitted BOOK gate. See [native lifecycle contract](docs/NATIVE_LIFECYCLE.md) for the locked dependency, API sources, destructor balance and limits.
 
 
 The runtime has two distinct test surfaces:

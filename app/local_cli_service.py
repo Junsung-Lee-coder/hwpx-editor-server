@@ -611,7 +611,7 @@ class LocalCliService(
             except Exception:
                 return False
         try:
-            self.runtime_manager.close_session(session_id)
+            self.runtime_manager.close_session(session_id, **({'prior_dirty': True} if binding.get('working_copy_dirty') is True or binding.get('dirty') is True else {}))
         except Exception:
             # Do not remove the managed session root while native/COM teardown
             # is uncertain.  The binding remains the ownership record for a
@@ -794,7 +794,7 @@ class LocalCliService(
             )
         if require_live and binding.get('live_session_bound') is False:
             raise LocalCliServiceError(
-                'The local CLI session is no longer live; retain its managed files. Full native close is unsupported; do not automatically reopen or discard it.',
+                'The local CLI session is no longer live; retain its managed files. Full native close is unsupported for this unproved or held session; do not automatically reopen or discard it.',
                 status_code=409,
             )
         if require_live and not self.runtime_manager.has_session(resolved_session_id):
@@ -3928,6 +3928,7 @@ class LocalCliService(
                 command_name=command_name,
                 handler=handler,
                 timeout=timeout,
+                **({'prior_dirty': True} if binding.get('working_copy_dirty') is True or binding.get('dirty') is True else {}),
             )
             binding['_expected_command_generation'] = command_generation
             try:
@@ -4130,13 +4131,13 @@ class LocalCliService(
                     status_code=409,
                 )
             if active_session_id and self.runtime_manager.has_session(active_session_id):
-                raise LocalCliServiceError('A local CLI document is already open. Full native close is unsupported; retain it and obtain separately authorized exact-owned operator closure before opening another one.', status_code=409)
+                raise LocalCliServiceError('A local CLI document is already open. Full native close is unsupported for this unproved or held session; retain it and obtain separately authorized exact-owned operator closure before opening another one.', status_code=409)
             if (
                 active_binding.get('document_session_state') in {'reconciled', 'reconciled_cleanup_pending'}
                 or isinstance(active_binding.get('artifact_custody'), dict)
             ):
                 raise LocalCliServiceError(
-                    'A reconciled local CLI session remains retained after artifact download; full native close is unsupported.',
+                    'A reconciled local CLI session remains retained after artifact download; full native close is unsupported for this unproved or held session.',
                     status_code=409,
                 )
             if not self._cleanup_stale_binding(active_binding):
@@ -7001,7 +7002,7 @@ class LocalCliService(
             self._record_local_cli_command('action', binding=binding, summary=f'action {action} changed pictures or BinData', payload=payload)
             raise LocalCliServiceError(
                 f'action {action} ran, but pictures or embedded BinData may have changed: {reasons}. The edit may have '
-                'persisted in the working copy. Retain the working copy and owning STA; full native close is unsupported. Do not retry or reopen automatically; hwpx undo is '
+                'persisted in the working copy. Retain the working copy and owning STA; full native close is unsupported for this unproved or held session. Do not retry or reopen automatically; hwpx undo is '
                 'refused for this edit. Pass --allow-media-change only when removing or changing a picture is intended.',
                 status_code=409,
             )
@@ -7309,17 +7310,22 @@ class LocalCliService(
             if handle.observe_pre_save is None:
                 raise LocalCliRuntimeError('Pre-Save observation is unavailable on this runtime.')
             diagnostic = handle.observe_pre_save()
-            handle.diagnostic_site = 'save_native'
-            save_document(handle.hwp, diagnostic=diagnostic)
+            # Exact False is deliberate clean-noop, not an uncalled Save return.
+            clean_noop = diagnostic['is_modified_value'] is False
+            diagnostic['save_decision'] = 'clean_noop' if clean_noop else 'ordinary_save'
+            if not clean_noop:
+                handle.diagnostic_site = 'save_native'
+                if save_document(handle.hwp, diagnostic=diagnostic) is not True:
+                    raise LocalCliRuntimeError('Ordinary Save did not return an affirmative result; custody retained.')
             handle.diagnostic_site = 'save_file_readback'
             if working_copy_path.is_symlink() or not working_copy_path.is_file():
-                raise LocalCliRuntimeError('Native save returned without a regular working-copy file.')
+                raise LocalCliRuntimeError('Save/checkpoint readback has no regular working-copy file.')
             try:
                 working_copy_size = working_copy_path.stat().st_size
             except OSError as exc:
                 raise LocalCliRuntimeError('Saved working-copy readback failed.') from exc
             if working_copy_size <= 0:
-                raise LocalCliRuntimeError('Native save produced an empty working copy.')
+                raise LocalCliRuntimeError('Save/checkpoint readback found an empty working copy.')
             working_copy_custody = {}
             handle.diagnostic_site = 'save_custody_readback'
             self._verify_artifact_readback(binding, working_copy_path, readback=working_copy_custody)
@@ -7331,7 +7337,8 @@ class LocalCliService(
             )
             return {
                 'location': location,
-                'ordinary_save_confirmed': True,
+                'ordinary_save_confirmed': not clean_noop,
+                'clean_save_noop_confirmed': clean_noop,
                 'working_copy_size_bytes': working_copy_size,
                 'working_copy_custody': working_copy_custody,
             }
@@ -7351,6 +7358,8 @@ class LocalCliService(
             ordinary_save_confirmed=result.get('ordinary_save_confirmed') is True,
         )
         working_copy_custody = result.get('working_copy_custody')
+        if result.get('ordinary_save_confirmed') is True and semantic_ok is True and dirty is False and 'dirty' in binding:
+            binding['dirty'] = False  # settle the legacy alias only with the same Save proof
         if isinstance(working_copy_custody, dict):
             custody_map = binding.get('artifact_custody') if isinstance(binding.get('artifact_custody'), dict) else {}
             custody_map['working-copy'] = working_copy_custody
@@ -7364,7 +7373,7 @@ class LocalCliService(
         self._record_local_cli_command(
             'save',
             binding=binding,
-            summary='saved active working copy',
+            summary='confirmed clean working copy; ordinary Save not called' if result.get('clean_save_noop_confirmed') is True else 'saved active working copy',
             payload={
                 'working_copy_path': str(working_copy_path),
                 'dirty': dirty,
@@ -7457,7 +7466,7 @@ class LocalCliService(
             # Fail closed: counting native Undo steps could revert part of an
             # edit, or an older edit too.
             raise LocalCliRuntimeError(
-                f'undo refused: {blocked}. Retain the working copy and owning STA instead of counting undos; full native close is unsupported. Separately authorized exact-owned operator closure is required.'
+                f'undo refused: {blocked}. Retain the working copy and owning STA instead of counting undos; full native close is unsupported for this unproved or held session. Separately authorized exact-owned operator closure is required.'
             )
         undo_count = int(undo_count_raw) if isinstance(undo_count_raw, int) and undo_count_raw > 1 else 1
 
@@ -7556,7 +7565,7 @@ class LocalCliService(
         # new work as soon as close begins; mark the tombstone only after
         # native close succeeds so a close timeout remains reconcilable.
         try:
-            self.runtime_manager.close_session(resolved_session_id)
+            self.runtime_manager.close_session(resolved_session_id, **({'prior_dirty': True} if binding.get('working_copy_dirty') is True or binding.get('dirty') is True else {}))
         except LocalCliRuntimeTimeoutError as exc:
             try:
                 command_status = self.runtime_manager.command_status(resolved_session_id, exc.command_id)
@@ -7607,6 +7616,22 @@ class LocalCliService(
                 status_code=504,
             ) from exc
         except LocalCliRuntimeError as exc:
+            # A reporting-only failure must not rewrite already-proven native
+            # completion or invite another Quit. This is a Python status read.
+            try:
+                close_status = self.runtime_manager.command_status(resolved_session_id, f'{resolved_session_id}:close')
+            except Exception:
+                close_status = {}
+            if (close_status.get('state') in {'succeeded', 'completed_after_timeout'}
+                    and close_status.get('semantic_ok') is True and close_status.get('completed') is True):
+                binding['cleanup_pending'] = True
+                binding['live_session_bound'] = False
+                binding['document_session_state'] = 'closed_cleanup_pending'
+                try:
+                    self._save_binding(binding)
+                except Exception:
+                    pass
+                raise LocalCliServiceError('Native close completed; reporting or managed cleanup is pending. Files are retained; native teardown must not be replayed.', status_code=500) from exc
             raise LocalCliServiceError('Local CLI full native close is unavailable or incomplete; session custody and managed files are retained.', status_code=500) from exc
 
         if binding.get('session_root_path'):

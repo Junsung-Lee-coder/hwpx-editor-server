@@ -21,7 +21,7 @@ from app.table_structure import (
     public_grid,
 )
 
-_ROLLBACK_HINT = {'attempted': False, 'hint': 'Retain the working copy and owning STA; full native close is unsupported. Separately authorized exact-owned operator closure is required; a single Undo does not guarantee a full rollback of this edit.'}
+_ROLLBACK_HINT = {'attempted': False, 'hint': 'Retain the working copy and owning STA; full native close is unsupported for this unproved or held session. Separately authorized exact-owned operator closure is required; a single Undo does not guarantee a full rollback of this edit.'}
 
 
 class _Mutation:
