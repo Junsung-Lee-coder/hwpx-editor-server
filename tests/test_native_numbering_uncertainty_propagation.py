@@ -145,6 +145,11 @@ def run_mixin(hwp):
 
 
 def assert_tagged_noncomplete(case: unittest.TestCase, error: BaseException) -> None:
+    if type(error) is _Terminate:
+        # Untrusted subclasses are not inspected/tagged. Identity and the
+        # already-asserted issued calls establish caller-owned uncertainty.
+        case.assertEqual(vars(error), {})
+        return
     case.assertIs(getattr(error, 'mutation_may_have_persisted', None), True)
     case.assertEqual(getattr(error, 'rollback', None), NO_CLEANUP)
     case.assertEqual(getattr(error, 'mutation_state', None), 'unknown')

@@ -40,12 +40,12 @@ from app.layout_ops import (
 from app.local_cli_runtime import LocalCliRuntimeError
 from app.local_cli_service_support import LocalCliMutationError
 
-_ROLLBACK_HINT = {'attempted': False, 'hint': 'Close the working copy without saving and reopen it; a single Undo does not guarantee a full rollback of this edit.'}
+_ROLLBACK_HINT = {'attempted': False, 'hint': 'Retain the working copy and owning STA; full native close is unsupported. Separately authorized exact-owned operator closure is required; a single Undo does not guarantee a full rollback of this edit.'}
 # What `hwpx undo` does after a layout edit (_BUNDLE_UNDO_POLICY): refuse.
 _UNDO_REPORT = {
     'hwpx_undo': 'refused',
     'undo_units_verified': False,
-    'note': 'Close the working copy without saving and reopen it to discard the edit.',
+    'note': 'Retain the working copy and owning STA; full native close is unsupported. Separately authorized exact-owned operator closure is required to discard the edit.',
 }
 # Kinds whose caret position stays meaningful after the edit and is restored.
 _RESTORE_CARET_KINDS = frozenset({'page_setup', 'columns', 'hanging_indent'})

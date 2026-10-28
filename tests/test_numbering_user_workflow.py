@@ -54,9 +54,13 @@ class _Workflow:
         service.command_packages = get_command_package_registry()
         service._load_active_binding = lambda session_id=None: dict(self.binding)
         service._bundle_compact_snapshot = lambda hwp: {'pos': list(hwp.get_pos())}
-        service._execute_live = lambda *, handler, **kwargs: handler(
-            SimpleNamespace(hwp=hwp, source_filename='document.hwpx', session_id=SESSION)
-        )
+        # Caller-owned workflow fixture tracks the same producer intent ABI;
+        # it offers no managed STA custody callback and is not native evidence.
+        def execute_live(*, handler, **kwargs):
+            handle = SimpleNamespace(hwp=hwp, source_filename='document.hwpx', session_id=SESSION, mutation_intent=False, hold_native_custody=None)
+            handle.mark_mutating_intent = lambda: setattr(handle, 'mutation_intent', True)
+            return handler(handle)
+        service._execute_live = execute_live
         service._bundle_page_evidence = lambda hwp: {'page': 1}
         service._update_live_binding = self._update
         service._save_binding = self._save

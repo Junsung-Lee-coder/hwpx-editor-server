@@ -46,7 +46,7 @@ class LocalCliBundleNumberingMixin:
             return False
         try:
             hold(
-                f"{step.get('op')} reached a native mutating call and ended with {type(exc).__name__}; "
+                'Numbering reached a native mutating call and ended noncomplete; '
                 'its outcome is unknown, so the live session is held and not closed, retried or recovered.',
                 exc,
             )
@@ -59,11 +59,11 @@ class LocalCliBundleNumberingMixin:
         return native_numbering_census.live_protection_reader(handle.hwp)
 
     def _bundle_page_number_apply(
-        self, hwp: Any, step: dict[str, Any], protection: Callable[[], Any] | None = None
+        self, hwp: Any, step: dict[str, Any], protection: Callable[[], Any] | None = None, on_mutating: Callable[[], None] | None = None
     ) -> dict[str, Any]:
         try:
             request = native_numbering.validate_page_number_step(step)
-            result = native_numbering.apply_page_number(hwp, request, protection=protection)
+            result = native_numbering.apply_page_number(hwp, request, protection=protection, on_mutating=on_mutating)
         except native_numbering.NativeNumberingMutationError as exc:
             raise _mutation_error(exc) from exc
         except native_numbering.EditOperationError as exc:
@@ -77,7 +77,7 @@ class LocalCliBundleNumberingMixin:
         }
 
     def _bundle_official_numbering_apply(
-        self, hwp: Any, step: dict[str, Any], protection: Callable[[], Any] | None = None
+        self, hwp: Any, step: dict[str, Any], protection: Callable[[], Any] | None = None, on_mutating: Callable[[], None] | None = None
     ) -> dict[str, Any]:
         try:
             validated = native_numbering.validate_official_numbering_step(step)
@@ -86,6 +86,11 @@ class LocalCliBundleNumberingMixin:
 
         original_pos = native_numbering._get_pos(hwp)  # noqa: SLF001
         restore_caret = True
+        def issued() -> None:
+            nonlocal restore_caret
+            restore_caret = False
+            if on_mutating is not None:
+                on_mutating()
         try:
             target = self._find_text_on_expected_page(
                 hwp,
@@ -100,15 +105,13 @@ class LocalCliBundleNumberingMixin:
                     find=validated['match'],
                     level=validated['level'],
                     protection=protection,
+                    on_mutating=issued,
                 )
             except native_numbering.NativeNumberingMutationError as exc:
                 raise _mutation_error(exc) from exc
             except native_numbering.EditOperationError as exc:
                 raise _runtime_error(exc) from exc
-        except BaseException as exc:
-            if getattr(exc, 'mutation_may_have_persisted', False) is True:
-                restore_caret = False
-            raise
+            restore_caret = True  # only a complete successful native result
         finally:
             if restore_caret and original_pos is not None:
                 try:

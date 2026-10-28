@@ -51,6 +51,7 @@ from app.local_cli_runtime import (
     _RECOVERY_ARTIFACT_KINDS,
     _artifact_kind_from_key,
     _bounded_journal_value,
+    _exception_label,
     LocalCliRuntimeError,
     LocalCliRuntimeHandle,
     LocalCliNativeCustodyHeldError,
@@ -793,7 +794,7 @@ class LocalCliService(
             )
         if require_live and binding.get('live_session_bound') is False:
             raise LocalCliServiceError(
-                'The local CLI session is no longer live; close it and open a new managed copy.',
+                'The local CLI session is no longer live; retain its managed files. Full native close is unsupported; do not automatically reopen or discard it.',
                 status_code=409,
             )
         if require_live and not self.runtime_manager.has_session(resolved_session_id):
@@ -3647,6 +3648,11 @@ class LocalCliService(
         op = str(step.get('op') or '')
         warnings: list[str] = []
 
+        # Numbering publishes intent at actual Execute boundaries. Other
+        # packages are conservative before invocation, never error callbacks.
+        if op not in {'page_number_apply', 'official_numbering_apply', 'control_inventory', 'table_frame_inventory', 'style_inspect'}:
+            if handle.mark_mutating_intent is not None:
+                handle.mark_mutating_intent()
         package = self.command_packages.get(op)
         if package is not None:
             return package.run(service=self, handle=handle, step=step, binding=binding)
@@ -3979,8 +3985,8 @@ class LocalCliService(
                 except Exception as save_error:
                     exc.reporting_errors.append(save_error)
                 raise LocalCliServiceError(
-                    'Local CLI native command left the live session held: a numbering command reached a native '
-                    'mutator and its outcome is unknown. The session is retained and is not closed, retried or '
+                    'Local CLI native command left the live session held: its outcome is unknown. '
+                    'The session is retained and is not closed, retried or '
                     'released by this service.',
                     status_code=500,
                 ) from exc
@@ -4124,13 +4130,13 @@ class LocalCliService(
                     status_code=409,
                 )
             if active_session_id and self.runtime_manager.has_session(active_session_id):
-                raise LocalCliServiceError('A local CLI document is already open. Close it before opening another one.', status_code=409)
+                raise LocalCliServiceError('A local CLI document is already open. Full native close is unsupported; retain it and obtain separately authorized exact-owned operator closure before opening another one.', status_code=409)
             if (
                 active_binding.get('document_session_state') in {'reconciled', 'reconciled_cleanup_pending'}
                 or isinstance(active_binding.get('artifact_custody'), dict)
             ):
                 raise LocalCliServiceError(
-                    'A reconciled local CLI session must be explicitly closed after downloading its artifacts.',
+                    'A reconciled local CLI session remains retained after artifact download; full native close is unsupported.',
                     status_code=409,
                 )
             if not self._cleanup_stale_binding(active_binding):
@@ -6921,6 +6927,7 @@ class LocalCliService(
             if not callable(run):
                 raise LocalCliRuntimeError('HAction.Run is unavailable on this machine')
             before: dict[str, Any] | None = None
+            handle.diagnostic_site = 'action_pre_read'
             if not allow_media_change:
                 # A deletion over a text-looking selection can still remove an adjacent inline picture (issue #3), so
                 # the picture/BinData inventory is read first and the action runs only on the unmoved selection.
@@ -6932,7 +6939,9 @@ class LocalCliService(
                 cursor_after_read = _snapshot_cursor_context(handle.hwp)
                 if any(cursor.get(key) != cursor_after_read.get(key) for key in ('pos', 'selected_pos', 'has_selection', 'selected_pos_error', 'selection_mode')):
                     return {'refused': 'the caret or selection changed while the document was read'}
+            handle.diagnostic_site = 'action_native'
             raw_result = run(action)
+            handle.diagnostic_site = 'action_post_read'
             result: dict[str, Any] = {
                 'result_type': type(raw_result).__name__,
                 'result_preview': self._macro_result_preview(raw_result),
@@ -6992,7 +7001,7 @@ class LocalCliService(
             self._record_local_cli_command('action', binding=binding, summary=f'action {action} changed pictures or BinData', payload=payload)
             raise LocalCliServiceError(
                 f'action {action} ran, but pictures or embedded BinData may have changed: {reasons}. The edit may have '
-                'persisted in the working copy. Close the working copy without saving and reopen it; hwpx undo is '
+                'persisted in the working copy. Retain the working copy and owning STA; full native close is unsupported. Do not retry or reopen automatically; hwpx undo is '
                 'refused for this edit. Pass --allow-media-change only when removing or changing a picture is intended.',
                 status_code=409,
             )
@@ -7083,14 +7092,32 @@ class LocalCliService(
                     }
                     warnings.extend(step_warnings)
                 except BaseException as exc:
-                    mutation_may_have_persisted = bool(getattr(exc, 'mutation_may_have_persisted', False))
-                    held = mutation_may_have_persisted and self._hold_unknown_numbering(handle, step, exc)
+                    # Read no exception properties/callbacks before custody.
+                    # Producer invocation intent is independent of error tags.
+                    mutation_may_have_persisted = handle.mutation_intent
+                    held = False
+                    if mutation_may_have_persisted and handle.hold_native_custody is not None:
+                        handle.hold_native_custody('Bundle mutator outcome unknown; session retained.', exc)
+                        held = True
                     if not isinstance(exc, Exception) and not held:
                         raise
                     ok = False
-                    rollback = getattr(exc, 'rollback', {})
-                    if not isinstance(rollback, dict):
-                        rollback = {}
+                    # Only our exact producer classes may carry bounded public
+                    # text/rollback. Never inspect an arbitrary subclass's
+                    # descriptors, metadata, metaclass name or representation.
+                    error_text = 'Native command failed; outcome is unproven.'
+                    rollback = {}
+                    if type(exc) is LocalCliMutationError or type(exc) is LocalCliRuntimeError:
+                        args = BaseException.__dict__['args'].__get__(exc)
+                        if type(args) is tuple and len(args) == 1 and type(args[0]) is str:
+                            error_text = args[0]
+                        if not held and type(exc) is LocalCliMutationError:
+                            data = BaseException.__dict__['__dict__'].__get__(exc)
+                            for key, value in dict.items(data):
+                                if type(key) is str and key == 'rollback' and type(value) is dict:
+                                    for field, flag in dict.items(value):
+                                        if type(field) is str and field in ('attempted', 'succeeded') and type(flag) is bool:
+                                            rollback[field] = flag
                     dirty = dirty or mutation_may_have_persisted
                     status = {
                         'index': index,
@@ -7100,7 +7127,7 @@ class LocalCliService(
                         'dirty': mutation_may_have_persisted,
                         'before': step_before,
                         'after': {} if held else self._bundle_compact_snapshot(handle.hwp),
-                        'error': f'{type(exc).__name__}: {exc}',
+                        'error': ('LocalCliMutationError' if type(exc) is LocalCliMutationError else _exception_label(exc)) + ': ' + error_text,
                         'mutation_may_have_persisted': mutation_may_have_persisted,
                         'rollback': rollback,
                         'mutation': {
@@ -7278,7 +7305,9 @@ class LocalCliService(
         working_copy_path = self._working_copy_path(binding)
 
         def _handler(handle: LocalCliRuntimeHandle) -> dict[str, Any]:
+            handle.diagnostic_site = 'save_native'
             save_document(handle.hwp)
+            handle.diagnostic_site = 'save_file_readback'
             if working_copy_path.is_symlink() or not working_copy_path.is_file():
                 raise LocalCliRuntimeError('Native save returned without a regular working-copy file.')
             try:
@@ -7288,7 +7317,9 @@ class LocalCliService(
             if working_copy_size <= 0:
                 raise LocalCliRuntimeError('Native save produced an empty working copy.')
             working_copy_custody = {}
+            handle.diagnostic_site = 'save_custody_readback'
             self._verify_artifact_readback(binding, working_copy_path, readback=working_copy_custody)
+            handle.diagnostic_site = 'save_location_readback'
             location = snapshot_live_location(
                 hwp=handle.hwp,
                 source_filename=handle.source_filename,
@@ -7422,7 +7453,7 @@ class LocalCliService(
             # Fail closed: counting native Undo steps could revert part of an
             # edit, or an older edit too.
             raise LocalCliRuntimeError(
-                f'undo refused: {blocked}. Close the working copy without saving and reopen it instead of counting undos.'
+                f'undo refused: {blocked}. Retain the working copy and owning STA instead of counting undos; full native close is unsupported. Separately authorized exact-owned operator closure is required.'
             )
         undo_count = int(undo_count_raw) if isinstance(undo_count_raw, int) and undo_count_raw > 1 else 1
 
@@ -7572,7 +7603,7 @@ class LocalCliService(
                 status_code=504,
             ) from exc
         except LocalCliRuntimeError as exc:
-            raise LocalCliServiceError('Local CLI native close failed.', status_code=500) from exc
+            raise LocalCliServiceError('Local CLI full native close is unavailable or incomplete; session custody and managed files are retained.', status_code=500) from exc
 
         if binding.get('session_root_path'):
             try:

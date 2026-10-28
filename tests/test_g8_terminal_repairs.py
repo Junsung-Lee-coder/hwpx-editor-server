@@ -240,8 +240,10 @@ class G8TerminalRuntimeFinalizerRedTests(unittest.TestCase):
                 side_effect=RuntimeError("close failed"),
             ):
                 session._run()
-            self.assertFalse(session._closed.is_set())
-            self.assertTrue(session.is_terminal())
+            # Constructor returned no wrapper: there is no live SDK handle to
+            # refuse closing, and the injected close fault was never reached.
+            self.assertTrue(session._closed.is_set())
+            self.assertFalse(session._native_custody_held)  # no returned wrapper to retain
 
     def test_pending_probe_cannot_become_ready_by_flipping_top_level_fields(self) -> None:
         identity = readiness.current_worker_identity()

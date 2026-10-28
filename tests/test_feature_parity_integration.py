@@ -243,7 +243,9 @@ class BundlePathUndoTests(unittest.TestCase):
             if command_name == 'undo':
                 undo_dispatched.append(command_name)
                 raise AssertionError('undo reached the live document')
-            return handler(SimpleNamespace(hwp=hwp, source_filename='a.hwpx', session_id='s'))
+            handle = SimpleNamespace(hwp=hwp, source_filename='a.hwpx', session_id='s', mutation_intent=False, hold_native_custody=None)
+            handle.mark_mutating_intent = lambda: setattr(handle, 'mutation_intent', True)
+            return handler(handle)
 
         def save(binding: dict[str, Any]) -> dict[str, Any]:
             store['binding'] = binding
@@ -308,7 +310,7 @@ class BundlePathUndoTests(unittest.TestCase):
                                                                        '--confirm-mutation']).server_payload()['steps']
                 service, store, second = self._run_bundle(hwp, steps, store)
                 self.assertTrue(second['dirty'], 'the document stays dirty from the first edit')
-                self.assertFalse(any(step.get('dirty') for step in second['steps']))
+                self.assertEqual(any(step.get('dirty') for step in second['steps']), label != 'where only')
                 self.assertIsNone(store['binding']['pending_logical_undo_count'])
                 with self.assertRaisesRegex(LocalCliRuntimeError, 'undo refused'):
                     service.undo()
@@ -335,8 +337,10 @@ class BundlePathUndoTests(unittest.TestCase):
         steps = build_named_bundle('object-insert-exact', ['--kind', 'footnote', '--text', 'n', '--expected-pos', '0,0,5', '--confirm-mutation']).server_payload()['steps']
         _service_obj, store, result = self._run_bundle(hwp, steps)
         self.assertFalse(result['ok'])
-        self.assertFalse(result['dirty'])
-        self.assertIsNone(store['binding'].get('logical_undo_unverified'))
+        # The package's conservative producer intent precedes its preflight;
+        # refusal is not runtime no-effect proof or permission to undo.
+        self.assertTrue(result['dirty'])
+        self.assertIsNotNone(store['binding'].get('logical_undo_unverified'))
 
 
 class ReadbackLimitTests(unittest.TestCase):

@@ -837,7 +837,9 @@ class BundleUndoTests(unittest.TestCase):
             if command_name == 'undo':
                 store['undo_dispatched'] = True
                 return {'snapshot': {}, 'context': {}, 'location': {}}
-            return handler(SimpleNamespace(hwp=hwp, source_filename='a.hwpx', session_id='s'))
+            handle = SimpleNamespace(hwp=hwp, source_filename='a.hwpx', session_id='s', mutation_intent=False, hold_native_custody=None)
+            handle.mark_mutating_intent = lambda: setattr(handle, 'mutation_intent', True)
+            return handler(handle)
 
         def save(binding: dict[str, Any]) -> dict[str, Any]:
             store['binding'] = binding
@@ -873,9 +875,10 @@ class BundleUndoTests(unittest.TestCase):
         service, result = self._bundle(hwp, store, action='insert_row_below', row=3, count=2)
         self.assertFalse(result['ok'])
         self.assertTrue(result['steps'][0]['mutation_may_have_persisted'])
-        self.assertEqual(result['steps'][0]['rollback']['undo']['native_editing_actions'], 2)
-        self.assertEqual(result['steps'][0]['rollback']['undo']['hwpx_undo'], 'refused')
-        self.assertIn('without saving and reopen', result['steps'][0]['rollback']['hint'])
+        # Public error projection admits only fixed primitive rollback flags,
+        # not arbitrary nested metadata/hints from the exception object.
+        self.assertEqual(result['steps'][0]['rollback'], {'attempted': False})
+        self.assertIn('failed', result['steps'][0]['error'].lower())
         with self.assertRaisesRegex(LocalCliRuntimeError, 'undo refused'):
             service.undo()
 
@@ -911,8 +914,12 @@ class BundleUndoTests(unittest.TestCase):
         store = self._store()
         _service_obj, result = self._bundle(hwp, store, action='insert_row_below', row=3, expected_rows=9)
         self.assertFalse(result['ok'])
-        self.assertEqual(store['binding']['pending_logical_undo_count'], 1)
-        self.assertIsNone(store['binding'].get('logical_undo_unverified'))
+        # A non-numbering package was entered; its producer intent is sticky
+        # even when its own preflight later refuses. Do not infer no effect
+        # from exception fields or restore permission to Undo.
+        self.assertTrue(result['dirty'])
+        self.assertIsNone(store['binding']['pending_logical_undo_count'])
+        self.assertIsNotNone(store['binding'].get('logical_undo_unverified'))
 
 
 if __name__ == '__main__':

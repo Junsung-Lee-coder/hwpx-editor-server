@@ -667,7 +667,7 @@ class ServiceFlowTests(unittest.TestCase):
                 self.assertIn(reason, str(caught.exception))
                 self.assertEqual(caught.exception.rollback['attempted'], False)
                 self.assertGreaterEqual(caught.exception.rollback['undo']['native_editing_actions'], 1)
-                self.assertIn('without saving and reopen', caught.exception.rollback['hint'])
+                self.assertIn('full native close is unsupported', caught.exception.rollback['hint'])
                 self.assertNotIn('use undo', caught.exception.rollback['hint'])
 
     def test_raising_native_action_is_not_retried(self) -> None:

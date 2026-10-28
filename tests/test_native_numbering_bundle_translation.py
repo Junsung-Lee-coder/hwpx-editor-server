@@ -50,9 +50,9 @@ def _run_bundle(hwp, step):
     service.command_packages = get_command_package_registry()
     service._load_active_binding = lambda session_id=None: dict(binding)  # type: ignore[method-assign]
     service._bundle_compact_snapshot = lambda handle_hwp: {'snapshot': True}  # type: ignore[method-assign]
-    service._execute_live = lambda *, handler, **kwargs: handler(  # type: ignore[method-assign]
-        SimpleNamespace(hwp=hwp, source_filename='document.hwpx', session_id=binding['session_id'])
-    )
+    handle = SimpleNamespace(hwp=hwp, source_filename='document.hwpx', session_id=binding['session_id'], mutation_intent=False, hold_native_custody=None)
+    handle.mark_mutating_intent = lambda: setattr(handle, 'mutation_intent', True)
+    service._execute_live = lambda *, handler, **kwargs: handler(handle)  # type: ignore[method-assign]
 
     def find(handle_hwp, *, match, expected_page):
         for index, para in enumerate(handle_hwp.paragraphs):

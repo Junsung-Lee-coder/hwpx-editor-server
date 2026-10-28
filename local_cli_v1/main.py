@@ -260,7 +260,7 @@ SAFE_WORKFLOW_TEXT = '''standard safe edit+proof workflow:
 4. edit: prefer bundle-backed commands/recipes with explicit where/how/changed proof; use anchor commands (`insert-before-heading`, `figure-section`) instead of repeated insertion before one anchor.
 5. screenshot/export-proof: capture rendered proof with screenshot --mode page, page-screenshot, export, or export-proof-range.
 6. save: save/download the working copy only after rendered proof is acceptable.
-7. close: close the live session after saving/reporting artifacts.
+7. close: full native close is currently unsupported; refusal retains the live session and managed artifacts.
 
 review rule: page count is metadata only, not validation proof. Trust rendered PDF/page PNG/live Hancom artifacts and visible target/content review.
 command states: run `hwpx command-status` for bundle-backed / direct-backlog / disabled status.
@@ -764,7 +764,7 @@ def build_parser() -> argparse.ArgumentParser:
     export_parser.add_argument('--out', type=Path, help='Exact PDF destination path')
     export_parser.add_argument('--bundle-proof', action='store_true', help='Use the bundle-backed export_pdf proof slice instead of the legacy direct export route')
     export_parser.add_argument('--json', action='store_true', help='Print the stable JSON envelope')
-    close_parser = subparsers.add_parser('close', help='Close the active live document session')
+    close_parser = subparsers.add_parser('close', help='Request close (full native closure is unsupported; live session is retained)')
     close_parser.add_argument('--json', action='store_true', help='Print the structured lifecycle response')
 
     type_parser = subparsers.add_parser('type', help='Replace the selection, or insert text at the caret')
@@ -1264,7 +1264,7 @@ def _last_proof_artifact(state: dict[str, Any]) -> tuple[str, str] | None:
 
 
 def _print_workflow_help() -> None:
-    print('HWPX workflow: status -> open -> find/where/select -> edit -> screenshot/export-proof -> save -> close')
+    print('HWPX workflow: status -> open -> find/where/select -> edit -> screenshot/export-proof -> save -> download -> retain session (full native close unsupported)')
     print('')
     print('Target pipeline:')
     print('1. local input planner -> explicit command bundle')
@@ -1893,7 +1893,7 @@ def _reopen_fresh_session(base_url: str, source_hwp: Path | None) -> dict[str, A
         status = get_json(base_url, '/local-cli/status')
         if status.get('live_session_bound'):
             if status.get('working_copy_dirty'):
-                raise ApiError('Refusing --fresh-session while the active live session is dirty. Save/close it first.')
+                raise ApiError('Refusing --fresh-session while the active live session is dirty. Save approved artifacts if safe and retain it; full native close is unsupported.')
             post_json(base_url, '/local-cli/close', {'session_id': existing_session_id})
             clear_session_binding(
                 expected_generation=state_generation,

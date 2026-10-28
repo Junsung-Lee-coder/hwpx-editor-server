@@ -320,11 +320,11 @@ class RunStepWiringTests(unittest.TestCase):
                 recorded['reader_handle'] = handle
                 return lambda: {}
 
-            def _bundle_page_number_apply(self, hwp, step, protection=None):
+            def _bundle_page_number_apply(self, hwp, step, protection=None, on_mutating=None):
                 recorded['page'] = protection
                 return {'warnings': []}
 
-            def _bundle_official_numbering_apply(self, hwp, step, protection=None):
+            def _bundle_official_numbering_apply(self, hwp, step, protection=None, on_mutating=None):
                 recorded['numbering'] = protection
                 return {'warnings': []}
 
@@ -335,7 +335,7 @@ class RunStepWiringTests(unittest.TestCase):
 
         for op, key in (('page_number_apply', 'page'), ('official_numbering_apply', 'numbering')):
             service, recorded = self._service()
-            handle = SimpleNamespace(hwp=object())
+            handle = SimpleNamespace(hwp=object(), mark_mutating_intent=lambda: None)
             run_step_for_op(op, service=service, handle=handle, step={}, binding=None, manifest={})
             self.assertTrue(callable(recorded[key]), msg=op)
             self.assertIs(recorded['reader_handle'], handle, msg=op)

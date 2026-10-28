@@ -540,9 +540,11 @@ def run_bundle(hwp, *steps, real_snapshot: bool = False):
 
     if not real_snapshot:
         service._bundle_compact_snapshot = snapshot  # type: ignore[method-assign]
-    service._execute_live = lambda *, handler, **kwargs: handler(  # type: ignore[method-assign]
-        SimpleNamespace(hwp=hwp, source_filename='document.hwpx', session_id=binding['session_id'])
-    )
+    # Caller-owned fixture models the runtime handle's sticky producer intent;
+    # no custody callback is supplied, so signal propagation is still tested.
+    handle = SimpleNamespace(hwp=hwp, source_filename='document.hwpx', session_id=binding['session_id'], mutation_intent=False, hold_native_custody=None)
+    handle.mark_mutating_intent = lambda: setattr(handle, 'mutation_intent', True)
+    service._execute_live = lambda *, handler, **kwargs: handler(handle)  # type: ignore[method-assign]
 
     def find(handle_hwp, *, match, expected_page):
         for index, para in enumerate(handle_hwp.paragraphs):

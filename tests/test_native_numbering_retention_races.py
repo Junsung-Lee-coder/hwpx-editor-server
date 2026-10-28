@@ -172,6 +172,25 @@ class QueuedCloseBeforeHoldTests(CustodyAssertions, unittest.TestCase):
 
 
 class QueuedCloseCleanControlTests(unittest.TestCase):
+    def _assert_close_unavailable(self, owned, error):
+        self.assertIsInstance(error, rt.LocalCliNativeCustodyHeldError)
+        self.assertNotIsInstance(error, LocalCliRuntimeTimeoutError)
+        self.assertIn('Qualified full native closure is unavailable', str(error.__cause__))
+        s = owned.session
+        self.assertTrue(s._thread.is_alive())
+        self.assertFalse(s._closed.is_set())
+        self.assertTrue(s._native_custody_held)
+        self.assertIs(owned.manager._sessions.get(owned.sid), s)
+        self.assertEqual(owned.cleanup_events(), [])
+        self.assertEqual(owned.hook, [])
+        self.assertEqual(rt.read_command_journal(owned.root, f'{owned.sid}:close')['state'], 'failed')
+        before = {p.relative_to(owned.root).as_posix(): p.read_bytes() for p in owned.root.rglob('*') if p.is_file() and p != rt.command_journal_path(owned.root)}
+        calls = list(owned.hwp.calls)
+        with self.assertRaises(rt.LocalCliRuntimeError):
+            owned.manager.close_session(owned.sid, timeout=.2)
+        self.assertEqual(owned.hwp.calls, calls)
+        self.assertEqual(before, {p.relative_to(owned.root).as_posix(): p.read_bytes() for p in owned.root.rglob('*') if p.is_file() and p != rt.command_journal_path(owned.root)})
+
     def _blocked_numbering(self, owned):
         entered, release = threading.Event(), threading.Event()
         original = owned.service._find_text_on_expected_page
@@ -226,13 +245,7 @@ class QueuedCloseCleanControlTests(unittest.TestCase):
         self.assertIsNone(error)
         self.assertIs(result['ok'], True)
         self.assertEqual(len(fault.attempted), 1)
-        self.assertIsNone(box['B'])
-        owned.session._thread.join(JOIN)
-        self.assertFalse(owned.session._thread.is_alive())
-        self.assertTrue(owned.session._closed.is_set())
-        self.assertFalse(owned.manager.has_session(owned.sid))
-        self.assertEqual(rt.read_command_journal(owned.root, f'{owned.sid}:close').get('state'), 'succeeded')
-        self.assertTrue(owned.cleanup_events(), 'ordinary clean close no longer releases the native resources')
+        self._assert_close_unavailable(owned, box['B'])
 
     def test_close_queued_behind_a_clean_typed_refusal_still_closes(self):
         hwp = make_hwp(foreign=True)
@@ -245,11 +258,7 @@ class QueuedCloseCleanControlTests(unittest.TestCase):
         self.assertIs(result['ok'], False)
         self.assertIs(result['dirty'], False)
         self.assertEqual(fault.attempted, [])
-        self.assertIsNone(box['B'])
-        owned.session._thread.join(JOIN)
-        self.assertFalse(owned.session._thread.is_alive())
-        self.assertFalse(owned.manager.has_session(owned.sid))
-        self.assertTrue(owned.cleanup_events())
+        self._assert_close_unavailable(owned, box['B'])
 
     def test_plain_close_after_numbering_still_closes(self):
         owned = Owned(self, make_hwp())
@@ -257,11 +266,15 @@ class QueuedCloseCleanControlTests(unittest.TestCase):
         result, error = owned.run(NUMBERING_STEP)
         self.assertIsNone(error)
         self.assertIs(result['ok'], True)
-        owned.manager.close_session(owned.sid, timeout=JOIN)
-        owned.session._thread.join(JOIN)
-        self.assertFalse(owned.session._thread.is_alive())
-        self.assertFalse(owned.manager.has_session(owned.sid))
-        self.assertTrue(owned.cleanup_events())
+        # Historical method name retained for CI continuity; full close is unsupported.
+        calls = list(owned.hwp.calls)
+        sentinel = owned.root / 'retained.hwpx'
+        sentinel.write_bytes(b'EXACT_SYNTHETIC_DOCUMENT_BYTES')
+        with self.assertRaises(rt.LocalCliNativeCustodyHeldError) as ctx:
+            owned.manager.close_session(owned.sid, timeout=JOIN)
+        self._assert_close_unavailable(owned, ctx.exception)
+        self.assertEqual(owned.hwp.calls, calls)
+        self.assertEqual(sentinel.read_bytes(), b'EXACT_SYNTHETIC_DOCUMENT_BYTES')
 
 
 class HeldReporterBaseExceptionTests(CustodyAssertions, unittest.TestCase):
@@ -407,11 +420,14 @@ class NonHeldReporterControlTests(unittest.TestCase):
         self.addCleanup(patcher.stop)
         value = owned.manager.execute(session_id=owned.sid, command_name='health_probe', handler=lambda h: {'ok': True}, timeout=5)
         self.assertEqual(value, {'ok': True})
-        wait_until(lambda: not owned.session._thread.is_alive(), 'the owning thread to end on the reporter signal')
-        owned.session._thread.join(JOIN)
-        self.assertFalse(owned.session._thread.is_alive())
-        self.assertEqual(owned.hook, ['Terminate'])
-        self.assertFalse(owned.session._native_custody_held)
+        # The command result was delivered; the later reporter signal enters
+        # finalization, which must preserve even a clean live wrapper.
+        wait_until(lambda: owned.session._native_custody_held, 'unavailable finalization to retain custody')
+        self.assertTrue(owned.session._thread.is_alive())
+        self.assertFalse(owned.session._closed.is_set())
+        self.assertEqual(owned.cleanup_events(), [])
+        self.assertEqual(owned.hook, [])
+        self.assertIs(owned.manager._sessions[owned.sid], owned.session)
 
 
 if __name__ == '__main__':

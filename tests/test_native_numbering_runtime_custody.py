@@ -145,11 +145,11 @@ class Owned:
         session = self.session
         if session._thread.is_alive():
             session._allow_native_cleanup = True
-            try:
-                session.close(timeout=10)
-            except LocalCliRuntimeError:
-                pass
-        session._thread.join(10)
+            # Fake-only release after assertions. The real wrapper has no
+            # qualified full closure interface; never fake one in production.
+            with patch.object(rt.LocalCliLiveSession, '_finalize', lambda *a, **k: None):
+                session._commands.put(rt._LiveCommand('test-release', '__close__', None, rt.Future()))
+                session._thread.join(2)
         if session._thread.is_alive():
             raise AssertionError('fake owning thread did not settle')
 
@@ -230,7 +230,7 @@ class CustodyAssertions:
         self.assertIs(step['mutation_may_have_persisted'], True)
         self.assertIs(owned.persisted.get('dirty'), True)
         if signal is not None:
-            self.assertIn(type(signal).__name__, step['error'])
+            self.assertIn('UNKNOWN' if type(signal) is Terminate else type(signal).__name__, step['error'])
 
     def assert_retained(self, owned):
         s = owned.session
@@ -349,9 +349,13 @@ class OwningThreadSignalTests(CustodyAssertions, unittest.TestCase):
         result, error = owned.run(NUMBERING_STEP)
         self.assertIsNone(result)
         self.assertIsNotNone(error)
-        owned.session._thread.join(10)
-        self.assertEqual(owned.hook, ['Terminate'])
-        self.assertFalse(owned.session._thread.is_alive())
+        self.assertIsInstance(error, Terminate)
+        self.assertFalse(owned.session._lifetime_edit_possible)
+        owned.session._thread.join(.1)
+        self.assertEqual(owned.hook, [])
+        self.assertTrue(owned.session._thread.is_alive())
+        self.assertFalse(owned.session._closed.is_set())
+        self.assertEqual(owned.cleanup_events(), [])
 
 
 class OrdinaryUnknownOutcomeTests(CustodyAssertions, unittest.TestCase):
@@ -409,6 +413,7 @@ class KnownOutcomeControlTests(CustodyAssertions, unittest.TestCase):
                 self.assertIs(result['ok'], True)
                 self.assertIs(result['dirty'], True)
                 self.assertEqual(len(fault.attempted), 1)
+                self.assertTrue(owned.session._lifetime_edit_possible)
                 self._assert_open_and_usable(owned)
 
     def test_clean_typed_refusal_is_not_dirty_and_not_quarantined(self):
@@ -422,6 +427,7 @@ class KnownOutcomeControlTests(CustodyAssertions, unittest.TestCase):
         self.assertIs(result['dirty'], False)
         self.assertIs(result['steps'][0]['mutation_may_have_persisted'], False)
         self.assertEqual(fault.attempted, [])
+        self.assertFalse(owned.session._lifetime_edit_possible)
         self._assert_open_and_usable(owned)
 
     def test_raw_exception_before_any_mutator_is_not_dirty_and_not_quarantined(self):
@@ -533,9 +539,16 @@ class PageNumberBoundaryTests(unittest.TestCase):
                 with self.assertRaises(BaseException) as ctx:
                     self._run_page(hwp)
                 self.assertIs(ctx.exception, fault.injected[0])
-                self.assertEqual(ctx.exception.mutation_state, 'unknown')
-                self.assertIs(ctx.exception.mutation_may_have_persisted, True)
-                self.assertEqual(ctx.exception.rollback, {'attempted': False, 'succeeded': False})
+                if type(ctx.exception) is Terminate:
+                    self.assertEqual(vars(ctx.exception), {})
+                else:
+                    self.assertEqual(ctx.exception.mutation_state, 'unknown')
+                if type(ctx.exception) is Terminate:
+                    self.assertEqual(vars(ctx.exception), {})
+                else:
+                    self.assertIs(ctx.exception.mutation_may_have_persisted, True)
+                if type(ctx.exception) is not Terminate:
+                    self.assertEqual(ctx.exception.rollback, {'attempted': False, 'succeeded': False})
                 self.assertEqual(fault.after(), [])
 
     def test_signal_inside_the_comparison_propagates_unchanged_and_tagged(self):
@@ -549,7 +562,10 @@ class PageNumberBoundaryTests(unittest.TestCase):
                     with self.assertRaises(BaseException) as ctx:
                         self._run_page(hwp, protection=census_mod.live_protection_reader(hwp))
                 self.assertIs(ctx.exception, signal)
-                self.assertIs(ctx.exception.mutation_may_have_persisted, True)
+                if type(ctx.exception) is Terminate:
+                    self.assertEqual(vars(ctx.exception), {})
+                else:
+                    self.assertIs(ctx.exception.mutation_may_have_persisted, True)
                 self.assertEqual(fault.after(), [])
 
     def test_signal_before_the_mutator_is_not_tagged(self):

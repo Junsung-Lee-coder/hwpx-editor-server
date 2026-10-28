@@ -8,6 +8,7 @@ import multiprocessing
 import os
 import tempfile
 import threading
+import time
 import unittest
 from concurrent.futures import Future
 from queue import Queue
@@ -778,6 +779,28 @@ class G22HealthProbeRepairTests(unittest.TestCase):
 
 
 class G22RuntimeFinalizationRepairTests(unittest.TestCase):
+    def _held_finalizer(self, session, **kwargs):
+        # Complete the lightweight fixture's owning-loop fields. Exercise the
+        # real finalizer on a thread: held custody intentionally blocks it.
+        session.session_id = 'finalizer-fixture'
+        session._native_custody_held = False
+        session._commands = Queue()
+        thread = threading.Thread(target=session._finalize, kwargs=kwargs)
+        thread.start()
+        try:
+            deadline = time.monotonic() + 2
+            while not session._native_custody_held and time.monotonic() < deadline:
+                time.sleep(.005)
+            self.assertTrue(session._native_custody_held)
+            self.assertTrue(thread.is_alive())
+            self.assertFalse(session._closed.is_set())
+        finally:
+            # Test-only shutdown of this synthetic finalizer, after assertions.
+            session._allow_native_cleanup = True
+            session._commands.put(_LiveCommand('fixture-release', 'barrier', None, Future()))
+            thread.join(2)
+        self.assertFalse(thread.is_alive())
+
     def test_finalizer_does_not_signal_closed_after_cleanup_error(self) -> None:
         session = object.__new__(LocalCliLiveSession)
         session._state_lock = threading.Lock()
@@ -798,7 +821,7 @@ class G22RuntimeFinalizationRepairTests(unittest.TestCase):
         with patch('app.local_cli_runtime.discard_live_document'), \
                 patch('app.local_cli_runtime.close_hwp_instance'), \
                 patch('app.local_cli_runtime.update_runtime_status'):
-            session._finalize(
+            self._held_finalizer(session,
                 hwp=object(),
                 pythoncom=None,
                 coinitialized=False,
@@ -832,7 +855,7 @@ class G22RuntimeFinalizationRepairTests(unittest.TestCase):
         with patch('app.local_cli_runtime.discard_live_document'), \
                 patch('app.local_cli_runtime.close_hwp_instance'), \
                 patch('app.local_cli_runtime.update_runtime_status'):
-            session._finalize(
+            self._held_finalizer(session,
                 hwp=object(),
                 pythoncom=None,
                 coinitialized=False,
@@ -1796,7 +1819,8 @@ class R10RuntimeReconciliationTests(unittest.TestCase):
         setup = (ROOT / 'docs' / 'MCP_SETUP.md').read_text(encoding='utf-8')
         self.assertIn('Recovering a timed-out Hancom command', rollback)
         self.assertIn('Do not replay the timed-out command.', rollback)
-        self.assertIn('Download any artifact that must be kept before closing', rollback)
+        self.assertIn('Download artifacts to retain', rollback)
+        self.assertIn('currently refuses full close', rollback)
         self.assertIn('command_reconcile', setup)
         self.assertIn('reconciled=false', setup)
         self.assertIn('/local-cli/session/{session_id}/artifact/recovery', setup)

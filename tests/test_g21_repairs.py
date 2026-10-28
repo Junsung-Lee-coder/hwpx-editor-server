@@ -987,7 +987,7 @@ class MutationFailureProjectionRepairTests(unittest.TestCase):
         setattr(service, 'command_packages', SimpleNamespace(allowed_keys=lambda op: set(), get=lambda op: None))
 
         def invoke_live(*, handler, **kwargs):
-            return handler(SimpleNamespace(hwp=object(), source_filename='document.hwpx', session_id=binding['session_id']))
+            return handler(SimpleNamespace(hwp=object(), source_filename='document.hwpx', session_id=binding['session_id'], mutation_intent=True, hold_native_custody=None))
 
         def update_live_binding(current, **kwargs):
             captured.update(kwargs)
@@ -1045,7 +1045,7 @@ class MutationFailureProjectionRepairTests(unittest.TestCase):
         setattr(service, 'command_packages', SimpleNamespace(allowed_keys=lambda op: set(), get=lambda op: None))
 
         def invoke_live(*, handler, **kwargs):
-            return handler(SimpleNamespace(hwp=hwp, source_filename='document.hwpx', session_id=binding['session_id']))
+            return handler(SimpleNamespace(hwp=hwp, source_filename='document.hwpx', session_id=binding['session_id'], mutation_intent=True, hold_native_custody=None))
 
         def invoke_margin(handle, step, *, binding=None):
             service._bundle_set_uniform_cell_margin(handle.hwp, 1984)

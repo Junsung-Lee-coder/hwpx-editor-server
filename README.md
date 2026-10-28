@@ -1,5 +1,10 @@
 # HWPX editor/server
 
+## Current full-close limitation
+
+Full native closure is **unsupported** in this integration, even after a clean command or successful numbering/save. `close` refuses before Clear, hidden Clear, Quit and CoUninitialize; owning STA, wrapper, registry and managed files remain retained. Explicit typed Clear is not full closure. A refusal is not native acceptance, first-Clear/hidden-Clear fault coverage, or permission to replay cleanup. Separately authorized external operators may close only an exact-owned disposable instance using real native authority and evidence; no such product interface exists here. The legacy Windows verification close gate must remain NON-PASS until that separate boundary is genuinely qualified.
+
+
 Edit Hancom `.hwpx`/`.hwp` documents programmatically on Windows. A local HTTP API drives the real Hancom editor through [`pyhwpx`](https://pypi.org/project/pyhwpx/), and a thin command-line client (`hwpx`) plans each edit, sends it to the API, and prints structured proof of what changed.
 
 ```text
@@ -55,7 +60,7 @@ Requirements: Windows with a logged-in desktop session, Hancom Office, Python 3.
 ## How an edit works
 
 ```text
-status -> open -> find/where/select -> edit -> render proof -> save -> close
+status -> open -> find/where/select -> edit -> render proof -> save -> download -> retain session
 ```
 
 The CLI turns each command into an explicit command bundle, the server runs it against Hancom under a runtime lock, and the CLI formats the structured result locally. Review the rendered proof before treating an edit as done.
@@ -83,7 +88,7 @@ hwpx official-numbering-apply --match "Fourth item" --expected-page 1 --level 4 
 ### Style and action guards
 
 - `hwpx font` and `hwpx fontsize`: after styling a selected range, no selection may remain (Hancom can collapse it, and the reply's paragraph-context reads replace it). The next `font` or `fontsize` without a selection is then refused instead of styling only the caret. Reselect the range for each property, or pass `--at-caret` to style the caret position on purpose. The reply reports `selection_consumed`.
-- `hwpx action NAME`: the picture and OLE controls, `BinItem` references and embedded BinData are read from the whole document before and after the action. If they cannot be read before (including a readback above 16M characters), or reading them moved the caret or selection, the action is not run. If any of them changed, or they cannot be read afterwards, the command fails with the reason, marks the working copy dirty and refuses `hwpx undo`; close the working copy without saving and reopen it. Pass `--allow-media-change` when removing or changing a picture is intended.
+- `hwpx action NAME`: the picture and OLE controls, `BinItem` references and embedded BinData are read from the whole document before and after the action. If they cannot be read before (including a readback above 16M characters), or reading them moved the caret or selection, the action is not run. If any of them changed, or they cannot be read afterwards, the command fails with the reason, marks the working copy dirty and refuses `hwpx undo`; retain the working copy and owning STA; do not retry, discard or reopen automatically. Runtime full close is currently unsupported, including for clean sessions. Only a separately authorized operator may close an exact-owned disposable instance using independently verified native authority. Pass `--allow-media-change` when removing or changing a picture is intended.
 
 ## Document tools
 

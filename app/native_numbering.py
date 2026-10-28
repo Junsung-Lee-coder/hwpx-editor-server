@@ -961,14 +961,14 @@ def _official_reason(codes: list[str], *, exception: BaseException | None = None
     return reason
 
 
-def apply_page_number(hwp: Any, request: Any, *, protection: Callable[[], Any] | None = None) -> dict[str, Any]:
+def apply_page_number(hwp: Any, request: Any, *, protection: Callable[[], Any] | None = None, on_mutating: Callable[[], None] | None = None) -> dict[str, Any]:
     """Insert one page number control.
 
     Once ``PageNumPos`` was issued, an ordinary failure anywhere afterwards (including raw readback, census or
     comparison errors) is raised as ``NativeNumberingMutationError`` with the original as ``__cause__``; a
-    ``BaseException`` (for example ``KeyboardInterrupt``/``SystemExit``) propagates unchanged, tagged as unknown.
+    ``BaseException`` (for example ``KeyboardInterrupt``/``SystemExit``) propagates unchanged; only exact builtin control-flow classes are legacy-tagged.
     """
-    reach = _MutationReach()
+    reach = _MutationReach(on_mutating)
     try:
         return _apply_page_number(hwp, request, protection=protection, reach=reach)
     except NativeNumberingMutationError:
@@ -1087,7 +1087,7 @@ def _apply_page_number(hwp: Any, request: Any, *, protection: Callable[[], Any] 
         ) from exc
 
     # From here the outcome may be unknown, so no failure path below moves the caret.
-    reach.reached = True
+    reach.issue()
     try:
         execute_result = haction.Execute('PageNumPos', hset.HSet)
     except Exception as exc:
@@ -1374,18 +1374,30 @@ class _MutationReach:
 
     reached = False
 
+    def __init__(self, on_mutating: Callable[[], None] | None = None):
+        self.on_mutating = on_mutating
+
+    def issue(self) -> None:
+        if self.on_mutating is not None:
+            self.on_mutating()
+        self.reached = True
+
 
 def _mark_noncomplete(exc: BaseException) -> None:
     """Tag a control-flow exit (not an Exception) that escaped after a mutating call, keeping the exit unchanged."""
-    for name, value in (
-        ('mutation_state', 'unknown'),
-        ('mutation_may_have_persisted', True),
-        ('rollback', {'attempted': False, 'succeeded': False}),
-    ):
-        try:
-            setattr(exc, name, value)
-        except Exception:
-            pass
+    # Only exact builtin control-flow exceptions have this legacy projection.
+    # BaseException.__getattribute__ still invokes a subclass data descriptor.
+    # Untrusted subclasses propagate unchanged, WITHOUT reading or tagging
+    # them. The owning runtime's producer intent already preserves UNKNOWN/STA.
+    if type(exc) is KeyboardInterrupt or type(exc) is SystemExit or type(exc) is BaseException:
+        data = BaseException.__dict__['__dict__'].__get__(exc)
+        # Even an exact builtin exception may carry foreign keys or values.
+        # Do not inspect/overwrite existing metadata: hashing/equality or
+        # destruction of an overwritten value can execute arbitrary code.
+        if data:
+            return
+        dict.update(data, mutation_state='unknown', mutation_may_have_persisted=True,
+                    rollback={'attempted': False, 'succeeded': False})
 
 
 def _define_official_outline(hwp: Any, haction: Any, guard: Callable[[bool, str], None], reach: _MutationReach) -> None:
@@ -1406,15 +1418,15 @@ def _define_official_outline(hwp: Any, haction: Any, guard: Callable[[bool, str]
             setattr(hset.OutlineShape, f'StrFormatLevel{index}', spec['str_format'])
             setattr(hset.OutlineShape, f'NumFormatLevel{index}', spec['num_format'])
     except Exception as exc:
-        raise NativeNumberingRefusal(f'native outline parameters could not be set: {exc}', code='native_parameters_unavailable') from exc
+        raise NativeNumberingRefusal(f'native outline parameters could not be set: exception of class {_exception_class_label(exc)}', code='native_parameters_unavailable') from exc
     guard(False, 'before the outline definition')
-    reach.reached = True
+    reach.issue()
     try:
         result = haction.Execute('OutlineNumber', hset.HSet)
     except Exception as exc:
         reason = _fixed_reason(lambda: _official_reason(['define_execute_raised'], exception=exc))
         raise NativeNumberingMutationError(
-            f'native OutlineNumber raised {exc!r}; the section outline definition may or may not have changed and was not rolled back',
+            f'native OutlineNumber raised exception of class {_exception_class_label(exc)}; the section outline definition may or may not have changed and was not rolled back',
             fixed_reason=reason,
         ) from exc
     if not _action_confirmed(result):
@@ -1429,7 +1441,7 @@ def _define_official_outline(hwp: Any, haction: Any, guard: Callable[[bool, str]
     except NativeNumberingRefusal as exc:
         reason = _fixed_reason(lambda: _official_reason(['define_readback_unverified']))
         raise NativeNumberingMutationError(
-            f'the section outline definition could not be verified after OutlineNumber: {exc}; nothing was rolled back', fixed_reason=reason
+            f'the section outline definition could not be verified after OutlineNumber: exception of class {_exception_class_label(exc)}; nothing was rolled back', fixed_reason=reason
         ) from exc
     if not _outline_matches_official(levels):
         reason = _fixed_reason(lambda: _official_reason(['define_readback_not_official']))
@@ -1447,14 +1459,15 @@ def apply_official_numbering(
     target_find: str | None = None,
     target_match_case: bool = True,
     target_anchor: _TargetState | None = None,
+    on_mutating: Callable[[], None] | None = None,
 ) -> dict[str, Any]:
     """Set/verify the official 4-level outline definition, then number the paragraph holding the caret.
 
     Once a mutating native call was issued, an ordinary failure anywhere afterwards (including raw readback,
     census or comparison errors) is raised as ``NativeNumberingMutationError`` with the original as ``__cause__``;
-    a ``BaseException`` (for example ``KeyboardInterrupt``/``SystemExit``) propagates unchanged, tagged as unknown.
+    a ``BaseException`` (for example ``KeyboardInterrupt``/``SystemExit``) propagates unchanged; only exact builtin control-flow classes are legacy-tagged.
     """
-    reach = _MutationReach()
+    reach = _MutationReach(on_mutating)
     try:
         return _apply_official_numbering(
             hwp,
@@ -1472,7 +1485,7 @@ def apply_official_numbering(
             raise
         reason = _fixed_reason(lambda: _official_reason(['unexpected_exception_after_mutation'], exception=exc))
         raise NativeNumberingMutationError(
-            f'outline numbering failed with {exc!r} after a native mutating call was issued; '
+            f'outline numbering failed with exception of class {_exception_class_label(exc)} after a native mutating call was issued; '
             'the document state is not proven and nothing was rolled back',
             fixed_reason=reason,
         ) from exc
@@ -1507,7 +1520,7 @@ def _apply_official_numbering(
             before_census = _read_protection(protection)
         except Exception as exc:
             raise NativeNumberingRefusal(
-                f'document protection census could not be read before editing: {exc}', code='protection_unavailable'
+                f'document protection census could not be read before editing: exception of class {_exception_class_label(exc)}', code='protection_unavailable'
             ) from exc
         _require_complete(before_census)
         hits = _census_hits(before_census['paragraphs'], target_find, target_match_case)
@@ -1554,7 +1567,7 @@ def _apply_official_numbering(
         except NativeNumberingRefusal as exc:
             reason = _fixed_reason(lambda: _official_reason(['paragraph_unverified_after_define']))
             raise NativeNumberingMutationError(
-                f'paragraph state could not be verified after the outline definition: {exc}; nothing was rolled back', fixed_reason=reason
+                f'paragraph state could not be verified after the outline definition: exception of class {_exception_class_label(exc)}; nothing was rolled back', fixed_reason=reason
             ) from exc
         if redefined_heading != heading or redefined_level != level:
             reason = _fixed_reason(
@@ -1586,17 +1599,17 @@ def _apply_official_numbering(
         except Exception as exc:
             reason = _fixed_reason(lambda: _official_reason(['paragraph_shape_set_raised'], exception=exc))
             raise NativeNumberingMutationError(
-                f'native ParagraphShape raised {exc!r}; the paragraph may or may not have been changed and nothing was rolled back',
+                f'native ParagraphShape raised exception of class {_exception_class_label(exc)}; the paragraph may or may not have been changed and nothing was rolled back',
                 fixed_reason=reason,
             ) from exc
         guard(defined, 'before the paragraph write')
-        reach.reached = True
+        reach.issue()
         try:
             execute_result = haction.Execute('ParagraphShape', _hset.HSet)
         except Exception as exc:
             reason = _fixed_reason(lambda: _official_reason(['paragraph_shape_execute_raised'], exception=exc))
             raise NativeNumberingMutationError(
-                f'native ParagraphShape raised {exc!r}; the paragraph may or may not have been changed and nothing was rolled back',
+                f'native ParagraphShape raised exception of class {_exception_class_label(exc)}; the paragraph may or may not have been changed and nothing was rolled back',
                 fixed_reason=reason,
             ) from exc
         if not _action_confirmed(execute_result):
@@ -1614,7 +1627,7 @@ def _apply_official_numbering(
     except NativeNumberingRefusal as exc:
         reason = _fixed_reason(lambda: _official_reason(['outcome_unverified']))
         raise NativeNumberingMutationError(
-            f'outline numbering outcome could not be verified: {exc}; nothing was rolled back', fixed_reason=reason
+            f'outline numbering outcome could not be verified: exception of class {_exception_class_label(exc)}; nothing was rolled back', fixed_reason=reason
         ) from exc
     problems: list[str] = []
     codes: list[str] = []
@@ -1630,7 +1643,7 @@ def _apply_official_numbering(
         except Exception as exc:
             reason = _fixed_reason(lambda: _official_reason(['protection_read_after_failed'], exception=exc))
             raise NativeNumberingMutationError(
-                f'document protection census could not be read after the native call: {exc}; nothing was rolled back',
+                f'document protection census could not be read after the native call: exception of class {_exception_class_label(exc)}; nothing was rolled back',
                 fixed_reason=reason,
             ) from exc
         lost = _incomplete(after_census)
@@ -1757,6 +1770,7 @@ def apply_official_numbering_at_match(
     level: Any,
     match_case: bool = True,
     protection: Callable[[], Any] | None = None,
+    on_mutating: Callable[[], None] | None = None,
 ) -> dict[str, Any]:
     req = normalize_official_numbering_request({'level': level})
     if not isinstance(find, str) or find == '' or '\n' in find or '\r' in find:
@@ -1769,7 +1783,7 @@ def apply_official_numbering_at_match(
     try:
         _set_pos(hwp, (list_id, para, 0))
     except Exception as exc:
-        raise NativeNumberingRefusal(f'the caret could not be moved to the target paragraph: {exc}', code='target_unlocatable') from exc
+        raise NativeNumberingRefusal(f'the caret could not be moved to the target paragraph: exception of class {_exception_class_label(exc)}', code='target_unlocatable') from exc
     anchor = _anchor_target(hwp, expected=(list_id, para))
 
     result = apply_official_numbering(
@@ -1779,6 +1793,7 @@ def apply_official_numbering_at_match(
         target_find=find,
         target_match_case=match_case,
         target_anchor=anchor,
+        on_mutating=on_mutating,
     )
     result['matches'] = 1
     return result

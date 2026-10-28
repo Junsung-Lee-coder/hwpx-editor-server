@@ -351,7 +351,7 @@ class LocalCliBundleControlsMixin:
                 f'added_types={json.dumps(added_types, ensure_ascii=False, sort_keys=True)}; '
                 f'removed_types={json.dumps(removed_types, ensure_ascii=False, sort_keys=True)}; '
                 f'identity_sha256={before_identity}->{after_identity}. '
-                'The working copy was not saved; close without saving and retry with a structure-preserving primitive.'
+                'The working copy was not saved; retain it and its owning STA. Full native close is unsupported; do not retry automatically. Separately authorized exact-owned operator closure is required.'
             )
         return proof
 

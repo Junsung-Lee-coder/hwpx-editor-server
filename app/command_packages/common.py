@@ -583,13 +583,13 @@ def run_step_for_op(op: str, *, service: Any, handle: Any, step: dict[str, Any],
         return result, True, list(result.get('warnings') or [])
     if op == 'page_number_apply':
         result = service._bundle_page_number_apply(  # noqa: SLF001
-            handle.hwp, step, protection=service._numbering_protection_reader(handle)  # noqa: SLF001
+            handle.hwp, step, protection=service._numbering_protection_reader(handle), on_mutating=handle.mark_mutating_intent  # noqa: SLF001
         )
         # Identical native settings are a proven no-op, not a new dirty delta.
         return result, result.get('result', {}).get('changed') is not False, list(result.get('warnings') or [])
     if op == 'official_numbering_apply':
         result = service._bundle_official_numbering_apply(  # noqa: SLF001
-            handle.hwp, step, protection=service._numbering_protection_reader(handle)  # noqa: SLF001
+            handle.hwp, step, protection=service._numbering_protection_reader(handle), on_mutating=handle.mark_mutating_intent  # noqa: SLF001
         )
         return result, result.get('result', {}).get('changed') is not False, list(result.get('warnings') or [])
     if op == 'paragraph_delete_exact':

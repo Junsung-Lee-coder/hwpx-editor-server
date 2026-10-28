@@ -26,10 +26,10 @@ from app.object_insert import (
     summarize,
 )
 
-_ROLLBACK_HINT = {'attempted': False, 'hint': 'Close the working copy without saving and reopen it; a single Undo does not guarantee a full rollback of this edit.'}
+_ROLLBACK_HINT = {'attempted': False, 'hint': 'Retain the working copy and owning STA; full native close is unsupported. Separately authorized exact-owned operator closure is required; a single Undo does not guarantee a full rollback of this edit.'}
 _UNDO_NOTE = (
     'hwpx undo refuses after object_insert_exact (_BUNDLE_UNDO_POLICY): Hancom may record each native editing action '
-    'as its own undo unit and the grouping is not verified natively. Close the working copy without saving and reopen it to discard the edit.'
+    'as its own undo unit and the grouping is not verified natively. Retain the working copy and owning STA; full native close is unsupported. Separately authorized exact-owned operator closure is required to discard the edit.'
 )
 
 

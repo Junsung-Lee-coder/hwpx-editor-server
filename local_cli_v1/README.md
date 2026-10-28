@@ -1,11 +1,16 @@
 # Local CLI
 
+## Current full-close limitation
+
+Full native closure is **unsupported** in this integration, even after a clean command or successful numbering/save. `close` refuses before Clear, hidden Clear, Quit and CoUninitialize; owning STA, wrapper, registry and managed files remain retained. Explicit typed Clear is not full closure. A refusal is not native acceptance, first-Clear/hidden-Clear fault coverage, or permission to replay cleanup. Separately authorized external operators may close only an exact-owned disposable instance using real native authority and evidence; no such product interface exists here. The legacy Windows verification close gate must remain NON-PASS until that separate boundary is genuinely qualified.
+
+
 `local_cli_v1` is the local planner and formatter for the HWPX runtime. It turns a command into an explicit bundle, sends the bundle to the local API when execution is requested, and keeps the response formatting on the client side.
 
 ## Standard safe edit+proof workflow
 
 ```text
-status -> open -> find/where/select -> edit -> render proof -> save -> close
+status -> open -> find/where/select -> edit -> render proof -> save -> download -> retain session
 ```
 
 Use managed or disposable copies. Capture rendered proof before saving a mutation. Page count is not proof of layout correctness.
@@ -52,7 +57,7 @@ python -m local_cli_v1.main save
 python -m local_cli_v1.main close
 ```
 
-`command-reconcile` is the only retry/close handoff for a timed-out native
+`command-reconcile` observes a timed-out native operation; it does not qualify full native closure. It is the only recovery handoff for a timed-out native
 command. It reads the durable server journal, waits while the native call is
 still pending, and commits the late result before normal commands are admitted.
 

@@ -115,7 +115,9 @@ def make_service(hwp: Any, store: dict[str, Any]) -> LocalCliService:
         if command_name == 'undo':
             store['undo_dispatched'] = True
             return {'snapshot': {}, 'context': {}, 'location': {}}
-        return handler(SimpleNamespace(hwp=hwp, source_filename='a.hwpx', session_id='s'))
+        handle = SimpleNamespace(hwp=hwp, source_filename='a.hwpx', session_id='s', mutation_intent=False, hold_native_custody=None)
+        handle.mark_mutating_intent = lambda: setattr(handle, 'mutation_intent', True)
+        return handler(handle)
 
     service._load_active_binding = lambda session_id=None: store['binding']  # type: ignore[method-assign]
     service._save_binding = save  # type: ignore[method-assign]
@@ -146,7 +148,7 @@ class ActionMediaGuardTests(unittest.TestCase):
             self.run_action(hwp, store)
         message = ctx.exception.message
         self.assertEqual(ctx.exception.status_code, 409)
-        for needle in ('Delete', 'picture controls 1 -> 0', 'BinData', 'may have persisted', 'without saving'):
+        for needle in ('Delete', 'picture controls 1 -> 0', 'BinData', 'may have persisted', 'owning STA', 'full native close is unsupported'):
             self.assertIn(needle, message)
         self.assertEqual(native_runs(hwp), [('Run', 'Delete')])
         binding = store['binding']
