@@ -69,6 +69,8 @@ _VALIDATION_SAMPLES: dict[str, dict[str, object]] = {
     'typography_overview': {'scope': 'document', 'max_samples': 3, 'max_sections': 3, 'max_styles': 3},
     'style_inspect': {'match': 'hello', 'keep_position': True},
     'paragraph_style_apply_exact': {'match': 'hello', 'expected_page': 1, 'confirm_layout': True},
+    'page_number_apply': {'position': 'bottom-center', 'start_number': 1, 'side_char': 'none', 'confirm_layout': True},
+    'official_numbering_apply': {'match': 'hello', 'expected_page': 1, 'level': 1, 'confirm_layout': True},
     'paragraph_delete_exact': {'match': 'hello', 'expected_page': 1, 'confirm_remove': True},
     'paragraph_join_previous_exact': {'match': 'hello', 'expected_page': 1, 'confirm_layout': True},
     'paragraph_join_next_exact': {'match': 'hello', 'expected_page': 1, 'confirm_layout': True},
@@ -152,6 +154,10 @@ _VALIDATION_SAMPLES: dict[str, dict[str, object]] = {
         'confirm_layout': True,
     },
     'table_split_exact': {'page_from': 1, 'target_id': 'ctrl/1', 'expected_hash': 'sha256:abc', 'expected_page': 1, 'down_rows': 1, 'confirm_layout': True},
+    'table_structure_exact': {'page_from': 1, 'target_id': 'ctrl/1', 'expected_hash': 'sha256:abc', 'expected_page': 1, 'action': 'insert_row_below', 'row': 1, 'col': 1, 'expected_rows': 2, 'expected_cols': 2, 'confirm_layout': True},
+    'object_insert_exact': {'kind': 'bookmark', 'name': 'b1', 'expected_pos': [0, 1, 2], 'confirm_mutation': True},
+    'layout_exact': {'kind': 'section_insert', 'expected_pos': [0, 1, 2], 'confirm_layout': True},
+    'layout_inspect': {},
     'where': {},
 }
 

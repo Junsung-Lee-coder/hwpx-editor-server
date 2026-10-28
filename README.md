@@ -1,5 +1,14 @@
 # HWPX editor/server
 
+## Native save and normal close contract
+
+`save` reads exact typed `IsModified` on the healthy owning STA and journals it before proceeding. Exact `False` deliberately skips ordinary Save as a **clean no-op**; the working-copy/file/custody/location readbacks still run. It does not fabricate a Save return or clear prior dirty evidence. Exact `True` calls the unchanged ordinary Save once; native False, errors, UNKNOWN and receipt/readback failures retain custody, with no forced Save or retry. Historical failed Saves remain failures.
+
+Normal `close` is implemented for the original constructor-owned instance with exactly one bound clean document and window. It calls raw void `Quit` once (not `pyhwpx.quit`, which hides a destructive Clear), verifies the original process handle exited, releases the SDK dispatch and observes both owning-STA COM balances. Dirty, unbound, timed-out, UNKNOWN or held state is retained with no teardown. A reporting-only failure after completion remains completed, with managed files retained for cleanup; Quit is never replayed. Download approved artifacts **before** successful close removes the managed root.
+
+Portable tests establish source behavior only. Real Windows SDK/COM/native-exit acceptance of this candidate still requires a separately reviewed verification run on an interactive Windows/Hancom desktop. See [native lifecycle contract](docs/NATIVE_LIFECYCLE.md) for the locked dependency, API sources, destructor balance and limits.
+
+
 Edit Hancom `.hwpx`/`.hwp` documents programmatically on Windows. A local HTTP API drives the real Hancom editor through [`pyhwpx`](https://pypi.org/project/pyhwpx/), and a thin command-line client (`hwpx`) plans each edit, sends it to the API, and prints structured proof of what changed.
 
 ```text
@@ -10,6 +19,8 @@ What you get:
 
 - **Find and navigate:** text search with page and cursor context, table and control inventories.
 - **Targeted edits:** text entry, character styles, bullets, tables, cell formatting, paragraph and control operations. Each edit is validated before it touches the document.
+- **Page numbers and official-document numbering:** `hwpx page-number-apply` inserts one native page number at one of six top/bottom positions with a start number and optional native dash side characters (arbitrary prefix/suffix text is refused). Before editing it reads an in-memory structural snapshot of the live document (body, run/paragraph/table/picture formatting, headers/footers, styles, numberings, media references) and refuses with no mutation when that snapshot is unreadable; afterwards only the new native page-number control and its settings may differ, and a changed or unreadable post-state is reported as an unknown outcome (not as inserted) with the document left as is. `hwpx official-numbering-apply` applies native outline numbering levels 1-4 (`1.` → `가.` → `1)` → `가)`) to one proven paragraph, verifying the current section's outline definition by readback and defining it only when no other outline paragraph in that section depends on it. It applies the level with one native ParagraphShape action (HeadingType plus Level) when the verified definition already exists, requires the same structural snapshot to be readable before the call and unchanged outside the target paragraph's numbering afterwards, and refuses a target it cannot identify uniquely. Both are bundle-backed, do not save automatically, and need rendered proof before save. A bounded Windows/Hancom check has confirmed bottom-center page numbering starting at 7 without dash decoration through save and reopen. The saved HWPX contains native page-number and page-restart controls, and the protected-content checks passed. Rendered numbering on every page, other settings, insertion/deletion renumbering, Undo, and native official-document numbering remain unverified.
+- **Table structure:** insert or delete rows and columns, merge a cell range, or split a cell on one exact table (`table-structure-exact`). The table grid is read back before and after, and the edit only counts as done when the grid changed exactly as planned.
 - **Rendered proof:** page screenshots and PDF renders, so you check the edit visually. Page count alone is never treated as proof.
 - **Honest failure reporting:** when Hancom's outcome is unknown, the server says so and keeps the evidence. It does not guess or silently retry.
 
@@ -53,12 +64,59 @@ Requirements: Windows with a logged-in desktop session, Hancom Office, Python 3.
 ## How an edit works
 
 ```text
-status -> open -> find/where/select -> edit -> render proof -> save -> close
+status -> open -> find/where/select -> edit -> render proof -> save -> download -> close
 ```
 
 The CLI turns each command into an explicit command bundle, the server runs it against Hancom under a runtime lock, and the CLI formats the structured result locally. Review the rendered proof before treating an edit as done.
 
 The CLI picks its server in this order: `--base-url`, the URL cached by `open`, `HWPX_BASE_URL`, then `http://127.0.0.1:8765`.
+
+### Native page numbers and official-document numbering
+
+After opening a working copy, use the existing bundle-backed commands:
+
+```text
+hwpx page-number-apply --position bottom-center --start-number 3 --side-char dash --confirm-layout
+hwpx official-numbering-apply --match "First item" --expected-page 1 --level 1 --confirm-layout
+hwpx official-numbering-apply --match "Second item" --expected-page 1 --level 2 --confirm-layout
+hwpx official-numbering-apply --match "Third item" --expected-page 1 --level 3 --confirm-layout
+hwpx official-numbering-apply --match "Fourth item" --expected-page 1 --level 4 --confirm-layout
+```
+
+- Page positions are `top-left`, `top-center`, `top-right`, `bottom-left`, `bottom-center`, `bottom-right`. Start numbers are integers from 1 through 65535. `--side-char dash` (or the pair `--prefix - --suffix -`) requests native `- 1 -` decoration; `none` is the default. Arbitrary prefix/suffix strings are not supported.
+- Official levels are native outline metadata, not characters inserted into the paragraph. Use a unique match in the intended body paragraph and its observed page. If match text begins with a hyphen, keep it attached to its option, for example `--match=--항목`.
+- Applying identical page settings or the same verified outline level again is a no-op: no native mutation is issued and the step reports `dirty=false`. It does not clear dirtiness from earlier edits. A conflicting existing page number or a paragraph using another list/bullet is refused rather than overwritten.
+- These two commands, and `bundle-run`, `bundle` and `tx-commit`, exit 0 only when the backend explicitly reports `ok=true`; a refusal or uncertain outcome exits 1, including with `--json`. Failure output keeps the step error and mutation evidence and does not claim successful execution. An unknown native outcome is not permission to retry, save, close or discard automatically.
+- No command here saves automatically. Render all affected pages before accepting the working copy. Native Hancom save/reopen, automatic renumbering and Undo behavior still require separate Windows evidence; portable tests do not establish them. Stateless queued numbering jobs remain unsupported.
+
+### Style and action guards
+
+- `hwpx font` and `hwpx fontsize`: after styling a selected range, no selection may remain (Hancom can collapse it, and the reply's paragraph-context reads replace it). The next `font` or `fontsize` without a selection is then refused instead of styling only the caret. Reselect the range for each property, or pass `--at-caret` to style the caret position on purpose. The reply reports `selection_consumed`.
+- `hwpx action NAME`: the picture and OLE controls, `BinItem` references and embedded BinData are read from the whole document before and after the action. If they cannot be read before (including a readback above 16M characters), or reading them moved the caret or selection, the action is not run. If any of them changed, or they cannot be read afterwards, the command fails with the reason, marks the working copy dirty and refuses `hwpx undo`; retain the working copy and owning STA; do not retry, discard or reopen automatically. Normal close is unavailable for this unproved or held state. Only a separately authorized operator may finalize an exact-owned disposable instance using independently verified native authority; operator cleanup is not product close acceptance. Pass `--allow-media-change` when removing or changing a picture is intended.
+
+## Document tools
+
+Native edits (bundle recipes; each checks the caret from `hwpx where`, runs the Hancom action once, and reads the document back before it reports success):
+
+| Recipe | What it does |
+|---|---|
+| `object-insert-exact` | Insert a footnote, endnote, memo, hyperlink, 책갈피 (named anchor), equation, line/rectangle/ellipse, header or footer |
+| `layout-inspect` | Read the page setup and column definition at the caret (read-only) |
+| `layout-exact` | Change paper size, orientation and margins; set columns; insert or remove a section break; apply an automatic hanging indent (내어쓰기) |
+
+Run a recipe with `python -m local_cli_v1.main bundle-run <recipe> ...` and see its options with `bundle-help <recipe>`. Images use the existing `image` command (`--fit-cell` inside a table cell). Resizing or deleting an image uses `section-control-move-resize-exact` / `section-control-delete-exact`.
+
+Local commands (no server call, no Hancom; their output is static evidence, not rendered proof):
+
+| Command | What it does |
+|---|---|
+| `new FILE.hwpx` | Write a minimal blank document (paper size and margins), then `open` it |
+| `mermaid-render SRC.mmd --out OUT.png` | Render a Mermaid diagram with mermaid-cli (`mmdc` on `PATH` or `HWPX_MMDC`), then insert it with `image` |
+| `doc-chunks`, `doc-search` | Split a document into chunks and search them |
+| `doc-index`, `doc-outline` | Paragraph position index; headings as a table of contents |
+| `doc-export --format text\|html`, `doc-stats` | Export as text or HTML; count characters, words and paragraphs |
+
+The native edits above have not yet been run on a Hancom desktop. They are designed to fail closed, so treat a first run on a disposable copy as verification.
 
 ## Security
 

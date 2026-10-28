@@ -27,6 +27,8 @@ BUNDLE_SERVER_OPS = frozenset(
         'typography_overview',
         'style_inspect',
         'paragraph_style_apply_exact',
+        'page_number_apply',
+        'official_numbering_apply',
         'paragraph_delete_exact',
         'control_delete_exact',
         'exact_control_select_proof',
@@ -39,6 +41,10 @@ BUNDLE_SERVER_OPS = frozenset(
         'table_cell_structure_exact',
         'table_column_width_exact',
         'table_split_exact',
+        'table_structure_exact',
+        'object_insert_exact',
+        'layout_exact',
+        'layout_inspect',
         'where',
     }
 )
@@ -102,6 +108,12 @@ _STEP_KEYS: dict[str, frozenset[str]] = {
             'pagebreak_before',
             'confirm_layout',
         }
+    ),
+    'page_number_apply': frozenset(
+        {'op', 'operation', 'label', 'position', 'start_number', 'side_char', 'confirm_layout'}
+    ),
+    'official_numbering_apply': frozenset(
+        {'op', 'operation', 'label', 'match', 'expected_page', 'level', 'confirm_layout'}
     ),
     'paragraph_delete_exact': frozenset(
         {
@@ -305,6 +317,76 @@ _STEP_KEYS: dict[str, frozenset[str]] = {
             'max_controls',
         }
     ),
+    'table_structure_exact': frozenset(
+        {
+            'op',
+            'label',
+            'section_anchor',
+            'page_from',
+            'page_to',
+            'around',
+            'target_id',
+            'expected_hash',
+            'expected_page',
+            'action',
+            'row',
+            'col',
+            'end_row',
+            'end_col',
+            'count',
+            'split_rows',
+            'split_cols',
+            'expected_rows',
+            'expected_cols',
+            'confirm_layout',
+            'max_controls',
+        }
+    ),
+    'object_insert_exact': frozenset(
+        {
+            'op',
+            'label',
+            'kind',
+            'expected_pos',
+            'confirm_mutation',
+            'text',
+            'url',
+            'display_text',
+            'name',
+            'script',
+            'width_mm',
+            'height_mm',
+            'treat_as_char',
+            'apply_to',
+        }
+    ),
+    'layout_exact': frozenset(
+        {
+            'op',
+            'label',
+            'kind',
+            'expected_pos',
+            'paper_width_mm',
+            'paper_height_mm',
+            'landscape',
+            'margin_top_mm',
+            'margin_bottom_mm',
+            'margin_left_mm',
+            'margin_right_mm',
+            'header_len_mm',
+            'footer_len_mm',
+            'gutter_len_mm',
+            'count',
+            'gap_mm',
+            'same_width',
+            'apply_to',
+            'section_index',
+            'marker_text',
+            'expected_before',
+            'confirm_layout',
+        }
+    ),
+    'layout_inspect': frozenset({'op', 'label'}),
     'control_move_resize_exact': frozenset(
         {
             'op',
@@ -1471,6 +1553,109 @@ def _build_paragraph_style_apply_exact(argv: Sequence[str]) -> BundleSpec:
     )
 
 
+_PAGE_NUMBER_POSITIONS = ('top-left', 'top-center', 'top-right', 'bottom-left', 'bottom-center', 'bottom-right')
+_PAGE_NUMBER_START_RANGE = (1, 65535)
+
+
+def _page_number_side_char(args: argparse.Namespace) -> str:
+    prefix, suffix = args.prefix, args.suffix
+    pair_given = prefix is not None or suffix is not None
+    pair_side: str | None = None
+    if pair_given:
+        if prefix is None or suffix is None:
+            raise BundleError('page-number-apply requires --prefix and --suffix together.')
+        if (prefix, suffix) == ('-', '-'):
+            pair_side = 'dash'
+        elif (prefix, suffix) == ('', ''):
+            pair_side = 'none'
+        else:
+            raise BundleError(
+                "page-number-apply supports only no side characters or '-' on both sides; "
+                'arbitrary --prefix/--suffix text is not supported by the native page-number action.'
+            )
+    if args.side_char is not None and pair_side is not None and args.side_char != pair_side:
+        raise BundleError('page-number-apply --side-char conflicts with --prefix/--suffix.')
+    return args.side_char or pair_side or 'none'
+
+
+def _build_page_number_apply(argv: Sequence[str]) -> BundleSpec:
+    parser = _parser('page-number-apply', 'Insert one native page number at a fixed top/bottom left/center/right position.')
+    parser.add_argument('--position', required=True, choices=_PAGE_NUMBER_POSITIONS, help='Native page-number position')
+    parser.add_argument('--start-number', type=int, default=1, help='First page number, 1-65535 (default 1)')
+    parser.add_argument('--side-char', choices=('none', 'dash'), help="Side characters: none, or '-' on both sides")
+    parser.add_argument('--prefix', help="Only '-' (paired with --suffix '-') or '' is supported")
+    parser.add_argument('--suffix', help="Only '-' (paired with --prefix '-') or '' is supported")
+    parser.add_argument('--confirm-layout', action='store_true', required=True, help='Required explicit confirmation for page layout mutation')
+    args = _parse_bundle_args(parser, argv)
+    low, high = _PAGE_NUMBER_START_RANGE
+    if not low <= int(args.start_number) <= high:
+        raise BundleError(f'start_number must be between {low} and {high}.')
+    side_char = _page_number_side_char(args)
+    fields: dict[str, Any] = {
+        'position': args.position,
+        'start_number': int(args.start_number),
+        'side_char': side_char,
+        'confirm_layout': bool(args.confirm_layout),
+    }
+    return BundleSpec(
+        name='page-number-apply',
+        summary='Insert one native page number; refuse when a different page number already exists.',
+        where=f'Whole document, position {args.position}, start number {fields["start_number"]}.',
+        how='Runs read-only where, then one `page_number_apply` primitive that drives the documented PageNumPos action only after a control census proves no conflicting page number and a structural snapshot of the live document (body, run/paragraph/table/picture formatting, header/footer, styles, numberings, media references) is readable; an unreadable snapshot is refused before any mutation, and a changed or unreadable snapshot after the call is reported as an unknown outcome, not as inserted.',
+        changed='Inserts one native page-number control; header/footer content, body, styles and unrelated state are fingerprinted before and after, and any difference or unreadable post-state is reported as an unknown outcome with the document left as is. Rendered proof of every page is required before acceptance.',
+        steps=(
+            _where_step('where:before-page-number'),
+            _step('page_number_apply', 'mutate:page-number-apply', **fields),
+            _where_step('where:after-page-number'),
+        ),
+        sources=(
+            {
+                'type': 'page-number-mutation',
+                'position': args.position,
+                'risk_note': 'Commit does not save automatically; accept only after rendered proof of every page on a disposable or working copy.',
+            },
+        ),
+    )
+
+
+def _build_official_numbering_apply(argv: Sequence[str]) -> BundleSpec:
+    parser = _parser('official-numbering-apply', 'Apply native automatic outline numbering (levels 1-4) to one text match on the expected page.')
+    parser.add_argument('--match', required=True, help='Unique paragraph text/anchor to number')
+    parser.add_argument('--expected-page', type=int, required=True, help='Required rendered/page evidence for the target before mutation')
+    parser.add_argument('--level', type=int, required=True, choices=(1, 2, 3, 4), help='Official outline level 1-4')
+    parser.add_argument('--confirm-layout', action='store_true', required=True, help='Required explicit confirmation for numbering mutation')
+    args = _parse_bundle_args(parser, argv)
+    match = _bounded_text(args.match, field='match')
+    if '\n' in match or '\r' in match:
+        raise BundleError('match must be a single line.')
+    expected_page = _positive_int(args.expected_page, field='expected_page')
+    fields: dict[str, Any] = {
+        'match': match,
+        'expected_page': expected_page,
+        'level': int(args.level),
+        'confirm_layout': bool(args.confirm_layout),
+    }
+    return BundleSpec(
+        name='official-numbering-apply',
+        summary='Apply native outline numbering at one level to one matched paragraph; fail closed on match/page proof.',
+        where=f'Match {match!r} on expected page {expected_page}.',
+        how='Runs read-only where, then one `official_numbering_apply` primitive that proves a unique target, verifies the current section\'s outline definition is the four-level 1. / 가. / 1) / 가) system (defining it only when no other outline paragraph in that section depends on it), and applies native outline numbering metadata (one native ParagraphShape action when the verified definition already exists) without touching paragraph text. The whole-document structural snapshot must be readable before the call and unchanged outside the target paragraph numbering afterwards; otherwise the step is refused or reported as an unknown outcome.',
+        changed=f'Sets native outline level {fields["level"]} on the matched paragraph only; the four-level 1. / 가. / 1) / 가) definition is verified by readback (an unverified format is not reported as success) and no number text is typed.',
+        steps=(
+            _where_step('where:before-official-numbering'),
+            _step('official_numbering_apply', 'mutate:official-numbering-apply', **fields),
+            _where_step('where:after-official-numbering'),
+        ),
+        sources=(
+            {
+                'type': 'official-numbering-mutation',
+                'level': fields['level'],
+                'risk_note': 'Commit does not save automatically; accept only after rendered proof of the numbering sequence on a disposable or working copy.',
+            },
+        ),
+    )
+
+
 def _build_paragraph_delete_exact(argv: Sequence[str]) -> BundleSpec:
     parser = _parser('paragraph-delete-exact', 'Delete one exact paragraph/text row after page and neighbor proof.')
     parser.add_argument('--match', required=True, help='Exact text/anchor in the paragraph to remove, e.g. a hyphen-only scaffold cell/row')
@@ -2090,6 +2275,232 @@ def _build_table_split_exact(argv: Sequence[str]) -> BundleSpec:
     )
 
 
+_TABLE_STRUCTURE_ACTIONS = (
+    'insert_row_above',
+    'insert_row_below',
+    'insert_col_left',
+    'insert_col_right',
+    'delete_row',
+    'delete_col',
+    'merge_cells',
+    'split_cell',
+)
+
+
+def _build_table_structure_exact(argv: Sequence[str]) -> BundleSpec:
+    parser = _parser('table-structure-exact', 'Insert/delete rows or columns, merge cells, or split a cell in one exact pre-proven table.')
+    _add_section_scope_args(parser)
+    parser.add_argument('--target-id', required=True, help='Exact table target id/path from section-table-frame-inventory')
+    parser.add_argument('--expected-hash', required=True, help='Exact proof_hash from section-table-frame-inventory')
+    parser.add_argument('--expected-page', type=int, required=True, help='Expected rendered/page evidence for the target before mutation')
+    parser.add_argument('--action', required=True, choices=_TABLE_STRUCTURE_ACTIONS, help='Structure edit to run')
+    parser.add_argument('--row', type=int, required=True, help='1-based row of the target cell (A1 is row 1)')
+    parser.add_argument('--col', type=int, required=True, help='1-based column of the target cell (A1 is column 1)')
+    parser.add_argument('--end-row', type=int, help='merge_cells: 1-based last row of the range')
+    parser.add_argument('--end-col', type=int, help='merge_cells: 1-based last column of the range')
+    parser.add_argument('--count', type=int, help='insert/delete: how many rows or columns (default 1, max 50)')
+    parser.add_argument('--split-rows', type=int, help='split_cell: rows to split the cell into (default 1)')
+    parser.add_argument('--split-cols', type=int, help='split_cell: columns to split the cell into (default 1)')
+    parser.add_argument('--expected-rows', type=int, required=True, help='Current row count of the table; the edit refuses to run on a different grid')
+    parser.add_argument('--expected-cols', type=int, required=True, help='Current column count of the table; the edit refuses to run on a different grid')
+    parser.add_argument('--confirm-layout', action='store_true', required=True, help='Required explicit confirmation for table structure mutation')
+    args = _parse_bundle_args(parser, argv)
+    scope = _normalize_section_scope_args(args)
+    target_id = _bounded_text(args.target_id, field='target_id')
+    expected_hash = _bounded_text(args.expected_hash, field='expected_hash')
+    fields: dict[str, Any] = {
+        'target_id': target_id,
+        'expected_hash': expected_hash,
+        'expected_page': _positive_int(args.expected_page, field='expected_page'),
+        'action': args.action,
+        'row': _positive_int(args.row, field='row'),
+        'col': _positive_int(args.col, field='col'),
+        'expected_rows': _positive_int(args.expected_rows, field='expected_rows'),
+        'expected_cols': _positive_int(args.expected_cols, field='expected_cols'),
+        'confirm_layout': bool(args.confirm_layout),
+        **scope,
+    }
+    takes = {
+        'merge_cells': ('end_row', 'end_col'),
+        'split_cell': ('split_rows', 'split_cols'),
+    }.get(args.action, ('count',))
+    for key in ('end_row', 'end_col', 'count', 'split_rows', 'split_cols'):
+        value = getattr(args, key)
+        if value is None:
+            continue
+        if key not in takes:
+            raise BundleError(f'--{key.replace("_", "-")} does not apply to --action {args.action}')
+        fields[key] = _positive_int(value, field=key)
+    if args.action == 'merge_cells' and not (fields.get('end_row') and fields.get('end_col')):
+        raise BundleError('--action merge_cells requires --end-row and --end-col')
+    if args.action == 'split_cell' and int(fields.get('split_rows') or 1) * int(fields.get('split_cols') or 1) < 2:
+        raise BundleError('--action split_cell requires --split-rows and/or --split-cols so the cell becomes at least two cells')
+    if args.max_controls:
+        fields['max_controls'] = int(args.max_controls)
+    cell = f'row {fields["row"]}, col {fields["col"]}'
+    return BundleSpec(
+        name='table-structure-exact',
+        summary=f'Run {args.action} on exactly one pre-proven table; verified by HWPML row/column/cell readback before and after.',
+        where=f'Table target {target_id!r} inside requested section/page scope, expected page {fields["expected_page"]}; cell {cell}.',
+        how='Runs read-only where, then one `table_structure_exact` primitive: re-inventory the exact table, read its grid, check the plan, move to the cell, run the documented Hancom action(s), and read the grid again.',
+        changed='Mutates table structure only if target id, proof_hash, expected page, expected grid size, cell navigation, and the post-edit grid all match the plan; any failure after the native action reports mutation_may_have_persisted.',
+        steps=(
+            _where_step('where:before-table-structure'),
+            _step('table_structure_exact', f'mutate:table-structure:{args.action}', **fields),
+            _where_step('where:after-table-structure'),
+        ),
+        sources=(
+            {
+                'type': 'documented-native-action',
+                'hancom_actions': 'TableInsertUpperRow / TableInsertLowerRow / TableInsertLeftColumn / TableInsertRightColumn / TableDeleteRow / TableDeleteColumn; TableCellBlock + TableCellBlockExtend + TableMergeCell; TableSplitCell (HTableSplitCell Rows/Cols)',
+                'readback': 'SelectCtrlFront + GetTextFile("HWPML2X", "saveblock"): TABLE RowCount/ColCount and ROW/CELL RowAddr/ColAddr/RowSpan/ColSpan',
+                'risk_note': 'Accept only after rendered before/after proof on a disposable or working copy; the table proof_hash changes after the edit.',
+            },
+        ),
+    )
+
+
+_OBJECT_INSERT_KINDS = ('footnote', 'endnote', 'memo', 'hyperlink', 'bookmark', 'equation', 'line', 'rectangle', 'ellipse', 'header', 'footer')
+
+
+def _parse_expected_pos(raw: str) -> list[int]:
+    parts = [part.strip() for part in str(raw).split(',')]
+    if len(parts) != 3 or not all(part.isdigit() for part in parts):
+        raise BundleError('--expected-pos must be LIST,PARA,POS from `hwpx where`, e.g. 0,12,3')
+    return [int(part) for part in parts]
+
+
+def _build_object_insert_exact(argv: Sequence[str]) -> BundleSpec:
+    parser = _parser('object-insert-exact', 'Insert one footnote, endnote, memo, hyperlink, bookmark, equation, shape, header or footer at the proven caret.')
+    parser.add_argument('--kind', required=True, choices=_OBJECT_INSERT_KINDS)
+    parser.add_argument('--expected-pos', required=True, help='Caret position LIST,PARA,POS reported by `hwpx where`; the edit refuses anywhere else')
+    parser.add_argument('--text', default=None, help='footnote/endnote/memo/header/footer text')
+    parser.add_argument('--url', default=None, help='hyperlink: http(s) or mailto URL')
+    parser.add_argument('--display-text', default=None, help='hyperlink: the exact currently selected text to link')
+    parser.add_argument('--name', default=None, help='bookmark name')
+    parser.add_argument('--script', default=None, help='equation: Hancom equation script, e.g. "{a} over {b}"')
+    parser.add_argument('--width-mm', type=float, default=None, help='line/rectangle/ellipse width in mm')
+    parser.add_argument('--height-mm', type=float, default=None, help='line/rectangle/ellipse height in mm')
+    parser.add_argument('--treat-as-char', choices=('on', 'off'), default=None, help='shapes: place as character (default on)')
+    parser.add_argument('--apply-to', choices=('both', 'even', 'odd'), default=None, help='header/footer pages (default both)')
+    parser.add_argument('--confirm-mutation', action='store_true', required=True, help='Required explicit confirmation for the insertion')
+    args = _parse_bundle_args(parser, argv)
+    fields: dict[str, Any] = {'kind': args.kind, 'expected_pos': _parse_expected_pos(args.expected_pos), 'confirm_mutation': True}
+    for key in ('text', 'url', 'display_text', 'name', 'script', 'width_mm', 'height_mm', 'apply_to'):
+        value = getattr(args, key)
+        if value is not None:
+            fields[key] = value
+    if args.treat_as_char is not None:
+        fields['treat_as_char'] = args.treat_as_char == 'on'
+    return BundleSpec(
+        name='object-insert-exact',
+        summary=f'Insert one {args.kind} at the proven caret; whole-document HWPML readback must show exactly that one new object.',
+        where=f'Caret at {fields["expected_pos"]} as reported by `hwpx where` (hyperlink: the current selection must equal --display-text).',
+        how='Runs read-only where (it never moves the caret or selection), then one `object_insert_exact` primitive: read the document, re-prove caret and edit state, run the documented Hancom action once, and read the document again.',
+        changed='Adds exactly one object of the requested kind; the step fails with mutation_may_have_persisted if the readback shows anything else.',
+        steps=(
+            _where_step('where:before-object-insert'),
+            _step('object_insert_exact', f'mutate:object-insert:{args.kind}', **fields),
+            _where_step('where:after-object-insert'),
+        ),
+        sources=(
+            {
+                'type': 'documented-native-action',
+                'hancom_actions': 'InsertFootnote / InsertEndnote / InsertFieldMemo / InsertHyperlink (HHyperLink) / Bookmark (HBookMark) / EquationCreate (HEqEdit) / DrawObjCreator* (HShapeObject) / HeaderFooter (HHeaderFooter)',
+                'readback': 'GetTextFile("HWPML2X", "") before and after: document-order paragraphs, characters and controls must differ by one contiguous insertion holding the new control; embedded BinData unchanged',
+                'risk_note': 'Native paths are not yet verified on a Hancom desktop; shapes and header/footer are the least certain. Review rendered proof before saving.',
+            },
+        ),
+    )
+
+
+_LAYOUT_KINDS = ('page_setup', 'columns', 'section_insert', 'section_delete', 'hanging_indent')
+_LAYOUT_PAGE_FIELDS = ('paper_width_mm', 'paper_height_mm', 'margin_top_mm', 'margin_bottom_mm', 'margin_left_mm',
+                       'margin_right_mm', 'header_len_mm', 'footer_len_mm', 'gutter_len_mm')
+
+
+def _parse_expected_before(pairs: Sequence[str]) -> dict[str, Any]:
+    values: dict[str, Any] = {}
+    for pair in pairs:
+        key, sep, raw = str(pair).partition('=')
+        key = key.strip().replace('-', '_')
+        if not sep or not key:
+            raise BundleError('--expected-before takes KEY=VALUE, e.g. margin_left_mm=30 or landscape=false')
+        raw = raw.strip()
+        if raw.lower() in ('true', 'false'):
+            values[key] = raw.lower() == 'true'
+        else:
+            try:
+                number = float(raw)
+            except ValueError as exc:
+                raise BundleError(f'--expected-before {key} must be a number or true/false') from exc
+            values[key] = int(number) if key == 'count' else number
+    return values
+
+
+def _build_layout_inspect(argv: Sequence[str]) -> BundleSpec:
+    parser = _parser('layout-inspect', 'Read the page setup and column definition at the caret (read-only).')
+    _parse_bundle_args(parser, argv)
+    return BundleSpec(
+        name='layout-inspect',
+        summary='Read-only page setup and column definition at the caret, in the units layout-exact takes as --expected-before.',
+        where='Current caret section.',
+        how='Runs read-only where, then `layout_inspect` (GetDefault only, nothing applied).',
+        changed='Nothing; read-only.',
+        steps=(_where_step('where:layout-inspect'), _step('layout_inspect', 'read:layout-inspect')),
+        sources=({'type': 'documented-native-readback', 'hancom_actions': 'GetDefault PageSetup (HSecDef) / MultiColumn (HColDef)'},),
+    )
+
+
+def _build_layout_exact(argv: Sequence[str]) -> BundleSpec:
+    parser = _parser('layout-exact', 'Change page setup or columns, insert/delete a section break, or apply an automatic hanging indent.')
+    parser.add_argument('--kind', required=True, choices=_LAYOUT_KINDS)
+    parser.add_argument('--expected-pos', required=True, help='Caret position LIST,PARA,POS reported by `hwpx where`')
+    for field in _LAYOUT_PAGE_FIELDS:
+        parser.add_argument(f'--{field.replace("_", "-")}', type=float, default=None, help=f'page_setup: {field.replace("_mm", "")} in mm')
+    parser.add_argument('--landscape', choices=('on', 'off'), default=None, help='page_setup: orientation')
+    parser.add_argument('--count', type=int, default=None, help='columns: 1..10')
+    parser.add_argument('--gap-mm', type=float, default=None, help='columns: gap between columns in mm')
+    parser.add_argument('--same-width', choices=('on', 'off'), default=None, help='columns: equal widths (default on)')
+    parser.add_argument('--apply-to', default=None, help='page_setup: current_section|whole_document; columns: current_section|from_caret_new')
+    parser.add_argument('--section-index', type=int, default=None, help='section_delete: 1-based section whose leading break is removed (>= 2)')
+    parser.add_argument('--marker-text', default=None, help='hanging_indent: the marker the paragraph starts with, e.g. "1. "')
+    parser.add_argument('--expected-before', action='append', default=[], help='Current value from layout-inspect as KEY=VALUE; repeat per field being changed')
+    parser.add_argument('--confirm-layout', action='store_true', required=True, help='Required explicit confirmation for the layout change')
+    args = _parse_bundle_args(parser, argv)
+    fields: dict[str, Any] = {'kind': args.kind, 'expected_pos': _parse_expected_pos(args.expected_pos), 'confirm_layout': True}
+    for key in (*_LAYOUT_PAGE_FIELDS, 'count', 'gap_mm', 'apply_to', 'section_index', 'marker_text'):
+        value = getattr(args, key)
+        if value is not None:
+            fields[key] = value
+    for key in ('landscape', 'same_width'):
+        value = getattr(args, key)
+        if value is not None:
+            fields[key] = value == 'on'
+    if args.expected_before:
+        fields['expected_before'] = _parse_expected_before(args.expected_before)
+    return BundleSpec(
+        name='layout-exact',
+        summary=f'Run layout {args.kind} at the proven caret; native readback must show exactly the requested change.',
+        where=f'Caret at {fields["expected_pos"]} as reported by `hwpx where`.',
+        how='Runs read-only where, then one `layout_exact` primitive: re-prove caret and edit state, check expected_before, run the documented Hancom action once, and read back the parameter set and whole-document HWPML.',
+        changed='Changes only the requested layout property; the step fails with mutation_may_have_persisted if the readback shows anything else.',
+        steps=(
+            _where_step('where:before-layout'),
+            _step('layout_exact', f'mutate:layout:{args.kind}', **fields),
+            _where_step('where:after-layout'),
+        ),
+        sources=(
+            {
+                'type': 'documented-native-action',
+                'hancom_actions': 'PageSetup (HSecDef) / MultiColumn (HColDef) / BreakSection / DeleteBack at a section start / ParagraphShapeIndentAtCaret',
+                'readback': 'GetDefault of the same parameter set plus GetTextFile("HWPML2X", "") before and after',
+                'risk_note': 'Native paths are not yet verified on a Hancom desktop; columns and section_delete are the least certain. Review rendered proof before saving.',
+            },
+        ),
+    )
+
+
 def _build_section_control_move_resize_exact(argv: Sequence[str]) -> BundleSpec:
     parser = _parser('section-control-move-resize-exact', 'Move and/or resize one control only after exact inventory proof matches.')
     _add_section_scope_args(parser)
@@ -2187,7 +2598,13 @@ _RECIPES: dict[str, BundleRecipe] = {
     'table-cell-structure-exact': BundleRecipe('table-cell-structure-exact', 'Read-only exact table/cell structure and navigability probe.', _build_table_cell_structure_exact),
     'table-column-width-exact': BundleRecipe('table-column-width-exact', 'Apply guarded native exact table column widths with preservation and rollback proof.', _build_table_column_width_exact),
     'table-split-exact': BundleRecipe('table-split-exact', 'Split one exact pre-proven table with documented TableSplitTable.', _build_table_split_exact),
+    'table-structure-exact': BundleRecipe('table-structure-exact', 'Insert/delete rows or columns, merge cells, or split a cell in one exact pre-proven table.', _build_table_structure_exact),
+    'layout-inspect': BundleRecipe('layout-inspect', 'Read page setup and column definition at the caret (read-only).', _build_layout_inspect),
+    'layout-exact': BundleRecipe('layout-exact', 'Change page setup or columns, insert/delete a section break, or apply an automatic hanging indent.', _build_layout_exact),
+    'object-insert-exact': BundleRecipe('object-insert-exact', 'Insert one footnote, endnote, memo, hyperlink, bookmark, equation, shape, header or footer at the proven caret.', _build_object_insert_exact),
     'paragraph-style-apply-exact': BundleRecipe('paragraph-style-apply-exact', 'Apply exact paragraph style toggles with fail-closed match/page proof.', _build_paragraph_style_apply_exact),
+    'page-number-apply': BundleRecipe('page-number-apply', 'Insert one native page number with fail-closed duplicate/conflict checks.', _build_page_number_apply),
+    'official-numbering-apply': BundleRecipe('official-numbering-apply', 'Apply native outline numbering levels 1-4 to one proven paragraph.', _build_official_numbering_apply),
     'paragraph-delete-exact': BundleRecipe('paragraph-delete-exact', 'Delete one exact paragraph/row after page and neighbor proof.', _build_paragraph_delete_exact),
     'style-apply': BundleRecipe('style-apply', 'Guarded dump-only style clone/apply proof; no mutation.', _build_style_apply),
     'style-clone': BundleRecipe('style-clone', 'Alias of guarded dump-only style apply proof; no mutation.', _build_style_clone),
@@ -2249,6 +2666,14 @@ def bundle_help(name: str) -> str:
         return 'usage: hwpx bundle-dump cell-row-fit-exact (--section-anchor TEXT | --page-from N [--page-to N]) --target-id ID --expected-hash HASH --expected-page N (--row-height-percent PCT | --row-height-hu HU | --row-height-mm MM | --resize-up-steps N | --resize-down-steps N | --line-spacing N | --char-height-percent PCT) --confirm-layout'
     if bundle_name == 'table-cell-structure-exact':
         return 'usage: hwpx bundle-dump table-cell-structure-exact (--section-anchor TEXT | --page-from N [--page-to N]) --target-id ID --expected-hash HASH --expected-page N\n       read-only exact table/cell structure probe; reports single-cell/non-navigable evidence before any TableSplitTable or row-fit attempt'
+    if bundle_name == 'table-structure-exact':
+        return 'usage: hwpx bundle-dump table-structure-exact (--section-anchor TEXT | --page-from N [--page-to N]) --target-id ID --expected-hash HASH --expected-page N --action ACTION --row R --col C --expected-rows N --expected-cols N [--count N | --end-row R --end-col C | --split-rows N --split-cols N] --confirm-layout\n       ACTION: insert_row_above, insert_row_below, insert_col_left, insert_col_right, delete_row, delete_col, merge_cells, split_cell; verified by HWPML grid readback'
+    if bundle_name == 'layout-inspect':
+        return 'usage: hwpx bundle-dump layout-inspect\n       read-only page setup and column definition at the caret; values feed layout-exact --expected-before'
+    if bundle_name == 'layout-exact':
+        return 'usage: hwpx bundle-dump layout-exact --kind KIND --expected-pos LIST,PARA,POS [page fields --expected-before KEY=VALUE ... --apply-to current_section|whole_document | --count N [--gap-mm G] [--same-width on|off] [--apply-to current_section|from_caret_new] | --section-index N | --marker-text TEXT] --confirm-layout\n       KIND: page_setup, columns, section_insert, section_delete, hanging_indent; verified by native parameter-set and HWPML readback'
+    if bundle_name == 'object-insert-exact':
+        return 'usage: hwpx bundle-dump object-insert-exact --kind KIND --expected-pos LIST,PARA,POS [--text T | --url U --display-text T | --name N | --script S | --width-mm W --height-mm H [--treat-as-char on|off]] [--apply-to both|even|odd] --confirm-mutation\n       KIND: footnote, endnote, memo, hyperlink, bookmark, equation, line, rectangle, ellipse, header, footer; verified by whole-document HWPML readback'
     if bundle_name == 'table-split-exact':
         return 'usage: hwpx bundle-dump table-split-exact (--section-anchor TEXT | --page-from N [--page-to N]) --target-id ID --expected-hash HASH --expected-page N --down-rows N --confirm-layout\n       splits one exact pre-proven table with documented TableSplitTable after explicit downward cell navigation'
     if bundle_name == 'export-proof-range':
@@ -2261,6 +2686,10 @@ def bundle_help(name: str) -> str:
         return 'usage: hwpx bundle-dump typography-overview [--max-samples N] [--max-sections N] [--max-styles N]\n       hwpx typography-overview [--json]\n       read-only live Hancom GetTextFile(HWPML2X) font/size/bold/style overview with a raw JSON artifact path'
     if bundle_name == 'paragraph-style-apply-exact':
         return 'usage: hwpx bundle-dump --with-meta paragraph-style-apply-exact --match TEXT --expected-page N (--keep-with-next on|off | --widow-orphan on|off | --pagebreak-before 0|1) [more style fields] --confirm-layout\n       hwpx paragraph-style-apply-exact --match TEXT --expected-page N [style fields] --confirm-layout'
+    if bundle_name == 'page-number-apply':
+        return "usage: hwpx bundle-dump --with-meta page-number-apply --position top-left|top-center|top-right|bottom-left|bottom-center|bottom-right [--start-number 1-65535] [--side-char none|dash | --prefix - --suffix -] --confirm-layout\n       hwpx page-number-apply --position bottom-center [--start-number N] --confirm-layout\n       inserts one native page number; arbitrary prefix/suffix text is refused; rendered proof of every page is required before acceptance"
+    if bundle_name == 'official-numbering-apply':
+        return 'usage: hwpx bundle-dump --with-meta official-numbering-apply --match TEXT --expected-page N --level 1|2|3|4 --confirm-layout\n       hwpx official-numbering-apply --match TEXT --expected-page N --level N --confirm-layout\n       applies native outline numbering metadata to one proven paragraph; no number text is typed; rendered proof of the numbering sequence is required'
     if bundle_name == 'paragraph-delete-exact':
         return 'usage: hwpx bundle-dump --with-meta paragraph-delete-exact --match TEXT --expected-page N [--occurrence-on-page N] [--expected-previous-contains TEXT] [--expected-next-contains TEXT] [--max-page-after N] --confirm-remove\n       deletes one exact paragraph/row after page and optional neighbor proof; rendered before/after proof is required before save/final delivery'
     if bundle_name in {'style-apply', 'style-clone'}:

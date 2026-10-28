@@ -16,7 +16,16 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Streamin
 
 from app.api_auth import ApiTokenMiddleware
 from app.config import get_settings
-from app.edit_ops import EditOperationError, SUPPORTED_OPS, SUPPORTED_VALIDATION_KEYS, normalize_instruction_payload, normalize_validation
+from app.edit_ops import (
+    NATIVE_NUMBERING_OPS,
+    QUEUED_JOB_NUMBERING_UNSUPPORTED_NOTE,
+    EditOperationError,
+    SUPPORTED_OPS,
+    SUPPORTED_VALIDATION_KEYS,
+    normalize_instruction_payload,
+    normalize_validation,
+    require_queued_job_runtime_support,
+)
 from app.interactive_session_manager import (
     VERIFY_EVIDENCE_HARD_STALE_AGE_MS,
     VERIFY_EVIDENCE_SOFT_WARN_AGE_MS,
@@ -328,6 +337,12 @@ async def save_upload_to_job(file: UploadFile, source_path: Path) -> int:
 
 
 
+def _normalize_job_instructions(raw: Any) -> dict[str, Any]:
+    payload = normalize_instruction_payload(raw)
+    require_queued_job_runtime_support(payload['operations'])
+    return payload
+
+
 def _parse_json_request_field(field_name: str, value: Any, *, allow_none: bool = False) -> Any:
     if value is None:
         if allow_none:
@@ -537,6 +552,8 @@ def capabilities() -> JSONResponse:
         'server_revision': build_server_revision(),
         'pid': os.getpid(),
         'supported_ops': sorted(SUPPORTED_OPS),
+        'queued_job_unsupported_ops': sorted(NATIVE_NUMBERING_OPS),
+        'queued_job_unsupported_ops_note': QUEUED_JOB_NUMBERING_UNSUPPORTED_NOTE,
         'supported_validation_keys': sorted(SUPPORTED_VALIDATION_KEYS),
         'supported_authoring_features': [
             'markdown_headings',
@@ -1969,7 +1986,7 @@ async def edit_and_convert(
         )
 
     try:
-        payload = normalize_instruction_payload(json.loads(instructions_json))
+        payload = _normalize_job_instructions(json.loads(instructions_json))
     except (json.JSONDecodeError, EditOperationError) as exc:
         raise HTTPException(status_code=400, detail=f'Invalid edit instructions: {exc}') from exc
 
@@ -2016,7 +2033,7 @@ async def edit_and_convert(
 @app.post('/edit-and-convert-from-path', response_model=ConvertResponse)
 def edit_and_convert_from_path(request: EditAndConvertFromPathRequest) -> ConvertResponse:
     try:
-        payload = normalize_instruction_payload(_parse_json_request_field('instructions_json', request.instructions_json))
+        payload = _normalize_job_instructions(_parse_json_request_field('instructions_json', request.instructions_json))
     except EditOperationError as exc:
         raise HTTPException(status_code=400, detail=f'Invalid edit instructions: {exc}') from exc
 

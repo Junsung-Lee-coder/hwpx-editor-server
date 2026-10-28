@@ -5,6 +5,10 @@ from dataclasses import dataclass, field as dataclass_field
 from pathlib import Path
 from queue import Empty, Queue
 import hashlib
+import math
+import csv
+import io
+import subprocess
 import os
 import threading
 import time
@@ -18,6 +22,7 @@ from app.runtime_state import update_runtime_status, utc_now_iso
 from app.worker import (
     close_hwp_instance,
     collect_hwp_snapshot,
+    collect_process_snapshot,
     create_hwp_instance_with_recovery,
     emit_runtime_observation,
     kill_hwp_runtime,
@@ -46,6 +51,25 @@ class LocalCliRuntimeTimeoutError(LocalCliRuntimeError):
         self.command_state = command_state
 
 
+class LocalCliNativeCustodyHeldError(LocalCliRuntimeError):
+    """A command reached a native mutator and its outcome is unknown; the owning STA is retained, not released.
+
+    The original cause (an exception or a control-flow signal such as ``KeyboardInterrupt``) is ``__cause__``.
+    Errors raised while reporting the held state (journal/status/pruning) are kept in ``reporting_errors``.
+    """
+
+    mutation_state = 'unknown'
+    mutation_may_have_persisted = True
+
+    def __init__(self, message: str):
+        super().__init__(message)
+        self.reporting_errors: list[BaseException] = []
+
+
+_HELD_CLOSE_MESSAGE = (
+    'The live local CLI session holds a native command whose outcome is unknown; '
+    'it is retained and is not closed, discarded or released by this runtime.'
+)
 MAX_RUNTIME_COMMAND_HISTORY = 100
 MAX_RUNTIME_JOURNAL_VALUE_CHARS = 2048
 MAX_RUNTIME_JOURNAL_LIST_ITEMS = 100
@@ -81,6 +105,95 @@ _MUTATING_COMMANDS = {
     'image', 'image-at-anchor', 'fontsize', 'bold', 'font', 'bullet', 'table',
     'list', 'action', 'undo', 'redo', 'insert-text-file', 'command-bundle', 'save',
 }
+
+
+def _native_diagnostic(site: object, error: BaseException) -> dict[str, str]:
+    """Fixed labels from already available Python state; no exception callbacks/values.
+
+    This is a last-entered caller boundary, never a native root-cause verdict.
+    Unknown classes and sites remain UNKNOWN; no messages, repr, traceback or SDK reads.
+    """
+    sites = ('command_handler', 'handler_returned', 'save_precondition', 'save_native', 'save_file_readback',
+             'save_custody_readback', 'save_location_readback', 'action_pre_read',
+             'action_native', 'action_post_read', 'close_wrapper', 'bundle_step')
+    diagnostic = {'site': site if type(site) is str and site in sites else 'UNKNOWN',
+                  'causal_class': _exception_label(error)}
+    if type(site) is str and site == 'bundle_step':
+        # The bundle catches this exception rather than letting it reach the
+        # worker's escaped-error diagnostic. Keep only exact trusted types and
+        # two explicit cause edges, never implicit context or arbitrary fields.
+        from app.edit_ops import EditOperationError
+        from app.local_cli_service_support import LocalCliMutationError
+        from app.native_numbering import (
+            NativeNumberingInputError, NativeNumberingRefusal, NativeNumberingMutationError,
+        )
+        diagnostic.update(cause_class='UNKNOWN', cause2_class='UNKNOWN', refusal_code='UNKNOWN')
+        # Optional fixed source-bound phase, never arbitrary error text or
+        # release authority. Exact containers/keys/values avoid callbacks even
+        # when a trusted exception's replaceable dictionary is hostile.
+        if type(error) is LocalCliRuntimeError or type(error) is LocalCliMutationError:
+            data = BaseException.__dict__['__dict__'].__get__(error)
+            phase = reason = None
+            if type(data) is dict and len(data) <= 16:
+                for key, value in dict.items(data):
+                    if type(key) is str and type(value) is str:
+                        if key == 'numbering_phase':
+                            phase = value
+                        elif key == 'numbering_reason':
+                            reason = value
+            if type(phase) is str and type(reason) is str and (phase, reason) in (
+                ('preflight', 'preservation_unproven'), ('pre_target', 'finder_failed'),
+                ('native', 'native_failed'), ('restore', 'restore_unproven'),
+                ('preservation', 'preservation_unproven'),
+            ):
+                diagnostic.update(numbering_phase=phase, numbering_reason=reason)
+        current = error
+        for field in ('causal_class', 'cause_class', 'cause2_class'):
+            label = _exception_label(current)
+            for cls, name in ((EditOperationError, 'EditOperationError'),
+                              (LocalCliMutationError, 'LocalCliMutationError'),
+                              (NativeNumberingInputError, 'NativeNumberingInputError'),
+                              (NativeNumberingRefusal, 'NativeNumberingRefusal'),
+                              (NativeNumberingMutationError, 'NativeNumberingMutationError')):
+                if type(current) is cls:
+                    label = name
+                    break
+            diagnostic[field] = label
+            if label == 'UNKNOWN':
+                break
+            if type(current) is NativeNumberingRefusal:
+                data = BaseException.__dict__['__dict__'].__get__(current)
+                if type(data) is dict and len(data) <= 16:
+                    for key, value in dict.items(data):
+                        if type(key) is str and key == 'code' and type(value) is str and value in (
+                            'control_enumeration_unavailable', 'existing_number_or_bullet', 'existing_page_number',
+                            'foreign_outline_definition', 'header_footer_unprovable', 'native_defaults_unavailable',
+                            'native_parameters_unavailable', 'native_unavailable', 'outline_definition_unreadable',
+                            'outline_usage_unprovable', 'paragraph_shape_unreadable', 'preservation_unprovable',
+                            'protection_unavailable', 'section_count_unprovable', 'target_ambiguous', 'target_moved',
+                            'target_not_found', 'target_not_in_body', 'target_unidentifiable', 'target_unlocatable',
+                            'text_readback_unavailable',
+                        ):
+                            diagnostic['refusal_code'] = value
+            if field == 'cause2_class':
+                break
+            current = BaseException.__dict__['__cause__'].__get__(current)
+            if current is None:
+                break
+    return diagnostic
+
+
+def _exception_label(error: BaseException) -> str:
+    # Identity comparisons only: even type.__getattribute__ can invoke a
+    # user metaclass's __name__ descriptor. No arbitrary metadata is needed.
+    for cls, label in ((ValueError, 'ValueError'), (TypeError, 'TypeError'),
+                       (OSError, 'OSError'), (RuntimeError, 'RuntimeError'),
+                       (LocalCliRuntimeError, 'LocalCliRuntimeError'),
+                       (LocalCliNativeCustodyHeldError, 'LocalCliNativeCustodyHeldError'),
+                       (KeyboardInterrupt, 'KeyboardInterrupt'), (SystemExit, 'SystemExit')):
+        if type(error) is cls:
+            return label
+    return 'UNKNOWN'
 
 
 def _filesystem_identity(path: Path) -> dict[str, int] | None:
@@ -123,19 +236,15 @@ def normalize_command_outcome(
 
     command = str(command_name or '')
     if error is not None:
-        error_mutation = getattr(error, 'mutation_may_have_persisted', None)
-        may_have_mutated = (
-            error_mutation
-            if isinstance(error_mutation, bool)
-            else command in _MUTATING_COMMANDS
-        )
+        # Exception instances are untrusted callbacks, not no-effect evidence.
+        may_have_mutated = command in _MUTATING_COMMANDS or command == 'pycall'
         return {
             'semantic_ok': False,
             'may_have_mutated': may_have_mutated,
             'delta_dirty': None,
             'step_count': 0,
             'failed_step_count': 0,
-            'error_code': type(error).__name__,
+            'error_code': _exception_label(error),
         }
 
     if not isinstance(result, dict):
@@ -664,7 +773,7 @@ def apply_char_style(
     raise LocalCliRuntimeError(native.error or 'pyhwpx set_font / CharShape is unavailable on this machine')
 
 
-def save_document(hwp: object) -> None:
+def save_document(hwp: object, *, diagnostic: dict[str, Any] | None = None) -> bool:
     result: Any
     if hasattr(hwp, 'save'):
         result = hwp.save()
@@ -672,8 +781,13 @@ def save_document(hwp: object) -> None:
         result = hwp.Save()
     else:
         raise LocalCliRuntimeError('pyhwpx save/Save is unavailable on this machine')
+    if diagnostic is not None:
+        # Record arrival before the existing False branch; never coerce the return.
+        diagnostic['save_return_arrived'] = True
+        diagnostic['save_returned_false'] = result is False
     if result is False:
         raise LocalCliRuntimeError('Hancom save returned false for the active working copy.')
+    return result is True
 
 
 def checked_save_hwp_as(hwp: object, output_path: Path, fmt: str) -> dict[str, Any]:
@@ -977,23 +1091,81 @@ def insert_numbered_list_at_cursor(hwp: object, *, count: int) -> dict[str, Any]
     }
 
 
-def discard_live_document(hwp: object) -> None:
-    clear_method = _safe_hwp_attr(hwp, 'clear')
-    if callable(clear_method):
-        try:
-            clear_method(option=1)
-        except TypeError:
-            clear_method(1)
-        return
+def _native_close_processes() -> frozenset[int] | None:
+    """Read-only constructor baseline. No native launch or broad cleanup."""
+    if os.sys.platform != 'win32':
+        return None  # portable runtimes have no native ownership proof
+    result = subprocess.run(['tasklist', '/FO', 'CSV', '/NH'], capture_output=True,
+                            text=True, timeout=5, check=True)
+    rows = list(csv.reader(io.StringIO(result.stdout)))
+    if not rows or any(len(row) != 5 for row in rows):
+        raise LocalCliRuntimeError('Native constructor process baseline is unavailable.')
+    return frozenset(int(row[1]) for row in rows if row[0].casefold() == 'hwp.exe')
 
-    close_method = _safe_hwp_attr(hwp, 'close')
-    if not callable(close_method):
-        close_method = _safe_hwp_attr(hwp, 'Close')
-    if callable(close_method):
+
+class _NativeCloseProcess:
+    """Private exact-process handle; wait only, never terminate or retry."""
+    def __init__(self, hwnd: int, before: frozenset[int]):
+        import win32api
+        import win32event
+        import win32process
+        import win32ts
+        from app.readiness import _process_start_identity
+        self.hwnd = hwnd
+        self.pid = win32process.GetWindowThreadProcessId(hwnd)[1]
+        if self.pid in before or self.pid == os.getpid():
+            raise LocalCliRuntimeError('Constructor did not return a new owned native process.')
+        process = collect_process_snapshot(self.pid)
+        if (process.get('alive') is not True or process.get('image_name', '').casefold() != 'hwp.exe'
+                or win32ts.ProcessIdToSessionId(self.pid) != win32ts.ProcessIdToSessionId(os.getpid())):
+            raise LocalCliRuntimeError('Native constructor process identity is unproved.')
+        self.generation = _process_start_identity(self.pid)
+        if not self.generation:
+            raise LocalCliRuntimeError('Native process generation is unavailable.')
+        self.handle = win32api.OpenProcess(0x100000 | 0x1000, False, self.pid)
         try:
-            close_method(is_dirty=False)
-        except TypeError:
-            close_method(False)
+            self.verify()
+        except BaseException:
+            self.handle.Close()
+            raise
+
+    def verify(self) -> None:
+        import win32event
+        import win32process
+        from app.readiness import _process_start_identity
+        if (win32event.WaitForSingleObject(self.handle, 0) != 258
+                or _process_start_identity(self.pid) != self.generation
+                or win32process.GetWindowThreadProcessId(self.hwnd)[1] != self.pid):
+            raise LocalCliRuntimeError('Original native process/window identity changed.')
+
+    def wait(self) -> None:
+        import win32event
+        # An exact handle avoids PID reuse. Timeout/WAIT_FAILED are not exit.
+        if win32event.WaitForSingleObject(self.handle, 5000) != 0:
+            raise LocalCliRuntimeError('Original native process exit is unproved.')
+
+    def close(self) -> None:
+        self.handle.Close()
+
+
+def _bind_native_close_process(hwnd: int, before: frozenset[int]) -> _NativeCloseProcess:
+    return _NativeCloseProcess(hwnd, before)
+
+
+def discard_live_document(hwp: object) -> bool:
+    """One explicit document Clear; True means only that its void call returned.
+
+    Hancom documents Clear as void (Automation manual, pp29/51). This helper
+    is NOT full-session closure or OS-exit proof and is not used by normal
+    close. Never compose it with wrapper.quit (which would Clear again).
+    """
+    clear_method = _safe_hwp_attr(hwp, 'clear')
+    if not callable(clear_method):
+        raise LocalCliRuntimeError('No supported explicit Clear interface.')
+    result = clear_method(option=1)
+    if result is not None:
+        raise LocalCliRuntimeError('Native Clear void return is unproved.')
+    return True
 
 
 def capture_screenshot_artifact(*, session_id: str, session_root: Path, hwp: object, log_path: Path) -> dict[str, Any]:
@@ -1071,6 +1243,11 @@ class LocalCliRuntimeHandle:
     source_filename: str
     log_path: Path
     hwp: object
+    hold_native_custody: Callable[[str, BaseException | None], None] | None = None
+    diagnostic_site: str = 'command_handler'
+    mark_mutating_intent: Callable[[], None] | None = None
+    mutation_intent: bool = False
+    observe_pre_save: Callable[[], dict[str, Any]] | None = None
 
 
 @dataclass
@@ -1094,6 +1271,10 @@ class _LiveCommand:
     failed_step_count: int = 0
     reconciliation_data: dict[str, Any] = dataclass_field(default_factory=dict)
     recovery_for_command_id: str | None = None
+    custody_held: bool = False
+    native_diagnostic: dict[str, str] | None = None
+    save_diagnostic: dict[str, Any] | None = None
+    native_close_diagnostic: dict[str, bool] | None = None
     completed_event: threading.Event = dataclass_field(default_factory=threading.Event)
 
 
@@ -1129,6 +1310,15 @@ class LocalCliLiveSession:
         self._terminal_error: LocalCliRuntimeError | None = None
         self._quarantined = False
         self._allow_native_cleanup = False
+        self._native_custody_held = False
+        # Sticky invocation intent, never cleared by a later clean envelope,
+        # save, read, false dirty flag, exception attribute or diagnostic site.
+        self._lifetime_edit_possible = False
+        # Unlike sticky invocation history, this preservation debt can only be
+        # discharged by a proved ordinary Save (or acknowledged recovery).
+        # Native clean/no-op/export projections cannot clear it.
+        self._normal_close_requires_save = False
+        self._active_command: _LiveCommand | None = None
         self._active_hwp: object | None = None
         self._active_handle: LocalCliRuntimeHandle | None = None
         self._recovery_target_id: str | None = None
@@ -1166,6 +1356,14 @@ class LocalCliLiveSession:
             'step_count': int(command.step_count),
             'failed_step_count': int(command.failed_step_count),
         }
+        if command.custody_held:
+            record['custody_held'] = True
+        if command.native_diagnostic is not None:
+            record['native_diagnostic'] = dict(command.native_diagnostic)
+        if include_private and command.native_close_diagnostic is not None:
+            record['native_close_diagnostic'] = dict(command.native_close_diagnostic)
+        if include_private and command.save_diagnostic is not None:
+            record['save_diagnostic'] = dict(command.save_diagnostic)
         if command.result is not None and command.state in {
             'succeeded', 'failed', 'completed_after_timeout', 'failed_after_timeout',
         }:
@@ -1175,8 +1373,8 @@ class LocalCliLiveSession:
             record['result'] = bounded_result
         if command.error is not None:
             record['error'] = {
-                'type': type(command.error).__name__,
-                'message': _bounded_journal_value(str(command.error), key_hint='error'),
+                'type': _exception_label(command.error),
+                'message': '<redacted>',
             }
         if command.reconciliation_data:
             recovery = command.reconciliation_data.get('recovery')
@@ -1312,7 +1510,7 @@ class LocalCliLiveSession:
         for key in ('semantic_ok', 'may_have_mutated', 'delta_dirty', 'step_count', 'failed_step_count'):
             data[key] = normalized[key]
         if error is not None:
-            data['error_code'] = normalized.get('error_code') or type(error).__name__
+            data['error_code'] = normalized.get('error_code') or _exception_label(error)
         if result is not None:
             data['artifacts'] = self._collect_result_artifacts(result, command.name)
             data['ordinary_save_confirmed'] = result.get('ordinary_save_confirmed') is True if isinstance(result, dict) else False
@@ -1375,6 +1573,7 @@ class LocalCliLiveSession:
                 item for item in commands
                 if item.get('state') == 'timed_out_pending_reconciliation'
                 or (bool(item.get('timed_out')) and not bool(item.get('reconciled')))
+                or bool(item.get('custody_held'))
             ]
             settled = [item for item in commands if item not in protected]
             payload['commands'] = settled[-MAX_RUNTIME_COMMAND_HISTORY:] + protected
@@ -1404,6 +1603,7 @@ class LocalCliLiveSession:
             command for command in commands
             if command.state == 'timed_out_pending_reconciliation'
             or (command.timed_out and not command.reconciled)
+            or command.custody_held
         ]
         settled = [command for command in commands if command not in protected]
         keep = {command.command_id for command in settled[-MAX_RUNTIME_COMMAND_HISTORY:]}
@@ -1414,9 +1614,146 @@ class LocalCliLiveSession:
             elif command.reconciled:
                 command.handler = None
 
+    def _hold_native_custody(self, command: _LiveCommand, reason: str, cause: BaseException | None, *, may_have_mutated: bool = True) -> None:
+        """Retain the owning STA after a numbering mutator was reached with an unknown outcome.
+
+        Only in-memory state is changed here, so the hold is published before any journal/status write can fail.
+        There is no operator release in this runtime: the hold lasts for the life of the process.
+        """
+
+        with self._state_lock:
+            error = command.error if isinstance(command.error, LocalCliNativeCustodyHeldError) else LocalCliNativeCustodyHeldError(reason)
+            if cause is not None and error.__cause__ is None:
+                error.__cause__ = cause
+            command.error = error
+            command.custody_held = True
+            command.may_have_mutated = command.may_have_mutated or may_have_mutated
+            self._native_custody_held = True
+            self._quarantined = True
+            self._allow_native_cleanup = False
+            if self._terminal_error is None:
+                self._terminal_error = error
+            data = self._ensure_reconciliation_data(command)
+            data['may_have_mutated'] = command.may_have_mutated
+            data['error_code'] = 'NATIVE_CUSTODY_HELD'
+            data['recovery'] = {'state': 'quarantined'}
+
+    def _mark_mutating_intent(self) -> None:
+        self._lifetime_edit_possible = True
+        if self._active_command is None or self._active_command.name != 'save':
+            self._normal_close_requires_save = True
+        if self._active_handle is not None:
+            self._active_handle.mutation_intent = True
+
+    def _observe_pre_save_is_modified(self) -> dict[str, Any]:
+        """One non-defaulting owning-STA read, retained before ordinary Save.
+
+        Only exact Boolean observations permit continuation. Other bounded
+        primitives remain typed evidence, never clean-document or close proof.
+        write_returned describes the preceding journal call, not Save success
+        or a claim about an unreturned/failed receipt write.
+        """
+        command = self._active_command
+        if (threading.current_thread() is not self._thread or command is None
+                or self._native_custody_held or command.custody_held
+                or command.timed_out or self._terminal_error is not None):
+            raise LocalCliRuntimeError('Pre-Save observation requires the healthy owning STA.')
+        diagnostic = {
+            'read_return_arrived': False, 'is_modified_state': 'ERROR',
+            'is_modified_type': 'UNKNOWN', 'read_error': 'UNKNOWN',
+            'pre_save_receipt': 'pending', 'save_return_arrived': False,
+            'save_returned_false': None,
+        }
+        command.save_diagnostic = diagnostic
+        read_error = None
+        try:
+            value = self._active_handle.hwp.IsModified
+        except BaseException as exc:
+            read_error = exc
+            diagnostic['is_modified_state'] = 'UNAVAILABLE' if type(exc) is AttributeError else 'ERROR'
+            diagnostic['read_error'] = _exception_label(exc)
+        else:
+            diagnostic['read_return_arrived'] = True
+            diagnostic['is_modified_state'] = 'OTHER'
+            for cls, label in ((bool, 'bool'), (int, 'int'), (float, 'float'),
+                               (type(None), 'NoneType'), (str, 'str')):
+                if type(value) is cls:
+                    diagnostic['is_modified_type'] = label
+                    break
+            if (type(value) is bool or value is None
+                    or (type(value) is int and -(2**31) <= value < 2**31)
+                    or (type(value) is float and math.isfinite(value))):
+                diagnostic['is_modified_value'] = value
+            if type(value) is bool:
+                diagnostic['is_modified_state'] = 'TRUE' if value else 'FALSE'
+        try:
+            self._persist_command(command)
+        except BaseException:
+            diagnostic['pre_save_receipt'] = 'write_failed'
+            raise
+        diagnostic['pre_save_receipt'] = 'write_returned'
+        if diagnostic['is_modified_type'] != 'bool':
+            raise LocalCliRuntimeError('Pre-Save IsModified observation is not an exact Boolean.') from read_error
+        if (self._native_custody_held or command.custody_held or command.timed_out
+                or self._terminal_error is not None):
+            raise LocalCliRuntimeError('Pre-Save observation lost healthy owning-STA authority.')
+        return diagnostic
+
+    def _hold_active_command_custody(self, reason: str, cause: BaseException | None = None, *, may_have_mutated: bool = True) -> None:
+        command = self._active_command
+        if command is None:
+            raise LocalCliRuntimeError('No local CLI command is active on the owning thread.')
+        if may_have_mutated:
+            self._hold_native_custody(command, reason, cause)
+        else:
+            self._hold_native_custody(command, reason, cause, may_have_mutated=False)
+        if command.name == 'command-bundle' and cause is not None:
+            # Existing bundle failure caller; custody is already published.
+            # Private journal only, no new SDK reads or release authority.
+            command.reconciliation_data['bundle_failure_diagnostic'] = _native_diagnostic('bundle_step', cause)
+
+    def _settle_held_command(
+        self,
+        command: _LiveCommand,
+        *,
+        result: Any = None,
+        escaped: bool = False,
+        reporting_error: BaseException | None = None,
+    ) -> None:
+        """Record a held command as failed/unknown and resolve its waiting caller without raising."""
+
+        error = command.error if isinstance(command.error, LocalCliNativeCustodyHeldError) else None
+        if error is None:
+            error = LocalCliNativeCustodyHeldError('The native command outcome is unknown and the session is held.')
+            command.error = error
+        if reporting_error is not None:
+            error.reporting_errors.append(reporting_error)
+        command.semantic_ok = False
+        # The hold already recorded issued-edit uncertainty independently.
+        command.state = 'failed_after_timeout' if command.timed_out else 'failed'
+        try:
+            self._persist_command(command)
+        except BaseException as persist_error:  # noqa: BLE001 - the hold is already published; keep the owning thread
+            error.reporting_errors.append(persist_error)
+        if not command.future.done():
+            if escaped or error.reporting_errors:
+                command.future.set_exception(error)
+            else:
+                command.future.set_result(result)
+
+    def _flush_held_custody_journal(self) -> None:
+        for command in list(self._commands_by_id.values()):
+            if command.custody_held:
+                try:
+                    self._persist_command(command)
+                except Exception:
+                    pass
+
     def has_unreconciled_reconciliation(self) -> bool:
         self._ensure_lifecycle_state()
         with self._state_lock:
+            if self._native_custody_held:
+                return True
             return any(
                 command.timed_out
                 and command.state in {
@@ -1442,6 +1779,9 @@ class LocalCliLiveSession:
             if command is None:
                 return read_command_journal(self.session_root, command_id)
             if command.reconciled:
+                return self._command_record(command)
+            if self._native_custody_held:
+                self._flush_held_custody_journal()
                 return self._command_record(command)
             if command.state == 'timed_out_pending_reconciliation':
                 return self._command_record(command)
@@ -1506,6 +1846,9 @@ class LocalCliLiveSession:
             command = self._commands_by_id.get(command_id)
             if command is None:
                 return read_command_journal(self.session_root, command_id)
+            if self._native_custody_held:
+                self._flush_held_custody_journal()
+                return self._command_record(command)
             data = self._ensure_reconciliation_data(command)
             recovery = data.get('recovery') if isinstance(data.get('recovery'), dict) else {}
             if recovery.get('state') != 'preserved':
@@ -1601,6 +1944,7 @@ class LocalCliLiveSession:
         handler: Callable[[LocalCliRuntimeHandle], Any],
         *,
         timeout: float = 90.0,
+        prior_dirty: bool = False,
     ) -> Any:
         self._ensure_lifecycle_state()
         with self._state_lock:
@@ -1610,6 +1954,8 @@ class LocalCliLiveSession:
                 raise LocalCliRuntimeError('The live local CLI session is closing.')
             if self._terminal_error is not None:
                 raise self._terminal_error
+            if prior_dirty:
+                self._normal_close_requires_save = True
             self._command_counter += 1
             command_id = f'{self.session_id}:command-{self._command_counter}'
             future: Future[Any] = Future()
@@ -1639,7 +1985,7 @@ class LocalCliLiveSession:
             )
             raise error from exc
 
-    def close(self, *, timeout: float = 30.0) -> None:
+    def close(self, *, timeout: float = 30.0, prior_dirty: bool = False) -> None:
         self._ensure_lifecycle_state()
         terminal_error: LocalCliRuntimeError | None = None
         future: Future[Any] | None = None
@@ -1647,6 +1993,11 @@ class LocalCliLiveSession:
         with self._state_lock:
             if self._closed.is_set():
                 return
+            if prior_dirty:
+                self._normal_close_requires_save = True
+            if self._native_custody_held and not self._allow_native_cleanup:
+                self._flush_held_custody_journal()
+                raise LocalCliRuntimeError(_HELD_CLOSE_MESSAGE)
             if self._quarantined and not self._allow_native_cleanup:
                 raise LocalCliRuntimeError(
                     'The live local CLI session is quarantined; reconcile and commit the recovery artifact before close.'
@@ -1712,6 +2063,10 @@ class LocalCliLiveSession:
             raise LocalCliRuntimeError(
                 'The live local CLI runtime is still releasing native resources; retry cleanup without replaying close.'
             )
+
+        self._thread.join(timeout=max(0.0, deadline - time.monotonic()))
+        if self._thread.is_alive():
+            raise LocalCliRuntimeError('Native close completed; final reporting thread is still settling. Do not replay teardown.')
 
     def is_terminal(self) -> bool:
         self._ensure_lifecycle_state()
@@ -1847,6 +2202,12 @@ class LocalCliLiveSession:
             self._quarantined = False
         if not hasattr(self, '_allow_native_cleanup'):
             self._allow_native_cleanup = False
+        if not hasattr(self, '_native_custody_held'):
+            self._native_custody_held = False
+        if not hasattr(self, '_normal_close_requires_save'):
+            self._normal_close_requires_save = False
+        if not hasattr(self, '_active_command'):
+            self._active_command = None
         if not hasattr(self, '_active_hwp'):
             self._active_hwp = None
         if not hasattr(self, '_active_handle'):
@@ -1906,6 +2267,84 @@ class LocalCliLiveSession:
         for command in changed:
             self._persist_command(command)
 
+    def _close_original_native(self, hwp: Any) -> None:
+        """One raw void Quit, no wrapper quit/hidden Clear and no save mode.
+
+        Locked 1.7.2 has an extra constructor CoInitialize and an unconditional
+        destructor CoUninitialize. Retire only this original pure-Python wrapper
+        after proven native exit: disable automatic destructor replay BEFORE
+        explicitly observing that exact destructor once on its owning STA.
+        Class retirement changes no COM interface and performs no native call.
+        """
+        owner = getattr(self, '_native_close_owner', None)
+        def healthy() -> None:
+            close = self._commands_by_id.get(f'{self.session_id}:close')
+            if (threading.current_thread() is not self._thread or self._native_custody_held
+                    or (self._quarantined and not self._allow_native_cleanup)
+                    or (close is not None and close.timed_out)):
+                raise LocalCliRuntimeError('Native close lost healthy owning-STA authority.')
+        healthy()
+        if self._normal_close_requires_save and not self._allow_native_cleanup:
+            raise LocalCliRuntimeError('Native close cannot discard unproved prior edits.')
+        if (owner is None or owner['wrapper'] is not hwp
+                or type(hwp) is not owner['wrapper_type']
+                or hwp.hwp is not owner['dispatch'] or hwp.on_quit is not False
+                or getattr(self, '_native_teardown_started', False)):
+            raise LocalCliRuntimeError('Qualified full native closure is unavailable: original constructor ownership is unproved.')
+        process = owner['process']
+        process.verify()
+        windows = hwp.XHwpWindows
+        window_count = windows.Count
+        if type(window_count) is not int or window_count != 1:
+            raise LocalCliRuntimeError('Native close requires exactly one window.')
+        window_handle = windows.Active_XHwpWindow.WindowHandle
+        if type(window_handle) is not int or window_handle != owner['hwnd']:
+            raise LocalCliRuntimeError('Native close window identity changed.')
+        docs = hwp.XHwpDocuments
+        document_count = docs.Count
+        if type(document_count) is not int or document_count != 1:
+            raise LocalCliRuntimeError('Native close requires exactly one document.')
+        document = docs.Active_XHwpDocument
+        document_id = document.DocumentID
+        if type(document_id) is not int or document_id != owner['document_id']:
+            raise LocalCliRuntimeError('Native close document identity changed.')
+        for source, attribute in ((document, 'FullName'), (hwp, 'Path')):
+            value = getattr(source, attribute)
+            if type(value) is not str or Path(value).resolve() != self.working_copy_path.resolve():
+                raise LocalCliRuntimeError('Native close document path changed.')
+        source = None
+        if hwp.IsModified is not False:
+            raise LocalCliRuntimeError('Native close requires an exact clean document; save explicitly first.')
+        # Drop local child COM references before Quit/release.
+        windows = docs = document = None
+        healthy()
+        process.verify()
+        close = self._commands_by_id.get(f'{self.session_id}:close')
+        diagnostic = {'quit_entered': True, 'quit_return_arrived': False, 'quit_void_return': False,
+                      'process_exit_confirmed': False, 'wrapper_com_return_arrived': False, 'runtime_com_return_arrived': False}
+        if close is not None:
+            close.native_close_diagnostic = diagnostic
+        self._native_teardown_started = True
+        # IHwpObject.Quit is void. None is a returned void call, NOT Boolean
+        # success; original OS exit and both COM balances are separate predicates.
+        result = hwp.hwp.Quit()
+        diagnostic['quit_return_arrived'] = True
+        diagnostic['quit_void_return'] = result is None
+        if result is not None:
+            raise LocalCliRuntimeError('Native Quit void contract did not return normally.')
+        healthy()
+        process.wait()
+        diagnostic['process_exit_confirmed'] = True
+        healthy()
+        original_type = owner['wrapper_type']
+        retired_type = type('_RetiredHwp', (original_type,), {'__slots__': (), '__del__': lambda self: None})
+        hwp.__class__ = retired_type
+        # Release the original dispatch only after exit, before COM uninit.
+        hwp.hwp = None
+        owner['dispatch'] = None
+        original_type.__del__(hwp)  # on_quit=False: no hidden Clear/Quit; observed constructor COM balance
+        diagnostic['wrapper_com_return_arrived'] = True
+
     def _finalize(
         self,
         *,
@@ -1915,84 +2354,97 @@ class LocalCliLiveSession:
         watchdog_stop: Any,
         watchdog_thread: Any,
     ) -> None:
-        """Finish a live session without allowing one cleanup failure to strand it."""
-
+        """Own actual native exit and COM completion before reporting close success."""
         cleanup_errors: list[str] = []
+        close = self._commands_by_id.get(f'{self.session_id}:close')
+        permitted = not self._quarantined or self._allow_native_cleanup
+        native_complete = False
 
-        def attempt(label: str, operation: Callable[[], Any]) -> None:
+        def report(label: str, operation: Callable[[], Any]) -> None:
             try:
                 operation()
-            except Exception as exc:
-                cleanup_errors.append(f'{label}: {type(exc).__name__}: {str(exc)[:512]}')
+            except BaseException:
+                cleanup_errors.append(label)
 
-        cleanup_permitted = not getattr(self, '_quarantined', False) or getattr(
-            self, '_allow_native_cleanup', False
-        )
         if watchdog_stop is not None:
-            attempt('watchdog_stop', watchdog_stop.set)
+            report('watchdog_stop', watchdog_stop.set)
         if watchdog_thread is not None:
-            def _join_watchdog() -> None:
+            def join_watchdog() -> None:
                 watchdog_thread.join(timeout=1.0)
-                is_alive = getattr(watchdog_thread, 'is_alive', None)
-                if callable(is_alive) and is_alive():
-                    raise RuntimeError('runtime watchdog did not stop before cleanup completed')
+                if watchdog_thread.is_alive():
+                    raise LocalCliRuntimeError('Watchdog stop incomplete.')
+            report('watchdog_join', join_watchdog)
 
-            attempt('watchdog_join', _join_watchdog)
-        if cleanup_permitted:
-            if hwp is not None:
-                attempt('discard_live_document', lambda: discard_live_document(hwp))
-            attempt('close_hwp_instance', lambda: close_hwp_instance(hwp))
-            if pythoncom is not None and coinitialized:
-                attempt('pythoncom_uninitialize', pythoncom.CoUninitialize)
+        if permitted and not cleanup_errors:
+            try:
+                if hwp is not None:
+                    self._close_original_native(hwp)
+                elif getattr(self, '_constructor_invoked', False):
+                    raise LocalCliRuntimeError('Constructor effects unresolved; owning STA retained.')
+                if pythoncom is not None and coinitialized:
+                    pythoncom.CoUninitialize()
+                    if close is not None and close.native_close_diagnostic is not None:
+                        close.native_close_diagnostic['runtime_com_return_arrived'] = True
+                native_complete = True
+            except BaseException as exc:
+                # No fallible formatting or persistence before the hold.
+                if close is not None:
+                    self._hold_native_custody(close, 'Native close is incomplete; custody retained.', exc)
+                    close.native_diagnostic = _native_diagnostic('close_wrapper', exc)
+                else:
+                    self._native_custody_held = self._quarantined = True
+                    self._allow_native_cleanup = False
+                    self._terminal_error = LocalCliRuntimeError('Native cleanup is incomplete; custody retained.')
+                self._active_hwp = hwp
+                cleanup_errors.append('native_teardown')
 
-        terminal_error = self._terminal_error or LocalCliRuntimeError(
-            'The live local CLI session terminated before queued work could run.'
-        )
-        try:
-            with self._state_lock:
-                self._closing = cleanup_permitted
-                commands = list(self._commands_by_id.values())
-                for command in commands:
-                    if cleanup_permitted and command.timed_out and command.state == 'timed_out_pending_reconciliation':
-                        command.state = 'failed_after_timeout'
-                    if cleanup_permitted:
-                        command.completed_event.set()
-                    if cleanup_permitted and not command.future.done():
-                        command.future.set_exception(terminal_error)
-        except Exception as exc:
-            cleanup_errors.append(f'pending_future_resolution: {type(exc).__name__}: {str(exc)[:512]}')
-            commands = list(getattr(self, '_commands_by_id', {}).values())
+        if permitted and not native_complete and not self._native_custody_held:
+            self._native_custody_held = self._quarantined = True
+            self._allow_native_cleanup = False
+            self._terminal_error = LocalCliRuntimeError('Cleanup prerequisite failed; custody retained.')
+        # Commit bounded in-memory completion BEFORE fallible reporting. Never
+        # replay native teardown to repair a journal/status-only failure.
+        if native_complete:
+            self._closed.set()
+            owner = getattr(self, '_native_close_owner', None)
+            if owner is not None:
+                report('native_process_handle', owner['process'].close)
+        if close is not None:
+            if native_complete:
+                close.result = {'ok': True}
+                self._apply_normalized_outcome(close, close.result)
+                close.state = 'completed_after_timeout' if close.timed_out else 'succeeded'
+            else:
+                close.error = close.error or self._terminal_error or LocalCliRuntimeError('Native close incomplete.')
+                close.semantic_ok = False
+                close.state = 'failed_after_timeout' if close.timed_out else 'failed'
+            close.completed_event.set()
 
-        for command in commands:
-            attempt(f'persist_command:{command.command_id}', lambda command=command: self._persist_command(command))
-        attempt(
-            'finalization_status',
-            lambda: update_runtime_status(
-                self.log_path,
-                phase='local_cli_session_finalized',
-                detail=self.source_filename,
-                extra={'cleanup_errors': cleanup_errors},
-                append_history=True,
-            ),
-        )
-        if cleanup_permitted:
-            attempt(
-                'cancel_pending_commands',
-                lambda: self._cancel_pending_commands(
-                    'The live local CLI session terminated before queued work could run.'
-                ),
-            )
-        with self._state_lock:
-            self._cleanup_errors = list(cleanup_errors)
-            if cleanup_errors and self._terminal_error is None:
-                self._terminal_error = LocalCliRuntimeError(
-                    'The live local CLI runtime could not complete cleanup; retain the binding and retry cleanup.'
-                )
-            if cleanup_permitted and not cleanup_errors:
-                # `_closed` is proof that every required native cleanup step
-                # completed.  A worker with cleanup errors remains terminal but
-                # must not be presented as cleanly closed.
-                self._closed.set()
+        for command in list(self._commands_by_id.values()):
+            if native_complete and command is not close:
+                if command.timed_out and command.state == 'timed_out_pending_reconciliation':
+                    command.state = 'failed_after_timeout'
+                command.completed_event.set()
+                if not command.future.done():
+                    command.future.set_exception(self._terminal_error or LocalCliRuntimeError('The live session stopped before command completion.'))
+            report('persist_command', lambda command=command: self._persist_command(command))
+        report('finalization_status', lambda: update_runtime_status(
+            self.log_path, phase='local_cli_session_finalized' if native_complete else 'local_cli_session_preserved',
+            detail=self.source_filename, extra={'cleanup_errors': cleanup_errors}, append_history=True))
+        report('cancel_pending_commands', lambda: self._cancel_pending_commands('The live session has stopped.'))
+        self._cleanup_errors = list(cleanup_errors)
+        if close is not None and not close.future.done():
+            if native_complete and not cleanup_errors:
+                close.future.set_result(close.result)
+            else:
+                close.future.set_exception(close.error or LocalCliRuntimeError('Close reporting incomplete; native teardown is not replayed.'))
+        # Keep the real SDK wrapper, COM apartment and manager registration alive
+        # after ambiguous cleanup. Normal public reconciliation cannot release a
+        # held session. A test-only release seam must not grant native authority.
+        while self._native_custody_held and not self._allow_native_cleanup:
+            pending = self._commands.get()
+            if not pending.future.done():
+                pending.future.set_exception(LocalCliRuntimeError(_HELD_CLOSE_MESSAGE))
 
     def _run(self) -> None:
         pythoncom = None
@@ -2025,12 +2477,37 @@ class LocalCliLiveSession:
                     f"current process session_id={process_session.get('session_id')} session_name={process_session.get('session_name')!r}."
                 )
 
+            before_native = _native_close_processes()
+            self._constructor_invoked = True
             hwp = create_hwp_instance_with_recovery(
                 Hwp,
                 log_path=self.log_path,
                 phase='local_cli_create_hwp_instance',
                 detail=f'open {self.source_filename}',
             )
+            self._active_hwp = hwp
+            if before_native is not None:
+                # Bind the original constructor object, not an injected close API.
+                if type(hwp) is not Hwp or hwp.on_quit is not False:
+                    raise LocalCliRuntimeError('Native constructor wrapper contract is unproved.')
+                windows = hwp.XHwpWindows
+                if type(windows.Count) is not int or windows.Count != 1:
+                    raise LocalCliRuntimeError('Native constructor window count is unproved.')
+                hwnd = windows.Active_XHwpWindow.WindowHandle
+                if type(hwnd) is not int or hwnd <= 0:
+                    raise LocalCliRuntimeError('Native constructor window identity is unproved.')
+                docs = hwp.XHwpDocuments
+                if type(docs.Count) is not int or docs.Count != 1:
+                    raise LocalCliRuntimeError('Native constructor document count is unproved.')
+                document_id = docs.Active_XHwpDocument.DocumentID
+                if type(document_id) is not int:
+                    raise LocalCliRuntimeError('Native constructor document identity is unproved.')
+                self._native_close_owner = {
+                    'wrapper': hwp, 'wrapper_type': Hwp, 'dispatch': hwp.hwp,
+                    'hwnd': hwnd, 'document_id': document_id,
+                    'process': _bind_native_close_process(hwnd, before_native),
+                }
+                windows = docs = None  # no child COM references survive into finalization
             update_runtime_status(
                 self.log_path,
                 phase='local_cli_create_hwp_instance_succeeded',
@@ -2056,6 +2533,8 @@ class LocalCliLiveSession:
                 document_path=self.working_copy_path,
                 log_path=self.log_path,
                 detail=f'open {self.source_filename}',
+                max_attempts=1,
+                probe_attempts=1,
             )
             update_runtime_status(
                 self.log_path,
@@ -2070,6 +2549,9 @@ class LocalCliLiveSession:
                 source_filename=self.source_filename,
                 log_path=self.log_path,
                 hwp=hwp,
+                hold_native_custody=self._hold_active_command_custody,
+                mark_mutating_intent=self._mark_mutating_intent,
+                observe_pre_save=self._observe_pre_save_is_modified,
             )
             self._active_hwp = hwp
             self._active_handle = handle
@@ -2108,15 +2590,32 @@ class LocalCliLiveSession:
             while True:
                 command = self._commands.get()
                 if command.name == '__close__':
+                    refusal: LocalCliRuntimeError | None = None
                     with self._state_lock:
-                        command.state = 'running'
-                        command.result = {'ok': True}
-                        self._apply_normalized_outcome(command, command.result)
-                        command.state = 'completed_after_timeout' if command.timed_out else 'succeeded'
-                    command.completed_event.set()
-                    self._persist_command(command)
-                    if not command.future.done():
-                        command.future.set_result(command.result)
+                        if (self._native_custody_held or self._normal_close_requires_save) and not self._allow_native_cleanup:
+                            # Admitted before a numbering callback became held; custody is re-checked at dequeue.
+                            refusal = LocalCliRuntimeError(_HELD_CLOSE_MESSAGE if self._native_custody_held else 'Normal close requires proved preservation of prior edits.')
+                            command.error = refusal
+                            self._apply_normalized_outcome(command, error=refusal)
+                            command.state = 'failed'
+                            self._closing = False
+                            self._close_future = None
+                            held_commands = [c for c in self._commands_by_id.values() if c.custody_held]
+                            if held_commands:
+                                self._last_command_id = max(held_commands, key=lambda c: c.sequence).command_id
+                        else:
+                            command.state = 'running'
+                    if refusal is not None:
+                        command.completed_event.set()
+                        try:
+                            self._persist_command(command)
+                        except Exception:
+                            pass
+                        if not command.future.done():
+                            command.future.set_exception(refusal)
+                        continue
+                    # Dequeue is not completion. The actual finalizer owns the
+                    # result/future, including failure of the locked wrapper.
                     break
                 if command.name == '__recover__':
                     recovery_future = command.future
@@ -2161,6 +2660,9 @@ class LocalCliLiveSession:
                             command.completed_event.set()
                         continue
                     command.state = 'running'
+                self._active_command = command
+                handle.diagnostic_site = 'command_handler'
+                handle.mutation_intent = False
                 try:
                     update_runtime_status(
                         self.log_path,
@@ -2170,8 +2672,19 @@ class LocalCliLiveSession:
                     )
                     if command.handler is None:
                         raise LocalCliRuntimeError(f'No handler was provided for local CLI command: {command.name}')
+                    # All actual service mutators (including arbitrary pycall,
+                    # bundles, export and selection/movement helpers) enter
+                    # here. Unknown callers fail conservatively. Only audited
+                    # read commands avoid current intent; earlier intent stays.
+                    if command.name not in {'health_probe', 'find', 'info', 'where', 'screenshot', 'command-bundle'}:
+                        self._mark_mutating_intent()
                     command.result = command.handler(handle)
+                    handle.diagnostic_site = 'handler_returned'
                     self._apply_normalized_outcome(command, command.result)
+                    if command.name in _MUTATING_COMMANDS - {'command-bundle'} and command.semantic_ok is not True and not command.custody_held:
+                        # A failed mutator's false per-step flags do not prove
+                        # lifetime no-edit or authorize discard.
+                        self._hold_native_custody(command, 'Failed native command has an unproved outcome; session retained.', None)
                     with self._state_lock:
                         terminal_state = 'failed' if command.semantic_ok is not True else 'succeeded'
                         if command.timed_out:
@@ -2188,32 +2701,66 @@ class LocalCliLiveSession:
                         # future resolution together.  A request timeout must
                         # not observe a half-committed successful mutation and
                         # relabel it as a failed/retryable command.
-                        self._persist_command(command)
-                        if not command.future.done():
-                            command.future.set_result(command.result)
+                        if command.custody_held:
+                            self._settle_held_command(command, result=command.result)
+                        else:
+                            self._persist_command(command)
+                            if (command.name == 'save' and command.semantic_ok is True
+                                    and command.result.get('ordinary_save_confirmed') is True
+                                    and not command.timed_out and not self._quarantined):
+                                self._normal_close_requires_save = False
+                            if not command.future.done():
+                                command.future.set_result(command.result)
                 except Exception as exc:
-                    command.error = exc
-                    self._apply_normalized_outcome(command, error=exc)
+                    # Publish custody before diagnostics or any fallible report.
+                    # A handler exception does not establish native no-effect.
+                    if not command.custody_held:
+                        self._hold_native_custody(command, 'The native command outcome is unknown; session retained.', exc)
+                    command.native_diagnostic = _native_diagnostic(handle.diagnostic_site, exc)
+                    if command.custody_held:
+                        with self._state_lock:
+                            self._settle_held_command(command, escaped=True)
+                except BaseException as signal:
+                    # Trusted invocation history, not a diagnostic label or
+                    # an exception's arbitrary attribute callback, decides
+                    # whether a signal can propagate as clean pre-edit.
+                    if not self._lifetime_edit_possible and not command.custody_held:
+                        command.error = signal
+                        command.state = 'failed'
+                        command.semantic_ok = False
+                        if not command.future.done():
+                            command.future.set_exception(signal)
+                        raise
+                    self._hold_native_custody(command, 'Native command interrupted; outcome unknown and session retained.', signal)
+                    command.native_diagnostic = _native_diagnostic(handle.diagnostic_site, signal)
                     with self._state_lock:
-                        command.state = 'failed_after_timeout' if command.timed_out else 'failed'
-                        if command.timed_out:
-                            data = self._ensure_reconciliation_data(command)
-                            recovery = data.get('recovery') if isinstance(data.get('recovery'), dict) else {}
-                            recovery['state'] = 'quarantined'
-                            data['recovery'] = recovery
-                    if isinstance(exc, LocalCliRuntimeError):
-                        wrapped = exc
-                    else:
-                        wrapped = LocalCliRuntimeError(str(exc))
-                    self._persist_command(command)
-                    if not command.future.done():
-                        command.future.set_exception(wrapped)
+                        self._settle_held_command(command, escaped=True)
                 finally:
+                    self._active_command = None
                     command.completed_event.set()
-                    self._persist_command(command)
-                    self._prune_in_memory_commands()
-        except Exception as exc:
-            wrapped = exc if isinstance(exc, LocalCliRuntimeError) else LocalCliRuntimeError(str(exc))
+                    for report in (lambda: self._persist_command(command), self._prune_in_memory_commands):
+                        try:
+                            report()
+                        except BaseException as report_error:  # in-memory hold precedes all further reporting
+                            # An already returned successful command remains
+                            # successful; this later session-report fault must
+                            # not discard its possible edits or stop its STA.
+                            if not command.custody_held:
+                                self._hold_native_custody(command, 'Session reporting failed; native custody retained.', report_error)
+                            if isinstance(command.error, LocalCliNativeCustodyHeldError):
+                                command.error.reporting_errors.append(report_error)
+        except BaseException as exc:
+            # Startup may already have allocated or opened native state. Publish
+            # custody before resolving startup/reporting; never teardown UNKNOWN.
+            if getattr(self, '_constructor_invoked', False):
+                self._native_custody_held = self._quarantined = True
+                self._allow_native_cleanup = False
+                self._active_hwp = hwp
+                wrapped = LocalCliNativeCustodyHeldError('Native startup outcome is unknown; owning STA retained.')
+            else:
+                wrapped = LocalCliRuntimeError('Local CLI startup failed before native construction.')
+            wrapped.__cause__ = exc
+            self._terminal_error = wrapped
             if not self._start_future.done():
                 self._start_future.set_exception(wrapped)
         finally:
@@ -2280,17 +2827,18 @@ class LocalCliRuntimeManager:
         command_name: str,
         handler: Callable[[LocalCliRuntimeHandle], Any],
         timeout: float = 90.0,
+        prior_dirty: bool = False,
     ) -> Any:
         session = self.require_session(session_id)
         try:
-            return session.execute(command_name, handler, timeout=timeout)
+            return session.execute(command_name, handler, timeout=timeout, **({'prior_dirty': True} if prior_dirty else {}))
         except LocalCliRuntimeError:
             if not session.is_alive() and not session.is_terminal():
                 with self._lock:
                     self._sessions.pop(session_id, None)
             raise
 
-    def close_session(self, session_id: str, *, timeout: float = 30.0) -> None:
+    def close_session(self, session_id: str, *, timeout: float = 30.0, prior_dirty: bool = False) -> None:
         with self._lock:
             session = self._sessions.get(session_id)
         if session is None:
@@ -2298,7 +2846,7 @@ class LocalCliRuntimeManager:
         # Keep the live handle registered until native/COM cleanup has
         # completed. Status probes must not report a false closed state while
         # the close command is still releasing the runtime thread.
-        session.close(timeout=timeout)
+        session.close(timeout=timeout, **({'prior_dirty': True} if prior_dirty else {}))
         with self._lock:
             if self._sessions.get(session_id) is session:
                 if not getattr(session, 'has_unreconciled_reconciliation', lambda: False)():

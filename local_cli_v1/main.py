@@ -49,6 +49,9 @@ from .output_parser import (
 )
 from .readback_diff import format_readback_diff_human, load_readback_manifest, summarize_readback_diff
 from .gate_verdict import load_manifest as load_gate_manifest, summarize_gate_verdict
+from . import reading_cli
+from .hwpx_new import HwpxNewError, write_blank_hwpx
+from .mermaid_render import MermaidRenderError, render_png
 from .proof_packet import ProofPacketError, build_proof_packet, seal_native_border_readback
 from .safe_schema import build_safe_agent_schema
 from .static_inspector import (
@@ -109,10 +112,13 @@ LOCAL_METADATA_NOTES: dict[str, str] = {
     'static-read': 'local read-only secondary HWPX package/static text/table/header/footer/footnote/equation/image inventory; no mutation; Hancom-native corroboration required',
     'static-compare': 'local read-only secondary source-vs-candidate static comparison; no mutation; mismatch cannot PASS without Hancom-native evidence',
     'static-render': 'local read-only secondary quick HTML/SVG preview; non-authoritative; Hancom render remains required for QA PASS',
+    'new': 'writes a minimal blank .hwpx locally (paper size and margins only); no server call; Hancom validity is proven only by `hwpx open`',
+    'mermaid-render': 'renders a local Mermaid source to PNG with mermaid-cli (mmdc); no server call; insert the PNG with `hwpx image`',
     'field-fill-plan': 'planning-only placeholder/field fill manifest; no mutation; production writes must use Hancom-native commands and proof',
     'output-format-policy': 'planning-only output extension/save/export policy manifest; no mutation; requires Hancom-native save/export proof',
     'gate-verdict': 'local read-only Hancom-primary gate verdict merger for hashes/tokens/counts/render proof/static supplements; no mutation and no external send',
 }
+LOCAL_METADATA_NOTES.update(reading_cli.READING_COMMAND_NOTES)
 
 DIRECT_ROUTE_NOTES: dict[str, str] = {
     'command-reconcile': 'durable timed-out native command reconciliation through the server route; no retry is admitted until terminal outcome',
@@ -171,6 +177,8 @@ BUNDLE_COMMAND_NOTES: dict[str, str] = {
     'qa-profile': 'export_pdf bundle plus local token/freshness QA manifest',
     'paragraph-style-apply-exact': 'bundle-backed paragraph style mutation; no auto-save; rendered proof required before save',
     'paragraph-delete-exact': 'bundle-backed guarded paragraph removal; page/neighbor guards and rendered proof required before save',
+    'page-number-apply': 'bundle-backed native page-number insertion; refuses conflicting existing page numbers and arbitrary prefix/suffix; no auto-save; rendered proof of every page required before save',
+    'official-numbering-apply': 'bundle-backed native outline numbering (levels 1-4) on one proven paragraph; no number text typed; no auto-save; rendered proof of the numbering sequence required before save',
     'text-table-to-native': 'bundle-backed native table insertion from a parsed pipe table, with optional split-by-column planning; no source text deletion; rendered proof required before cleanup/save',
     'text-table-cleanup-selected': 'bundle-backed cleanup mutation; deletes only exact active selected source text outside table/cell context; rendered before/after proof required before save',
     'table4-anchor-range-replace': 'bundle-backed guarded Table 4 range replacement; selects/hashes start→before Figure 5, deletes old source text, inserts native 4-column table; rendered proof required before save',
@@ -252,7 +260,7 @@ SAFE_WORKFLOW_TEXT = '''standard safe edit+proof workflow:
 4. edit: prefer bundle-backed commands/recipes with explicit where/how/changed proof; use anchor commands (`insert-before-heading`, `figure-section`) instead of repeated insertion before one anchor.
 5. screenshot/export-proof: capture rendered proof with screenshot --mode page, page-screenshot, export, or export-proof-range.
 6. save: save/download the working copy only after rendered proof is acceptable.
-7. close: close the live session after saving/reporting artifacts.
+7. close: normal close requires original ownership, one clean bound document/window, native exit and COM completion; UNKNOWN/held sessions and managed artifacts stay retained.
 
 review rule: page count is metadata only, not validation proof. Trust rendered PDF/page PNG/live Hancom artifacts and visible target/content review.
 command states: run `hwpx command-status` for bundle-backed / direct-backlog / disabled status.
@@ -268,6 +276,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     subparsers = parser.add_subparsers(dest='command', required=True)
+    reading_cli.register(subparsers)
 
     help_parser = subparsers.add_parser('help', help='Show HWPX safe workflow help')
     help_parser.add_argument('topic', nargs='?', choices=('workflow', 'commands'), default='workflow')
@@ -281,6 +290,27 @@ def build_parser() -> argparse.ArgumentParser:
     command_reconcile_parser.add_argument('--command-id', required=True)
     command_reconcile_parser.add_argument('--session-id', default=None)
     command_reconcile_parser.add_argument('--json', action='store_true', help='Print reconciliation JSON')
+
+    new_parser = subparsers.add_parser('new', help='Write a minimal blank .hwpx locally, then open it with `hwpx open`')
+    new_parser.add_argument('file', type=Path)
+    new_parser.add_argument('--paper', default='A4', help='Paper name: A3, A4, A5, B4, B5, LETTER, LEGAL (default A4, portrait)')
+    new_parser.add_argument('--width-mm', type=float, default=None, help='Custom paper width in mm (with --height-mm)')
+    new_parser.add_argument('--height-mm', type=float, default=None, help='Custom paper height in mm (with --width-mm)')
+    for margin in ('top', 'bottom', 'left', 'right', 'header', 'footer', 'gutter'):
+        new_parser.add_argument(f'--margin-{margin}-mm', type=float, default=None, help=f'{margin} margin in mm (default: Hancom A4 default)')
+    new_parser.add_argument('--title', default='', help='Document title metadata')
+    new_parser.add_argument('--force', action='store_true', help='Replace an existing file')
+    new_parser.add_argument('--json', action='store_true', help='Print the result JSON')
+
+    mermaid_parser = subparsers.add_parser('mermaid-render', help='Render a Mermaid diagram to PNG with mermaid-cli (mmdc) for `hwpx image`')
+    mermaid_parser.add_argument('source', type=Path, help='UTF-8 Mermaid source file (.mmd)')
+    mermaid_parser.add_argument('--out', type=Path, required=True, help='Output .png path')
+    mermaid_parser.add_argument('--scale', type=float, default=2.0, help='Render scale 0.5..5 (default 2)')
+    mermaid_parser.add_argument('--width', type=int, default=None, help='Render width in px (100..8000)')
+    mermaid_parser.add_argument('--background', choices=('white', 'transparent'), default='white')
+    mermaid_parser.add_argument('--mmdc', default=None, help='Path to mmdc (default: HWPX_MMDC, then PATH)')
+    mermaid_parser.add_argument('--timeout', type=int, default=90, help='Renderer timeout in seconds')
+    mermaid_parser.add_argument('--json', action='store_true', help='Print the result JSON')
 
     open_parser = subparsers.add_parser('open', help='Open a local HWP/HWPX file into a live server session')
     open_parser.add_argument('file', type=Path)
@@ -588,6 +618,33 @@ def build_parser() -> argparse.ArgumentParser:
     paragraph_style_parser.add_argument('--confirm-layout', action='store_true', required=True, help='Required explicit confirmation for paragraph layout/style mutation')
     paragraph_style_parser.add_argument('--json', action='store_true', help='Print normalized command-bundle parser JSON')
 
+    page_number_parser = subparsers.add_parser(
+        'page-number-apply',
+        help='Bundle-backed native page-number insertion; requires position and layout confirmation',
+    )
+    page_number_parser.add_argument(
+        '--position',
+        required=True,
+        choices=('top-left', 'top-center', 'top-right', 'bottom-left', 'bottom-center', 'bottom-right'),
+        help='Native page-number position',
+    )
+    page_number_parser.add_argument('--start-number', type=int, default=1, help='First page number, 1-65535 (default 1)')
+    page_number_parser.add_argument('--side-char', choices=('none', 'dash'), help="Side characters: none, or '-' on both sides")
+    page_number_parser.add_argument('--prefix', help="Only '-' (paired with --suffix '-') or '' is supported")
+    page_number_parser.add_argument('--suffix', help="Only '-' (paired with --prefix '-') or '' is supported")
+    page_number_parser.add_argument('--confirm-layout', action='store_true', required=True, help='Required explicit confirmation for page layout mutation')
+    page_number_parser.add_argument('--json', action='store_true', help='Print normalized command-bundle parser JSON')
+
+    official_numbering_parser = subparsers.add_parser(
+        'official-numbering-apply',
+        help='Bundle-backed native outline numbering (levels 1-4) for one paragraph; requires match, expected page, level, and confirmation',
+    )
+    official_numbering_parser.add_argument('--match', required=True, help='Unique paragraph text/anchor to number')
+    official_numbering_parser.add_argument('--expected-page', type=int, required=True, help='Expected rendered/page evidence for the target')
+    official_numbering_parser.add_argument('--level', type=int, required=True, help='Official outline level 1-4')
+    official_numbering_parser.add_argument('--confirm-layout', action='store_true', required=True, help='Required explicit confirmation for numbering mutation')
+    official_numbering_parser.add_argument('--json', action='store_true', help='Print normalized command-bundle parser JSON')
+
     paragraph_delete_parser = subparsers.add_parser(
         'paragraph-delete-exact',
         help='Bundle-backed exact paragraph/scaffold-row cleanup; requires match, expected page, and remove confirmation',
@@ -707,7 +764,7 @@ def build_parser() -> argparse.ArgumentParser:
     export_parser.add_argument('--out', type=Path, help='Exact PDF destination path')
     export_parser.add_argument('--bundle-proof', action='store_true', help='Use the bundle-backed export_pdf proof slice instead of the legacy direct export route')
     export_parser.add_argument('--json', action='store_true', help='Print the stable JSON envelope')
-    close_parser = subparsers.add_parser('close', help='Close the active live document session')
+    close_parser = subparsers.add_parser('close', help='Close the original owned clean session; UNKNOWN or held custody is retained')
     close_parser.add_argument('--json', action='store_true', help='Print the structured lifecycle response')
 
     type_parser = subparsers.add_parser('type', help='Replace the selection, or insert text at the caret')
@@ -801,12 +858,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     fontsize_parser = subparsers.add_parser('fontsize', help='Set font size on the current selection or caret position')
     fontsize_parser.add_argument('size_pt', type=float)
+    fontsize_parser.add_argument('--at-caret', action='store_true', help='Style the caret position on purpose after an earlier selected-range style edit')
 
     bold_parser = subparsers.add_parser('bold', help='Turn bold on or off for the proven current text selection')
     bold_parser.add_argument('value', choices=('on', 'off'))
 
     font_parser = subparsers.add_parser('font', help='Set font family on the current selection or caret position')
     font_parser.add_argument('face_name')
+    font_parser.add_argument('--at-caret', action='store_true', help='Style the caret position on purpose after an earlier selected-range style edit')
 
     bullet_parser = subparsers.add_parser('bullet', help='Create one bullet item at the current caret position')
     bullet_parser.add_argument('text')
@@ -821,6 +880,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     action_parser = subparsers.add_parser('action', help='Run a Hancom HAction by name')
     action_parser.add_argument('action_name')
+    action_parser.add_argument('--allow-media-change', action='store_true', help='Allow the action to remove or change pictures or embedded BinData')
 
     subparsers.add_parser('bundle-list', aliases=['bundles'], help='List local planner bundle recipes')
 
@@ -1205,6 +1265,9 @@ def _last_proof_artifact(state: dict[str, Any]) -> tuple[str, str] | None:
 
 def _print_workflow_help() -> None:
     print('HWPX workflow: status -> open -> find/where/select -> edit -> screenshot/export-proof -> save -> close')
+    print('Use download for approved artifacts before close removes managed files. Exact clean no-op skips Save, not its readbacks.')
+    print('Normal close requires the original owned instance, one clean bound document/window, returned void Quit, native exit and COM completion.')
+    print('UNKNOWN, dirty, unbound or held sessions stay retained: no automatic Save, Clear, Quit, retry or release.')
     print('')
     print('Target pipeline:')
     print('1. local input planner -> explicit command bundle')
@@ -1637,6 +1700,27 @@ def _paragraph_style_apply_bundle_args(args: argparse.Namespace) -> list[str]:
     return bundle_args
 
 
+def _page_number_apply_bundle_args(args: argparse.Namespace) -> list[str]:
+    bundle_args = ['--position', args.position, '--start-number', str(args.start_number)]
+    if args.side_char is not None:
+        bundle_args.extend(['--side-char', args.side_char])
+    if args.prefix is not None:
+        bundle_args.extend(['--prefix', args.prefix])
+    if args.suffix is not None:
+        bundle_args.extend(['--suffix', args.suffix])
+    if args.confirm_layout:
+        bundle_args.append('--confirm-layout')
+    return bundle_args
+
+
+def _official_numbering_apply_bundle_args(args: argparse.Namespace) -> list[str]:
+    # This parsed text is data, even when it starts with an option-like hyphen.
+    bundle_args = [f'--match={args.match}', '--expected-page', str(args.expected_page), '--level', str(args.level)]
+    if args.confirm_layout:
+        bundle_args.append('--confirm-layout')
+    return bundle_args
+
+
 def _paragraph_delete_bundle_args(args: argparse.Namespace) -> list[str]:
     bundle_args = ['--match', args.match, '--expected-page', str(args.expected_page)]
     if args.occurrence_on_page is not None:
@@ -1812,7 +1896,7 @@ def _reopen_fresh_session(base_url: str, source_hwp: Path | None) -> dict[str, A
         status = get_json(base_url, '/local-cli/status')
         if status.get('live_session_bound'):
             if status.get('working_copy_dirty'):
-                raise ApiError('Refusing --fresh-session while the active live session is dirty. Save/close it first.')
+                raise ApiError('Refusing --fresh-session while the active live session is dirty. Save approved artifacts if safe and retain it; full native close is unsupported for this unproved or held session.')
             post_json(base_url, '/local-cli/close', {'session_id': existing_session_id})
             clear_session_binding(
                 expected_generation=state_generation,
@@ -2820,6 +2904,9 @@ def main(argv: list[str] | None = None) -> int:
     base_url = _resolve_base_url(args.base_url)
 
     try:
+        if args.command in reading_cli.READING_COMMANDS:
+            return reading_cli.dispatch(args)
+
         if args.command == 'help':
             if args.topic == 'commands':
                 _print_command_status()
@@ -3145,6 +3232,49 @@ def main(argv: list[str] | None = None) -> int:
                 artifact_dir=args.artifact_dir.expanduser() if args.artifact_dir else None,
             )
             print(json.dumps(payload, ensure_ascii=False, indent=2))
+            return 0
+
+        if args.command == 'new':
+            margins = {name: getattr(args, f'margin_{name}_mm') for name in ('top', 'bottom', 'left', 'right', 'header', 'footer', 'gutter')}
+            try:
+                result = write_blank_hwpx(
+                    args.file,
+                    overwrite=args.force,
+                    title=args.title,
+                    paper=args.paper,
+                    width_mm=args.width_mm,
+                    height_mm=args.height_mm,
+                    margins_mm=margins,
+                )
+            except HwpxNewError as exc:
+                raise ApiError(str(exc)) from exc
+            if args.json:
+                print(json.dumps(result, ensure_ascii=False, indent=2))
+            else:
+                paper = result['paper_mm']
+                print(f"created: {result['path']} ({paper['width']} x {paper['height']} mm, portrait)")
+                print('evidence: generated package only; Hancom validity is proven by opening it')
+                print(f"next: hwpx open {result['path']}")
+            return 0
+
+        if args.command == 'mermaid-render':
+            try:
+                result = render_png(
+                    args.source,
+                    args.out,
+                    scale=args.scale,
+                    width=args.width,
+                    background=args.background,
+                    renderer=args.mmdc,
+                    timeout=args.timeout,
+                )
+            except MermaidRenderError as exc:
+                raise ApiError(str(exc)) from exc
+            if args.json:
+                print(json.dumps(result, ensure_ascii=False, indent=2))
+            else:
+                print(f"rendered: {result['path']} ({result['width_px']} x {result['height_px']} px, sha256 {result['sha256'][:16]})")
+                print(f"next: hwpx image {result['path']}  (add --fit-cell when the caret is in a table cell)")
             return 0
 
         if args.command == 'static-render':
@@ -3498,6 +3628,34 @@ def main(argv: list[str] | None = None) -> int:
                 print('next: run rendered proof before save; use `hwpx save` only after proof passes.')
             _print_bundle_payload(payload, json_output=bool(args.json))
             return 0
+
+        if args.command in {'page-number-apply', 'official-numbering-apply'}:
+            is_page_number = args.command == 'page-number-apply'
+            bundle_args = _page_number_apply_bundle_args(args) if is_page_number else _official_numbering_apply_bundle_args(args)
+            spec, payload = _execute_named_bundle(base_url, args.command, bundle_args)
+            succeeded = payload.get('ok') is True
+            op = 'page_number_apply' if is_page_number else 'official_numbering_apply'
+            unchanged = succeeded and any(
+                step.get('op') == op and step.get('result', {}).get('result', {}).get('changed') is False
+                for step in payload.get('steps', [])
+            )
+            if not args.json:
+                if unchanged:
+                    print(f'bundle: {spec.name}')
+                    print('commit: requested native numbering already applied; no document change; not saved')
+                elif succeeded:
+                    _print_bundle_plan(spec.name, spec.local_metadata())
+                    action = 'page-number action' if is_page_number else 'outline numbering'
+                    print(f'commit: native {action} executed against the working copy; not saved')
+                else:
+                    print('commit: numbering command stopped; not saved')
+                if succeeded:
+                    scope = 'every page' if is_page_number else 'the numbering sequence'
+                    print(f'next: run rendered proof of {scope} before save; use `hwpx save` only after proof passes.')
+                else:
+                    print('next: inspect the failure evidence; an unknown native outcome must not be retried, saved or closed automatically.')
+            _print_bundle_payload(payload, json_output=bool(args.json))
+            return 0 if succeeded else 1
 
         if args.command == 'paragraph-delete-exact':
             bundle_args = _paragraph_delete_bundle_args(args)
@@ -3988,7 +4146,7 @@ def main(argv: list[str] | None = None) -> int:
             payload = post_json(
                 base_url,
                 '/local-cli/fontsize',
-                {'size_pt': args.size_pt, 'session_id': _state_session_id()},
+                {'size_pt': args.size_pt, 'at_caret': bool(args.at_caret), 'session_id': _state_session_id()},
             )
             _print_command_payload(payload)
             return 0
@@ -4006,7 +4164,7 @@ def main(argv: list[str] | None = None) -> int:
             payload = post_json(
                 base_url,
                 '/local-cli/font',
-                {'face_name': args.face_name, 'session_id': _state_session_id()},
+                {'face_name': args.face_name, 'at_caret': bool(args.at_caret), 'session_id': _state_session_id()},
             )
             _print_command_payload(payload)
             return 0
@@ -4036,7 +4194,7 @@ def main(argv: list[str] | None = None) -> int:
             payload = post_json(
                 base_url,
                 '/local-cli/action',
-                {'action_name': args.action_name, 'session_id': _state_session_id()},
+                {'action_name': args.action_name, 'allow_media_change': bool(args.allow_media_change), 'session_id': _state_session_id()},
             )
             _print_macro_payload(payload)
             return 0
@@ -4056,12 +4214,17 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == 'tx-commit':
             request_payload = _load_tx_server_payload(args.plan_json)
             payload = post_json(base_url, '/local-cli/command-bundle', request_payload)
+            succeeded = payload.get('ok') is True
             if not args.json:
-                print('transaction committed: server_payload from preview was posted unchanged')
+                outcome = 'committed' if succeeded else 'stopped'
+                print(f'transaction {outcome}: server_payload from preview was posted unchanged')
                 print('commit: working copy may be dirty; not saved')
-                print('next: run rendered proof before save; use `hwpx save` only after proof passes.')
+                if succeeded:
+                    print('next: run rendered proof before save; use `hwpx save` only after proof passes.')
+                else:
+                    print('next: inspect failure evidence; do not retry an unknown native outcome automatically.')
             _print_bundle_payload(payload, json_output=bool(args.json))
-            return 0
+            return 0 if succeeded else 1
 
         if args.command == 'bundle-dump':
             spec = build_named_bundle(args.bundle_name, args.bundle_args)
@@ -4083,16 +4246,16 @@ def main(argv: list[str] | None = None) -> int:
 
         if args.command == 'bundle-run':
             spec, payload = _execute_named_bundle(base_url, args.bundle_name, args.bundle_args)
-            if not args.json:
+            if not args.json and payload.get('ok') is True:
                 _print_bundle_plan(spec.name, spec.local_metadata())
             _print_bundle_payload(payload, json_output=args.json)
-            return 0
+            return 0 if payload.get('ok') is True else 1
 
         if args.command == 'bundle':
             request_payload = _load_bundle_payload(args.json_file)
             payload = post_json(base_url, '/local-cli/command-bundle', request_payload)
             _print_bundle_payload(payload, json_output=args.json)
-            return 0
+            return 0 if payload.get('ok') is True else 1
     except (ApiError, BundleError, StatePersistenceError) as exc:
         message = exc.message if isinstance(exc, ApiError) else str(exc)
         print(f'error: {message}', file=sys.stderr)

@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from typing import Annotated, Any, Literal
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.models import CellMarginsGetRequest
 
@@ -92,13 +92,52 @@ class CellFormatStep(Closed):
         return self
 
 
+class PageNumberStep(Closed):
+    # Prefix/suffix text is unsupported by the native action, so it has no field.
+    op: Literal['page_number_apply']
+    label: Label = 'mcp:page-number-apply'
+    position: Literal['top-left', 'top-center', 'top-right', 'bottom-left', 'bottom-center', 'bottom-right']
+    start_number: int = Field(default=1, ge=1, le=65535)
+    side_char: Literal['none', 'dash'] = 'none'
+    confirm_layout: bool
+
+    @field_validator('confirm_layout')
+    @classmethod
+    def require_confirm_layout(cls, value: bool) -> bool:
+        if value is not True:
+            raise ValueError('confirm_layout must be true')
+        return value
+
+
+class OfficialNumberingStep(Closed):
+    op: Literal['official_numbering_apply']
+    label: Label = 'mcp:official-numbering-apply'
+    match: Annotated[str, Field(min_length=1, max_length=500)]
+    expected_page: int = Field(ge=1, le=10000)
+    level: int = Field(ge=1, le=4)
+    confirm_layout: bool
+
+    @field_validator('confirm_layout')
+    @classmethod
+    def require_confirm_layout(cls, value: bool) -> bool:
+        if value is not True:
+            raise ValueError('confirm_layout must be true')
+        return value
+
+    @model_validator(mode='after')
+    def require_single_line_match(self) -> 'OfficialNumberingStep':
+        if not self.match.strip() or '\n' in self.match or '\r' in self.match:
+            raise ValueError('official_numbering_apply match must be a non-blank single line')
+        return self
+
+
 class Reconcile(Closed):
     op: Literal['command_reconcile']
     command_id: Annotated[str, Field(min_length=1, max_length=128, pattern=r'^[a-zA-Z0-9_.:-]+$')]
 
 
 class Command(Session):
-    request: Annotated[ContextStep | SelectionStep | ReadbackStep | CellFormatStep | Reconcile,
+    request: Annotated[ContextStep | SelectionStep | ReadbackStep | CellFormatStep | PageNumberStep | OfficialNumberingStep | Reconcile,
                        Field(discriminator='op')]
 
 

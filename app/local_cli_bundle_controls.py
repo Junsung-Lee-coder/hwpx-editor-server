@@ -117,7 +117,29 @@ class LocalCliBundleControlsMixin:
             'document_is_modified': location.get('document_is_modified'),
         }
 
-    def _bundle_page_evidence(self, hwp: Any) -> dict[str, Any]:
+    def _bundle_page_evidence(self, hwp: Any, *, numbering_guard: bool = False) -> dict[str, Any]:
+        if numbering_guard:
+            from app import native_numbering
+            for name in ('current_page', 'get_current_page', 'GetCurrentPage', 'Page', 'CurrentPage', 'KeyIndicator'):
+                member = native_numbering._native_member(hwp, name)  # noqa: SLF001
+                if member is native_numbering._NATIVE_ABSENT:  # noqa: SLF001
+                    continue  # Only an absent API permits trying another spelling.
+                if name in ('Page', 'CurrentPage'):
+                    value = member
+                else:
+                    if not callable(member):
+                        raise LocalCliRuntimeError('Numbering page API is unproven.')
+                    value = member()  # An entered getter failure is never a fallback.
+                if name == 'KeyIndicator':
+                    if (type(value) is not list and type(value) is not tuple) or len(value) <= 3:
+                        raise LocalCliRuntimeError('Numbering page tuple is unproven.')
+                    if any(type(item) is not int and type(item) is not str and type(item) is not bool and item is not None for item in value):
+                        raise LocalCliRuntimeError('Numbering page tuple primitive is unproven.')
+                    value = value[3]
+                if type(value) is not int or value <= 0:
+                    raise LocalCliRuntimeError('Numbering page value is unproven.')
+                return {'page': value, 'method': name}
+            raise LocalCliRuntimeError('Numbering page API is unavailable.')
         evidence: dict[str, Any] = {}
         for name in ('current_page', 'get_current_page', 'GetCurrentPage'):
             method = getattr(hwp, name, None)
@@ -351,7 +373,7 @@ class LocalCliBundleControlsMixin:
                 f'added_types={json.dumps(added_types, ensure_ascii=False, sort_keys=True)}; '
                 f'removed_types={json.dumps(removed_types, ensure_ascii=False, sort_keys=True)}; '
                 f'identity_sha256={before_identity}->{after_identity}. '
-                'The working copy was not saved; close without saving and retry with a structure-preserving primitive.'
+                'The working copy was not saved; retain it and its owning STA. Full native close is unsupported for this unproved or held session; do not retry automatically. Separately authorized exact-owned operator closure is required.'
             )
         return proof
 

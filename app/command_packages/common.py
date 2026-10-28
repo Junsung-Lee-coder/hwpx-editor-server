@@ -481,6 +481,23 @@ def validate_step_for_op(op: str, *, service: Any, index: int, step: dict[str, A
             _raise(error_type, f'command-bundle step {index} cell_row_fit_exact requires confirm_layout=true')
     elif op == 'native_table_insert':
         _validate_native_table_insert(step, index, error_type)
+    elif op in {'page_number_apply', 'official_numbering_apply'}:
+        from app import native_numbering
+
+        try:
+            if op == 'page_number_apply':
+                normalized = native_numbering.normalize_page_number_request(native_numbering.validate_page_number_step(step))
+                step.update(
+                    position=normalized['position'],
+                    start_number=normalized['start_number'],
+                    side_char=normalized['side_char'],
+                )
+                step.pop('prefix', None)
+                step.pop('suffix', None)
+            else:
+                step.update(native_numbering.validate_official_numbering_step(step))
+        except native_numbering.NativeNumberingInputError as exc:
+            _raise(error_type, f'command-bundle step {index} {op}: {exc}')
     elif op in {'control_inventory', 'table_frame_inventory', 'export_pdf', 'where'}:
         pass
     else:
@@ -564,6 +581,17 @@ def run_step_for_op(op: str, *, service: Any, handle: Any, step: dict[str, Any],
     if op == 'paragraph_style_apply_exact':
         result = service._bundle_paragraph_style_apply_exact(handle.hwp, step)  # noqa: SLF001
         return result, True, list(result.get('warnings') or [])
+    if op == 'page_number_apply':
+        result = service._bundle_page_number_apply(  # noqa: SLF001
+            handle.hwp, step, protection=service._numbering_protection_reader(handle), on_mutating=handle.mark_mutating_intent  # noqa: SLF001
+        )
+        # Identical native settings are a proven no-op, not a new dirty delta.
+        return result, result.get('result', {}).get('changed') is not False, list(result.get('warnings') or [])
+    if op == 'official_numbering_apply':
+        result = service._bundle_official_numbering_apply(  # noqa: SLF001
+            handle.hwp, step, protection=service._numbering_protection_reader(handle), on_mutating=handle.mark_mutating_intent  # noqa: SLF001
+        )
+        return result, result.get('result', {}).get('changed') is not False, list(result.get('warnings') or [])
     if op == 'paragraph_delete_exact':
         result = service._bundle_paragraph_delete_exact(handle.hwp, step)  # noqa: SLF001
         return result, True, list(result.get('warnings') or [])

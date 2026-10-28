@@ -1,11 +1,20 @@
 # Local CLI
 
+## Native save and normal close contract
+
+`save` reads exact typed `IsModified` on the healthy owning STA and journals it before proceeding. Exact `False` deliberately skips ordinary Save as a **clean no-op**; the working-copy/file/custody/location readbacks still run. It does not fabricate a Save return or clear prior dirty evidence. Exact `True` calls the unchanged ordinary Save once; native False, errors, UNKNOWN and receipt/readback failures retain custody, with no forced Save or retry. Historical failed Saves remain failures.
+
+Normal `close` is implemented for the original constructor-owned instance with exactly one bound clean document and window. It calls raw void `Quit` once (not `pyhwpx.quit`, which hides a destructive Clear), verifies the original process handle exited, releases the SDK dispatch and observes both owning-STA COM balances. Dirty, unbound, timed-out, UNKNOWN or held state is retained with no teardown. A reporting-only failure after completion remains completed, with managed files retained for cleanup; Quit is never replayed. Download approved artifacts **before** successful close removes the managed root.
+
+Portable tests establish source behavior only. Real Windows SDK/COM/native-exit acceptance of this candidate still requires the separately admitted BOOK gate. See [native lifecycle contract](../docs/NATIVE_LIFECYCLE.md) for the locked dependency, API sources, destructor balance and limits.
+
+
 `local_cli_v1` is the local planner and formatter for the HWPX runtime. It turns a command into an explicit bundle, sends the bundle to the local API when execution is requested, and keeps the response formatting on the client side.
 
 ## Standard safe edit+proof workflow
 
 ```text
-status -> open -> find/where/select -> edit -> render proof -> save -> close
+status -> open -> find/where/select -> edit -> render proof -> save -> download -> close
 ```
 
 Use managed or disposable copies. Capture rendered proof before saving a mutation. Page count is not proof of layout correctness.
@@ -52,7 +61,7 @@ python -m local_cli_v1.main save
 python -m local_cli_v1.main close
 ```
 
-`command-reconcile` is the only retry/close handoff for a timed-out native
+`command-reconcile` observes a timed-out native operation; it does not qualify full native closure. It is the only recovery handoff for a timed-out native
 command. It reads the durable server journal, waits while the native call is
 still pending, and commits the late result before normal commands are admitted.
 

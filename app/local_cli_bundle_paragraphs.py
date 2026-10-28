@@ -28,6 +28,10 @@ from app.local_cli_service_support import (
 )
 
 
+class _NumberingTargetNotFound(LocalCliRuntimeError):
+    """Strict finder reached an exact False, before the numbering mutator."""
+
+
 class LocalCliBundleParagraphsMixin:
     """Command-bundle style and paragraph operations for LocalCliService."""
 
@@ -166,21 +170,51 @@ class LocalCliBundleParagraphsMixin:
                 except Exception:
                     pass
 
-    def _find_text_on_expected_page(self, hwp: Any, *, match: str, expected_page: int) -> dict[str, Any]:
-        _move_doc_begin(hwp)
-        find_method = getattr(hwp, 'find', None)
+    def _find_text_on_expected_page(self, hwp: Any, *, match: str, expected_page: int, numbering_guard: bool = False) -> dict[str, Any]:
+        if numbering_guard:
+            from app import native_numbering
+            try:
+                mover = native_numbering._native_method(hwp, 'MoveDocBegin')  # noqa: SLF001
+                native_numbering._require_motion_result(mover())  # noqa: SLF001
+                find_method = native_numbering._native_method(hwp, 'find')  # noqa: SLF001
+            except _NumberingTargetNotFound as exc:
+                raise LocalCliRuntimeError('Numbering finder native setup failed.') from exc
+        else:
+            _move_doc_begin(hwp)
+            find_method = getattr(hwp, 'find', None)
         if not callable(find_method):
             raise LocalCliRuntimeError('exact paragraph primitive requires hwp.find')
         seen_positions: set[tuple[int, int, int]] = set()
         candidates: list[dict[str, Any]] = []
         for _ in range(200):
-            try:
-                found = bool(find_method(match, direction='Forward', MatchCase=1, WholeWordOnly=0))
-            except TypeError:
-                found = bool(find_method(match))
-            if not found:
-                break
-            snapshot = _snapshot_cursor_context(hwp)
+            if numbering_guard:
+                # The locked wrapper accepts these kwargs. Never retry a
+                # TypeError or coerce an unknown native return into absence.
+                try:
+                    found = find_method(match, direction='Forward', MatchCase=1, WholeWordOnly=0)
+                except _NumberingTargetNotFound as exc:
+                    # SDK-thrown exact absence/refusal classes are technical
+                    # failures, never the source's positive False producer.
+                    raise LocalCliRuntimeError('Numbering finder native read failed.') from exc
+                if type(found) is not bool:
+                    raise LocalCliRuntimeError('Numbering finder did not return an exact Boolean.')
+                if found is False:
+                    raise _NumberingTargetNotFound('No target on the expected page.')
+            else:
+                try:
+                    found = bool(find_method(match, direction='Forward', MatchCase=1, WholeWordOnly=0))
+                except TypeError:
+                    found = bool(find_method(match))
+                if not found:
+                    break
+            if numbering_guard:
+                from app.native_numbering import _read_target_state
+                state = _read_target_state(hwp)
+                if state is None:
+                    raise LocalCliRuntimeError('Numbering finder target state is unproven.')
+                snapshot = {'pos': list(state[0]), 'has_selection': bool(state[1])}
+            else:
+                snapshot = _snapshot_cursor_context(hwp)
             raw_pos = snapshot.get('pos') or []
             try:
                 pos_key = (int(raw_pos[0]), int(raw_pos[1]), int(raw_pos[2]))
@@ -189,7 +223,22 @@ class LocalCliBundleParagraphsMixin:
             if pos_key in seen_positions:
                 break
             seen_positions.add(pos_key)
-            page = self._bundle_page_evidence(hwp).get('page')
+            if numbering_guard:
+                try:
+                    evidence = self._bundle_page_evidence(hwp, numbering_guard=True)
+                except _NumberingTargetNotFound as exc:
+                    raise LocalCliRuntimeError('Numbering finder native page read failed.') from exc
+            else:
+                evidence = self._bundle_page_evidence(hwp)
+            if numbering_guard:
+                # Validate keys before lookup, including colliding foreign keys.
+                if type(evidence) is not dict or any(type(key) is not str for key in evidence):
+                    raise LocalCliRuntimeError('Numbering page evidence is unproven.')
+                page = evidence.get('page')
+                if type(page) is not int or page <= 0:
+                    raise LocalCliRuntimeError('Numbering page evidence is unproven.')
+            else:
+                page = evidence.get('page')
             candidates.append({'page': page, 'pos': list(pos_key), 'snapshot': snapshot})
             if page is not None and int(page) == int(expected_page):
                 return {'page': page, 'pos': list(pos_key), 'snapshot': snapshot, 'candidates': candidates}

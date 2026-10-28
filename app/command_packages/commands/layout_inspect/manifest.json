@@ -1,0 +1,13 @@
+{
+  "op": "layout_inspect",
+  "version": "local-cli/layout-inspect/v1-package",
+  "summary": "Read-only page setup and column definition at the caret (GetDefault only), in the units layout_exact takes as expected_before.",
+  "module": "app.command_packages.commands.layout_inspect.run",
+  "read_only": true,
+  "dirty_default": false,
+  "allowed_keys": [
+    "op",
+    "operation",
+    "label"
+  ]
+}

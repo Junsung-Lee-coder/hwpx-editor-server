@@ -99,6 +99,13 @@ class Backend(BaseHTTPRequestHandler):
                 time.sleep(2)
             if type(self).mode == 'failure':
                 return self.reply({'detail': {'code': 'NATIVE_BLOCKED', 'message': 'blocked', 'command_id': 'cmd-owned'}}, 409)
+            if type(self).mode == 'numbering_unknown' and self.path == '/local-cli/command-bundle':
+                # Shape of LocalCliService.command_bundle after a numbering step raised LocalCliMutationError.
+                return self.reply({'ok': False, 'semantic_ok': False, 'session_id': SID, 'dirty': True,
+                                   'steps': [{'index': 1, 'op': 'page_number_apply', 'ok': False, 'dirty': True,
+                                              'error': 'LocalCliMutationError: outcome unknown',
+                                              'mutation_may_have_persisted': True,
+                                              'rollback': {'attempted': False, 'succeeded': False}}]})
             if type(self).mode == 'semantic_failure' and self.path == '/local-cli/command-reconcile':
                 return self.reply({'ok': False, 'semantic_ok': False, 'session_id': SID,
                                    'command_id': 'cmd-owned', 'state': 'failed_after_timeout'})
@@ -455,6 +462,122 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
         post = [x for x in Backend.calls if x[0] == 'POST'][-1]
         self.assertEqual(post[1], '/local-cli/command-bundle')
         self.assertEqual(post[2]['steps'][0]['expected_hash'], proof_hash)
+
+    PAGE_REQUEST = {'op': 'page_number_apply', 'position': 'bottom-center', 'start_number': 3,
+                    'side_char': 'dash', 'confirm_layout': True}
+    NUMBERING_REQUEST = {'op': 'official_numbering_apply', 'match': 'Item text', 'expected_page': 2,
+                         'level': 3, 'confirm_layout': True}
+
+    async def test_page_number_apply_forwards_exactly_the_supported_fields(self):
+        result = await self.sdk_call('hwpx_command', {'session_id': SID, 'request': dict(self.PAGE_REQUEST)})
+        self.assertFalse(result.is_error, result)
+        posts = [c for c in Backend.calls if c[0] == 'POST']
+        self.assertEqual(len(posts), 1)
+        self.assertEqual(posts[0][1], '/local-cli/command-bundle')
+        self.assertEqual(posts[0][2]['session_id'], SID)
+        self.assertEqual(len(posts[0][2]['steps']), 1)
+        step = posts[0][2]['steps'][0]
+        self.assertEqual(step, {'op': 'page_number_apply', 'label': 'mcp:page-number-apply',
+                                'position': 'bottom-center', 'start_number': 3, 'side_char': 'dash',
+                                'confirm_layout': True})
+        self.assertNotIn('header_footer_checked', step)
+
+    async def test_page_number_apply_fills_documented_defaults(self):
+        request = {'op': 'page_number_apply', 'position': 'top-left', 'confirm_layout': True}
+        result = await self.sdk_call('hwpx_command', {'session_id': SID, 'request': request})
+        self.assertFalse(result.is_error, result)
+        step = [c for c in Backend.calls if c[0] == 'POST'][-1][2]['steps'][0]
+        self.assertEqual((step['start_number'], step['side_char']), (1, 'none'))
+
+    async def test_official_numbering_apply_forwards_exactly_the_supported_fields(self):
+        for level in (1, 2, 3, 4):
+            Backend.calls = []
+            request = {**self.NUMBERING_REQUEST, 'level': level}
+            result = await self.sdk_call('hwpx_command', {'session_id': SID, 'request': request})
+            self.assertFalse(result.is_error, result)
+            posts = [c for c in Backend.calls if c[0] == 'POST']
+            self.assertEqual(len(posts), 1)
+            self.assertEqual(posts[0][1], '/local-cli/command-bundle')
+            self.assertEqual(posts[0][2]['steps'], [{'op': 'official_numbering_apply',
+                                                     'label': 'mcp:official-numbering-apply',
+                                                     'match': 'Item text', 'expected_page': 2,
+                                                     'level': level, 'confirm_layout': True}])
+
+    async def test_new_operations_reject_unsupported_or_malformed_requests_before_the_backend(self):
+        bad_page = [
+            {'header_footer_checked': True}, {'header_footer_checked': False}, {'prefix': '- '}, {'suffix': ' -'},
+            {'side_char': 'bold'}, {'side_char': '*'}, {'position': 'center'}, {'position': 'bottom'},
+            {'start_number': 0}, {'start_number': 65536}, {'start_number': True}, {'start_number': '3'},
+            {'confirm_layout': False}, {'confirm_layout': 1}, {'confirm_layout': 'true'},
+            {'number_format': 'roman'}, {'unknown': 1},
+        ]
+        for override in bad_page:
+            result = await self.sdk_call('hwpx_command', {'session_id': SID, 'request': {**self.PAGE_REQUEST, **override}})
+            self.assertTrue(result.is_error, override)
+        for key in ('position', 'confirm_layout'):
+            request = {k: v for k, v in self.PAGE_REQUEST.items() if k != key}
+            result = await self.sdk_call('hwpx_command', {'session_id': SID, 'request': request})
+            self.assertTrue(result.is_error, key)
+        bad_numbering = [
+            {'level': 0}, {'level': 5}, {'level': True}, {'level': '2'}, {'level': 2.5},
+            {'expected_page': 0}, {'expected_page': True}, {'expected_page': '2'},
+            {'match': ''}, {'match': '   '}, {'match': 'two\nlines'}, {'match': 'x' * 501},
+            {'confirm_layout': False}, {'confirm_layout': 1}, {'format': '1.'}, {'text': 'x'},
+        ]
+        for override in bad_numbering:
+            result = await self.sdk_call('hwpx_command', {'session_id': SID, 'request': {**self.NUMBERING_REQUEST, **override}})
+            self.assertTrue(result.is_error, override)
+        for key in ('match', 'expected_page', 'level', 'confirm_layout'):
+            request = {k: v for k, v in self.NUMBERING_REQUEST.items() if k != key}
+            result = await self.sdk_call('hwpx_command', {'session_id': SID, 'request': request})
+            self.assertTrue(result.is_error, key)
+        self.assertEqual(Backend.calls, [])
+
+    async def test_new_operations_backend_failure_is_an_error_with_a_single_call(self):
+        Backend.mode = 'failure'
+        for request in (self.PAGE_REQUEST, self.NUMBERING_REQUEST):
+            Backend.calls = []
+            result = await self.sdk_call('hwpx_command', {'session_id': SID, 'request': dict(request)})
+            self.assertTrue(result.is_error)
+            posts = [c for c in Backend.calls if c[0] == 'POST']
+            self.assertEqual([p[1] for p in posts], ['/local-cli/command-bundle'])
+
+    async def test_numbering_mutation_unknown_outcome_is_an_error_that_keeps_the_evidence(self):
+        Backend.mode = 'numbering_unknown'
+        result = await self.sdk_call('hwpx_command', {'session_id': SID, 'request': dict(self.PAGE_REQUEST)})
+        self.assertTrue(result.is_error)
+        structured = result.structured_content
+        self.assertFalse(structured['ok'])
+        self.assertIsNone(structured['result'])
+        backend = structured['error']['details']['backend']
+        step = backend['steps'][0]
+        self.assertIs(step['mutation_may_have_persisted'], True)
+        self.assertEqual(step['rollback'], {'attempted': False, 'succeeded': False})
+        posts = [c for c in Backend.calls if c[0] == 'POST']
+        self.assertEqual([p[1] for p in posts], ['/local-cli/command-bundle'])
+
+    async def test_numbering_unknown_outcome_triggers_no_undo_close_or_discard_route(self):
+        Backend.mode = 'numbering_unknown'
+        await self.sdk_call('hwpx_command', {'session_id': SID, 'request': dict(self.PAGE_REQUEST)})
+        await self.sdk_call('hwpx_command', {'session_id': SID, 'request': dict(self.NUMBERING_REQUEST)})
+        paths = [c[1] for c in Backend.calls]
+        for path in paths:
+            for word in ('undo', 'close', 'quit', 'discard', 'clear'):
+                self.assertNotIn(word, path.lower())
+
+    async def test_facade_has_no_queued_job_route_for_numbering(self):
+        response, payload = await self.raw('tools/list')
+        text = json.dumps(payload)
+        self.assertNotIn('edit-and-convert', text)
+        self.assertNotIn('edit_and_convert', text)
+
+    async def test_new_operations_are_advertised_without_the_removed_bypass(self):
+        response, payload = await self.raw('tools/list')
+        self.assertEqual(response.status_code, 200)
+        text = json.dumps(payload)
+        self.assertIn('page_number_apply', text)
+        self.assertIn('official_numbering_apply', text)
+        self.assertNotIn('header_footer_checked', text)
 
     async def test_reconcile_preserves_identifier(self):
         result = await self.sdk_call('hwpx_command', {'session_id': SID,

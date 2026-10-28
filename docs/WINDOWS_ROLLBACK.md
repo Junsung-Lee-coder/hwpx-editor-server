@@ -44,7 +44,7 @@ The local-CLI backend quarantines a document when a native command exceeds its w
 2. Query the session status and call `command_reconcile` with the same session ID and command ID.
 3. If reconciliation is pending, wait and query the same command again. Do not close the session or remove its managed root.
 4. Treat a response that says the native recovery snapshot is unavailable, missing, or failed verification as unknown. Keep the binding and logs for operator review; do not claim that the document was recovered.
-5. Only after a recovery artifact has been committed with its managed relative path, size, and SHA-256 may the session be released and closed. Download any artifact that must be kept before closing, because explicit close removes the server-managed working copy and temporary output.
+5. A committed recovery artifact (managed relative path, size and SHA-256) does not qualify full native closure. Download artifacts to retain; this runtime currently refuses full close even for clean/reconciled sessions and keeps the wrapper, owning STA, registry and managed files. External exact-owned disposable closure requires separate real native operator authority; do not retry Clear/Quit or infer closure from an artifact.
 
 The recovery snapshot is a new native `SaveAs` output. It does not overwrite the source file or silently replace the working copy. A native save that returns anything other than an affirmative success result, produces no regular nonempty file, or changes during custody verification is a recovery failure. A hung or dirty native process remains fenced; do not kill it merely because the client-side timeout elapsed.
 
