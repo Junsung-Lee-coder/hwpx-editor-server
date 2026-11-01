@@ -419,6 +419,13 @@ def build_local_cli_router(*, settings: Any, interactive_sessions: Any, service:
         except Exception as exc:
             raise as_http_error(exc) from exc
 
+    @router.post('/local-cli/numbering-readback')
+    def local_cli_numbering_readback(request: LocalCliCloseRequest) -> dict[str, Any]:
+        try:
+            return service.numbering_readback(session_id=request.session_id)
+        except Exception as exc:
+            raise as_http_error(exc) from exc
+
     @router.post('/local-cli/undo')
     def local_cli_undo(request: LocalCliCloseRequest) -> dict[str, Any]:
         try:

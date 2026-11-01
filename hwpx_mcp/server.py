@@ -5,15 +5,18 @@ No COM, shared CLI cache, installer hooks or background backend process is creat
 from __future__ import annotations
 
 import asyncio
+import base64
 from dataclasses import dataclass
 import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import secrets
 from typing import Any
 from urllib.parse import urlsplit
 import uuid
+import zipfile
 
 import httpx2
 from mcp.server import Server
@@ -25,12 +28,15 @@ from pydantic import ValidationError
 from starlette.datastructures import Headers
 from starlette.responses import JSONResponse, Response
 
+from hwpx_mcp import review as review_rules
+from hwpx_mcp.proof import ProofError
 from hwpx_mcp.schema import MODELS, Envelope
 
 PROTOCOL_VERSION = '2026-07-28'
 MAX_BODY = 1024 * 1024
 MAX_BACKEND = 4 * 1024 * 1024
 MAX_FILE = 25 * 1024 * 1024
+MAX_INLINE_IMAGE = 3 * 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -146,7 +152,8 @@ class Facade:
                     if not raw.is_absolute():
                         raise BackendFailure('SOURCE_NOT_ALLOWED', 'Source must be an absolute path under the configured input root.')
                     source = raw.resolve(strict=True)
-                    if (not source.is_relative_to(self.settings.source_root.resolve()) or
+                    # A saved output under the artifact root can be reopened to check what actually persisted.
+                    if (not (source.is_relative_to(self.settings.source_root.resolve()) or source.is_relative_to(self.settings.artifact_root.resolve())) or
                             source.suffix.lower() not in {'.hwpx', '.hwp'} or not source.is_file()):
                         raise BackendFailure('SOURCE_NOT_ALLOWED', 'Source is not an allowed HWP/HWPX input file.')
                     if not 0 < source.stat().st_size <= MAX_FILE:
@@ -160,6 +167,7 @@ class Facade:
                     Session(session_id=sid)
                     if result.get('working_copy_id') != sid:
                         raise BackendFailure('SESSION_IDENTITY_MISMATCH', 'Open did not return its managed working-copy identity.')
+                    self.record_source(sid, source)
                 else:
                     record = await self.session(http, sid)
                     if name == 'hwpx_status':
@@ -175,6 +183,8 @@ class Facade:
                         if request['op'] == 'command_reconcile':
                             result = await self.request(http, 'POST', '/local-cli/command-reconcile',
                                 json={'session_id': sid, 'command_id': request['command_id']})
+                        elif request['op'] in {'undo', 'redo'}:
+                            result = await self.request(http, 'POST', '/local-cli/' + request['op'], json={'session_id': sid})
                         else:
                             # Reuse the strict existing bundle validation, including
                             # each command's native CAS/proof guard. Never widen it.
@@ -188,6 +198,8 @@ class Facade:
                             raise BackendFailure('SESSION_CLOSED', 'Closed local-CLI sessions are status-queryable but cannot receive new commands.')
                         if args.request.kind == 'frame':
                             result = await self.request(http, 'POST', '/local-cli/screenshot', json={'session_id': sid})
+                        elif args.request.kind == 'review':
+                            result = await self.review(http, sid, args.request)
                         else:
                             result = await self.page_proof(http, sid, args.request.page, args.request.dpi)
                     else:
@@ -200,6 +212,8 @@ class Facade:
                             result = await self.cell_margins_get(http, sid, args)
                         else:
                             result = await self.request(http, 'POST', '/local-cli/' + name.removeprefix('hwpx_'), json=payload)
+                            if name == 'hwpx_save':
+                                result = {**result, 'saved_output': await self.saved_output(http, sid, result)}
                     returned_sid = result.get('session_id')
                     if returned_sid is not None and returned_sid != sid:
                         raise BackendFailure('SESSION_IDENTITY_MISMATCH', 'Backend result identity did not match the requested handle.')
@@ -211,6 +225,8 @@ class Facade:
                 'details': {'session_id': sid, 'backend_may_still_be_running': True}})
         except BackendFailure as exc:
             return envelope(name, sid=sid, error={'code': exc.code, 'message': exc.message, 'details': exc.details})
+        except ProofError as exc:
+            return envelope(name, sid=sid, error={'code': 'RENDER_FAILED', 'message': str(exc), 'details': {}})
         except (OSError, ValueError):
             return envelope(name, sid=sid, error={'code': 'LOCAL_INPUT_OR_ARTIFACT_ERROR', 'message': 'Input or artifact processing failed; no automatic replay was attempted.', 'details': {}})
         finally:
@@ -285,25 +301,141 @@ class Facade:
                                      'Getter success requires a submitted succeeded command.')
         return result
 
-    async def page_proof(self, http, sid, page, dpi):
+    async def download(self, http, route, target, what):
+        async with http.stream('GET', self.settings.backend.rstrip('/') + route) as response:
+            if response.status_code != 200:
+                raise BackendFailure('ARTIFACT_DOWNLOAD_FAILED', f'{what} could not be retrieved.')
+            size = 0
+            with target.open('xb') as stream:
+                async for chunk in response.aiter_bytes():
+                    size += len(chunk)
+                    if size > MAX_FILE:
+                        raise BackendFailure('ARTIFACT_SIZE_LIMIT', f'{what} exceeds 25 MiB; retained partial artifact is not proof.')
+                    stream.write(chunk)
+
+    async def export_pdf(self, http, sid, pdf):
         result = await self.request(http, 'POST', '/local-cli/export', json={'session_id': sid})
         expected = f'/local-cli/session/{sid}/artifact/export'
         if result.get('download_path') != expected:
             raise BackendFailure('ARTIFACT_IDENTITY_MISMATCH', 'Export returned an unexpected artifact route.')
+        await self.download(http, expected, pdf, 'Native PDF artifact')
+        return result
+
+    def session_dir(self, sid):
+        return self.settings.artifact_root / sid
+
+    def record_source(self, sid, source):
+        """Remember what was opened, so a later saved output can be compared with it without Hancom."""
+        folder = self.session_dir(sid)
+        folder.mkdir(parents=True, exist_ok=True)
+        record = {'path': str(source), 'sha256': hashlib.sha256(source.read_bytes()).hexdigest()}
+        try:
+            record['package'] = review_rules.package_inventory(source)
+        except (OSError, ValueError, zipfile.BadZipFile):
+            record['package'] = None  # A .hwp input has no HWPX package; absence is not a comparison result.
+        (folder / 'source.json').write_text(json.dumps(record, ensure_ascii=False, indent=2), encoding='utf-8')
+
+    async def saved_output(self, http, sid, result):
+        """The native save already succeeded; a failed copy is reported beside it and never turns it into a failed save."""
+        try:
+            return {'retrieved': True, **await self.retrieve_saved(http, sid, result)}
+        except BackendFailure as exc:
+            return {'retrieved': False, 'code': exc.code, 'message': exc.message}
+        except (httpx2.TimeoutException, httpx2.TransportError, OSError):
+            return {'retrieved': False, 'code': 'ARTIFACT_DOWNLOAD_FAILED', 'message': 'Saved document could not be copied to the artifact root.'}
+
+    async def retrieve_saved(self, http, sid, result):
+        """Copy the saved working copy out of the managed root, which a successful close removes."""
+        route = f'/local-cli/session/{sid}/artifact/working-copy'
+        if result.get('download_path') != route:
+            raise BackendFailure('ARTIFACT_IDENTITY_MISMATCH', 'Save returned an unexpected artifact route.')
+        folder = self.session_dir(sid) / 'saved'
+        folder.mkdir(parents=True, exist_ok=True)
+        name = Path(str(result.get('filename') or 'document.hwpx')).name
+        target = folder / f'{len(list(folder.iterdir())) + 1:03d}-{name}'
+        await self.download(http, route, target, 'Saved document')
+        saved = {'path': str(target), 'sha256': hashlib.sha256(target.read_bytes()).hexdigest(), 'size_bytes': target.stat().st_size}
+        try:
+            package = review_rules.package_inventory(target)
+        except (OSError, ValueError, zipfile.BadZipFile):
+            package = None
+        saved['package'] = package
+        source_record = self.read_json(self.session_dir(sid) / 'source.json')
+        if package is not None and source_record and source_record.get('package'):
+            saved['compared_with_source'] = review_rules.compare_packages(source_record['package'], package)
+        (self.session_dir(sid) / 'latest-saved.json').write_text(json.dumps(saved, ensure_ascii=False, indent=2), encoding='utf-8')
+        return saved
+
+    @staticmethod
+    def read_json(path):
+        try:
+            value = json.loads(path.read_text(encoding='utf-8'))
+        except (OSError, ValueError):
+            return None
+        return value if isinstance(value, dict) else None
+
+    def review_baseline(self, sid, compare_to):
+        if compare_to is not None:
+            owner, name = compare_to.split('/', 1)
+            baseline = self.read_json(self.settings.artifact_root / owner / name / 'review.json')
+            if baseline is None:
+                raise BackendFailure('REVIEW_NOT_FOUND', 'The requested earlier review does not exist under the artifact root.')
+            return baseline
+        return self.read_json(self.session_dir(sid) / 'review-1' / 'review.json')
+
+    async def review(self, http, sid, request):
+        """One readable answer: native render, numbering as printed, changes and preservation, saved file."""
+        readback = await self.request(http, 'POST', '/local-cli/numbering-readback', json={'session_id': sid})
+        folder = self.session_dir(sid)
+        folder.mkdir(parents=True, exist_ok=True)
+        existing = [int(match.group(1)) for item in folder.iterdir() if (match := re.fullmatch(r'review-([0-9]+)', item.name))]
+        number = max(existing, default=0) + 1
+        baseline = self.review_baseline(sid, request.compare_to)
+        destination = folder / f'review-{number}'
+        destination.mkdir(exist_ok=False)
+        pdf = destination / 'document.pdf'
+        await self.export_pdf(http, sid, pdf)
+        from hwpx_mcp.proof import pdf_page_texts, render_pages
+        pages = await asyncio.to_thread(render_pages, pdf, destination, dpi=request.dpi, max_pages=request.max_pages)
+        texts = await asyncio.to_thread(pdf_page_texts, pdf, max_pages=request.max_pages)
+        from PIL import Image
+        page_rows = []
+        for index, png in enumerate(pages, start=1):
+            with Image.open(png) as image:
+                width, height = image.size
+                image.verify()
+            page_rows.append({'page': index, 'path': str(png), 'sha256': hashlib.sha256(png.read_bytes()).hexdigest(), 'width': width, 'height': height})
+        native_pages = readback.get('page_count')
+        current = {
+            'review_id': f'{sid}/review-{number}', 'session_id': sid, 'document': readback.get('source_filename'),
+            'page_count': native_pages, 'pages_rendered': len(page_rows), 'pages_truncated': isinstance(native_pages, int) and native_pages > len(page_rows),
+            'document_is_modified': readback.get('document_is_modified') is True,
+            'paragraphs': readback.get('paragraphs') or [], 'paragraphs_truncated': readback.get('paragraphs_truncated') is True,
+            'controls': readback.get('controls') or {}, 'evidence': readback.get('evidence') or {},
+            'caret_unchanged': readback.get('caret_unchanged'),
+            'pdf': {'path': str(pdf), 'sha256': hashlib.sha256(pdf.read_bytes()).hexdigest()}, 'pages': page_rows,
+            'rendered_text_available': texts is not None,
+            'saved_output': self.read_json(folder / 'latest-saved.json'),
+        }
+        current['numbering'] = review_rules.rendered_numbering(current['paragraphs'], texts or [])
+        current['numbering_all_match'] = all(row['matches'] for row in current['numbering']) if current['numbering'] and texts is not None else None
+        current['page_numbers'] = review_rules.rendered_page_numbers(readback, texts or [])
+        current['comparison'] = review_rules.compare(baseline, current, current['numbering']) if baseline else None
+        current['summary_text'] = review_rules.summarize(current)
+        summary = destination / 'summary.md'
+        current['summary_path'] = str(summary)
+        current['json_path'] = str(destination / 'review.json')
+        summary.write_text(review_rules.to_markdown(current), encoding='utf-8')
+        (destination / 'review.json').write_text(json.dumps(current, ensure_ascii=False, indent=2), encoding='utf-8')
+        # The structured result stays small; the full paragraph list is in review.json.
+        return {'ok': True, 'session_id': sid, **{key: value for key, value in current.items() if key != 'paragraphs'}}
+
+    async def page_proof(self, http, sid, page, dpi):
         destination = self.settings.artifact_root / sid / uuid.uuid4().hex
         destination.mkdir(parents=True, exist_ok=False)
         pdf = destination / 'document.pdf'
         png = destination / f'page-{page}.png'
-        async with http.stream('GET', self.settings.backend.rstrip('/') + expected) as response:
-            if response.status_code != 200:
-                raise BackendFailure('ARTIFACT_DOWNLOAD_FAILED', 'Native PDF artifact could not be retrieved.')
-            size = 0
-            with pdf.open('xb') as stream:
-                async for chunk in response.aiter_bytes():
-                    size += len(chunk)
-                    if size > MAX_FILE:
-                        raise BackendFailure('ARTIFACT_SIZE_LIMIT', 'Native PDF exceeds 25 MiB; retained partial artifact is not proof.')
-                    stream.write(chunk)
+        result = await self.export_pdf(http, sid, pdf)
         # Reuse the existing Poppler resolver, with an explicit subprocess limit.
         from hwpx_mcp.proof import render_page
         await asyncio.to_thread(render_page, pdf, png, page=page, dpi=dpi)
@@ -391,6 +523,16 @@ class Boundary:
         await self.app(scope, replay, send)
 
 
+def review_content(result, inline_images):
+    """The short summary as its own text, then the first page previews a client can show directly."""
+    content = [types.TextContent(text=result['summary_text'])]
+    for page in result['pages'][:inline_images]:
+        raw = Path(page['path']).read_bytes()
+        if len(raw) <= MAX_INLINE_IMAGE:
+            content.append(types.ImageContent(data=base64.b64encode(raw).decode('ascii'), mime_type='image/png'))
+    return content
+
+
 def build_app(settings: Settings | None = None):
     settings = settings or Settings.from_env()
     facade = Facade(settings)
@@ -403,10 +545,10 @@ def build_app(settings: Settings | None = None):
                 'hwpx_status': 'Inspect explicit session and reconciliation status. May repair stale backend status; not a rollback claim.',
                 'hwpx_find': 'Find text in the explicit managed copy; may move the live cursor or create proof.',
                 'hwpx_where': 'Read native cursor/location; runs work in the existing serialized backend lane.',
-                'hwpx_command': 'Bounded context/readback/selection, guarded cell alignment or margin formatting, native page-number insertion, native outline numbering of one proven paragraph, or command reconciliation. No arbitrary COM, Python or shell.',
-                'hwpx_proof': 'Native frame or one PDF-rendered page. Single-page proof does not establish full-document visual QA.',
-                'hwpx_save': 'Save the managed working copy only; retrieve its download artifact before close.',
-                'hwpx_close': 'Close the explicit managed session and remove its managed artifacts. Download wanted output first.',
+                'hwpx_command': 'Bounded context/readback/selection, guarded cell alignment or margin formatting, native page-number insertion, native outline numbering of one proven paragraph, insertion or removal of one proven body paragraph, undo or redo of the last counted edit, or command reconciliation. No arbitrary COM, Python or shell.',
+                'hwpx_proof': 'Native frame, one PDF-rendered page, or kind=review: a short readable summary, numbering as printed in the native PDF, changes and preservation against an earlier review, every page preview, the PDF and the saved file. Does not edit or save.',
+                'hwpx_save': 'Save the managed working copy and copy the saved file to the artifact root; the result gives its path, hash and a comparison with the opened file.',
+                'hwpx_close': 'Close the explicit clean managed session and remove its managed files. The file saved by hwpx_save stays under the artifact root.',
                 'hwpx_cell_margins_get': 'One exact-target four-side cell-margin observation in the existing live managed session; navigation is restored and no cache, persistence or freshness guarantee is implied.',
             }[name], input_schema=model.model_json_schema(), output_schema=Envelope.model_json_schema(),
             annotations=types.ToolAnnotations(read_only_hint=name in {'hwpx_health', 'hwpx_cell_margins_get'},
@@ -430,8 +572,10 @@ def build_app(settings: Settings | None = None):
                 'details': {'fields': [list(e['loc']) for e in exc.errors()][:16]}})
         else:
             value = await facade.execute(params.name, args)
-        return types.CallToolResult(content=[types.TextContent(text=json.dumps(value, ensure_ascii=False))],
-                                    structured_content=value, is_error=not value['ok'])
+        content = [types.TextContent(text=json.dumps(value, ensure_ascii=False))]
+        if value['ok'] and params.name == 'hwpx_proof' and args.request.kind == 'review':
+            content.extend(review_content(value['result'], args.request.inline_images))
+        return types.CallToolResult(content=content, structured_content=value, is_error=not value['ok'])
 
     server = Server('hwpx-mcp-adapter', version='0.1.0', on_list_tools=list_tools, on_call_tool=call_tool)
     app = server.streamable_http_app(streamable_http_path='/mcp', json_response=False, stateless_http=True,

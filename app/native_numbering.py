@@ -753,12 +753,27 @@ def _page_restart_problems(
     return [] if bound else ['the new page restart does not match the requested start in the first paragraph of the single section']
 
 
+def _page_number_definition_problems(
+    before: Mapping[str, list[tuple[str, str]]], after: Mapping[str, list[tuple[str, str]]]
+) -> list[str]:
+    """PageNumPos may add the page number's own font and character shape; no existing definition may change."""
+    problems: list[str] = []
+    for name in sorted(set(before) | set(after)):
+        removed, added = _multiset_delta(before.get(name, []), after.get(name, []))
+        if not removed and not added:
+            continue
+        if removed or name not in {'facenamelist', 'charshapelist'} or (name == 'charshapelist' and len(added) > 1):
+            problems.append(f'{name} changed')
+    return problems
+
+
 def _page_number_delta_problems(
     before: Mapping[str, Any], after: Mapping[str, Any], *, request_start: int | None = None, require_restart: bool = False
 ) -> list[str]:
     problems = _raw_field_problems(
-        before, after, ('header_footer', 'body_sha256', 'styles_sha256', 'numberings_sha256', 'bindata_sha256', 'definitions', 'outline_shapes')
+        before, after, ('header_footer', 'body_sha256', 'styles_sha256', 'numberings_sha256', 'bindata_sha256', 'outline_shapes')
     )
+    problems.extend(_page_number_definition_problems(before['definitions'], after['definitions']))
     restart_evidence = _has_restart_evidence(before) and _has_restart_evidence(after)
     digest_key = 'restart_stripped_sha256' if restart_evidence else 'stripped_sha256'
     if restart_evidence:

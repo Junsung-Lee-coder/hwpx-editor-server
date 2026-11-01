@@ -69,6 +69,7 @@ from app.local_cli_runtime import (
     save_document,
     snapshot_live_location,
 )
+from app import native_paragraph_edit
 from app.local_cli_type_guard import type_insert_guard_reason
 from app.command_packages.runtime import get_command_package_registry
 from app.raw_readback import RawReadbackMismatch, build_raw_target_readback
@@ -130,6 +131,11 @@ _BUNDLE_UNDO_POLICY: dict[str, str] = {
     'layout_exact': 'refuse',
     'object_insert_exact': 'refuse',
     'table_structure_exact': 'single_native_edit',
+    # Native one-Undo proven for one ParagraphShape and one PageNumPos; a definition plus a paragraph write is not one step.
+    'official_numbering_apply': 'single_native_edit',
+    'page_number_apply': 'single_native_edit',
+    'paragraph_insert_exact': 'single_native_edit',
+    'paragraph_remove_exact': 'single_native_edit',
 }
 _UNDO_UNVERIFIED_BUNDLE_OPS = frozenset(_BUNDLE_UNDO_POLICY)
 
@@ -2764,6 +2770,8 @@ class LocalCliService(
                 'level',
                 'confirm_layout',
             },
+            'paragraph_insert_exact': {'op', 'operation', 'label', 'match', 'expected_page', 'text', 'position', 'confirm_layout'},
+            'paragraph_remove_exact': {'op', 'operation', 'label', 'match', 'expected_page', 'confirm_remove'},
             'paragraph_delete_exact': {
                 'op',
                 'operation',
@@ -3650,7 +3658,8 @@ class LocalCliService(
 
         # Numbering publishes intent at actual Execute boundaries. Other
         # packages are conservative before invocation, never error callbacks.
-        if op not in {'page_number_apply', 'official_numbering_apply', 'control_inventory', 'table_frame_inventory', 'style_inspect', 'where'}:
+        if op not in {'page_number_apply', 'official_numbering_apply', 'paragraph_insert_exact', 'paragraph_remove_exact',
+                      'control_inventory', 'table_frame_inventory', 'style_inspect', 'where'}:
             if handle.mark_mutating_intent is not None:
                 handle.mark_mutating_intent()
         package = self.command_packages.get(op)
@@ -7109,13 +7118,14 @@ class LocalCliService(
                     # Producer invocation intent is independent of error tags.
                     from app.native_numbering import NativeNumberingRefusal
                     from app.local_cli_bundle_numbering import _NumberingPreEditHold, _NumberingSemanticRefusal
-                    numbering = step.get('op') in {'official_numbering_apply', 'page_number_apply'}
-                    target_refused = step.get('op') == 'official_numbering_apply' and (
+                    numbering = step.get('op') in {'official_numbering_apply', 'page_number_apply', 'paragraph_insert_exact', 'paragraph_remove_exact'}
+                    target_refused = step.get('op') in {'official_numbering_apply', 'paragraph_insert_exact', 'paragraph_remove_exact'} and (
                         type(exc) is NativeNumberingRefusal or type(exc) is _NumberingSemanticRefusal
                     )
                     preedit_hold = step.get('op') == 'official_numbering_apply' and type(exc) is _NumberingPreEditHold
                     mutation_may_have_persisted = handle.mutation_intent or (
-                        step.get('op') == 'official_numbering_apply' and not target_refused and not preedit_hold
+                        step.get('op') in {'official_numbering_apply', 'paragraph_insert_exact', 'paragraph_remove_exact'}
+                        and not target_refused and not preedit_hold
                     )
                     held = False
                     if (mutation_may_have_persisted or (numbering and not target_refused)) and handle.hold_native_custody is not None:
@@ -7167,6 +7177,10 @@ class LocalCliService(
                         from app.local_cli_runtime import _native_diagnostic
                         status['refusal_code'] = ('semantic_refusal' if type(exc) is _NumberingSemanticRefusal
                                                   else _native_diagnostic('bundle_step', exc)['refusal_code'])
+                    if numbering:
+                        # Fixed labels only, so a caller can see the stopping phase without opening the journal.
+                        from app.local_cli_runtime import _native_diagnostic
+                        status['failure_diagnostic'] = _native_diagnostic('bundle_step', exc)
                     if held:
                         status['native_custody_held'] = True
                         custody_held = True
@@ -7454,6 +7468,25 @@ class LocalCliService(
             'session_id': resolved_session_id,
             'filename': self._artifact_name(kind='export', source_filename=str(binding.get('source_filename') or 'document.hwpx')),
             'download_path': self._artifact_download_path(session_id=resolved_session_id, kind='export'),
+        }
+
+    def numbering_readback(self, *, session_id: str | None = None) -> dict[str, Any]:
+        """Read-only numbering, page-number and preservation facts for a readable review of the live document."""
+        binding = self._load_active_binding(session_id=session_id)
+
+        def _handler(handle: LocalCliRuntimeHandle) -> dict[str, Any]:
+            return native_paragraph_edit.numbering_readback(handle.hwp, protection=self._numbering_protection_reader(handle))
+
+        result = self._execute_live(binding=binding, command_name='numbering-readback', task_label='local_cli.numbering_readback', handler=_handler)
+        result.pop('_local_cli_command', None)
+        return {
+            'ok': True,
+            'session_id': self._binding_session_id(binding),
+            'schema_version': 'local-cli/numbering-readback/v1',
+            'read_only': True,
+            'working_copy_dirty': binding.get('working_copy_dirty') is True,
+            'source_filename': str(binding.get('source_filename') or ''),
+            **result,
         }
 
     def where(self, *, session_id: str | None = None) -> dict[str, Any]:

@@ -98,7 +98,7 @@ _KNOWN_NON_ENVELOPE_COMMANDS = {
     'cursormove', 'cell-replace', 'type', 'anchor-insert', 'figure-section',
     'image', 'image-at-anchor', 'fontsize', 'bold', 'font', 'bullet', 'table',
     'list', 'action', 'undo', 'redo', 'where', 'save', 'export', 'screenshot',
-    'insert-text-file', 'open', 'close',
+    'insert-text-file', 'open', 'close', 'numbering-readback',
 }
 _MUTATING_COMMANDS = {
     'replace', 'cell-replace', 'type', 'anchor-insert', 'figure-section',
@@ -171,6 +171,7 @@ def _native_diagnostic(site: object, error: BaseException) -> dict[str, str]:
                             'native_parameters_unavailable', 'native_unavailable', 'outline_definition_unreadable',
                             'outline_usage_unprovable', 'paragraph_shape_unreadable', 'preservation_unprovable',
                             'protection_unavailable', 'section_count_unprovable', 'target_ambiguous', 'target_moved',
+                            'target_has_controls', 'target_is_last_paragraph', 'target_at_document_start', 'neighbor_has_break',
                             'target_not_found', 'target_not_in_body', 'target_unidentifiable', 'target_unlocatable',
                             'text_readback_unavailable',
                         ):

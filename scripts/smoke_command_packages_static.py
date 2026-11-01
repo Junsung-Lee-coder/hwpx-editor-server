@@ -71,6 +71,8 @@ _VALIDATION_SAMPLES: dict[str, dict[str, object]] = {
     'paragraph_style_apply_exact': {'match': 'hello', 'expected_page': 1, 'confirm_layout': True},
     'page_number_apply': {'position': 'bottom-center', 'start_number': 1, 'side_char': 'none', 'confirm_layout': True},
     'official_numbering_apply': {'match': 'hello', 'expected_page': 1, 'level': 1, 'confirm_layout': True},
+    'paragraph_insert_exact': {'match': 'hello', 'expected_page': 1, 'text': 'next', 'position': 'after', 'confirm_layout': True},
+    'paragraph_remove_exact': {'match': 'hello', 'expected_page': 1, 'confirm_remove': True},
     'paragraph_delete_exact': {'match': 'hello', 'expected_page': 1, 'confirm_remove': True},
     'paragraph_join_previous_exact': {'match': 'hello', 'expected_page': 1, 'confirm_layout': True},
     'paragraph_join_next_exact': {'match': 'hello', 'expected_page': 1, 'confirm_layout': True},

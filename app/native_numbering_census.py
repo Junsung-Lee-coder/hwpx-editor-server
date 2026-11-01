@@ -265,6 +265,27 @@ class _Resolver:
         self._memo: dict[tuple[str, int], str] = {}
         self._active: set[tuple[str, int]] = set()
         self._collect(root, body, 0)
+        self.fonts = self._font_table()
+
+    def _font_table(self) -> dict[tuple[str, str], str]:
+        """Language-scoped font content by native Id; Hancom renumbers these Ids when it adds a font."""
+        table: dict[tuple[str, str], str] = {}
+        for face in self.items.get('facenamelist', []):
+            lang = (_attr(face, 'lang') or '').strip().lower()
+            for font in face:
+                font_id = _attr(font, 'id') if _name(font) == 'font' else None
+                if lang and font_id is not None:
+                    table[(lang, font_id.strip())] = _digest_tokens(self.emit(font, root_item=True) or [])
+        return table
+
+    def font_items(self) -> list[str]:
+        """One id-independent digest per language font, so an added font never reads as a changed one."""
+        return [
+            _digest_tokens([(_attr(face, 'lang') or '').strip().lower(), *(self.emit(font, root_item=True) or [])])
+            for face in self.items.get('facenamelist', [])
+            for font in face
+            if _name(font) == 'font'
+        ]
 
     def _collect(self, element: ET.Element, body: ET.Element, depth: int) -> None:
         if depth > _MAX_DEPTH:
@@ -338,6 +359,7 @@ class _Resolver:
         mask_shape: bool = False,
         shell: bool = False,
         root_paragraph: bool = False,
+        drop_empty_runs: bool = False,
         depth: int = 0,
     ) -> list[str] | None:
         if depth > _MAX_DEPTH:
@@ -347,6 +369,8 @@ class _Resolver:
         if strip and name in PAGE_NUMBER_ELEMENTS and not is_root:
             return None
         if strip_restart and not is_root and _is_bare_page_restart(element):
+            return None
+        if drop_empty_runs and not is_root and name == 'text' and len(element) == 0 and not (element.text or '').strip():
             return None
         if prune and name == 'p' and not is_root:
             return ['<p/>']
@@ -365,7 +389,9 @@ class _Resolver:
                 continue
             if mask_shape and root_item and depth == 0 and key in _MASKED_SHAPE_ATTRS:
                 continue
-            if key in _REFERENCE_LISTS:
+            if name == 'fontid' and (key, value.strip()) in self.fonts:
+                out.append(f'{key}=@{self.fonts[(key, value.strip())]}')
+            elif key in _REFERENCE_LISTS:
                 masked = mask_shape and root_paragraph and depth == 0 and key == 'parashape'
                 out.append(f'{key}=@{self.definition(_REFERENCE_LISTS[key], value, masked=masked)}')
             elif key == 'style' and name == 'p':
@@ -385,6 +411,7 @@ class _Resolver:
                 strip_restart=strip_restart,
                 prune=prune,
                 shell=shell,
+                drop_empty_runs=drop_empty_runs,
                 depth=depth + 1,
             )
             if sub is None:
@@ -440,6 +467,10 @@ def _definitions(resolver: _Resolver) -> dict[str, list[dict[str, str]]] | None:
     try:
         result: dict[str, list[dict[str, str]]] = {}
         for list_name, elements in resolver.items.items():
+            if list_name == 'facenamelist':
+                result[list_name] = sorted(
+                    ({'sha': digest, 'shell': digest} for digest in resolver.font_items()), key=lambda entry: entry['sha'])
+                continue
             entries = []
             for element in elements:
                 sha = resolver.item_digest(element)
@@ -462,6 +493,26 @@ def _outline_shapes(resolver: _Resolver, body: ET.Element) -> list[str] | None:
         return shapes
     except _Unresolved:
         return None
+
+
+def _styles_digest(root: ET.Element, resolver: _Resolver) -> str | None:
+    """Styles by resolved definition content; a renumbered CharShape/ParaShape reference is not a style change."""
+    if not any(_name(element) == 'stylelist' for element in root.iter()):
+        return None
+    try:
+        return _digest_tokens([resolver.item_digest(element) for element in resolver.items.get('stylelist', [])])
+    except _Unresolved:
+        return _lists_digest(root, {'stylelist'})
+
+
+def _paragraph_structure(element: ET.Element) -> dict[str, Any]:
+    """Fixed facts a paragraph edit must know: native break flags and inline controls by element name."""
+    controls = [_name(child) for run in element if _name(run) == 'text' for child in run if _name(child) != 'char']
+    return {
+        'page_break': (_attr(element, 'pagebreak') or '').strip().lower() == 'true',
+        'column_break': (_attr(element, 'columnbreak') or '').strip().lower() == 'true',
+        'inline_controls': controls,
+    }
 
 
 def parse_hwpml2x_census(text: Any) -> dict[str, Any]:
@@ -488,6 +539,7 @@ def parse_hwpml2x_census(text: Any) -> dict[str, Any]:
     resolver = _Resolver(root, body)
     outline_bindings_complete = _outline_bindings_complete(resolver, body)
     raw_paragraphs: list[tuple[int, str, str | None, ET.Element]] = []
+    body_positions: dict[int, int] = {}
     header_footer_elements: list[ET.Element] = []
     section_counter = [-1]
 
@@ -503,6 +555,9 @@ def parse_hwpml2x_census(text: Any) -> dict[str, Any]:
                 header_footer_elements.append(child)
             elif name == 'p':
                 raw_paragraphs.append((max(section, 0), _para_text(child), _attr(child, 'parashape'), child))
+                if _name(element) == 'section':
+                    # Direct section paragraphs are the native list-0 paragraphs, in document order.
+                    body_positions[id(child)] = len(body_positions)
                 visit(child, section, depth + 1)
             else:
                 visit(child, section, depth + 1)
@@ -520,6 +575,7 @@ def parse_hwpml2x_census(text: Any) -> dict[str, Any]:
             masked = resolver.digest(element, prune=True, root_paragraph=True, mask_shape=True)
             stripped = resolver.digest(element, prune=True, root_paragraph=True, strip=True)
             restart_stripped = resolver.digest(element, prune=True, root_paragraph=True, strip=True, strip_restart=True)
+            content = resolver.digest(element, prune=True, root_paragraph=True, mask_shape=True, strip=True, strip_restart=True, drop_empty_runs=True)
         except _Unresolved:
             paragraphs = None
             break
@@ -548,6 +604,9 @@ def parse_hwpml2x_census(text: Any) -> dict[str, Any]:
                 'masked_sha256': masked,
                 'stripped_sha256': stripped,
                 'restart_stripped_sha256': restart_stripped,
+                'content_sha256': content,
+                'body_index': body_positions.get(id(element)),
+                **_paragraph_structure(element),
             }
         )
 
@@ -567,7 +626,7 @@ def parse_hwpml2x_census(text: Any) -> dict[str, Any]:
     return {
         'header_footer': header_footer,
         'body_sha256': _digest_tokens([text_value for _section, text_value, _shape, _element in raw_paragraphs]),
-        'styles_sha256': _lists_digest(root, {'stylelist'}),
+        'styles_sha256': _styles_digest(root, resolver),
         'numberings_sha256': _lists_digest(root, {'numberinglist', 'bulletlist'}),
         'bindata_sha256': _lists_digest(root, {'bindatalist'}),
         # Explicitly fingerprint both media metadata and payload storage, including

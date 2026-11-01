@@ -131,13 +131,46 @@ class OfficialNumberingStep(Closed):
         return self
 
 
+class _ParagraphTarget(Closed):
+    match: Annotated[str, Field(min_length=1, max_length=500)]
+    expected_page: int = Field(ge=1, le=10000)
+
+    @model_validator(mode='after')
+    def require_single_line_match(self):
+        if not self.match.strip() or '\n' in self.match or '\r' in self.match:
+            raise ValueError('match must be a non-blank single line')
+        return self
+
+
+class ParagraphInsertStep(_ParagraphTarget):
+    op: Literal['paragraph_insert_exact']
+    label: Label = 'mcp:paragraph-insert-exact'
+    text: Annotated[str, Field(min_length=1, max_length=4000)]
+    position: Literal['after', 'before'] = 'after'
+    confirm_layout: Literal[True]
+
+
+class ParagraphRemoveStep(_ParagraphTarget):
+    op: Literal['paragraph_remove_exact']
+    label: Label = 'mcp:paragraph-remove-exact'
+    confirm_remove: Literal[True]
+
+
+class UndoStep(Closed):
+    op: Literal['undo']
+
+
+class RedoStep(Closed):
+    op: Literal['redo']
+
+
 class Reconcile(Closed):
     op: Literal['command_reconcile']
     command_id: Annotated[str, Field(min_length=1, max_length=128, pattern=r'^[a-zA-Z0-9_.:-]+$')]
 
 
 class Command(Session):
-    request: Annotated[ContextStep | SelectionStep | ReadbackStep | CellFormatStep | PageNumberStep | OfficialNumberingStep | Reconcile,
+    request: Annotated[ContextStep | SelectionStep | ReadbackStep | CellFormatStep | PageNumberStep | OfficialNumberingStep | ParagraphInsertStep | ParagraphRemoveStep | UndoStep | RedoStep | Reconcile,
                        Field(discriminator='op')]
 
 
@@ -151,8 +184,16 @@ class PageProof(Closed):
     dpi: int = Field(default=160, ge=72, le=600)
 
 
+class ReviewProof(Closed):
+    kind: Literal['review']
+    dpi: int = Field(default=100, ge=72, le=300)
+    max_pages: int = Field(default=30, ge=1, le=200)
+    inline_images: int = Field(default=3, ge=0, le=8)
+    compare_to: Annotated[str, Field(pattern=r'^[a-f0-9]{32}/review-[0-9]{1,6}$')] | None = None
+
+
 class Proof(Session):
-    request: Annotated[FrameProof | PageProof, Field(discriminator='kind')]
+    request: Annotated[FrameProof | PageProof | ReviewProof, Field(discriminator='kind')]
 
 
 class Error(Closed):

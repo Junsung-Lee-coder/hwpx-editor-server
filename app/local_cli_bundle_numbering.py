@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any
 
-from app import native_numbering, native_numbering_census
+from app import native_numbering, native_numbering_census, native_paragraph_edit
 from app.local_cli_runtime import LocalCliRuntimeError
 from app.local_cli_bundle_paragraphs import _NumberingTargetNotFound
 from app.local_cli_service_support import LocalCliMutationError
@@ -125,8 +125,64 @@ class LocalCliBundleNumberingMixin:
             'read_only': False,
             'mutation': 'page-number-apply',
             'result': result,
+            'undo': {'native_editing_actions': 1 if result.get('changed') else 0},
             'warnings': [_RENDER_PROOF_WARNING, *result.get('warnings', [])],
         }
+
+    def _bundle_paragraph_edit(self, hwp: Any, step: dict[str, Any], *, validate: Callable[..., dict[str, Any]], edit: Callable[..., dict[str, Any]],
+                               schema: str, mutation: str) -> dict[str, Any]:
+        try:
+            validated = validate(step)
+            original = native_numbering._read_target_state(hwp)  # noqa: SLF001
+            if original is None:
+                raise LocalCliRuntimeError('Paragraph edit target state is unproven.')
+            target = self._find_text_on_expected_page(hwp, match=validated['match'], expected_page=validated['expected_page'], numbering_guard=True)
+            target = _plain_proof(target)
+            if type(target) is not dict or target.get('page') != validated['expected_page']:
+                raise LocalCliRuntimeError('Paragraph edit target page is unproven.')
+            result = edit(validated)
+        except native_numbering.NativeNumberingMutationError as exc:
+            raise _mutation_error(exc) from exc
+        except native_numbering.NativeNumberingInputError as exc:
+            raise _runtime_error(exc) from exc
+        except _NumberingTargetNotFound as exc:
+            native_numbering._set_pos(hwp, original[0])  # noqa: SLF001
+            raise native_numbering.NativeNumberingRefusal('No target on the expected page.', code='target_not_found') from exc
+        except native_numbering.NativeNumberingRefusal:
+            # Raised only before the native edit; the temporary finder caret goes back before the refusal is reported.
+            native_numbering._set_pos(hwp, original[0])  # noqa: SLF001
+            raise
+        return {
+            'schema_version': schema,
+            'read_only': False,
+            'mutation': mutation,
+            'match': validated['match'],
+            'expected_page': validated['expected_page'],
+            'result': result,
+            'undo': {'native_editing_actions': len(result['native_actions'])},
+            'warnings': [_RENDER_PROOF_WARNING],
+        }
+
+    def _bundle_paragraph_insert_exact(
+        self, hwp: Any, step: dict[str, Any], protection: Callable[[], Any], on_mutating: Callable[[], None] | None = None
+    ) -> dict[str, Any]:
+        return self._bundle_paragraph_edit(
+            hwp, step, validate=native_paragraph_edit.validate_insert_step,
+            edit=lambda item: native_paragraph_edit.insert_paragraph(
+                hwp, match=item['match'], text=item['text'], position=item['position'],
+                protection=lambda: _guard_protection(protection), on_mutating=on_mutating),
+            schema='local-cli/paragraph-insert-exact/v1', mutation='paragraph-insert-exact',
+        )
+
+    def _bundle_paragraph_remove_exact(
+        self, hwp: Any, step: dict[str, Any], protection: Callable[[], Any], on_mutating: Callable[[], None] | None = None
+    ) -> dict[str, Any]:
+        return self._bundle_paragraph_edit(
+            hwp, step, validate=native_paragraph_edit.validate_remove_step,
+            edit=lambda item: native_paragraph_edit.remove_paragraph(
+                hwp, match=item['match'], protection=lambda: _guard_protection(protection), on_mutating=on_mutating),
+            schema='local-cli/paragraph-remove-exact/v1', mutation='paragraph-remove-exact',
+        )
 
     def _bundle_official_numbering_apply(
         self, hwp: Any, step: dict[str, Any], protection: Callable[[], Any] | None = None, on_mutating: Callable[[], None] | None = None
@@ -282,6 +338,7 @@ class LocalCliBundleNumberingMixin:
             'level': validated['level'],
             'target': {'page': target.get('page'), 'finder': target},
             'result': result,
+            'undo': {'native_editing_actions': len(result['native_actions'])},
             'numbering_format_enforced': result['numbering_format_enforced'],
             'numbering_format': result['numbering_format'],
             'warnings': [_RENDER_PROOF_WARNING],

@@ -29,6 +29,8 @@ BUNDLE_SERVER_OPS = frozenset(
         'paragraph_style_apply_exact',
         'page_number_apply',
         'official_numbering_apply',
+        'paragraph_insert_exact',
+        'paragraph_remove_exact',
         'paragraph_delete_exact',
         'control_delete_exact',
         'exact_control_select_proof',
@@ -115,6 +117,10 @@ _STEP_KEYS: dict[str, frozenset[str]] = {
     'official_numbering_apply': frozenset(
         {'op', 'operation', 'label', 'match', 'expected_page', 'level', 'confirm_layout'}
     ),
+    'paragraph_insert_exact': frozenset(
+        {'op', 'operation', 'label', 'match', 'expected_page', 'text', 'position', 'confirm_layout'}
+    ),
+    'paragraph_remove_exact': frozenset({'op', 'operation', 'label', 'match', 'expected_page', 'confirm_remove'}),
     'paragraph_delete_exact': frozenset(
         {
             'op',
