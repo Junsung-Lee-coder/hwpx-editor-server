@@ -137,6 +137,15 @@ class Comparison(unittest.TestCase):
         result = built(OUTLINE, ['1. Alpha\n'], page_count=5, baseline=baseline)
         self.assertEqual(result['comparison']['changes'], [])
         self.assertEqual(result['comparison']['numbers_not_compared'], 1)
+        self.assertEqual(result['comparison']['state'], 'partial')
+        self.assertIn('수준만 비교', result['summary_text'])
+
+    def test_a_partial_baseline_keeps_a_later_whole_review_from_reading_as_complete(self):
+        baseline = built(OUTLINE, ['1. Alpha\n'], page_count=2)
+        result = built(OUTLINE, ['1. Alpha\n', '2. Beta\n'], baseline=baseline)
+        self.assertEqual(result['comparison']['numbers_not_compared'], 1)
+        self.assertEqual(result['review_status'], 'partial')
+        self.assertIs(result['numbering_all_match'], True)
 
     def test_an_uncovered_label_with_a_changed_level_is_still_a_change(self):
         baseline = self.base()

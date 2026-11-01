@@ -194,7 +194,7 @@ def compare(baseline: dict[str, Any], current: dict[str, Any], rows: list[dict[s
     cells_after = [item['text'] for item in after if not item.get('in_body')]
     return {
         **result,
-        'state': 'partial' if partial or 'unproven' in evidence.values() or controls is None else 'complete',
+        'state': 'partial' if partial or uncompared or 'unproven' in evidence.values() or controls is None else 'complete',
         'changes': changes,
         'numbers_not_compared': uncompared,
         'nested_paragraphs_identical': None if partial else cells_before == cells_after,
@@ -348,10 +348,12 @@ def summarize(review: dict[str, Any]) -> str:
         state = comparison.get('state', 'complete')
         if state == 'unverified':
             lines.append(f'{label} 대비: 문단을 비교하지 못했습니다')
-        elif comparison.get('nested_paragraphs_identical') is None and state == 'partial':
+        elif state == 'partial' and (comparison.get('nested_paragraphs_identical') is None or comparison.get('numbers_not_compared')):
             lines.append(f"{label} 대비: 확인한 범위에서 {found or '바뀐 문단 없음'}")
         else:
             lines.append(f"{label} 대비: {found or '바뀐 문단 없음'}")
+        if comparison.get('numbers_not_compared'):
+            lines.append(f"번호 {comparison['numbers_not_compared']}개는 인쇄된 번호를 읽지 못한 쪽이 있어 수준만 비교했습니다.")
         changed = [_EVIDENCE_LABELS[name] for name, value in comparison['evidence'].items() if value == 'changed']
         unproven = [_EVIDENCE_LABELS[name] for name, value in comparison['evidence'].items() if value == 'unproven']
         if changed:
