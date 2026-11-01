@@ -187,6 +187,9 @@ class FormatHwp:
                         fonts.append(para['end']['Font'])
 
         visit(self.body)
+        # Hancom numbers shapes in its own order, so adding one can renumber the shape a definition names.
+        if isinstance(self.explicit_number_mark, dict) and self.explicit_number_mark not in chars:
+            chars.append(self.explicit_number_mark)
         return chars, paras, fonts
 
     def _char_xml(self, index: int, props: dict[str, Any], fonts: list[str]) -> str:
@@ -264,7 +267,8 @@ class FormatHwp:
         bullet = '<BULLETLIST Count="1"><BULLET Char="●" Id="1"><PARAHEAD Alignment="Left" AutoIndent="true" TextOffset="50" TextOffsetType="percent" UseInstWidth="false" WidthAdjust="0"/></BULLET></BULLETLIST>'
         head = head.replace('</NUMBERINGLIST>', '</NUMBERINGLIST>' + bullet, 1)
         if self.explicit_number_mark:
-            head = head.replace('<PARAHEAD ', '<PARAHEAD CharShape="0" ')
+            named = chars.index(self.explicit_number_mark) if isinstance(self.explicit_number_mark, dict) else 0
+            head = head.replace('<PARAHEAD ', f'<PARAHEAD CharShape="{named}" ')
         head = re.sub(r'<PARASHAPELIST .*?</PARASHAPELIST>', lambda _m: f'<PARASHAPELIST Count="{len(paras)}">' + ''.join(self._para_xml(i, p) for i, p in enumerate(paras)) + '</PARASHAPELIST>', head, flags=re.S)
         return head + f'<BODY><SECTION Id="0">{body}</SECTION>' + _CAPTURED[_BODY_END:]
 

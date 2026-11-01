@@ -67,6 +67,25 @@ class NumberMarkDefault(unittest.TestCase):
         self.assertEqual(value['result']['number_marks'][0]['source'], 'definition')
         self.assertIs(value['result']['number_marks'][0]['changed'], False)
 
+    def test_a_renumbered_shape_named_by_a_definition_is_not_a_changed_definition(self) -> None:
+        for match in ('번호 앞글', '번호 앞글 꼬리글'):
+            with self.subTest(match=match):
+                hwp = numbered_document()
+                hwp.explicit_number_mark = char(Height=1200, TextColor=0xC00000)
+                value = result_of(self, character(hwp, match=match, **RED))
+                self.assertEqual(len(hwp.executes()), 1)
+                mark = value['result']['number_marks'][0]
+                self.assertEqual((mark['source'], mark['changed'], mark['after']['size_pt'], mark['after']['text_color']), ('definition', False, 12.0, '#0000C0'))
+
+    def test_a_definition_that_really_names_another_shape_is_still_a_change(self) -> None:
+        from app.native_numbering_census import parse_hwpml2x_census
+        hwp = numbered_document()
+        hwp.explicit_number_mark = char(Height=1200)
+        first = parse_hwpml2x_census(hwp.get_text_file('HWPML2X', ''))
+        hwp.explicit_number_mark = char(Height=1300)
+        second = parse_hwpml2x_census(hwp.get_text_file('HWPML2X', ''))
+        self.assertNotEqual(first['numberings_sha256'], second['numberings_sha256'])
+
     def test_values_the_mark_already_has_need_no_restoring(self) -> None:
         hwp = numbered_document()
         result_of(self, Flow(hwp).step(**CHARACTER, match='굵끝 앞글 꼬리글', bold=True))

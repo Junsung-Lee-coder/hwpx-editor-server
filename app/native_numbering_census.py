@@ -264,6 +264,17 @@ def _lists_digest(root: ET.Element, names: set[str]) -> str | None:
     return _digest_tokens([_element_digest(element) for element in found])
 
 
+def _numberings_digest(root: ET.Element, resolver: '_Resolver') -> str | None:
+    """Definitions by content: a mark shape a definition names is renumbered when Hancom adds a character shape, and that is no change (observed on Hancom 2024)."""
+    found = [element for element in root.iter() if _name(element) in {'numberinglist', 'bulletlist'}]
+    if not found:
+        return None
+    try:
+        return _digest_tokens([resolver.digest(element) for element in found])
+    except _Unresolved:
+        return _lists_digest(root, {'numberinglist', 'bulletlist'})
+
+
 def _run_is_empty(run: ET.Element) -> bool:
     """No text and at most empty CHAR children; native Undo leaves one such run, with no element and nothing to show (observed on Hancom 2024)."""
     return not (run.text or '').strip() and all(
@@ -674,7 +685,7 @@ def parse_hwpml2x_census(text: Any) -> dict[str, Any]:
         'header_footer': header_footer,
         'body_sha256': _digest_tokens([text_value for _section, text_value, _shape, _element in raw_paragraphs]),
         'styles_sha256': _styles_digest(root, resolver),
-        'numberings_sha256': _lists_digest(root, {'numberinglist', 'bulletlist'}),
+        'numberings_sha256': _numberings_digest(root, resolver),
         'bindata_sha256': _lists_digest(root, {'bindatalist'}),
         # Explicitly fingerprint both media metadata and payload storage, including
         # observed absence. Unlike bindata_sha256=None, this is usable evidence

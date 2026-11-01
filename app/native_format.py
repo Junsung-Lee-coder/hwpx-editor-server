@@ -57,8 +57,6 @@ from app.native_numbering_census import (
     _Resolver,
     _Unresolved,
     _attr,
-    _digest_tokens,
-    _element_digest,
     _is_bare_page_restart,
     _lower_attrs,
     _name,
@@ -243,14 +241,6 @@ def _element_facts(element: ET.Element) -> dict[str, str]:
     return {key: value for key, value in _lower_attrs(element).items() if key != 'id'}
 
 
-def _content_digest(element: ET.Element) -> str:
-    """A definition by its content, so a renumbered definition is not a changed one."""
-    plain = ET.Element(element.tag, {key: value for key, value in element.attrib.items() if key.rsplit('}', 1)[-1].lower() != 'id'})
-    plain.text = element.text
-    plain.extend(list(element))
-    return _element_digest(plain)
-
-
 def _by_content(facts: dict[str, str], name: str, definitions: Mapping[str, str]) -> None:
     if name in facts:
         facts[name] = definitions.get(facts[name].strip(), facts[name])
@@ -289,13 +279,21 @@ def _para_props(element: ET.Element, fills: Mapping[str, str], tabs: Mapping[str
     return props
 
 
-def _definition_digests(root: ET.Element, kind: str) -> dict[str, str]:
-    return {_attr(element, 'id').strip(): _content_digest(element) for element in root.iter() if _name(element) == kind and _attr(element, 'id') is not None}
+def _definition_digests(root: ET.Element, kind: str, resolver: _Resolver) -> dict[str, str]:
+    """Definitions by content, so a renumbered one is not a changed one; one that cannot be resolved stays by its id."""
+    digests: dict[str, str] = {}
+    for element in root.iter():
+        if _name(element) == kind and _attr(element, 'id') is not None:
+            try:
+                digests[_attr(element, 'id').strip()] = resolver.item_digest(element)
+            except _Unresolved:
+                continue
+    return digests
 
 
-def _shape_tables(root: ET.Element) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]], set[str], dict[str, tuple[str, str, str]]]:
-    fills, tabs = _definition_digests(root, 'borderfill'), _definition_digests(root, 'tabdef')
-    numbers, bullets = _definition_digests(root, 'numbering'), _definition_digests(root, 'bullet')
+def _shape_tables(root: ET.Element, resolver: _Resolver) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]], set[str], dict[str, tuple[str, str, str]]]:
+    fills, tabs = _definition_digests(root, 'borderfill', resolver), _definition_digests(root, 'tabdef', resolver)
+    numbers, bullets = _definition_digests(root, 'numbering', resolver), _definition_digests(root, 'bullet', resolver)
     headings: dict[str, tuple[str, str, str]] = {}
     fonts: dict[tuple[str, str], tuple[str, str]] = {}
     names: set[str] = set()
@@ -415,8 +413,8 @@ def parse_format_model(text: str) -> dict[str, Any]:
     body = next((element for element in root.iter() if _name(element) == 'body'), None)
     if body is None:
         raise _ModelUnusable('HWPML2X text has no BODY')
-    chars, paras, fonts, headings = _shape_tables(root)
     resolver = _Resolver(root, body)
+    chars, paras, fonts, headings = _shape_tables(root, resolver)
     marks = _MarkDefinitions(root, chars)
     paragraphs: list[dict[str, Any]] = []
     margins: list[str] = []
