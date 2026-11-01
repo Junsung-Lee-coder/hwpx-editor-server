@@ -946,7 +946,7 @@ def _mark_report(rows: list[dict[str, Any]], before: Mapping[str, Any], after: M
         old, new = public_mark(before['paragraphs'][index]), public_mark(after['paragraphs'][index])
         if old is None:
             continue
-        item = {'paragraph_index': index, 'kind': old['kind'], 'source': old['source'], 'before': old, 'after': new, 'changed': old != new}
+        item = {'paragraph_index': index, 'kind': old['kind'], 'source': old['source'], 'before': old, 'after': new, 'changed': None if old['source'] == 'unknown' else old != new}
         if kept:
             item['kept_by'] = 'paragraph_end_action'
         report.append(item)

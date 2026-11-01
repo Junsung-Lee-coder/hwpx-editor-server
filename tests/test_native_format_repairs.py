@@ -86,6 +86,14 @@ class NumberMarkDefault(unittest.TestCase):
         second = parse_hwpml2x_census(hwp.get_text_file('HWPML2X', ''))
         self.assertNotEqual(first['numberings_sha256'], second['numberings_sha256'])
 
+    def test_a_definition_that_cannot_be_read_is_not_reported_as_unchanged(self) -> None:
+        hwp = numbered_document()
+        real = hwp.get_text_file
+        hwp.get_text_file = lambda fmt='UNICODE', option='': real(fmt, option).replace('Heading="1"', 'Heading="77"')
+        mark = result_of(self, character(hwp, match='번호 앞글', **RED))['result']['number_marks'][0]
+        self.assertEqual(mark['source'], 'unknown')
+        self.assertIsNone(mark['changed'])
+
     def test_values_the_mark_already_has_need_no_restoring(self) -> None:
         hwp = numbered_document()
         result_of(self, Flow(hwp).step(**CHARACTER, match='굵끝 앞글 꼬리글', bold=True))
