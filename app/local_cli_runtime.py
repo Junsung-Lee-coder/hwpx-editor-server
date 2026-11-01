@@ -1275,6 +1275,7 @@ class _LiveCommand:
     reconciliation_data: dict[str, Any] = dataclass_field(default_factory=dict)
     recovery_for_command_id: str | None = None
     custody_held: bool = False
+    close_refused: bool = False  # A close refused for a save, on the owning thread: no native work ran under this sequence.
     native_diagnostic: dict[str, str] | None = None
     save_diagnostic: dict[str, Any] | None = None
     native_close_diagnostic: dict[str, bool] | None = None
@@ -1783,7 +1784,7 @@ class LocalCliLiveSession:
     def latest_command_sequence(self) -> int:
         self._ensure_lifecycle_state()
         with self._state_lock:
-            return max((int(command.sequence) for command in self._commands_by_id.values()), default=0)
+            return max((int(command.sequence) for command in self._commands_by_id.values() if not command.close_refused), default=0)
 
     def reconcile_command(self, command_id: str) -> dict[str, Any]:
         self._ensure_lifecycle_state()
@@ -2621,6 +2622,7 @@ class LocalCliLiveSession:
                         elif (self._normal_close_requires_save or native_modified) and not self._allow_native_cleanup:
                             refusal = LocalCliRuntimeError('Normal close requires proved preservation of prior edits.')
                             refusal.save_required = True  # Refused before any teardown; the session stays usable.
+                            command.close_refused = True
                         if refusal is not None:
                             command.error = refusal
                             self._apply_normalized_outcome(command, error=refusal)

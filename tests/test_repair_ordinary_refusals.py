@@ -4,10 +4,14 @@ The SDK is a fake. Technical failures here are labelled synthetic faults, never 
 """
 from __future__ import annotations
 
+from pathlib import Path
+import tempfile
+import threading
 import unittest
 from unittest.mock import patch
 
 from app import local_cli_runtime as rt
+from app.local_cli_service import LocalCliService
 from app.native_numbering_census import _MAX_DEPTH
 from tests import test_native_numbering_preservation as preservation
 from tests.native_numbering_fakes import FakeCtrl, FakeProps
@@ -522,6 +526,47 @@ class CloseIsModified(unittest.TestCase):
             owned.manager.close_session(owned.sid, timeout=5)
         self.assertTrue(getattr(caught.exception, 'save_required', False))
         self.assertFalse(owned.session._native_custody_held)
+
+
+class EditingAfterARefusedClose(unittest.TestCase):
+    """Found by the native run: a close refused for a save ran no native work, so it must not make the next edit look stale."""
+
+    def refused(self, owned):
+        owned.hwp.IsModified = True
+        with self.assertRaises(rt.LocalCliRuntimeError) as caught:
+            owned.manager.close_session(owned.sid, timeout=5)
+        self.assertTrue(getattr(caught.exception, 'save_required', False))
+
+    def test_a_refused_close_is_not_the_latest_native_command(self):
+        owned = owned_doc(self)
+        owned.manager.execute(session_id=owned.sid, command_name='where', handler=lambda h: {}, timeout=5)
+        latest = owned.manager.latest_command_sequence(owned.sid)
+        self.refused(owned)
+        self.assertEqual(owned.manager.latest_command_sequence(owned.sid), latest)
+
+    def test_the_next_edit_projects_through_the_real_binding_check(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            owned = owned_doc(self, preservation.make_doc(texts=('Title', 'Item here', 'Tail')))
+            service = object.__new__(LocalCliService)
+            service.root = Path(tmp)
+            service.sessions_root = service.root / 'sessions'
+            service.active_binding_path = service.root / 'active_binding.json'
+            service.sessions_root.mkdir()
+            service._closed_session_ids = set()
+            service._closed_session_ids_lock = threading.Lock()
+            service.runtime_manager = owned.manager
+            binding = {'session_id': owned.sid, 'command_generation': 0, 'native_command_sequence': owned.manager.latest_command_sequence(owned.sid)}
+            saved = service._save_binding(dict(binding))
+            self.refused(owned)
+            self.assertEqual(service._save_binding(dict(saved))['session_id'], owned.sid)
+
+    def test_a_held_close_stays_the_latest_command(self):
+        owned = owned_doc(self)
+        CloseIsModified.raising(self, owned.hwp)
+        with self.assertRaises(rt.LocalCliRuntimeError):
+            owned.manager.close_session(owned.sid, timeout=5)
+        command = owned.session._commands_by_id[f'{owned.sid}:close']
+        self.assertEqual(owned.manager.latest_command_sequence(owned.sid), command.sequence)
 
 
 if __name__ == '__main__':
