@@ -28,7 +28,7 @@ from typing import Any, Callable, Mapping
 import xml.etree.ElementTree as ET
 
 from app.native_numbering import (
-    ControlEnumerationLimit,
+    ControlEnumerationUnproven,
     NativeNumberingInputError,
     NativeNumberingMutationError,
     NativeNumberingRefusal,
@@ -1128,7 +1128,8 @@ def _read(hwp: Any, read: Callable[[], Mapping[str, Any]]) -> dict[str, Any]:
     state = read()
     try:
         controls = [name for _control, name in _control_ids(hwp)]
-    except ControlEnumerationLimit as exc:
+    except ControlEnumerationUnproven as exc:
+        # Before the edit this read changed nothing, so it stops cleanly; after the native action apply_format holds it as any other failed proof.
         raise NativeNumberingRefusal('the document controls could not be enumerated', code='control_enumeration_unavailable') from exc
     return {**state, 'controls': controls}
 

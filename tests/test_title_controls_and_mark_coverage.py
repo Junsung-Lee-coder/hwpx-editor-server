@@ -204,6 +204,32 @@ class OtherControlsBesideARange(unittest.TestCase):
         self.assertIn('table, picture', outcome['steps'][0]['refusal_message'])
 
 
+class ControlChainThatCannotBeRead(unittest.TestCase):
+    """Measured: Hancom gives a field's end an empty control identifier, so a document with a hyperlink cannot prove its control list."""
+
+    def document(self) -> FormatHwp:
+        return FormatHwp([paragraph('제목'), paragraph('앞글자 ', control('<FIELDBEGIN/>', '%hlk'), '링크글자', control('<FIELDEND/>', ''), ' 뒤글자'), paragraph('끝 문단')])
+
+    def test_formatting_is_refused_before_any_edit_and_the_session_stays_usable(self) -> None:
+        for name, request in (('character', lambda hwp: character(hwp, match='끝 문단', **RED)), ('paragraph', lambda hwp: para_format(hwp, match='끝 문단', align='center'))):
+            with self.subTest(name=name):
+                hwp = self.document()
+                outcome = request(hwp)
+                refusal(self, outcome, 'control_enumeration_unavailable', hwp)
+                self.assertIn('controls could not be enumerated', outcome['steps'][0]['refusal_message'])
+
+    def test_a_control_list_lost_after_the_action_is_still_held(self) -> None:
+        def lose(doc):
+            doc.lists[0][1]['atoms'].append(control('<FIELDEND/>', ''))
+        hwp = FormatHwp([paragraph('제목'), paragraph('본문 글자'), paragraph('끝 문단')])
+        hwp.after_execute = lose
+        owned = owned_doc(self, hwp)
+        with patch('app.local_cli_service.snapshot_live_location', return_value={}), patch('app.local_cli_runtime.snapshot_live_location', return_value={}):
+            outcome = owned.service.command_bundle(steps=[{'label': 'x', **CHARACTER, 'match': '본문', 'bold': True}])
+        self.assertTrue(outcome['native_custody_held'])
+        self.assertTrue(outcome['steps'][0]['mutation_may_have_persisted'])
+
+
 class ParagraphRangeRefusals(unittest.TestCase):
     def reason(self, hwp: FormatHwp, code: str = 'target_has_controls', **fields) -> str:
         outcome = para_format(hwp, align='center', **fields)
