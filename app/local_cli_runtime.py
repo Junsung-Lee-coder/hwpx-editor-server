@@ -168,6 +168,7 @@ def _native_diagnostic(site: object, error: BaseException) -> dict[str, str]:
                     for key, value in dict.items(data):
                         if type(key) is str and key == 'code' and type(value) is str and value in (
                             'control_enumeration_unavailable', 'existing_number_or_bullet', 'existing_page_number',
+                            'existing_page_restart', 'existing_section_page_start',
                             'foreign_outline_definition', 'header_footer_unprovable', 'native_defaults_unavailable',
                             'native_parameters_unavailable', 'native_unavailable', 'outline_definition_unreadable',
                             'outline_usage_unprovable', 'paragraph_shape_unreadable', 'preservation_unprovable',

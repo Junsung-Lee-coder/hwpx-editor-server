@@ -68,6 +68,21 @@ $mcpProcess = Start-Process -FilePath '.mcp-venv\Scripts\python.exe' -ArgumentLi
 문서가 너무 커서 구조를 읽을 수 없으면(HWPML2X 3,200만 자 초과 등) `review_status`가 `unverified`가 되고 PDF와 미리보기는 그대로 돌려줍니다. 이 실패는 문서를 변경됨으로 표시하거나 세션을 보류시키지 않습니다.
 - `pdf`, `pages`, `summary_path`, `json_path`, `saved_output`: 산출물 폴더의 PDF, 쪽별 PNG, 읽기 쉬운 `summary.md`, 전체 기계 판독용 `review.json`, 마지막 저장 파일.
 
+## 쪽 번호
+
+`page_number_apply`의 `start_number`는 생략하면 1입니다. Hancom 13.0.0.3457은 시작 번호 1에 새 번호 조판을 만들지 않으므로, 첫 쪽이 1로 인쇄되는 근거는 문서 자체입니다. 그래서 변경 전에 문서의 시작 값을 확인합니다.
+
+| 문서 | 요청 | 처리 |
+|---|---|---|
+| 새 번호 조판이 없고 구역 시작이 0 또는 1 | 1 또는 생략 | 쪽 번호를 넣습니다. `readback.new_number_source`는 `implicit_first_page` |
+| 새 번호 조판이 없음 | 2 이상 | 쪽 번호와 새 번호 조판을 넣습니다. `new_number_source`는 `hwpml2x_page_restart` |
+| 구역 시작이 2 이상이고 새 번호 조판이 없음 | 1 또는 생략 | 변경 전에 `existing_section_page_start`로 거부합니다. 넣어도 그 구역의 시작 번호가 인쇄되기 때문입니다. 시작 번호를 명시하면 됩니다 |
+| 첫 문단에 요청과 같은 번호의 새 번호 조판이 있음 | 같은 번호 | 쪽 번호를 넣고 그 조판은 그대로 둡니다 |
+| 그 밖의 새 번호 조판이 있음 | 모두 | 변경 전에 `existing_page_restart`로 거부합니다. Hancom이 첫 쪽의 조판을 요청 값으로 고쳐 쓰고, 되돌리기로 돌아오지 않기 때문입니다 |
+| 쪽 번호가 이미 있음 | 모두 | 변경 전에 `existing_page_number`로 거부합니다 |
+
+거부되면 세션은 보류되지 않고 저장하지 않은 이전 변경도 그대로 남습니다. 실제 인쇄된 번호는 `hwpx_proof`의 `review`가 PDF에서 확인합니다.
+
 ## 번호 문단 편집
 
 번호 체계 `1.` → `가.` → `1)` → `가)`는 `official_numbering_apply`로 지정합니다. 번호는 Hancom이 매기므로 문단을 넣거나 지우면 뒤따르는 번호가 자동으로 다시 매겨집니다.

@@ -7249,13 +7249,13 @@ class LocalCliService(
                         from app.local_cli_runtime import _native_diagnostic
                         status['refusal_code'] = (exc.code if type(exc) is _NumberingSemanticRefusal or type(exc) is _NumberingCleanRefusal
                                                   else _native_diagnostic('bundle_step', exc)['refusal_code'])
+                        args = BaseException.__dict__['args'].__get__(exc)
+                        if step.get('op') in {'character_format_exact', 'paragraph_format_exact', 'page_number_apply'} and type(args) is tuple and len(args) == 1 and type(args[0]) is str:
+                            status['refusal_message'] = args[0][:400]
                         if type(exc) is NativeNumberingRefusal:
                             found_page = BaseException.__dict__['__dict__'].__get__(exc).get('found_page')
                             if type(found_page) is int:
                                 status['found_page'] = found_page
-                            args = BaseException.__dict__['args'].__get__(exc)
-                            if step.get('op') in {'character_format_exact', 'paragraph_format_exact'} and type(args) is tuple and len(args) == 1 and type(args[0]) is str:
-                                status['refusal_message'] = args[0][:400]
                     if numbering:
                         # Fixed labels only, so a caller can see the stopping phase without opening the journal.
                         from app.local_cli_runtime import _native_diagnostic

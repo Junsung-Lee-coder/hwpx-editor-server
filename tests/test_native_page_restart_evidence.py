@@ -112,6 +112,17 @@ def apply(hwp: SyntheticComHwp, request: dict[str, Any] | None = None) -> dict[s
     return nn.apply_page_number(hwp, request or REQUEST, protection=live_protection_reader(hwp))
 
 
+def census_of(text: str) -> dict[str, Any]:
+    return nn._validated_census(parse_hwpml2x_census(text))
+
+
+def assert_refused_existing_restart(case: unittest.TestCase, hwp: SyntheticComHwp) -> None:
+    with case.assertRaises(nn.NativeNumberingRefusal) as caught:
+        apply(hwp)
+    case.assertEqual(caught.exception.code, 'existing_page_restart')
+    case.assertEqual([call for call in hwp.calls if call[0] == 'Execute'], [])
+
+
 class RealPairParserTests(unittest.TestCase):
     def test_pinned_pair_raw_bytes_need_the_str_the_product_passes(self) -> None:
         raw = (PAIR_DIR / 'after.hwpml2x').read_bytes()
@@ -214,11 +225,11 @@ class RequestedStartPositiveTests(_Assertions):
                 self.assertEqual(result['steps'][0]['result']['result']['status'], 'inserted')
                 self.assertEqual(sum(1 for c in hwp.controls if c.CtrlID == 'pgnp'), 1)
 
-    def test_unchanged_unrelated_existing_page_restart_does_not_block_an_integer_readback_insertion(self) -> None:
+    def test_an_unrelated_existing_page_restart_is_refused_before_the_native_call(self) -> None:
+        # Measured: Hancom writes its own restart beside it, or rewrites it when it is on the first page.
         before = mutate(BEFORE, SECOND_PARAGRAPH_CHAR, EXISTING + SECOND_PARAGRAPH_CHAR)
         after = mutate(remove_newnum(AFTER), SECOND_PARAGRAPH_CHAR, EXISTING + SECOND_PARAGRAPH_CHAR)
-        result = apply(SyntheticComHwp(before, after))
-        self.assertEqual(result['status'], 'inserted')
+        assert_refused_existing_restart(self, SyntheticComHwp(before, after))
 
     def test_old_format_census_with_integer_readback_keeps_working(self) -> None:
         hwp = SyntheticComHwp()
@@ -262,9 +273,17 @@ class RestartEvidenceNegativeTests(_Assertions):
     def test_missing_restart_with_none_readback_is_unknown(self) -> None:
         self.assert_apply_unknown(SyntheticComHwp(after=remove_newnum(AFTER), new_number=None))
 
-    def test_start_one_without_restart_and_none_readback_is_not_inferred_as_one(self) -> None:
+    def test_start_one_without_restart_is_page_one_only_where_the_section_starts_there(self) -> None:
+        # Hancom writes no restart for start 1 (measured), so the section's own start decides what prints; see test_page_number_start_one.
+        request = {'position': 'bottom-center', 'start_number': 1}
         after = remove_newnum(AFTER)
-        self.assert_apply_unknown(SyntheticComHwp(after=after, new_number=None), request={'position': 'bottom-center', 'start_number': 1})
+        self.assertEqual(apply(SyntheticComHwp(after=after, new_number=None), request)['readback']['new_number_source'], 'implicit_first_page')
+        moved = 'Page="5" PageStartsOn'
+        hwp = SyntheticComHwp(mutate(BEFORE, 'Page="0" PageStartsOn', moved), mutate(after, 'Page="0" PageStartsOn', moved), new_number=None)
+        with self.assertRaises(nn.NativeNumberingRefusal) as caught:
+            apply(hwp, request)
+        self.assertEqual(caught.exception.code, 'existing_section_page_start')
+        self.assertEqual([call for call in hwp.calls if call[0] == 'Execute'], [])
 
     def test_none_readback_without_a_protection_reader_or_with_old_evidence_is_unknown(self) -> None:
         hwp = SyntheticComHwp(new_number=None)
@@ -281,18 +300,24 @@ class RestartEvidenceNegativeTests(_Assertions):
         after = mutate(AFTER, SECOND_PARAGRAPH_CHAR, EXISTING + SECOND_PARAGRAPH_CHAR)
         for new_number in ('echo', None):
             with self.subTest(new_number=new_number):
-                self.assert_apply_unknown(SyntheticComHwp(before, after, new_number=new_number))
+                assert_refused_existing_restart(self, SyntheticComHwp(before, after, new_number=new_number))
+        self.assertEqual(nn._page_number_delta_problems(census_of(before), census_of(after), request_start=7),
+                         ['existing page restart(s) changed or cannot be told apart from the new one'])
 
     def test_unchanged_preexisting_restart_cannot_prove_a_none_readback(self) -> None:
         before = mutate(BEFORE, SECOND_PARAGRAPH_CHAR, EXISTING + SECOND_PARAGRAPH_CHAR)
         after = mutate(remove_newnum(AFTER), SECOND_PARAGRAPH_CHAR, EXISTING + SECOND_PARAGRAPH_CHAR)
-        self.assert_apply_unknown(SyntheticComHwp(before, after, new_number=None))
+        assert_refused_existing_restart(self, SyntheticComHwp(before, after, new_number=None))
+        self.assertIn('no new page restart appeared in the document after the native call to confirm the requested start',
+                      nn._page_number_delta_problems(census_of(before), census_of(after), request_start=7, require_restart=True))
 
     def test_preexisting_restart_removed_or_altered_is_unknown(self) -> None:
         before = mutate(BEFORE, SECOND_PARAGRAPH_CHAR, EXISTING + SECOND_PARAGRAPH_CHAR)
         for new_number in ('echo', None):
             with self.subTest(new_number=new_number):
-                self.assert_apply_unknown(SyntheticComHwp(before, AFTER, new_number=new_number))
+                assert_refused_existing_restart(self, SyntheticComHwp(before, AFTER, new_number=new_number))
+        self.assertEqual(nn._page_number_delta_problems(census_of(before), census_of(AFTER), request_start=7),
+                         ['existing page restart(s) changed or cannot be told apart from the new one'])
 
     def test_non_integer_new_number_readbacks_stay_unknown_even_when_the_xml_matches(self) -> None:
         for value in ('7', True, 7.0, RuntimeError('boom')):

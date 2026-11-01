@@ -103,6 +103,16 @@ def _vanishing_elements(root: ET.Element) -> set[int]:
     return vanishing
 
 
+def _section_page_starts(body: ET.Element) -> list[int | None]:
+    """Each section definition's own page start in document order; 0 continues from 1, and None is a value this cannot read."""
+    starts: list[int | None] = []
+    for element in body.iter():
+        if _name(element) == 'startnumber':
+            value = (_lower_attrs(element).get('page') or '').strip()
+            starts.append(int(value) if value.isascii() and value.isdigit() else None)
+    return starts
+
+
 def _page_restarts(
     root: ET.Element, body: ET.Element, paragraph_index: dict[int, int]
 ) -> tuple[list[dict[str, Any]], list[list[int]]]:
@@ -701,4 +711,5 @@ def parse_hwpml2x_census(text: Any) -> dict[str, Any]:
         'outline_shapes': _outline_shapes(resolver, body),
         'page_restarts': page_restarts,
         'page_restart_positions': page_restart_positions,
+        'section_page_starts': _section_page_starts(body),
     }

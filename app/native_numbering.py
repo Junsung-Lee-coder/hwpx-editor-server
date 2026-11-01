@@ -534,6 +534,10 @@ def _validated_census(raw: Any) -> dict[str, Any]:
     census['paragraphs'] = paragraphs
     census['page_restarts'] = _validated_page_restarts(raw.get('page_restarts'))
     census['page_restart_positions'] = _validated_restart_positions(raw.get('page_restart_positions'), census['page_restarts'])
+    starts = raw.get('section_page_starts')
+    if starts is not None and not (isinstance(starts, list) and all(item is None or _is_plain_int(item) for item in starts)):
+        raise RuntimeError('protection census section_page_starts must be a list of integers or nulls')
+    census['section_page_starts'] = list(starts) if starts is not None else None
     census['definitions'] = _validated_definitions(raw.get('definitions'))
     frame = raw.get('frame')
     if frame is not None and (
@@ -720,6 +724,39 @@ def _has_restart_evidence(census: Mapping[str, Any]) -> bool:
     )
 
 
+def _first_number_source(census: Mapping[str, Any], start: int) -> str:
+    """Where the printed first number will come from, or a refusal before the edit, as PageNumPos was measured on Hancom 13.0.0.3457.
+
+    Start 1 adds no restart, so the document's own start stays in force: a section starting at 5 goes on printing 5. Any other start writes
+    a restart. A restart already on the first page is rewritten to the request and Undo does not put it back, and a later one cannot be told
+    apart from that here, so only a first-paragraph restart that already holds the requested number is left alone.
+    """
+    restarts, positions, starts = census.get('page_restarts'), census.get('page_restart_positions'), census.get('section_page_starts')
+    if restarts is None or positions is None or starts is None:
+        return 'new_restart'  # A reader without this evidence: only a restart it can see proves the start.
+    if restarts:
+        only = restarts[0]
+        number = next((value for name, value in only['attrs'] if name == 'number'), '').strip()
+        if (len(restarts) == 1 and only['location'] == 'body' and only['section'] == 0 and only['paragraph'] == 0
+                and number.isascii() and number.isdigit() and int(number) == start):
+            return 'existing_restart'
+        raise NativeNumberingRefusal(
+            'the document already sets a page restart; Hancom would rewrite it to the requested start and its Undo would not put it back, '
+            'so the page number was not added',
+            code='existing_page_restart',
+        )
+    if start != 1:
+        return 'new_restart'
+    if len(starts) != 1 or starts[0] is None:
+        raise NativeNumberingRefusal('the page start of this section could not be read, so a first page numbered 1 cannot be proven', code='preservation_unprovable')
+    if starts[0] not in {0, 1}:
+        raise NativeNumberingRefusal(
+            f'this section starts its pages at {starts[0]}, which a start number of 1 would not change; give start_number to set the start explicitly',
+            code='existing_section_page_start',
+        )
+    return 'implicit_first_page'
+
+
 def _first_paragraph_start_conflicts(restarts: list[dict[str, Any]], request_start: int | None) -> list[str]:
     if request_start is None:
         return []
@@ -795,6 +832,8 @@ def _page_number_delta_problems(
         before, after, ('header_footer', 'body_sha256', 'styles_sha256', 'numberings_sha256', 'bindata_sha256', 'outline_shapes')
     )
     problems.extend(_page_number_definition_problems(before['definitions'], after['definitions']))
+    if before.get('section_page_starts') != after.get('section_page_starts'):
+        problems.append('the section page start changed')
     restart_evidence = _has_restart_evidence(before) and _has_restart_evidence(after)
     digest_key = 'restart_stripped_sha256' if restart_evidence else 'stripped_sha256'
     if restart_evidence:
@@ -1141,6 +1180,9 @@ def _apply_page_number(hwp: Any, request: Any, *, protection: Callable[[], Any] 
                     code='header_footer_unprovable',
                 )
         _require_complete(before_census)
+        first_number = _first_number_source(before_census, req['start_number'])
+    else:
+        first_number = 'new_restart'
 
     mover = getattr(hwp, 'MoveDocBegin', None)
     if not callable(mover):
@@ -1273,7 +1315,8 @@ def _apply_page_number(hwp: Any, request: Any, *, protection: Callable[[], Any] 
             ['preservation evidence is incomplete after the native call (' + '; '.join(lost) + ')']
             if lost
             else _page_number_delta_problems(
-                before_census, after_census, request_start=req['start_number'], require_restart=new_number_unset or restart_control
+                before_census, after_census, request_start=req['start_number'],
+                require_restart=(new_number_unset or restart_control) and first_number == 'new_restart',
             )
         )
         if census_problems:
@@ -1282,19 +1325,18 @@ def _apply_page_number(hwp: Any, request: Any, *, protection: Callable[[], Any] 
                 + '; '.join(census_problems)
                 + '; the document was not rolled back'
             )
+        source = 'implicit_first_page' if first_number == 'implicit_first_page' and not after_census['page_restarts'] else 'hwpml2x_page_restart'
         protection_info = {
             'checked': True,
             'compared': list(_PAGE_NUMBER_COMPARED),
             'unproven': [],
-            'page_number_proof': (
-                'control_chain+hwpml2x_page_restart' if new_number_unset or restart_control else 'control_chain'
-            ),
+            'page_number_proof': f'control_chain+{source}' if new_number_unset or restart_control else 'control_chain',
         }
         if new_number_unset:
             readback = {
                 'available': True,
                 'values': {**values, 'NewNumber': req['start_number']},
-                'new_number_source': 'hwpml2x_page_restart',
+                'new_number_source': source,
             }
 
     _restore_caret(hwp, caret, warnings)

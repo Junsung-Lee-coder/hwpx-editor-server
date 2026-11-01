@@ -225,7 +225,8 @@ class UnrelatedPathsStayUsableTests(unittest.TestCase):
     def test_page_number_insertion_is_unaffected_by_missing_bindings(self) -> None:
         for layout in self.LAYOUTS:
             hwp = bound_doc(layout, '2')
-            result = nn.apply_page_number(hwp, POSITION, protection=census_module.live_protection_reader(hwp))
+            # A layout without a section definition has no readable page start, so an explicit start keeps this about the outline bindings.
+            result = nn.apply_page_number(hwp, {**POSITION, 'start_number': 3}, protection=census_module.live_protection_reader(hwp))
             self.assertEqual(result['status'], 'inserted', msg=layout)
 
 

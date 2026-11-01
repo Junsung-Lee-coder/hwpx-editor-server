@@ -5,7 +5,11 @@ Everything that drives them is SYNTHETIC (``SyntheticComHwp`` is a fake COM obje
 variant of the real pair). These are source/fake checks only, not native executions and not observed native corruption.
 
 F1: a pre-existing page restart that moves beside its text siblings must not pass as an unchanged document.
-F2: an unchanged page restart in the first paragraph whose number contradicts the requested start must not pass.
+F2: a page restart in the first paragraph whose number contradicts the requested start must not pass.
+
+Hancom was later measured to rewrite a first-page restart to the request, with an Undo that does not put it back, and to add its own beside a
+later one. So only a first-paragraph restart agreeing with the request reaches the native call, and the others are refused before it; where
+such a pair can no longer reach the call, the comparison itself is asserted too.
 """
 from __future__ import annotations
 
@@ -23,6 +27,7 @@ remove_newnum = base.remove_newnum
 EXISTING = base.EXISTING
 SECOND = base.SECOND_PARAGRAPH_CHAR
 FIRST = '<CHAR>NQPAGEONE</CHAR>'
+AGREEING = '<NEWNUM Number="7" NumberType="Page"/>'
 SPLIT = '</TEXT><TEXT CharShape="0"><CHAR>SPLIT</CHAR>'
 
 
@@ -42,7 +47,18 @@ def pair(before_marker: str, after_marker: str, anchor: str) -> tuple[str, str]:
     )
 
 
+def delta_problems(before: str, after: str) -> list[str]:
+    return nn._page_number_delta_problems(nn._validated_census(parse_hwpml2x_census(before)), nn._validated_census(parse_hwpml2x_census(after)), request_start=7)
+
+
 class _Unknown(unittest.TestCase):
+    def assert_refused_before_the_call(self, hwp: SyntheticComHwp) -> nn.NativeNumberingRefusal:
+        with self.assertRaises(nn.NativeNumberingRefusal) as caught:
+            apply(hwp)
+        self.assertEqual(caught.exception.code, 'existing_page_restart')
+        self.assertEqual([call for call in hwp.calls if call[0] == 'Execute'], [])
+        return caught.exception
+
     def assert_apply_unknown(self, hwp: SyntheticComHwp, *, request: dict[str, Any] | None = None) -> None:
         with self.assertRaises(nn.NativeNumberingMutationError) as caught:
             apply(hwp, request)
@@ -113,33 +129,39 @@ class RestartPositionObservationTests(unittest.TestCase):
 
 class F1ExistingRestartPositionTests(_Unknown):
     def test_restart_moved_within_the_same_paragraph_is_unknown(self) -> None:
-        before, after = pair(EXISTING + SECOND, SECOND + EXISTING, SECOND)
+        before, after = pair(AGREEING + FIRST, FIRST + AGREEING, FIRST)
         for new_number in ('echo', None):
             with self.subTest(new_number=new_number):
                 self.assert_apply_unknown(SyntheticComHwp(before, after, new_number=new_number))
 
     def test_restart_moved_into_a_sibling_text_element_is_unknown(self) -> None:
-        before, after = pair(EXISTING + SECOND + SPLIT, SECOND + SPLIT.replace('<CHAR>', EXISTING + '<CHAR>'), SECOND)
+        before, after = pair(AGREEING + FIRST + SPLIT, FIRST + SPLIT.replace('<CHAR>', AGREEING + '<CHAR>'), FIRST)
         self.assert_apply_unknown(SyntheticComHwp(before, after))
 
     def test_restart_moved_across_a_paragraph_boundary_stays_unknown(self) -> None:
-        before = mutate(base.BEFORE, SECOND, EXISTING + SECOND)
-        after = mutate(remove_newnum(base.AFTER), '<CHAR>NQLEVELTHREE</CHAR>', EXISTING + '<CHAR>NQLEVELTHREE</CHAR>')
+        before = mutate(base.BEFORE, FIRST, AGREEING + FIRST)
+        after = mutate(remove_newnum(base.AFTER), SECOND, AGREEING + SECOND)
         self.assert_apply_unknown(SyntheticComHwp(before, after))
 
     def test_unchanged_positions_stay_supported_before_and_after_the_text(self) -> None:
-        for label, marker in (('before the text', EXISTING + SECOND), ('after the text', SECOND + EXISTING)):
+        for label, marker in (('before the text', AGREEING + FIRST), ('after the text', FIRST + AGREEING)):
             with self.subTest(label):
-                before, after = pair(marker, marker, SECOND)
+                before, after = pair(marker, marker, FIRST)
                 self.assertEqual(apply(SyntheticComHwp(before, after))['status'], 'inserted')
 
     def test_unchanged_restart_inside_a_second_text_element_stays_supported(self) -> None:
-        marker = SECOND + SPLIT.replace('<CHAR>', EXISTING + '<CHAR>')
-        before, after = pair(marker, marker, SECOND)
+        marker = FIRST + SPLIT.replace('<CHAR>', AGREEING + '<CHAR>')
+        before, after = pair(marker, marker, FIRST)
         self.assertEqual(apply(SyntheticComHwp(before, after))['status'], 'inserted')
 
+    def test_the_comparison_still_sees_a_later_restart_moving(self) -> None:
+        for moved in (pair(EXISTING + SECOND, SECOND + EXISTING, SECOND), pair(EXISTING + SECOND + SPLIT, SECOND + SPLIT.replace('<CHAR>', EXISTING + '<CHAR>'), SECOND)):
+            self.assertIn('an existing page restart moved relative to the content around it', delta_problems(*moved))
+        unchanged = pair(EXISTING + SECOND, EXISTING + SECOND, SECOND)
+        self.assertEqual(delta_problems(*unchanged), [])
+
     def test_public_bundle_action_reports_unknown_without_success_or_rollback(self) -> None:
-        before, after = pair(EXISTING + SECOND, SECOND + EXISTING, SECOND)
+        before, after = pair(AGREEING + FIRST, FIRST + AGREEING, FIRST)
         hwp = SyntheticComHwp(before, after)
         result, persisted = _run_bundle(hwp, dict(PAGE_STEP, start_number=7))
         self.assertFalse(result['ok'])
@@ -162,28 +184,29 @@ class F1ExistingRestartPositionTests(_Unknown):
 
 
 class F2FirstParagraphStartTests(_Unknown):
-    def test_unchanged_first_paragraph_restart_contradicting_the_start_is_unknown(self) -> None:
+    def test_first_paragraph_restart_contradicting_the_start_is_refused_before_the_call(self) -> None:
         before, after = pair(EXISTING + FIRST, EXISTING + FIRST, FIRST)
         for new_number in ('echo', None):
             with self.subTest(new_number=new_number):
-                self.assert_apply_unknown(SyntheticComHwp(before, after, new_number=new_number))
+                self.assert_refused_before_the_call(SyntheticComHwp(before, after, new_number=new_number))
+        self.assertIn('a page restart in the first paragraph of the first section sets the start to', ' '.join(delta_problems(before, after)))
 
     def test_the_conflict_is_named_in_the_refusal(self) -> None:
         before, after = pair(EXISTING + FIRST, EXISTING + FIRST, FIRST)
-        with self.assertRaises(nn.NativeNumberingMutationError) as caught:
-            apply(SyntheticComHwp(before, after))
-        self.assertIn('contradicts the requested start 7', str(caught.exception))
+        self.assertIn('already sets a page restart', str(self.assert_refused_before_the_call(SyntheticComHwp(before, after))))
+        self.assertIn('contradicts the requested start 7', ' '.join(delta_problems(before, after)))
 
     def test_unreadable_or_signed_numbers_in_the_first_paragraph_are_unknown(self) -> None:
         for number in ('abc', '', '-3', '3.0', '+7'):
             with self.subTest(number=number):
                 marker = f'<NEWNUM Number="{number}" NumberType="Page"/>' + FIRST
                 before, after = pair(marker, marker, FIRST)
-                self.assert_apply_unknown(SyntheticComHwp(before, after))
+                self.assert_refused_before_the_call(SyntheticComHwp(before, after))
+                self.assertNotEqual(delta_problems(before, after), [])
 
     def test_restart_after_the_first_character_is_equally_a_first_paragraph_restart(self) -> None:
         before, after = pair(FIRST + EXISTING, FIRST + EXISTING, FIRST)
-        self.assert_apply_unknown(SyntheticComHwp(before, after))
+        self.assert_refused_before_the_call(SyntheticComHwp(before, after))
 
     def test_first_paragraph_restart_that_agrees_with_the_start_stays_supported(self) -> None:
         for number, start in (('7', 7), ('07', 7), ('3', 3)):
@@ -193,20 +216,21 @@ class F2FirstParagraphStartTests(_Unknown):
                 result = apply(SyntheticComHwp(before, after), request={'position': 'bottom-center', 'start_number': start})
                 self.assertEqual(result['status'], 'inserted')
 
-    def test_unrelated_second_paragraph_restart_stays_supported_with_a_different_number(self) -> None:
+    def test_second_paragraph_restart_is_refused_before_the_call_with_a_different_number(self) -> None:
         before, after = pair(EXISTING + SECOND, EXISTING + SECOND, SECOND)
-        self.assertEqual(apply(SyntheticComHwp(before, after))['status'], 'inserted')
+        self.assert_refused_before_the_call(SyntheticComHwp(before, after))
 
-    def test_public_bundle_action_reports_unknown_without_success_or_rollback(self) -> None:
+    def test_public_bundle_action_reports_the_refusal_with_no_mutation(self) -> None:
         before, after = pair(EXISTING + FIRST, EXISTING + FIRST, FIRST)
         hwp = SyntheticComHwp(before, after)
         result, persisted = _run_bundle(hwp, dict(PAGE_STEP, start_number=7))
         self.assertFalse(result['ok'])
-        self.assertTrue(persisted['dirty'])
+        self.assertFalse(result['dirty'])
+        self.assertFalse(persisted.get('dirty', False))
         step = result['steps'][0]
         self.assertFalse(step['ok'])
-        self.assertTrue(step['mutation_may_have_persisted'])
-        self.assertEqual(step['rollback'], NO_CLEANUP)
+        self.assertFalse(step['mutation_may_have_persisted'])
+        self.assertEqual(step['refusal_code'], 'existing_page_restart')
 
     def test_real_pair_and_none_readback_proof_keep_working(self) -> None:
         self.assertEqual(apply(SyntheticComHwp())['status'], 'inserted')

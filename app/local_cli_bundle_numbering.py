@@ -82,7 +82,7 @@ def _guard_protection(protection: Callable[[], Any] | None,
     raw = _plain_proof(raw)
     required = {'header_footer', 'body_sha256', 'styles_sha256', 'numberings_sha256',
                 'bindata_sha256', 'media_sha256', 'page_number_count', 'paragraphs',
-                'definitions', 'frame', 'outline_shapes', 'page_restarts', 'page_restart_positions'}
+                'definitions', 'frame', 'outline_shapes', 'page_restarts', 'page_restart_positions', 'section_page_starts'}
     if type(raw) is not dict or set(raw) != required:
         raise LocalCliRuntimeError('Numbering preservation fields are incomplete.')
     census = native_numbering._validated_census(raw)  # noqa: SLF001
@@ -105,7 +105,7 @@ def _page_refusal_changed_nothing(refusal: native_numbering.NativeNumberingRefus
         return type(refusal.__cause__) is native_numbering_census.CensusTextUnusable
     if refusal.code == 'control_enumeration_unavailable':
         return type(refusal.__cause__) is native_numbering.ControlEnumerationLimit
-    return refusal.code in {'existing_page_number', 'section_count_unprovable', 'header_footer_unprovable', 'preservation_unprovable'}
+    return refusal.code in {'existing_page_number', 'existing_page_restart', 'existing_section_page_start', 'section_count_unprovable', 'header_footer_unprovable', 'preservation_unprovable'}
 
 
 class LocalCliBundleNumberingMixin:
