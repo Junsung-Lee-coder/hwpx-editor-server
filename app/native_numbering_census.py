@@ -40,6 +40,10 @@ class CensusError(RuntimeError):
     """The HWPML2X text could not be read as a document census."""
 
 
+class CensusTextUnusable(CensusError):
+    """A plain native text string came back and cannot serve as evidence: too large, not XML, or not a document."""
+
+
 class _Unresolved(Exception):
     """A reference or definition could not be resolved unambiguously."""
 
@@ -515,23 +519,38 @@ def _paragraph_structure(element: ET.Element) -> dict[str, Any]:
     }
 
 
+def _paragraph_definitions(resolver: _Resolver, element: ET.Element, shape_ref: str | None, heading: str | None, number_ref: str | None) -> dict[str, Any]:
+    """Which definitions this paragraph itself uses, so an edit can tell its own single-use definition from any other."""
+    facts: dict[str, Any] = {'parashape_sha256': None, 'charshape_sha256s': [], 'numbering_ref_sha256': None}
+    try:
+        if shape_ref is not None:
+            facts['parashape_sha256'] = resolver.definition('parashapelist', shape_ref)
+        references = {ref for run in element if _name(run) == 'text' and (ref := _attr(run, 'charshape')) is not None}
+        facts['charshape_sha256s'] = sorted(resolver.definition('charshapelist', ref) for ref in references)
+        if heading in {'NUMBER', 'BULLET'} and number_ref is not None:
+            facts['numbering_ref_sha256'] = resolver.definition('numberinglist' if heading == 'NUMBER' else 'bulletlist', number_ref)
+    except _Unresolved:
+        pass
+    return facts
+
+
 def parse_hwpml2x_census(text: Any) -> dict[str, Any]:
     if type(text) is not str:
         raise CensusError('HWPML2X text must be a string')
     if not text.strip():
-        raise CensusError('HWPML2X text is empty')
+        raise CensusTextUnusable('HWPML2X text is empty')
     if len(text) > MAX_HWPML_CHARS:
-        raise CensusError('HWPML2X text is too large to fingerprint')
+        raise CensusTextUnusable('HWPML2X text is too large to fingerprint')
     if _DOCTYPE.search(text):
-        raise CensusError('HWPML2X text declares a DOCTYPE or ENTITY, which is refused')
+        raise CensusTextUnusable('HWPML2X text declares a DOCTYPE or ENTITY, which is refused')
     try:
         root = ET.fromstring(text)
     except ET.ParseError as exc:
-        raise CensusError(f'HWPML2X text is not well-formed XML: {exc}') from exc
+        raise CensusTextUnusable(f'HWPML2X text is not well-formed XML: {exc}') from exc
 
     body = next((element for element in root.iter() if _name(element) == 'body'), None)
     if body is None:
-        raise CensusError('HWPML2X text has no BODY element')
+        raise CensusTextUnusable('HWPML2X text has no BODY element')
 
     shapes = _shape_table(root)
     number_refs = _number_refs(root)
@@ -580,6 +599,7 @@ def parse_hwpml2x_census(text: Any) -> dict[str, Any]:
             paragraphs = None
             break
         number_ref = number_refs.get(shape_ref.strip()) if shape_ref is not None else None
+        definitions = _paragraph_definitions(resolver, element, shape_ref, heading, number_ref)
         inst_ids = [value for key, value in _lower_attrs_all(element) if key == 'instid']
         shares_outline: bool | None
         if heading != 'NUMBER':
@@ -607,6 +627,7 @@ def parse_hwpml2x_census(text: Any) -> dict[str, Any]:
                 'content_sha256': content,
                 'body_index': body_positions.get(id(element)),
                 **_paragraph_structure(element),
+                **definitions,
             }
         )
 

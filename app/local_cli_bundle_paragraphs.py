@@ -243,6 +243,8 @@ class LocalCliBundleParagraphsMixin:
             if page is not None and int(page) == int(expected_page):
                 return {'page': page, 'pos': list(pos_key), 'snapshot': snapshot, 'candidates': candidates}
         pages = [item.get('page') for item in candidates]
+        if numbering_guard:
+            raise _NumberingTargetNotFound(f'No target on the expected page; candidate pages {pages!r}.')
         raise LocalCliRuntimeError(f'exact paragraph primitive could not find {match!r} on expected_page={expected_page}; candidate_pages={pages!r}')
 
     def _find_paragraph_delete_target(

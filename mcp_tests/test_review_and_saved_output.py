@@ -218,8 +218,8 @@ class ReviewAndSavedOutput(unittest.IsolatedAsyncioTestCase):
         Backend.working_copy_status = 500
         result = await self.call('hwpx_save', {'session_id': SID})
         self.assertFalse(result.is_error)
-        self.assertEqual(result.structured_content['result']['saved_output'], {
-            'retrieved': False, 'code': 'ARTIFACT_DOWNLOAD_FAILED', 'message': 'Saved document could not be retrieved.'})
+        saved = result.structured_content['result']['saved_output']
+        self.assertEqual((saved['retrieved'], saved['code'], saved['message']), (False, 'ARTIFACT_DOWNLOAD_FAILED', 'Saved document could not be retrieved.'))
 
     async def test_a_saved_output_can_be_reopened_but_other_paths_cannot(self):
         saved = (await self.call('hwpx_save', {'session_id': SID})).structured_content['result']['saved_output']
@@ -236,8 +236,9 @@ class ReviewAndSavedOutput(unittest.IsolatedAsyncioTestCase):
         await self.call('hwpx_command', {'session_id': SID, 'request': {'op': 'paragraph_insert_exact', 'match': 'Item', 'expected_page': 1, 'text': 'New', 'confirm_layout': True}})
         step = Backend.calls[-1][2]['steps'][0]
         self.assertEqual((step['op'], step['match'], step['text'], step['position'], step['confirm_layout']), ('paragraph_insert_exact', 'Item', 'New', 'after', True))
-        await self.call('hwpx_command', {'session_id': SID, 'request': {'op': 'paragraph_remove_exact', 'match': 'Item', 'expected_page': 1, 'confirm_remove': True}})
+        await self.call('hwpx_command', {'session_id': SID, 'request': {'op': 'paragraph_remove_exact', 'match': 'Item', 'expected_page': 1, 'expected_text': 'Item text', 'confirm_remove': True}})
         self.assertEqual(Backend.calls[-1][2]['steps'][0]['op'], 'paragraph_remove_exact')
+        self.assertEqual(Backend.calls[-1][2]['steps'][0]['expected_text'], 'Item text')
 
     async def test_a_refusal_leads_with_its_reason(self):
         from hwpx_mcp.server import rejection_summary
@@ -250,8 +251,9 @@ class ReviewAndSavedOutput(unittest.IsolatedAsyncioTestCase):
 
     async def test_paragraph_edit_schema_is_closed(self):
         for request in (
-            {'op': 'paragraph_remove_exact', 'match': 'Item', 'expected_page': 1, 'confirm_remove': False},
-            {'op': 'paragraph_remove_exact', 'match': 'Item', 'expected_page': 1},
+            {'op': 'paragraph_remove_exact', 'match': 'Item', 'expected_page': 1, 'expected_text': 'Item', 'confirm_remove': False},
+            {'op': 'paragraph_remove_exact', 'match': 'Item', 'expected_page': 1, 'expected_text': 'Item'},
+            {'op': 'paragraph_remove_exact', 'match': 'Item', 'expected_page': 1, 'confirm_remove': True},
             {'op': 'paragraph_insert_exact', 'match': 'Item', 'expected_page': 1, 'text': 'New'},
             {'op': 'paragraph_insert_exact', 'match': 'Item', 'expected_page': 1, 'text': 'New', 'confirm_layout': True, 'position': 'inside'},
             {'op': 'paragraph_insert_exact', 'match': 'a\nb', 'expected_page': 1, 'text': 'New', 'confirm_layout': True},

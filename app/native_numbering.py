@@ -226,6 +226,10 @@ def _read_text_hash(hwp: Any) -> str:
     return hashlib.sha256(text.encode('utf-8')).hexdigest()
 
 
+class ControlEnumerationUnproven(RuntimeError):
+    """The control chain returned values this code will not read further; the read itself changed nothing."""
+
+
 def _control_ids(hwp: Any) -> list[tuple[Any, str]]:
     head = hwp.HeadCtrl
     controls: list[tuple[Any, str]] = []
@@ -235,10 +239,10 @@ def _control_ids(hwp: Any) -> list[tuple[Any, str]]:
             return controls
         ctrl_id = ctrl.CtrlID
         if type(ctrl_id) is not str or not ctrl_id:
-            raise RuntimeError('control identifier is not exact text')
+            raise ControlEnumerationUnproven('control identifier is not exact text')
         controls.append((ctrl, ctrl_id))
         ctrl = ctrl.Next
-    raise RuntimeError(f'control enumeration exceeded {_MAX_CONTROLS} controls')
+    raise ControlEnumerationUnproven(f'control enumeration exceeded {_MAX_CONTROLS} controls')
 
 
 def _preflight_census(hwp: Any) -> tuple[str, list[tuple[Any, str]]]:
@@ -885,7 +889,8 @@ def _official_delta_problems(
                     problems.append('the target paragraph is not an outline paragraph at the requested level')
             elif left['sha256'] != right['sha256']:
                 problems.append(f'paragraph {index} outside the target changed')
-    problems.extend(_official_definition_problems(before['definitions'], after['definitions'], define=define))
+    target = before['paragraphs'][target_index] if 0 <= target_index < len(before['paragraphs']) else None
+    problems.extend(_official_definition_problems(before['definitions'], after['definitions'], define=define, target=target, remaining=after['paragraphs']))
     shapes_before, shapes_after = before['outline_shapes'], after['outline_shapes']
     if len(shapes_before) != len(shapes_after):
         problems.append('the section outline definition references changed in number')
@@ -896,8 +901,21 @@ def _official_delta_problems(
     return problems
 
 
+def single_use_shape_left(removed: list[tuple[str, str]], owned: Any, remaining: list[Mapping[str, Any]] | None, field: str) -> bool:
+    """Hancom drops a shape with its only user (observed): admit exactly that, for the edited paragraph's own shape."""
+    if remaining is None or not all(entry[0] in owned for entry in removed):
+        return False
+    for item in remaining:
+        used = item.get(field)
+        used = used if isinstance(used, list) else [used]
+        if any(entry[0] in used for entry in removed):
+            return False
+    return True
+
+
 def _official_definition_problems(
-    before: Mapping[str, list[tuple[str, str]]], after: Mapping[str, list[tuple[str, str]]], *, define: bool
+    before: Mapping[str, list[tuple[str, str]]], after: Mapping[str, list[tuple[str, str]]], *, define: bool,
+    target: Mapping[str, Any] | None = None, remaining: list[Mapping[str, Any]] | None = None,
 ) -> list[str]:
     problems: list[str] = []
     for name in sorted(set(before) | set(after)):
@@ -905,7 +923,8 @@ def _official_definition_problems(
         if not removed and not added:
             continue
         if name == 'parashapelist':
-            if removed or len(added) > 1:
+            own_shape = [] if target is None else [target.get('parashape_sha256')]
+            if len(removed) > 1 or len(added) > 1 or (removed and not single_use_shape_left(removed, own_shape, remaining, 'parashape_sha256')):
                 problems.append(f'{name} lost entries or gained more than the target paragraph shape')
         elif name == 'numberinglist' and define:
             replaced_in_place = len(removed) == 1 and len(added) == 1 and removed[0][1] == added[0][1]

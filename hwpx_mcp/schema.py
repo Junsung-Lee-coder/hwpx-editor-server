@@ -153,6 +153,7 @@ class ParagraphInsertStep(_ParagraphTarget):
 class ParagraphRemoveStep(_ParagraphTarget):
     op: Literal['paragraph_remove_exact']
     label: Label = 'mcp:paragraph-remove-exact'
+    expected_text: Annotated[str, Field(min_length=1, max_length=4000)]
     confirm_remove: Literal[True]
 
 

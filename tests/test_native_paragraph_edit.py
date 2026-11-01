@@ -54,6 +54,12 @@ class _EditHwp(_HwpmlHwp):
 
         self.HAction.Execute, self.HAction.Run = execute, run
 
+    def set_pos(self, list_id, para, pos):
+        # Observed on Hancom 2024: SetPos ends any block selection.
+        self.selection = None
+        self.selection_para = None
+        super().set_pos(list_id, para, pos)
+
     def MoveParaEnd(self):  # noqa: N802
         self.calls.append(('MoveParaEnd',))
         self.cursor = (self.cursor[0], self.cursor[1], len(str(self.paragraphs[self.cursor[1]]['text'])))
@@ -145,7 +151,7 @@ class ParagraphInsert(unittest.TestCase):
 class ParagraphRemove(unittest.TestCase):
     def test_removes_exactly_one_text_paragraph_with_one_native_action(self) -> None:
         hwp = _doc('Title', 'Item', 'Tail')
-        result = Flow(hwp).step(match='Item', **REMOVE)
+        result = Flow(hwp).step(match='Item', expected_text='Item', **REMOVE)
         self.assertTrue(result['ok'], result)
         self.assertEqual([p['text'] for p in hwp.paragraphs], ['Title', 'Tail'])
         self.assertIn(('select_text', 1, 0, 2, 0, 0), hwp.calls)
@@ -153,7 +159,7 @@ class ParagraphRemove(unittest.TestCase):
 
     def test_last_paragraph_is_refused_without_a_native_edit(self) -> None:
         hwp = _doc('Title', 'Item')
-        result = Flow(hwp).step(match='Item', **REMOVE)
+        result = Flow(hwp).step(match='Item', expected_text='Item', **REMOVE)
         self.assertFalse(result['ok'])
         self.assertEqual(result['steps'][0]['refusal_code'], 'target_is_last_paragraph')
         self.assertNotIn(('Run', 'Delete'), hwp.calls)
@@ -169,7 +175,7 @@ class ParagraphRemove(unittest.TestCase):
             return census
 
         with patch.object(edit, '_read_protection', protected):
-            result = Flow(hwp).step(match='Item', **REMOVE)
+            result = Flow(hwp).step(match='Item', expected_text='Item', **REMOVE)
         self.assertFalse(result['ok'])
         self.assertEqual(result['steps'][0]['refusal_code'], code)
         self.assertNotIn(('Run', 'Delete'), hwp.calls)

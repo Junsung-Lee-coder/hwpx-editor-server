@@ -84,7 +84,7 @@ class SemanticDebtSafety(unittest.TestCase):
                 self.assertEqual(hwp.calls[mark[0]:], [])
                 self.assertEqual(owned.cleanup_events(), [])
 
-    def test_preedit_incomplete_census_holds_without_new_edit_debt(self):
+    def test_preedit_incomplete_census_refuses_without_hold_or_edit_debt(self):
         owned = custody.Owned(self, preservation.make_doc(), real_execute_live=True)
         hwp = owned.hwp
         hwp.hwpml_text = hwp.get_text_file('HWPML2X', '').replace('STYLELIST', 'XSTYLELIST')
@@ -93,7 +93,8 @@ class SemanticDebtSafety(unittest.TestCase):
         self.assertFalse(result['ok'])
         self.assertFalse(result['dirty'])
         self.assertFalse(result['steps'][0]['mutation_may_have_persisted'])
-        self.assertTrue(owned.session._native_custody_held)
+        self.assertEqual(result['steps'][0]['refusal_code'], 'preservation_unprovable')
+        self.assertFalse(owned.session._native_custody_held)
         command = next(c for c in owned.session._commands_by_id.values() if c.name == 'command-bundle')
         self.assertFalse(command.may_have_mutated)
         self.assertFalse(owned.session._lifetime_edit_possible)
@@ -193,12 +194,12 @@ class SemanticDebtSafety(unittest.TestCase):
         self.assertFalse(result['ok'])
         self.assertTrue(result['dirty'])
         self.assertFalse(result['steps'][0]['mutation_may_have_persisted'])
-        self.assertTrue(owned.session._native_custody_held)
+        self.assertFalse(owned.session._native_custody_held)
         self.assertTrue(owned.session._normal_close_requires_save)
         self.assertTrue(owned.session._lifetime_edit_possible)
         self.assertEqual(owned.cleanup_events(), [])
 
-    def test_failed_report_of_preedit_hold_preserves_independent_debt(self):
+    def test_preedit_refusal_preserves_independent_debt_when_reporting_fails(self):
         from unittest.mock import patch
         for prior_dirty in (False, True):
             with self.subTest(prior_dirty=prior_dirty):
@@ -210,15 +211,15 @@ class SemanticDebtSafety(unittest.TestCase):
                 hwp.hwpml_text = hwp.get_text_file('HWPML2X', '').replace('STYLELIST', 'XSTYLELIST')
                 persist = owned.session._persist_command
                 def fail(command):
-                    if command.name == 'command-bundle' and command.custody_held:
-                        raise OSError('synthetic held-report failure')
+                    if command.name == 'command-bundle':
+                        raise OSError('synthetic report failure')
                     return persist(command)
                 with patch.object(owned.session, '_persist_command', fail):
                     result, error = owned.run(translation.NUMBERING_STEP)
+                # A failed report never reads as success, never clears earlier debt and never reads as a new edit.
                 self.assertIsNone(result)
                 self.assertIsNotNone(error)
-                self.assertTrue(owned.session._native_custody_held)
-                self.assertEqual(owned.saved_bindings[-1]['working_copy_dirty'], prior_dirty)
+                self.assertIs(owned.session._normal_close_requires_save, prior_dirty)
                 self.assertEqual(owned.cleanup_events(), [])
 
     def test_page_property_validation_precedes_the_next_property_read(self):

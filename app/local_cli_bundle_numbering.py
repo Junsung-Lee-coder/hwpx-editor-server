@@ -52,19 +52,30 @@ def _plain_proof(value: Any, depth: int = 0) -> Any:
     raise LocalCliRuntimeError('Numbering proof primitive is unproven.')
 
 
+class _NumberingCleanRefusal(LocalCliRuntimeError):
+    """Refused from returned evidence before any navigation or mutator: nothing changed and the session stays usable."""
+
+    def __init__(self, message: str, *, code: str) -> None:
+        super().__init__(message)
+        self.code = code
+
+
 class _NumberingSemanticRefusal(LocalCliRuntimeError):
     """Issued only after trusted semantic branch and complete restored-state proof."""
-
-
-class _NumberingPreEditHold(LocalCliRuntimeError):
-    """Trusted pre-navigation returned census is incomplete; custody is not issued-edit debt."""
 
 
 def _guard_protection(protection: Callable[[], Any] | None,
                       on_incomplete: Callable[[], None] | None = None) -> dict[str, Any]:
     if protection is None:
         raise LocalCliRuntimeError('Numbering preservation reader is unavailable.')
-    raw = _plain_proof(protection())
+    try:
+        raw = protection()
+    except native_numbering_census.CensusTextUnusable as exc:
+        # The native read returned a plain string that cannot serve as evidence (too large, malformed).
+        if on_incomplete is not None:
+            on_incomplete()
+        raise LocalCliRuntimeError('Numbering preservation evidence is unusable.') from exc
+    raw = _plain_proof(raw)
     required = {'header_footer', 'body_sha256', 'styles_sha256', 'numberings_sha256',
                 'bindata_sha256', 'media_sha256', 'page_number_count', 'paragraphs',
                 'definitions', 'frame', 'outline_shapes', 'page_restarts', 'page_restart_positions'}
@@ -80,6 +91,13 @@ def _guard_protection(protection: Callable[[], Any] | None,
         if paragraph['section'] < 0 or paragraph['level'] < 0:
             raise LocalCliRuntimeError('Numbering paragraph state is unproven.')
     return raw
+
+
+def _page_refusal_changed_nothing(refusal: native_numbering.NativeNumberingRefusal) -> bool:
+    """Judged from returned document evidence, before the temporary navigation; a failed native read stays unproven."""
+    if refusal.code == 'protection_unavailable':
+        return type(refusal.__cause__) is native_numbering_census.CensusTextUnusable
+    return refusal.code in {'existing_page_number', 'section_count_unprovable', 'header_footer_unprovable', 'preservation_unprovable'}
 
 
 class LocalCliBundleNumberingMixin:
@@ -118,6 +136,10 @@ class LocalCliBundleNumberingMixin:
             result = native_numbering.apply_page_number(hwp, request, protection=protection, on_mutating=on_mutating)
         except native_numbering.NativeNumberingMutationError as exc:
             raise _mutation_error(exc) from exc
+        except native_numbering.NativeNumberingRefusal as exc:
+            if _page_refusal_changed_nothing(exc):
+                raise _NumberingCleanRefusal(str(exc), code=exc.code) from exc
+            raise _runtime_error(exc) from exc
         except native_numbering.EditOperationError as exc:
             raise _runtime_error(exc) from exc
         return {
@@ -130,27 +152,47 @@ class LocalCliBundleNumberingMixin:
         }
 
     def _bundle_paragraph_edit(self, hwp: Any, step: dict[str, Any], *, validate: Callable[..., dict[str, Any]], edit: Callable[..., dict[str, Any]],
-                               schema: str, mutation: str) -> dict[str, Any]:
+                               protection: Callable[[], Any], schema: str, mutation: str) -> dict[str, Any]:
+        def evidence() -> dict[str, Any]:
+            try:
+                return _guard_protection(protection)
+            except LocalCliRuntimeError as exc:
+                raise native_numbering.NativeNumberingRefusal(
+                    'Document preservation evidence is unusable before the edit.', code='preservation_unprovable',
+                ) from exc
+
+        def restored() -> None:
+            """A refusal is reported as changing nothing only after the state it found is back and proven."""
+            caret, selection = original
+            native_numbering._set_pos(hwp, caret)  # noqa: SLF001
+            if selection:
+                if selection[0] != selection[3]:
+                    raise LocalCliRuntimeError('Cross-list selection restoration is unproven.')
+                native_numbering._require_motion_result(hwp.select_text(selection[1], selection[2], selection[4], selection[5], selection[0]))  # noqa: SLF001
+            if native_numbering._read_target_state(hwp) != original or _guard_protection(protection) != before:  # noqa: SLF001
+                raise LocalCliRuntimeError('Paragraph edit refusal restoration is unproven.')
+
         try:
             validated = validate(step)
-            original = native_numbering._read_target_state(hwp)  # noqa: SLF001
-            if original is None:
-                raise LocalCliRuntimeError('Paragraph edit target state is unproven.')
+        except native_numbering.NativeNumberingInputError as exc:
+            raise _runtime_error(exc) from exc
+        original = native_numbering._read_target_state(hwp)  # noqa: SLF001
+        if original is None:
+            raise native_numbering.NativeNumberingRefusal('The caret or selection could not be read as exact positions.', code='target_unlocatable')
+        before = evidence()
+        try:
             target = self._find_text_on_expected_page(hwp, match=validated['match'], expected_page=validated['expected_page'], numbering_guard=True)
             target = _plain_proof(target)
             if type(target) is not dict or target.get('page') != validated['expected_page']:
                 raise LocalCliRuntimeError('Paragraph edit target page is unproven.')
-            result = edit(validated)
+            result = edit(validated, evidence)
         except native_numbering.NativeNumberingMutationError as exc:
             raise _mutation_error(exc) from exc
-        except native_numbering.NativeNumberingInputError as exc:
-            raise _runtime_error(exc) from exc
         except _NumberingTargetNotFound as exc:
-            native_numbering._set_pos(hwp, original[0])  # noqa: SLF001
+            restored()
             raise native_numbering.NativeNumberingRefusal('No target on the expected page.', code='target_not_found') from exc
         except native_numbering.NativeNumberingRefusal:
-            # Raised only before the native edit; the temporary finder caret goes back before the refusal is reported.
-            native_numbering._set_pos(hwp, original[0])  # noqa: SLF001
+            restored()
             raise
         return {
             'schema_version': schema,
@@ -168,10 +210,9 @@ class LocalCliBundleNumberingMixin:
     ) -> dict[str, Any]:
         return self._bundle_paragraph_edit(
             hwp, step, validate=native_paragraph_edit.validate_insert_step,
-            edit=lambda item: native_paragraph_edit.insert_paragraph(
-                hwp, match=item['match'], text=item['text'], position=item['position'],
-                protection=lambda: _guard_protection(protection), on_mutating=on_mutating),
-            schema='local-cli/paragraph-insert-exact/v1', mutation='paragraph-insert-exact',
+            edit=lambda item, reader: native_paragraph_edit.insert_paragraph(
+                hwp, match=item['match'], text=item['text'], position=item['position'], protection=reader, on_mutating=on_mutating),
+            protection=protection, schema='local-cli/paragraph-insert-exact/v1', mutation='paragraph-insert-exact',
         )
 
     def _bundle_paragraph_remove_exact(
@@ -179,9 +220,9 @@ class LocalCliBundleNumberingMixin:
     ) -> dict[str, Any]:
         return self._bundle_paragraph_edit(
             hwp, step, validate=native_paragraph_edit.validate_remove_step,
-            edit=lambda item: native_paragraph_edit.remove_paragraph(
-                hwp, match=item['match'], protection=lambda: _guard_protection(protection), on_mutating=on_mutating),
-            schema='local-cli/paragraph-remove-exact/v1', mutation='paragraph-remove-exact',
+            edit=lambda item, reader: native_paragraph_edit.remove_paragraph(
+                hwp, match=item['match'], expected_text=item['expected_text'], protection=reader, on_mutating=on_mutating),
+            protection=protection, schema='local-cli/paragraph-remove-exact/v1', mutation='paragraph-remove-exact',
         )
 
     def _bundle_official_numbering_apply(
@@ -312,7 +353,10 @@ class LocalCliBundleNumberingMixin:
                     rollback={'attempted': False, 'succeeded': False},
                 )
             elif preedit_incomplete and phase == 'preflight':
-                error = _NumberingPreEditHold('Numbering preservation is incomplete before navigation or mutation.')
+                # Only returned evidence was read: no navigation, no mutator. A refusal, not custody.
+                raise _NumberingCleanRefusal(
+                    'Numbering preservation is incomplete before navigation or mutation.', code='preservation_unprovable',
+                ) from exc
             else:
                 error = LocalCliRuntimeError('Numbering guard failed; outcome is unproven.')
             error.numbering_phase = phase

@@ -11,6 +11,7 @@
     "label",
     "match",
     "expected_page",
+    "expected_text",
     "confirm_remove"
   ]
 }

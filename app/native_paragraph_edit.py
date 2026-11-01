@@ -3,16 +3,20 @@
 Native facts these rely on were observed on Hancom 2024 through pyhwpx 1.7.2: one ``InsertText`` holding ``\\r\\n``
 creates one paragraph that inherits the neighbor's HeadingType and Level and is reverted by one Undo. Selecting from a
 paragraph start to the next paragraph start and running one ``Delete`` removes it, keeps the next paragraph's shape and
-is reverted by one Undo, but the next paragraph loses a PageBreak/ColumnBreak flag, so that case is refused.
+is reverted by one Undo, but the next paragraph loses a PageBreak/ColumnBreak flag, so that case is refused. Removing the
+only user of a character or paragraph shape also drops that shape from the document's definition list.
 
 The same census protects both edits as numbering: mandatory evidence is read before the call, and any change beyond the
 requested paragraph after the call is an unknown outcome that is never rolled back.
 """
 from __future__ import annotations
 
+import difflib
 from typing import Any, Callable, Mapping
 
+from app.native_numbering_census import CensusTextUnusable
 from app.native_numbering import (
+    ControlEnumerationUnproven,
     NativeNumberingInputError,
     NativeNumberingMutationError,
     NativeNumberingRefusal,
@@ -21,12 +25,15 @@ from app.native_numbering import (
     _STEP_ENVELOPE_KEYS,
     _action_confirmed,
     _census_hits,
+    _control_ids,
     _exception_class_label,
     _get_pos,
     _get_selection,
     _locate_unique_body_paragraph,
     _mark_noncomplete,
+    _multiset_delta,
     _native_method,
+    _page_number_props,
     _read_protection,
     _read_target_state,
     _reject_unknown_keys,
@@ -35,6 +42,8 @@ from app.native_numbering import (
     _require_haction,
     _set_pos,
     _status_text,
+    _validated_census,
+    single_use_shape_left,
 )
 
 TEXT_MAX_CHARS = 4000
@@ -68,10 +77,13 @@ def validate_insert_step(step: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def validate_remove_step(step: Mapping[str, Any]) -> dict[str, Any]:
-    _reject_unknown_keys(step, ('match', 'expected_page', 'confirm_remove') + _STEP_ENVELOPE_KEYS, 'paragraph_remove_exact step')
+    _reject_unknown_keys(step, ('match', 'expected_page', 'expected_text', 'confirm_remove') + _STEP_ENVELOPE_KEYS, 'paragraph_remove_exact step')
     if step.get('confirm_remove') is not True:
         raise NativeNumberingInputError('paragraph_remove_exact requires confirm_remove=true')
-    return _validated_match(step, 'paragraph_remove_exact')
+    expected_text = step.get('expected_text')
+    if not isinstance(expected_text, str) or not expected_text:
+        raise NativeNumberingInputError('paragraph_remove_exact requires expected_text, the full text of the paragraph to remove')
+    return {**_validated_match(step, 'paragraph_remove_exact'), 'expected_text': expected_text}
 
 
 def _target(census: Mapping[str, Any], match: str) -> tuple[int, dict[str, Any]]:
@@ -92,21 +104,32 @@ def _located(hwp: Any, match: str, paragraph: Mapping[str, Any]) -> tuple[int, i
     return list_id, para
 
 
-def _shared_problems(before: Mapping[str, Any], after: Mapping[str, Any], *, allowed_shape_removal: bool) -> list[str]:
+def _shared_problems(before: Mapping[str, Any], after: Mapping[str, Any], *, removed_paragraph: Mapping[str, Any] | None = None) -> list[str]:
     problems = [f'{field} changed' for field in _COMPARED if before.get(field) != after.get(field)]
     for name in sorted(set(before['definitions']) | set(after['definitions'])):
-        left, right = before['definitions'].get(name, []), after['definitions'].get(name, [])
-        if left == right:
+        removed, added = _multiset_delta(before['definitions'].get(name, []), after['definitions'].get(name, []))
+        if not removed and not added:
             continue
-        removed = [entry for entry in left if entry not in right]
-        added = [entry for entry in right if entry not in left]
-        if not (allowed_shape_removal and name == 'parashapelist' and len(removed) <= 1 and not added):
-            problems.append(f'{name} changed')
+        if removed_paragraph is not None and not added and name in {'parashapelist', 'charshapelist'}:
+            own, field = (([removed_paragraph.get('parashape_sha256')], 'parashape_sha256') if name == 'parashapelist'
+                          else (removed_paragraph.get('charshape_sha256s') or [], 'charshape_sha256s'))
+            if single_use_shape_left(removed, own, after['paragraphs'], field):
+                continue
+        problems.append(f'{name} changed')
     return problems
 
 
 def _same_content(left: Mapping[str, Any], right: Mapping[str, Any]) -> bool:
-    return all(left.get(key) == right.get(key) for key in ('text', 'heading', 'level', 'section', 'content_sha256'))
+    return all(left.get(key) == right.get(key) for key in (
+        'text', 'heading', 'level', 'section', 'content_sha256', 'numbering_ref_sha256', 'inline_controls', 'page_break', 'column_break',
+    ))
+
+
+def _control_sequence(hwp: Any) -> list[str]:
+    try:
+        return [name for _control, name in _control_ids(hwp)]
+    except ControlEnumerationUnproven as exc:
+        raise NativeNumberingRefusal('the document controls could not be enumerated before the edit', code='control_enumeration_unavailable') from exc
 
 
 def _finish(reach: _MutationReach, problems: list[str], what: str) -> None:
@@ -150,6 +173,7 @@ def insert_paragraph(
             raise NativeNumberingRefusal('inserting before the first body paragraph would split the section definition', code='target_at_document_start')
         if position == 'before' and (paragraph['page_break'] or paragraph['column_break']):
             raise NativeNumberingRefusal('inserting before a paragraph that starts a page or column is refused', code='neighbor_has_break')
+        controls = _control_sequence(hwp)
         list_id, para = _located(hwp, match, paragraph)
         _set_pos(hwp, (list_id, para, 0))
         if position == 'after':
@@ -169,9 +193,13 @@ def insert_paragraph(
         if not _action_confirmed(result):
             raise NativeNumberingMutationError(f'native InsertText returned {_status_text(result)}; nothing was rolled back')
         after = _read_protection(protection)
-        problems = _shared_problems(before, after, allowed_shape_removal=False)
-        new_index = index + 1 if position == 'after' else index
-        if len(after['paragraphs']) != len(before['paragraphs']) + 1:
+        problems = _shared_problems(before, after)
+        if [name for _control, name in _control_ids(hwp)] != controls:
+            problems.append('the document control sequence changed')
+        # Cells of the target's own table are listed right after it, so the new paragraph is found by body position.
+        new_body_index = paragraph['body_index'] + (1 if position == 'after' else 0)
+        new_index = next((number for number, item in enumerate(after['paragraphs']) if item.get('body_index') == new_body_index), None)
+        if len(after['paragraphs']) != len(before['paragraphs']) + 1 or new_index is None:
             problems.append('the paragraph count did not grow by exactly one')
         else:
             added = after['paragraphs'][new_index]
@@ -195,7 +223,7 @@ def insert_paragraph(
 
 
 def remove_paragraph(
-    hwp: Any, *, match: str, protection: Callable[[], Any], on_mutating: Callable[[], None] | None = None,
+    hwp: Any, *, match: str, expected_text: str, protection: Callable[[], Any], on_mutating: Callable[[], None] | None = None,
 ) -> dict[str, Any]:
     reach = _MutationReach(on_mutating)
 
@@ -204,6 +232,8 @@ def remove_paragraph(
         before = _read_protection(protection)
         _require_complete(before)
         index, paragraph = _target(before, match)
+        if paragraph['text'] != expected_text:
+            raise NativeNumberingRefusal('the paragraph at this match does not hold exactly expected_text', code='target_text_mismatch')
         if paragraph['inline_controls']:
             raise NativeNumberingRefusal(
                 f"the paragraph holds inline controls ({', '.join(sorted(set(paragraph['inline_controls'])))}), so removing it would remove them",
@@ -214,6 +244,7 @@ def remove_paragraph(
             raise NativeNumberingRefusal('the last paragraph of a section cannot be removed this way', code='target_is_last_paragraph')
         if paragraph['page_break'] or paragraph['column_break'] or following['page_break'] or following['column_break']:
             raise NativeNumberingRefusal('removing this paragraph would move a page or column break', code='neighbor_has_break')
+        controls = _control_sequence(hwp)
         list_id, para = _located(hwp, match, paragraph)
         selected = hwp.select_text(para, 0, para + 1, 0, list_id)
         expected = (list_id, para, 0, list_id, para + 1, 0)
@@ -224,7 +255,9 @@ def remove_paragraph(
         if not _action_confirmed(result):
             raise NativeNumberingMutationError(f'native Delete returned {_status_text(result)}; nothing was rolled back')
         after = _read_protection(protection)
-        problems = _shared_problems(before, after, allowed_shape_removal=True)
+        problems = _shared_problems(before, after, removed_paragraph=paragraph)
+        if [name for _control, name in _control_ids(hwp)] != controls:
+            problems.append('the document control sequence changed')
         rest = before['paragraphs'][:index] + before['paragraphs'][index + 1:]
         if len(after['paragraphs']) != len(rest):
             problems.append('the paragraph count did not shrink by exactly one')
@@ -243,46 +276,118 @@ def remove_paragraph(
     return _run(reach, body, 'paragraph removal')
 
 
-_PAGE_POSITIONS = {'bottomcenter': 'bottom-center', 'bottomleft': 'bottom-left', 'bottomright': 'bottom-right',
-                   'topcenter': 'top-center', 'topleft': 'top-left', 'topright': 'top-right'}
 _PARAGRAPH_LIMIT = 2000
 _READBACK_TEXT_LIMIT = 300
 
 
 def numbering_readback(hwp: Any, *, protection: Callable[[], Any]) -> dict[str, Any]:
-    """Facts for a readable review. Only the existing in-memory readers run; the caret is compared before and after."""
-    from app.native_numbering import _control_ids, _validated_census
+    """Facts for a readable review; only in-memory reads run, and the caret is compared before and after.
 
-    state = _read_target_state(hwp)
-    census = _validated_census(protection())
-    if not census['paragraphs']:
-        raise RuntimeError('the document census has no paragraph evidence')
-    controls: dict[str, int] = {}
-    page_numbers = []
-    for control, name in _control_ids(hwp):
-        controls[name] = controls.get(name, 0) + 1
-        if name == 'pgnp':
-            props = control.Properties
-            page_numbers.append({'draw_pos': props.Item('DrawPos'), 'side_char': props.Item('SideChar')})
-    restarts = [next((value for key, value in entry['attrs'] if key == 'number'), None) for entry in census['page_restarts'] or []]
-    paragraphs = [
-        {
-            'text': item['text'][:_READBACK_TEXT_LIMIT], 'heading': item['heading'], 'level': item['level'],
-            'in_body': item.get('body_index') is not None, 'content_sha256': item['content_sha256'],
-        }
-        for item in census['paragraphs'][:_PARAGRAPH_LIMIT]
-    ]
-    return {
-        'paragraphs': paragraphs,
-        'paragraphs_truncated': len(census['paragraphs']) > _PARAGRAPH_LIMIT,
-        'controls': controls,
-        'page_numbers': page_numbers,
-        'page_restarts': restarts,
-        'evidence': {
+    A document this code cannot use as evidence (too large, unresolved references, too many controls) is reported as
+    unavailable and leaves the session as it was. An unexpected native exception propagates, and stays unknown.
+    """
+    try:
+        state = _read_target_state(hwp)
+    except NativeNumberingRefusal:
+        state = None
+    result: dict[str, Any] = {'available': True, 'reason': None, 'paragraphs': None, 'paragraphs_truncated': False, 'paragraph_total': None, 'evidence': None,
+                              'page_restarts': None}
+    try:
+        census = _validated_census(_read_census(protection))
+    except (CensusTextUnusable, _CensusUnusable):
+        census = None
+        result.update(available=False, reason='census_unavailable')
+    if census is not None:
+        result['evidence'] = {
             'header_footer': census['header_footer'], 'styles_sha256': census['styles_sha256'], 'media_sha256': census['media_sha256'],
             'numberings_sha256': census['numberings_sha256'], 'bindata_sha256': census['bindata_sha256'],
-        },
-        'page_count': hwp.PageCount,
-        'document_is_modified': hwp.IsModified,
-        'caret_unchanged': state is not None and _read_target_state(hwp) == state,
+        }
+        result['page_restarts'] = [next((value for key, value in entry['attrs'] if key == 'number'), None) for entry in census['page_restarts'] or []]
+        if census['paragraphs'] is None:
+            result.update(available=False, reason='paragraphs_unresolved')
+        else:
+            result['paragraph_total'] = len(census['paragraphs'])
+            result['paragraphs_truncated'] = len(census['paragraphs']) > _PARAGRAPH_LIMIT
+            result['paragraphs'] = [
+                {
+                    'text': item['text'][:_READBACK_TEXT_LIMIT], 'heading': item['heading'], 'level': item['level'],
+                    'in_body': item.get('body_index') is not None, 'content_sha256': item['content_sha256'],
+                }
+                for item in census['paragraphs'][:_PARAGRAPH_LIMIT]
+            ]
+    try:
+        chain = _control_ids(hwp)
+    except ControlEnumerationUnproven:
+        result.update(controls=None, controls_reason='control_limit', page_numbers=None)
+    else:
+        controls: dict[str, int] = {}
+        page_numbers: list[dict[str, Any] | None] = []
+        for control, name in chain:
+            controls[name] = controls.get(name, 0) + 1
+            if name == 'pgnp':
+                props = _page_number_props(control, allow_unset_new_number=True)
+                page_numbers.append(None if props is None else {'draw_pos': props['DrawPos'], 'side_char': props['SideChar']})
+        result.update(controls=controls, page_numbers=page_numbers)
+    result.update(page_count=hwp.PageCount, document_is_modified=hwp.IsModified, caret_unchanged=state is not None and _read_target_state(hwp) == state)
+    return result
+
+
+class _CensusUnusable(Exception):
+    """The native read returned, but the result does not have the shape of a document census."""
+
+
+def _read_census(protection: Callable[[], Any]) -> Any:
+    raw = protection()
+    if not isinstance(raw, Mapping):
+        raise _CensusUnusable('census is not an object')
+    return raw
+
+
+_HISTORY_CHANGE_LIMIT = 50
+
+
+def history_evidence(hwp: Any, protection: Callable[[], Any]) -> dict[str, Any] | None:
+    """What Undo/Redo is compared with. None means this document cannot be used as evidence; the call may still run."""
+    try:
+        census = _validated_census(protection())
+    except CensusTextUnusable:
+        return None
+    if census['paragraphs'] is None:
+        return None
+    return {
+        'paragraphs': [{key: item[key] for key in ('text', 'heading', 'level', 'content_sha256')} for item in census['paragraphs']],
+        'controls': [name for _control, name in _control_ids(hwp)],
+        'digests': {name: census[name] for name in ('header_footer', 'styles_sha256', 'numberings_sha256', 'media_sha256', 'page_restarts')},
     }
+
+
+def history_confirmation(before: Mapping[str, Any] | None, after: Mapping[str, Any] | None) -> dict[str, Any]:
+    """What this Undo/Redo actually changed, from the document, so the reply says more than that the call returned."""
+    if before is None or after is None:
+        return {'available': False, 'document_changed': None}
+    old, new = before['paragraphs'], after['paragraphs']
+    changes: list[dict[str, Any]] = []
+    matcher = difflib.SequenceMatcher(None, [item['text'] for item in old], [item['text'] for item in new], autojunk=False)
+    for op, i1, i2, j1, j2 in matcher.get_opcodes():
+        if op != 'equal':
+            changes.extend({'kind': 'removed', 'text': item['text'][:120]} for item in old[i1:i2])
+            changes.extend({'kind': 'added', 'text': item['text'][:120]} for item in new[j1:j2])
+            continue
+        for left, right in zip(old[i1:i2], new[j1:j2]):
+            if (left['heading'], left['level']) != (right['heading'], right['level']):
+                changes.append({'kind': 'numbering_changed', 'text': right['text'][:120], 'before': {'heading': left['heading'], 'level': left['level']},
+                                'after': {'heading': right['heading'], 'level': right['level']}})
+            elif left['content_sha256'] != right['content_sha256']:
+                changes.append({'kind': 'format_changed', 'text': right['text'][:120]})
+    digests = sorted(name for name in before['digests'] if before['digests'][name] != after['digests'][name])
+    controls_changed = before['controls'] != after['controls']
+    result: dict[str, Any] = {
+        'available': True,
+        'document_changed': bool(changes or digests or controls_changed),
+        'paragraph_count': {'before': len(old), 'after': len(new)},
+        'changes': changes[:_HISTORY_CHANGE_LIMIT],
+        'changed_evidence': digests,
+    }
+    if controls_changed:
+        result['controls'] = {'before': before['controls'], 'after': after['controls']}
+    return result

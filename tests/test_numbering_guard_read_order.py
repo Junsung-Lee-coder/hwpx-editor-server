@@ -57,7 +57,13 @@ class ReadOrderTests(unittest.TestCase):
         result = self.run_bundle(service, match=match)
         self.assertTrue(mark, 'fault boundary must actually be reached')
         self.assertFalse(result['ok'])
-        self.assert_held(manager, session, hwp, calls, held, may_have_mutated=not unissued)
+        if unissued:
+            # Exact returned incomplete evidence before any navigation or Execute: a refusal, with the session usable.
+            self.assertEqual(result['steps'][-1]['refusal_code'], 'preservation_unprovable')
+            self.assertFalse(result['steps'][-1]['mutation_may_have_persisted'])
+            self.assertFalse(session._native_custody_held)
+        else:
+            self.assert_held(manager, session, hwp, calls, held, may_have_mutated=True)
         self.assertEqual(hwp.calls[mark[0]:], [], 'no SDK after first unknown/invalid observation')
         self.assertFalse(any(c[0] == 'Execute' for c in hwp.calls))
 
@@ -141,8 +147,7 @@ class ReadOrderTests(unittest.TestCase):
             for index, transform in enumerate(transforms):
                 with self.subTest(body=body, nth=nth, variant=index):
                     # These exact returned/validated incomplete first censuses
-                    # precede all navigation/Execute. Custody remains UNKNOWN;
-                    # it must not manufacture current-command edit debt (R4).
+                    # precede all navigation/Execute, so nothing can have changed.
                     unissued = not body and nth == 1 and index in (1, 3, 4, 5, 6, 7, 8)
                     self.protection_fault(nth, transform, body, unissued=unissued)
 

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import json
 import os
 from pathlib import Path
@@ -13,6 +14,7 @@ import tempfile
 import threading
 import time
 import unittest
+import zipfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import httpx2
@@ -76,6 +78,17 @@ class Backend(BaseHTTPRequestHandler):
                                'metadata': {'local_cli_v1': local}}})
         if self.path == '/local-cli/status':
             return self.reply({'ok': True, 'session_id': SID, 'command_reconciliation': None})
+        if self.path == f'/local-cli/session/{SID}/artifact/working-copy':
+            # hwpx_save and hwpx_close copy the saved file out of the managed session.
+            archive = io.BytesIO()
+            with zipfile.ZipFile(archive, 'w') as package:
+                package.writestr('Contents/section0.xml', '<sec/>')
+            raw = archive.getvalue()
+            self.send_response(200)
+            self.send_header('Content-Length', str(len(raw)))
+            self.end_headers()
+            self.wfile.write(raw)
+            return None
         return self.reply({'detail': 'not found'}, 404)
 
     def do_POST(self):
@@ -125,6 +138,9 @@ class Backend(BaseHTTPRequestHandler):
                                                'sequence': 1, 'state': 'completed_after_timeout',
                                                'timed_out': True, 'reconcilable': True, 'reconciled': False,
                                                'recovery': {'state': 'saving'}}})
+            if self.path == '/local-cli/save':
+                return self.reply({'ok': True, 'session_id': SID, 'command_id': 'cmd-owned', 'state': 'succeeded', 'filename': 'fixture-edited.hwpx',
+                                   'download_path': f'/local-cli/session/{SID}/artifact/working-copy'})
             return self.reply({'ok': True, 'session_id': SID, 'command_id': 'cmd-owned', 'state': 'succeeded'})
         return self.reply({'detail': 'not found'}, 404)
 

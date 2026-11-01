@@ -131,13 +131,35 @@ _BUNDLE_UNDO_POLICY: dict[str, str] = {
     'layout_exact': 'refuse',
     'object_insert_exact': 'refuse',
     'table_structure_exact': 'single_native_edit',
-    # Native one-Undo proven for one ParagraphShape and one PageNumPos; a definition plus a paragraph write is not one step.
+    # One native action is one counted Undo; a definition plus a paragraph write is not one step and refuses.
     'official_numbering_apply': 'single_native_edit',
     'page_number_apply': 'single_native_edit',
     'paragraph_insert_exact': 'single_native_edit',
     'paragraph_remove_exact': 'single_native_edit',
 }
 _UNDO_UNVERIFIED_BUNDLE_OPS = frozenset(_BUNDLE_UNDO_POLICY)
+
+
+class LocalCliUndoRefused(LocalCliRuntimeError):
+    """Undo or Redo stopped with the document unchanged; the code selects a fixed reason that is safe to show the caller."""
+
+    def __init__(self, message: str, *, code: str = 'undo_not_counted') -> None:
+        super().__init__(message)
+        self.code = code
+
+
+_HISTORY_REFUSALS = {
+    'no_undo_available': 'this session has no edit to undo; no native undo was called.',
+    'no_redo_available': 'there is no undone edit to reapply; no native redo was called.',
+    'undo_not_counted': 'the last edit cannot be undone as one counted step; no undo was performed.',
+    'undo_not_applied': 'Hancom reported nothing to undo and the document is unchanged.',
+    'redo_not_applied': 'Hancom reported nothing to redo and the document is unchanged.',
+}
+# The edit commands outside command bundles; each is one tracked edit whose native count the command itself records.
+_DIRECT_EDIT_COMMANDS = frozenset({
+    'replace', 'cell-replace', 'type', 'anchor-insert', 'figure-section', 'image', 'image-at-anchor', 'fontsize', 'bold',
+    'font', 'bullet', 'table', 'list', 'action', 'insert-text-file', 'pycall',
+})
 
 
 def _bundle_step_single_undo(step: dict[str, Any]) -> bool:
@@ -174,6 +196,14 @@ def _record_bundle_undo_state(binding: dict[str, Any], steps: list[Any], prior: 
         # Drop this bundle's own start marker; an older unverified edit below
         # these steps still blocks undo once they are undone.
         binding['logical_undo_unverified'] = prior.get('logical_undo_unverified')
+    _track_history_edit(binding, None if unverified else len(dirty_steps))
+
+
+def _track_history_edit(binding: dict[str, Any], native_steps: Any) -> None:
+    """The edits this session can undo, newest last: native step counts, or None for an edit that cannot be counted."""
+    if isinstance(binding.get('undo_stack'), list):
+        binding['undo_stack'].append(native_steps)
+        binding['redo_stack'] = []
 
 
 _STYLE_SELECTION_CONSUMED_WARNING = (
@@ -2350,13 +2380,15 @@ class LocalCliService(
     def _run_single_action(self, hwp: Any, *, actions: tuple[str, ...], methods: tuple[str, ...], error_message: str) -> None:
         run = getattr(getattr(hwp, 'HAction', None), 'Run', None)
         if callable(run):
+            # A false or failed Run may already have acted, so no fallback call follows it.
             for action in actions:
                 try:
                     raw = run(action)
-                    if raw is None or bool(raw):
-                        return
-                except Exception:
-                    continue
+                except Exception as exc:
+                    raise LocalCliServiceError(error_message, status_code=500) from exc
+                if raw is None or bool(raw):
+                    return
+            raise LocalCliServiceError(error_message, status_code=500)
         for method_name in methods:
             method = getattr(hwp, method_name, None)
             if callable(method):
@@ -2771,7 +2803,7 @@ class LocalCliService(
                 'confirm_layout',
             },
             'paragraph_insert_exact': {'op', 'operation', 'label', 'match', 'expected_page', 'text', 'position', 'confirm_layout'},
-            'paragraph_remove_exact': {'op', 'operation', 'label', 'match', 'expected_page', 'confirm_remove'},
+            'paragraph_remove_exact': {'op', 'operation', 'label', 'match', 'expected_page', 'expected_text', 'confirm_remove'},
             'paragraph_delete_exact': {
                 'op',
                 'operation',
@@ -3939,6 +3971,8 @@ class LocalCliService(
                 timeout=timeout,
                 **({'prior_dirty': True} if binding.get('working_copy_dirty') is True or binding.get('dirty') is True else {}),
             )
+            if command_name in _DIRECT_EDIT_COMMANDS:
+                _track_history_edit(binding, 'direct')
             binding['_expected_command_generation'] = command_generation
             try:
                 command_status = self.runtime_manager.command_status(session_id)
@@ -4305,6 +4339,8 @@ class LocalCliService(
                 'document_session_state': 'open',
                 'live_session_bound': True,
                 'working_copy_dirty': False,
+                'undo_stack': [],
+                'redo_stack': [],
                 'last_find': None,
                 'cursor_pos': None,
                 'selected_range': None,
@@ -7117,16 +7153,11 @@ class LocalCliService(
                     # Read no exception properties/callbacks before custody.
                     # Producer invocation intent is independent of error tags.
                     from app.native_numbering import NativeNumberingRefusal
-                    from app.local_cli_bundle_numbering import _NumberingPreEditHold, _NumberingSemanticRefusal
+                    from app.local_cli_bundle_numbering import _NumberingCleanRefusal, _NumberingSemanticRefusal
                     numbering = step.get('op') in {'official_numbering_apply', 'page_number_apply', 'paragraph_insert_exact', 'paragraph_remove_exact'}
-                    target_refused = step.get('op') in {'official_numbering_apply', 'paragraph_insert_exact', 'paragraph_remove_exact'} and (
-                        type(exc) is NativeNumberingRefusal or type(exc) is _NumberingSemanticRefusal
-                    )
-                    preedit_hold = step.get('op') == 'official_numbering_apply' and type(exc) is _NumberingPreEditHold
-                    mutation_may_have_persisted = handle.mutation_intent or (
-                        step.get('op') in {'official_numbering_apply', 'paragraph_insert_exact', 'paragraph_remove_exact'}
-                        and not target_refused and not preedit_hold
-                    )
+                    target_refused = numbering and (type(exc) is NativeNumberingRefusal or type(exc) is _NumberingSemanticRefusal or type(exc) is _NumberingCleanRefusal)
+                    # Paragraph edits publish intent exactly when the native call is issued; numbering keeps its stricter projection.
+                    mutation_may_have_persisted = handle.mutation_intent or (step.get('op') == 'official_numbering_apply' and not target_refused)
                     held = False
                     if (mutation_may_have_persisted or (numbering and not target_refused)) and handle.hold_native_custody is not None:
                         if mutation_may_have_persisted:
@@ -7176,6 +7207,7 @@ class LocalCliService(
                     if target_refused and not mutation_may_have_persisted:
                         from app.local_cli_runtime import _native_diagnostic
                         status['refusal_code'] = ('semantic_refusal' if type(exc) is _NumberingSemanticRefusal
+                                                  else exc.code if type(exc) is _NumberingCleanRefusal
                                                   else _native_diagnostic('bundle_step', exc)['refusal_code'])
                     if numbering:
                         # Fixed labels only, so a caller can see the stopping phase without opening the journal.
@@ -7439,12 +7471,21 @@ class LocalCliService(
         resolved_session_id = self._binding_session_id(binding)
 
         def _handler(handle: LocalCliRuntimeHandle) -> dict[str, Any]:
-            artifact_path = export_document_pdf(
-                session_root=handle.session_root,
-                source_filename=handle.source_filename,
-                hwp=handle.hwp,
-                log_path=handle.log_path,
-            )
+            hwp = handle.hwp
+            clean_before = getattr(hwp, 'IsModified', None) is False
+            path_before = getattr(hwp, 'Path', None)
+            try:
+                artifact_path = export_document_pdf(
+                    session_root=handle.session_root,
+                    source_filename=handle.source_filename,
+                    hwp=hwp,
+                    log_path=handle.log_path,
+                )
+            except LocalCliRuntimeError:
+                # The same exact-clean proof as a successful export, plus an unchanged document path.
+                if clean_before and getattr(hwp, 'IsModified', None) is False and getattr(hwp, 'Path', None) == path_before:
+                    return {'export_failed': True}
+                raise
             return {
                 'artifact_path': str(artifact_path),
                 'location': snapshot_live_location(
@@ -7455,6 +7496,8 @@ class LocalCliService(
             }
 
         result = self._execute_live(binding=binding, command_name='export', task_label='local_cli.export', handler=_handler)
+        if result.get('export_failed') is True:
+            raise LocalCliServiceError('export_failed: Hancom could not export this document to PDF; the document is unchanged.', status_code=422)
         location = result.get('location') if isinstance(result.get('location'), dict) else {}
         artifact_path = str(result.get('artifact_path') or '')
         artifacts = self._validated_artifact_projection(
@@ -7468,6 +7511,32 @@ class LocalCliService(
             'session_id': resolved_session_id,
             'filename': self._artifact_name(kind='export', source_filename=str(binding.get('source_filename') or 'document.hwpx')),
             'download_path': self._artifact_download_path(session_id=resolved_session_id, kind='export'),
+        }
+
+    def _run_history_action(self, handle: LocalCliRuntimeHandle, name: str, native_steps: int) -> dict[str, Any]:
+        """Undo or Redo with no second call once one may have been issued, compared with the document before and after."""
+        hwp = handle.hwp
+        protection = self._numbering_protection_reader(handle)
+        before = native_paragraph_edit.history_evidence(hwp, protection)
+        run = getattr(getattr(hwp, 'HAction', None), 'Run', None)
+        call = (lambda: run(name)) if callable(run) else getattr(hwp, name, None)
+        if not callable(call):
+            raise LocalCliRuntimeError(f'pyhwpx {name.lower()} is unavailable on this machine')
+        for step in range(native_steps):
+            raw = call()
+            if raw is True:
+                continue
+            after = native_paragraph_edit.history_evidence(hwp, protection) if raw is False and step == 0 else None
+            if before is not None and after is not None and not native_paragraph_edit.history_confirmation(before, after)['document_changed']:
+                # Observed: native False with nothing to undo changes nothing. The comparison proves it for this call.
+                return {'not_applied': True}
+            raise LocalCliRuntimeError(f'Native {name} did not return True; its outcome is unknown.')
+        after = native_paragraph_edit.history_evidence(hwp, protection)
+        return {
+            'confirmation': native_paragraph_edit.history_confirmation(before, after),
+            'snapshot': _snapshot_cursor_context(hwp),
+            'context': _capture_nearby_text_context(hwp),
+            'location': snapshot_live_location(hwp=hwp, source_filename=handle.source_filename, working_copy_id=handle.session_id),
         }
 
     def numbering_readback(self, *, session_id: str | None = None) -> dict[str, Any]:
@@ -7524,42 +7593,34 @@ class LocalCliService(
 
     def undo(self, *, session_id: str | None = None) -> dict[str, Any]:
         binding = self._load_active_binding(session_id=session_id)
+        tracked = binding.get('undo_stack') if isinstance(binding.get('undo_stack'), list) else None
+        if tracked is not None and not tracked:
+            raise LocalCliUndoRefused('undo refused: no tracked edit in this session.', code='no_undo_available')
         undo_count_raw = binding.get('pending_logical_undo_count')
         blocked = binding.get('logical_undo_unverified')
-        if blocked and not isinstance(undo_count_raw, int):
+        if (blocked and not isinstance(undo_count_raw, int)) or (tracked is not None and tracked[-1] is None):
             # Fail closed: counting native Undo steps could revert part of an
             # edit, or an older edit too.
             raise LocalCliUndoRefused(
-                f'undo refused: {blocked}. Retain the working copy and owning STA instead of counting undos; full native close is unsupported for this unproved or held session. Separately authorized exact-owned operator closure is required.'
+                f'undo refused: {blocked or "the last edit cannot be undone as one counted step"}. Retain the working copy and owning STA instead of counting undos; full native close is unsupported for this unproved or held session. Separately authorized exact-owned operator closure is required.',
+                code='undo_not_counted',
             )
-        undo_count = int(undo_count_raw) if isinstance(undo_count_raw, int) and undo_count_raw > 1 else 1
+        if tracked is not None and type(tracked[-1]) is int:
+            undo_count = tracked[-1]
+        else:
+            undo_count = int(undo_count_raw) if isinstance(undo_count_raw, int) and undo_count_raw > 1 else 1
 
-        def _handler(handle: LocalCliRuntimeHandle) -> dict[str, Any]:
-            for _ in range(undo_count):
-                self._run_single_action(
-                    handle.hwp,
-                    actions=('Undo',),
-                    methods=('Undo',),
-                    error_message='pyhwpx undo is unavailable on this machine',
-                )
-            snapshot = _snapshot_cursor_context(handle.hwp)
-            context = _capture_nearby_text_context(handle.hwp)
-            return {
-                'snapshot': snapshot,
-                'context': context,
-                'location': snapshot_live_location(
-                    hwp=handle.hwp,
-                    source_filename=handle.source_filename,
-                    working_copy_id=handle.session_id,
-                ),
-            }
-
-        result = self._execute_live(binding=binding, command_name='undo', task_label='local_cli.undo', handler=_handler)
+        result = self._execute_live(binding=binding, command_name='undo', task_label='local_cli.undo',
+                                    handler=lambda handle: self._run_history_action(handle, 'Undo', undo_count))
+        if result.get('not_applied') is True:
+            raise LocalCliUndoRefused('undo refused: Hancom had nothing to undo.', code='undo_not_applied')
         snapshot = result.get('snapshot') if isinstance(result.get('snapshot'), dict) else {}
         context = result.get('context') if isinstance(result.get('context'), dict) else {}
         location = result.get('location') if isinstance(result.get('location'), dict) else {}
         binding = self._update_live_binding(binding, location=location, dirty=True, clear_last_find=True, clear_selection_cache=True)
         binding['pending_logical_undo_count'] = None
+        if isinstance(binding.get('undo_stack'), list) and binding['undo_stack']:
+            binding.setdefault('redo_stack', []).append(binding['undo_stack'].pop())
         binding = self._save_binding(binding)
         self._record_local_cli_command('undo', binding=binding, summary=f'applied undo to the live document ({undo_count} native step(s))', payload={'cursor': snapshot.get('pos'), 'native_undo_steps': undo_count})
         return {
@@ -7568,41 +7629,33 @@ class LocalCliService(
             'native_undo_steps': undo_count,
             'caret_pos': snapshot.get('pos'),
             'context': context,
+            'confirmation': result.get('confirmation'),
         }
 
     def redo(self, *, session_id: str | None = None) -> dict[str, Any]:
         binding = self._load_active_binding(session_id=session_id)
-
-        def _handler(handle: LocalCliRuntimeHandle) -> dict[str, Any]:
-            self._run_single_action(
-                handle.hwp,
-                actions=('Redo',),
-                methods=('Redo',),
-                error_message='pyhwpx redo is unavailable on this machine',
-            )
-            snapshot = _snapshot_cursor_context(handle.hwp)
-            context = _capture_nearby_text_context(handle.hwp)
-            return {
-                'snapshot': snapshot,
-                'context': context,
-                'location': snapshot_live_location(
-                    hwp=handle.hwp,
-                    source_filename=handle.source_filename,
-                    working_copy_id=handle.session_id,
-                ),
-            }
-
-        result = self._execute_live(binding=binding, command_name='redo', task_label='local_cli.redo', handler=_handler)
+        tracked = binding.get('redo_stack') if isinstance(binding.get('redo_stack'), list) else None
+        if tracked is not None and not tracked:
+            raise LocalCliUndoRefused('redo refused: no undone edit to reapply.', code='no_redo_available')
+        redo_count = tracked[-1] if tracked is not None and type(tracked[-1]) is int else 1
+        result = self._execute_live(binding=binding, command_name='redo', task_label='local_cli.redo',
+                                    handler=lambda handle: self._run_history_action(handle, 'Redo', redo_count))
+        if result.get('not_applied') is True:
+            raise LocalCliUndoRefused('redo refused: Hancom had nothing to redo.', code='redo_not_applied')
         snapshot = result.get('snapshot') if isinstance(result.get('snapshot'), dict) else {}
         context = result.get('context') if isinstance(result.get('context'), dict) else {}
         location = result.get('location') if isinstance(result.get('location'), dict) else {}
         binding = self._update_live_binding(binding, location=location, dirty=True, clear_last_find=True, clear_selection_cache=True)
+        if isinstance(binding.get('redo_stack'), list) and binding['redo_stack']:
+            binding.setdefault('undo_stack', []).append(binding['redo_stack'].pop())
+            binding = self._save_binding(binding)
         self._record_local_cli_command('redo', binding=binding, summary='applied redo to the live document', payload={'cursor': snapshot.get('pos')})
         return {
             'ok': True,
             'summary': 'redo applied',
             'caret_pos': snapshot.get('pos'),
             'context': context,
+            'confirmation': result.get('confirmation'),
         }
 
     def artifact(self, *, kind: str, session_id: str | None = None) -> tuple[Path, str]:
@@ -7680,6 +7733,8 @@ class LocalCliService(
                 status_code=504,
             ) from exc
         except LocalCliRuntimeError as exc:
+            if getattr(exc, 'save_required', False) is True:
+                raise LocalCliServiceError('save_required: the document has unsaved changes; call save first. It was not closed.', status_code=409) from exc
             # A reporting-only failure must not rewrite already-proven native
             # completion or invite another Quit. This is a Python status read.
             try:
@@ -7734,15 +7789,11 @@ class LocalCliService(
 
 
 
-class LocalCliUndoRefused(LocalCliRuntimeError):
-    """Undo was refused before any native call; its fixed reason text is safe to show the caller."""
-
-
 def as_http_error(exc: Exception) -> HTTPException:
     if isinstance(exc, LocalCliServiceError):
         return HTTPException(status_code=exc.status_code, detail=exc.message)
     if type(exc) is LocalCliUndoRefused:
-        return HTTPException(status_code=409, detail='The last edit cannot be undone as one counted step; no undo was performed.')
+        return HTTPException(status_code=409, detail=f'{exc.code}: {_HISTORY_REFUSALS[exc.code]}')
     if isinstance(exc, LocalCliRuntimeError):
         return HTTPException(status_code=500, detail='Local CLI native operation failed.')
     return HTTPException(status_code=500, detail='Local CLI request failed.')

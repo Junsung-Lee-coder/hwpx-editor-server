@@ -172,6 +172,7 @@ def _native_diagnostic(site: object, error: BaseException) -> dict[str, str]:
                             'outline_usage_unprovable', 'paragraph_shape_unreadable', 'preservation_unprovable',
                             'protection_unavailable', 'section_count_unprovable', 'target_ambiguous', 'target_moved',
                             'target_has_controls', 'target_is_last_paragraph', 'target_at_document_start', 'neighbor_has_break',
+                            'target_text_mismatch',
                             'target_not_found', 'target_not_in_body', 'target_unidentifiable', 'target_unlocatable',
                             'text_readback_unavailable',
                         ):
@@ -2592,10 +2593,17 @@ class LocalCliLiveSession:
                 command = self._commands.get()
                 if command.name == '__close__':
                     refusal: LocalCliRuntimeError | None = None
+                    # An exact native True needs a save; refuse here, before the finalizer would treat it as a failed close.
+                    native_modified = (not self._native_custody_held and not self._allow_native_cleanup
+                                       and getattr(hwp, 'IsModified', None) is True)
                     with self._state_lock:
-                        if (self._native_custody_held or self._normal_close_requires_save) and not self._allow_native_cleanup:
+                        if self._native_custody_held and not self._allow_native_cleanup:
                             # Admitted before a numbering callback became held; custody is re-checked at dequeue.
-                            refusal = LocalCliRuntimeError(_HELD_CLOSE_MESSAGE if self._native_custody_held else 'Normal close requires proved preservation of prior edits.')
+                            refusal = LocalCliRuntimeError(_HELD_CLOSE_MESSAGE)
+                        elif (self._normal_close_requires_save or native_modified) and not self._allow_native_cleanup:
+                            refusal = LocalCliRuntimeError('Normal close requires proved preservation of prior edits.')
+                            refusal.save_required = True  # Refused before any teardown; the session stays usable.
+                        if refusal is not None:
                             command.error = refusal
                             self._apply_normalized_outcome(command, error=refusal)
                             command.state = 'failed'
@@ -2678,14 +2686,14 @@ class LocalCliLiveSession:
                     # here. Unknown callers fail conservatively. Only audited
                     # read commands avoid current intent; earlier intent stays.
                     if command.name not in {'health_probe', 'find', 'info', 'where', 'screenshot', 'command-bundle', 'numbering-readback'}:
-                        clean_export = command.name == 'export' and not self._normal_close_requires_save and handle.hwp.IsModified is False
+                        clean_export = command.name in {'export', 'undo', 'redo'} and not self._normal_close_requires_save and getattr(handle.hwp, 'IsModified', None) is False
                         self._mark_mutating_intent()
                     else:
                         clean_export = False
                     command.result = command.handler(handle)
                     handle.diagnostic_site = 'handler_returned'
                     if clean_export and handle.hwp.IsModified is False:
-                        # Exact-clean before and after with no earlier debt: a PDF export adds no preservation debt.
+                        # Exact-clean before and after with no earlier debt: an export or a history call that changed nothing adds no preservation debt.
                         # Earlier debt is never discharged here; only a proved ordinary Save does that.
                         self._normal_close_requires_save = False
                     self._apply_normalized_outcome(command, command.result)
@@ -2723,7 +2731,9 @@ class LocalCliLiveSession:
                     # Publish custody before diagnostics or any fallible report.
                     # A handler exception does not establish native no-effect.
                     if not command.custody_held:
-                        self._hold_native_custody(command, 'The native command outcome is unknown; session retained.', exc)
+                        # A failed read-only readback retains the session, but it is not an edit.
+                        self._hold_native_custody(command, 'The native command outcome is unknown; session retained.', exc,
+                                                  may_have_mutated=command.name != 'numbering-readback' or handle.mutation_intent)
                     command.native_diagnostic = _native_diagnostic(handle.diagnostic_site, exc)
                     if command.custody_held:
                         with self._state_lock:

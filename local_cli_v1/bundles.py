@@ -120,7 +120,7 @@ _STEP_KEYS: dict[str, frozenset[str]] = {
     'paragraph_insert_exact': frozenset(
         {'op', 'operation', 'label', 'match', 'expected_page', 'text', 'position', 'confirm_layout'}
     ),
-    'paragraph_remove_exact': frozenset({'op', 'operation', 'label', 'match', 'expected_page', 'confirm_remove'}),
+    'paragraph_remove_exact': frozenset({'op', 'operation', 'label', 'match', 'expected_page', 'expected_text', 'confirm_remove'}),
     'paragraph_delete_exact': frozenset(
         {
             'op',
