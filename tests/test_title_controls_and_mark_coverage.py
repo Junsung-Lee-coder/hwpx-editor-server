@@ -9,7 +9,7 @@ import unittest
 from unittest.mock import patch
 
 from app import native_format
-from tests.native_format_fakes import bookmark, char, end_shape, footnote_like, FormatHwp, index_mark, new_number, numbered_document, page_hiding, page_number, paragraph, picture, shape, table, unmeasured
+from tests.native_format_fakes import bookmark, char, control, end_shape, footnote_like, FormatHwp, index_mark, new_number, numbered_document, page_hiding, page_number, paragraph, picture, shape, table, unmeasured
 from tests.test_native_format import CHARACTER, character, para_format, refusal, result_of, styled
 from tests.test_native_paragraph_edit import Flow
 from tests.test_repair_runtime_safety import owned_doc
@@ -208,6 +208,10 @@ class ParagraphRangeRefusals(unittest.TestCase):
                 text = self.reason(FormatHwp(body), 'target_has_invisible_controls', match='제목 글', through_match='본문 글')
                 self.assertIn('invisible', text)
                 self.assertNotIn('table, picture', text)
+
+    def test_a_hidden_comment_before_the_first_text_is_refused_as_invisible(self) -> None:
+        text = self.reason(title_document(control('<HIDDENCOMMENT/>', 'tcmt', joins=True)), 'target_has_invisible_controls', match='표제 앞부분', through_match='본문 첫째')
+        self.assertIn('invisible', text)
 
     def test_a_control_nothing_measured_before_the_first_text_is_refused_as_an_object(self) -> None:
         text = self.reason(title_document(unmeasured()), match='표제 앞부분', through_match='본문 첫째')

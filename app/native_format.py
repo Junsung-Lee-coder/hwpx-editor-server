@@ -91,6 +91,8 @@ _JOINING_AFTER_TEXT = _JOINING_CONTROLS - {'secdef', 'coldef'}
 # Measured the same way: these keep their own shape beside a block in every position.
 _OWN_SHAPE_CONTROLS = frozenset({'picture', 'table', 'rectangle', 'equation', 'footnote', 'endnote', 'autonum', 'fieldbegin', 'fieldend'})
 _PRINTS_NOTHING = _JOINING_CONTROLS | {'fieldbegin', 'fieldend'}
+# A hidden comment's own paragraph shows up in a block starting after it, so a range of paragraphs cannot prove what it selected.
+_PARAGRAPH_RANGE_LEAD = _JOINING_CONTROLS - {'hiddencomment'}
 _PARAGRAPH_FIELDS = ('align', 'left_indent_pt', 'right_indent_pt', 'first_line_indent_pt', 'line_spacing_type', 'line_spacing_value')
 _TARGET_FIELDS = ('match', 'through_match', 'paragraph_index', 'expected_text', 'expected_page')
 
@@ -817,7 +819,7 @@ def _paragraph_block(rows: list[dict[str, Any]], list_id: int, para: int, model:
         first_atoms = rows[0]['paragraph']['atoms']
         lead = next((number for number, atom in enumerate(first_atoms) if 'char' in atom), len(first_atoms))
         # The measured invisible controls come before the selected text and stay out of the block; anything else is refused.
-        _refuse_range_controls(first_atoms if lead == len(first_atoms) or not _JOINING_CONTROLS.issuperset(atom['control'] for atom in first_atoms[:lead]) else first_atoms[lead:])
+        _refuse_range_controls(first_atoms if lead == len(first_atoms) or not _PARAGRAPH_RANGE_LEAD.issuperset(atom['control'] for atom in first_atoms[:lead]) else first_atoms[lead:])
         for row in rows[1:]:
             _refuse_range_controls(row['paragraph']['atoms'])
         end = _end_position(rows[-1]['paragraph'])
