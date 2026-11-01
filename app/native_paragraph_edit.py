@@ -14,7 +14,7 @@ from __future__ import annotations
 import difflib
 from typing import Any, Callable, Mapping
 
-from app.native_numbering_census import CensusTextUnusable, _digest_tokens
+from app.native_numbering_census import CensusError, CensusTextUnusable, _digest_tokens
 from app.native_numbering import (
     ControlEnumerationLimit,
     ControlEnumerationUnproven,
@@ -285,7 +285,7 @@ EMPTY_INVENTORY = 'absent'
 _READBACK_TEXT_LIMIT = 300
 
 
-def numbering_readback(hwp: Any, *, protection: Callable[[], Any]) -> dict[str, Any]:
+def numbering_readback(hwp: Any, *, protection: Callable[[], Any], format_model: Callable[[], Mapping[str, Any]] | None = None, format_rows: Callable[[Mapping[str, Any]], dict[str, Any]] | None = None) -> dict[str, Any]:
     """Facts for a readable review; only in-memory reads run, and the caret is compared before and after.
 
     A document this code cannot use as evidence (too large, unresolved references, too many controls) is reported as
@@ -329,6 +329,7 @@ def numbering_readback(hwp: Any, *, protection: Callable[[], Any]) -> dict[str, 
                 }
                 for item in census['paragraphs'][:_PARAGRAPH_LIMIT]
             ]
+            _add_format(result, census['paragraphs'], format_model, format_rows)
     try:
         chain = _control_ids(hwp)
     except ControlEnumerationUnproven:
@@ -344,6 +345,24 @@ def numbering_readback(hwp: Any, *, protection: Callable[[], Any]) -> dict[str, 
         result.update(controls=controls, page_numbers=page_numbers)
     result.update(page_count=hwp.PageCount, document_is_modified=hwp.IsModified, caret_unchanged=state is not None and _read_target_state(hwp) == state)
     return result
+
+
+def _add_format(result: dict[str, Any], paragraphs: list[dict[str, Any]], format_model: Callable[[], Mapping[str, Any]] | None, format_rows: Callable[[Mapping[str, Any]], dict[str, Any]] | None) -> None:
+    """Each paragraph's position and its character and paragraph values; a document that cannot show them says so and stays readable."""
+    for index, row in enumerate(result['paragraphs']):
+        row['index'] = index
+    if format_model is None or format_rows is None:
+        return
+    try:
+        rows = format_model()['paragraphs']
+    except CensusError:  # A returned text this reader cannot use; a raising native read is not this.
+        rows = None
+    if rows is None or [item['text'] for item in rows] != [item['text'] for item in paragraphs]:
+        result['format_reason'] = 'format_unavailable'
+        return
+    for row, item in zip(result['paragraphs'], rows):
+        row['context'] = item['context']
+        row['format'] = format_rows(item)
 
 
 class _CensusUnusable(Exception):
@@ -372,6 +391,10 @@ def history_evidence(hwp: Any, protection: Callable[[], Any]) -> dict[str, Any] 
         controls = [name for _control, name in _control_ids(hwp)]
     except ControlEnumerationLimit:
         return None
+    return evidence_of(census, controls)
+
+
+def evidence_of(census: Mapping[str, Any], controls: list[str]) -> dict[str, Any]:
     return {
         'paragraphs': [{key: item[key] for key in ('text', 'heading', 'level', 'content_sha256')} for item in census['paragraphs']],
         'controls': controls,

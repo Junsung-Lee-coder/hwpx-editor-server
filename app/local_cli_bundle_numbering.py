@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any
 
-from app import native_numbering, native_numbering_census, native_paragraph_edit
+from app import native_format, native_numbering, native_numbering_census, native_paragraph_edit
 from app.local_cli_runtime import LocalCliRuntimeError
 from app.local_cli_bundle_paragraphs import _NumberingTargetNotFound
 from app.local_cli_service_support import LocalCliMutationError
@@ -234,6 +234,70 @@ class LocalCliBundleNumberingMixin:
                 hwp, match=item['match'], expected_text=item['expected_text'], protection=reader, on_mutating=on_mutating),
             protection=protection, schema='local-cli/paragraph-remove-exact/v1', mutation='paragraph-remove-exact',
         )
+
+    def _bundle_format_exact(
+        self, hwp: Any, step: dict[str, Any], *, kind: str, on_mutating: Callable[[], None] | None = None
+    ) -> dict[str, Any]:
+        """One exact range: every read here is a fresh one, and a refusal gives back the caret and any selection it found."""
+        try:
+            request = (native_format.validate_character_step if kind == 'character' else native_format.validate_paragraph_step)(step)
+        except native_numbering.NativeNumberingInputError as exc:
+            raise _runtime_error(exc) from exc
+        original = native_numbering._read_target_state(hwp)  # noqa: SLF001
+        if original is None:
+            raise native_numbering.NativeNumberingRefusal('The caret or selection could not be read as exact positions.', code='target_unlocatable')
+
+        def read() -> dict[str, Any]:
+            try:
+                # One native read for each: the model is taken from the very text the census proved usable.
+                source = hwp.get_text_file('HWPML2X', '')
+                raw = _guard_protection(lambda: native_numbering_census.parse_hwpml2x_census(source))
+                model = native_format.parse_format_model(source)
+            except (LocalCliRuntimeError, native_numbering_census.CensusError) as exc:
+                raise native_numbering.NativeNumberingRefusal('Document preservation evidence is unusable before the edit.', code='preservation_unprovable') from exc
+            census = native_numbering._validated_census(raw)  # noqa: SLF001
+            if [item['text'] for item in model['paragraphs']] != [item['text'] for item in census['paragraphs']]:
+                raise native_numbering.NativeNumberingRefusal('The document text and its paragraph list disagree.', code='preservation_unprovable')
+            return {'census': census, 'model': model}
+
+        def restored() -> None:
+            caret, selection = original
+            native_numbering._set_pos(hwp, caret)  # noqa: SLF001
+            if selection:
+                if selection[0] != selection[3]:
+                    raise LocalCliRuntimeError('Cross-list selection restoration is unproven.')
+                native_numbering._require_motion_result(hwp.select_text(selection[1], selection[2], selection[4], selection[5], selection[0]))  # noqa: SLF001
+            if native_numbering._read_target_state(hwp) != original or read()['census'] != before:  # noqa: SLF001
+                raise LocalCliRuntimeError('Formatting refusal restoration is unproven.')
+
+        before = None
+        try:
+            before = read()['census']
+            result = native_format.apply_format(
+                hwp, kind=kind, request=request, read=read, restore=original[0], on_mutating=on_mutating,
+                page_of=lambda: self._bundle_page_evidence(hwp, numbering_guard=True)['page'],
+            )
+        except native_numbering.NativeNumberingMutationError as exc:
+            raise _mutation_error(exc) from exc
+        except native_numbering.NativeNumberingReadFailure:
+            raise  # Unknown: the service holds, and neither restoration nor any other SDK call follows.
+        except native_numbering.NativeNumberingRefusal:
+            if before is not None:
+                restored()
+            raise
+        if result['changed'] is False:
+            restored()
+        name = 'character-format-exact' if kind == 'character' else 'paragraph-format-exact'
+        return {
+            'schema_version': f'local-cli/{name}/v1',
+            'read_only': False,
+            'mutation': name,
+            'target': result['target'],
+            'requested': result['requested'],
+            'result': {key: result[key] for key in ('changed', 'status', 'before', 'after', 'native_actions')},
+            'undo': {'native_editing_actions': len(result['native_actions']), 'pre_state_sha256': result['pre_state_sha256'], 'post_state_sha256': result['post_state_sha256']},
+            'warnings': [_RENDER_PROOF_WARNING],
+        }
 
     def _bundle_official_numbering_apply(
         self, hwp: Any, step: dict[str, Any], protection: Callable[[], Any] | None = None, on_mutating: Callable[[], None] | None = None

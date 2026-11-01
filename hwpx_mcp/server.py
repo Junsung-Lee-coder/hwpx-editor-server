@@ -556,10 +556,12 @@ class Facade:
                 width, height = image.size
                 image.verify()
             page_rows.append({'page': index, 'path': str(png), 'sha256': await asyncio.to_thread(file_sha256, png), 'width': width, 'height': height})
+        saved_record = self.read_json(folder / 'latest-saved.json')
         current = review_rules.assemble(
             session_id=sid, review_id=f'{sid}/review-{number}', readback=readback,
             pdf={'path': str(pdf), 'sha256': await asyncio.to_thread(file_sha256, pdf)} if pdf.is_file() else None,
-            pages=page_rows, texts=texts, baseline=baseline, saved_output=self.read_json(folder / 'latest-saved.json'), render_error=render_error,
+            pages=page_rows, texts=texts, baseline=baseline, saved_output=saved_record, render_error=render_error,
+            persisted_format=await self.persisted_format(folder, readback, saved_record),
         )
         summary = destination / 'summary.md'
         current['summary_path'] = str(summary)
@@ -568,6 +570,22 @@ class Facade:
         write_json_atomic(destination / 'review.json', current)
         # The structured result stays small; the full paragraph list is in review.json.
         return {'ok': True, 'session_id': sid, **{key: value for key, value in current.items() if key != 'paragraphs'}}
+
+    async def persisted_format(self, folder, readback, saved_record):
+        """The formatting a saved file itself holds against the unmodified live document: the latest copy, or the saved copy this session reopened."""
+        paragraphs = readback.get('paragraphs')
+        if readback.get('document_is_modified') is not False or not paragraphs or not all('format' in item for item in paragraphs):
+            return None
+        kept = saved_record.get('path') if saved_record and saved_record.get('retrieved') is True else None
+        compared_with = 'saved_output'
+        if kept is None:
+            opened = (self.read_json(folder / 'source.json') or {}).get('path')
+            kept = opened if opened and Path(opened).is_relative_to(self.settings.artifact_root.resolve()) else None
+            compared_with = 'reopened_saved_file'
+        if kept is None or Path(kept).suffix.lower() != '.hwpx':
+            return None
+        value = await asyncio.to_thread(review_rules.persisted_format, Path(kept), paragraphs, truncated=readback.get('paragraphs_truncated') is True)
+        return {**value, 'compared_with': compared_with, 'path': str(kept)}
 
     async def page_proof(self, http, sid, page, dpi):
         destination = self.settings.artifact_root / sid / uuid.uuid4().hex
@@ -684,7 +702,7 @@ def build_app(settings: Settings | None = None):
                 'hwpx_status': 'Inspect explicit session and reconciliation status. May repair stale backend status; not a rollback claim.',
                 'hwpx_find': 'Find text in the explicit managed copy; may move the live cursor or create proof.',
                 'hwpx_where': 'Read native cursor/location; runs work in the existing serialized backend lane.',
-                'hwpx_command': 'Bounded context/readback/selection, guarded cell alignment or margin formatting, native page-number insertion, native outline numbering of one proven paragraph, insertion or removal of one proven body paragraph (removal also requires its full text), undo or redo within the tracked edits of this session with a report of what changed, or command reconciliation. No arbitrary COM, Python or shell.',
+                'hwpx_command': 'Bounded context/readback/selection, guarded cell alignment or margin formatting, native page-number insertion, native outline numbering of one proven paragraph, insertion or removal of one proven body paragraph (removal also requires its full text), character formatting (font family, size, bold, italic, underline, text color) or paragraph formatting (alignment, indents, line spacing) of one exact range or paragraph found again before each command, undo or redo within the tracked edits of this session with a report of what changed, or command reconciliation. No arbitrary COM, Python or shell.',
                 'hwpx_proof': 'Native frame, one PDF-rendered page, or kind=review: first how much could be checked (complete, partial, unverified or mismatch), then numbering as printed in the native PDF, changes and preservation against an earlier review, page previews, the PDF and the saved file. Does not edit or save.',
                 'hwpx_save': 'Save the managed working copy and copy the saved file to the artifact root; the result gives its path, hash and a comparison with the opened file. If the copy fails the result says so, and calling hwpx_save again retries it.',
                 'hwpx_close': 'Close the explicit clean managed session and remove its managed files, after confirming its saved content exists under the artifact root. Refused, with nothing deleted, while unsaved changes remain or the saved file cannot be copied.',

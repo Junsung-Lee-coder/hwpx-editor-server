@@ -1,0 +1,25 @@
+{
+  "op": "paragraph_format_exact",
+  "version": "local-cli/paragraph-format-exact/v1-package",
+  "summary": "Command-bundle package for paragraph_format_exact: the paragraphs of one exact target with one native ParagraphShape: any of alignment, indents, first-line indent and line spacing.",
+  "module": "app.command_packages.commands.paragraph_format_exact.run",
+  "read_only": false,
+  "dirty_default": true,
+  "allowed_keys": [
+    "op",
+    "operation",
+    "label",
+    "match",
+    "through_match",
+    "paragraph_index",
+    "expected_text",
+    "expected_page",
+    "confirm_layout",
+    "align",
+    "left_indent_pt",
+    "right_indent_pt",
+    "first_line_indent_pt",
+    "line_spacing_type",
+    "line_spacing_value"
+  ]
+}

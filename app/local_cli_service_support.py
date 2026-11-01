@@ -383,6 +383,8 @@ _BUNDLE_ALLOWED_OPS = {
     'official_numbering_apply',
     'paragraph_insert_exact',
     'paragraph_remove_exact',
+    'character_format_exact',
+    'paragraph_format_exact',
     'paragraph_delete_exact',
     'paragraph_join_previous_exact',
     'paragraph_join_next_exact',

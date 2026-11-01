@@ -10,6 +10,7 @@ import hashlib
 from pathlib import Path
 import re
 from typing import Any
+import xml.etree.ElementTree as ET
 import zipfile
 import zlib
 
@@ -25,6 +26,17 @@ _EVIDENCE_LABELS = {
     'numberings_sha256': '번호 정의', 'bindata_sha256': '바이너리 데이터 목록',
 }
 _CONTROL_LABELS = {'tbl': '표', 'gso': '그림·개체', 'head': '머리말', 'foot': '꼬리말', 'pgnp': '쪽 번호', 'nwno': '새 쪽 번호'}
+
+
+_CHARACTER_FIELDS = ('font_family', 'size_pt', 'bold', 'italic', 'underline', 'text_color')
+_PARAGRAPH_FIELDS = ('align', 'left_indent_pt', 'right_indent_pt', 'first_line_indent_pt', 'line_spacing_type', 'line_spacing_value')
+_FORMAT_LABELS = {
+    'font_family': '글꼴', 'size_pt': '크기', 'bold': '굵게', 'italic': '기울임', 'underline': '밑줄', 'text_color': '글자색',
+    'align': '정렬', 'left_indent_pt': '왼쪽 여백', 'right_indent_pt': '오른쪽 여백', 'first_line_indent_pt': '첫 줄', 'line_spacing_type': '줄 간격 종류', 'line_spacing_value': '줄 간격 값',
+}
+_ALIGN_WORDS = {'justify': '양쪽', 'left': '왼쪽', 'right': '오른쪽', 'center': '가운데', 'distribute': '배분', 'distribute_space': '나눔'}
+_SPACING_WORDS = {'percent': '글자에 따라(%)', 'fixed': '고정 값(pt)', 'between_lines': '여백만 지정(pt)', 'at_least': '최소(pt)'}
+_MAX_FORMAT_ROWS = 200
 
 
 _STATUS_LABELS = {'complete': '전체 확인', 'partial': '일부만 확인', 'unverified': '확인하지 못함', 'mismatch': '불일치'}
@@ -147,6 +159,60 @@ def rendered_page_numbers(readback: dict[str, Any], page_texts: list[str] | None
             'pages': pages, 'all_found': all_found}
 
 
+def _changed_fields(left: dict[str, Any], right: dict[str, Any], names: tuple[str, ...]) -> dict[str, dict[str, Any]]:
+    return {name: {'before': left.get(name), 'after': right.get(name)} for name in names if left.get(name) != right.get(name)}
+
+
+def _characters(fact: dict[str, Any]) -> list[tuple[str, dict[str, Any]]]:
+    """One entry per character of a run list; a run longer than its shown text still counts its length."""
+    rows: list[tuple[str, dict[str, Any]]] = []
+    for run in fact.get('runs') or []:
+        shown = run.get('text') or ''
+        rows.extend((shown[offset] if offset < len(shown) else '', run) for offset in range(int(run.get('length', len(shown)))))
+    return rows
+
+
+def _range_changes(before: dict[str, Any], after: dict[str, Any]) -> list[dict[str, Any]]:
+    """The ranges whose named character values differ, joined while the difference stays the same."""
+    ranges: list[dict[str, Any]] = []
+    for (_old_char, old_run), (char, new_run) in zip(_characters(before), _characters(after)):
+        changes = _changed_fields(old_run, new_run, _CHARACTER_FIELDS)
+        if changes and ranges and ranges[-1]['changes'] == changes and ranges[-1].pop('_open', False):
+            ranges[-1]['text'] += char
+            ranges[-1]['_open'] = True
+        elif changes:
+            ranges.append({'text': char, 'changes': changes, '_open': True})
+        elif ranges:
+            ranges[-1].pop('_open', None)
+    for item in ranges:
+        item.pop('_open', None)
+    return ranges
+
+
+def format_changes(before: dict[str, Any], after: dict[str, Any]) -> dict[str, Any]:
+    """What the paragraph's character and paragraph values say changed, in the units a caller uses."""
+    old, new = before.get('format'), after.get('format')
+    if not isinstance(old, dict) or not isinstance(new, dict):
+        return {}
+    ranges = _range_changes(old, new)
+    paragraph = _changed_fields(old.get('paragraph') or {}, new.get('paragraph') or {}, _PARAGRAPH_FIELDS)
+    detail: dict[str, Any] = {'ranges': ranges, 'paragraph': paragraph}
+    if old.get('runs_truncated') or new.get('runs_truncated'):
+        detail['truncated'] = True
+    elif not ranges and not paragraph:
+        detail['other_properties'] = True
+    return detail
+
+
+def format_coverage(comparison: dict[str, Any] | None) -> dict[str, Any]:
+    """How well the reported format changes are explained. Only a change that cannot be explained lowers a review."""
+    changes = [item for item in (comparison or {}).get('changes', []) if item['kind'] == 'format_changed']
+    unexplained = sum('ranges' not in item for item in changes)
+    limited = sum(bool(item.get('truncated') or item.get('other_properties')) for item in changes)
+    state = 'unverified' if unexplained else 'partial' if limited else 'complete'
+    return {'state': state, 'format_changes': len(changes), 'unexplained': unexplained, 'not_fully_named': limited}
+
+
 def _paragraph_state(side: dict[str, Any]) -> str:
     if side.get('paragraphs') is None or side.get('coverage', {}).get('paragraphs', {}).get('state') == 'unverified':
         return 'unverified'
@@ -189,7 +255,7 @@ def compare(baseline: dict[str, Any], current: dict[str, Any], rows: list[dict[s
                 else:
                     uncompared += 1
                 if before[left]['content_sha256'] != after[right]['content_sha256']:
-                    changes.append({'kind': 'format_changed', 'text': after[right]['text']})
+                    changes.append({'kind': 'format_changed', 'text': after[right]['text'], 'paragraph_index': after[right].get('index', right), **format_changes(before[left], after[right])})
             continue
         # What runs off the end of a truncated list says nothing about the document.
         if not (baseline.get('paragraphs_truncated') and i2 == len(before)):
@@ -306,6 +372,176 @@ def compare_packages(source: dict[str, Any], saved: dict[str, Any]) -> dict[str,
     }
 
 
+def _local(element: ET.Element) -> str:
+    return element.tag.rsplit('}', 1)[-1] if isinstance(element.tag, str) else ''
+
+
+def _attribute(element: ET.Element, name: str) -> str | None:
+    return next((value for key, value in element.attrib.items() if key.rsplit('}', 1)[-1] == name), None)
+
+
+_HWPX_ALIGN = {'JUSTIFY': 'justify', 'LEFT': 'left', 'RIGHT': 'right', 'CENTER': 'center', 'DISTRIBUTE': 'distribute', 'DISTRIBUTE_SPACE': 'distribute_space'}
+_HWPX_SPACING = {'PERCENT': 'percent', 'FIXED': 'fixed', 'BETWEEN_LINES': 'between_lines', 'BETWEENLINES': 'between_lines', 'AT_LEAST': 'at_least', 'ATLEAST': 'at_least'}
+_HWPX_INLINE = {'tab': '\t', 'lineBreak': '\n', 'nbSpace': '\u00a0', 'fwSpace': '\u2007'}
+
+
+def _hwpx_character(element: ET.Element, fonts: dict[tuple[str, str], str]) -> dict[str, Any]:
+    faces: dict[str, str] = {}
+    values: dict[str, Any] = {'bold': False, 'italic': False, 'underline': False}
+    for child in element:
+        name = _local(child)
+        if name == 'fontRef':
+            faces = {language: fonts[(language, ref)] for language, ref in child.attrib.items()}
+        elif name in {'bold', 'italic'}:
+            values[name] = True
+        elif name == 'underline':
+            values['underline'] = (_attribute(child, 'type') or 'NONE').upper() != 'NONE'
+    distinct = set(faces.values())
+    return {'font_family': next(iter(distinct)) if len(distinct) == 1 else faces, 'size_pt': int(_attribute(element, 'height') or 0) / 100, **values,
+            'text_color': (_attribute(element, 'textColor') or '').upper() or None}
+
+
+def _hwpx_paragraph(element: ET.Element) -> dict[str, Any]:
+    """The branch Hancom itself marks in real HWPUNITs (1 pt = 100); the plain default branch holds double values for older readers."""
+    holder = next((item for item in element.iter() if _local(item) == 'case'), None)
+    if holder is None:
+        raise ValueError('paragraph margins are not in the expected branch')
+    numbers: dict[str, Any] = {'align': None, 'left_indent_pt': None, 'right_indent_pt': None, 'first_line_indent_pt': None, 'line_spacing_type': None, 'line_spacing_value': None}
+    align = next((item for item in element if _local(item) == 'align'), None)
+    if align is not None:
+        numbers['align'] = _HWPX_ALIGN.get((_attribute(align, 'horizontal') or '').upper())
+    for item in holder.iter():
+        name = _local(item)
+        if name in {'left', 'right', 'intent'}:
+            key = {'left': 'left_indent_pt', 'right': 'right_indent_pt', 'intent': 'first_line_indent_pt'}[name]
+            numbers[key] = int(_attribute(item, 'value') or 0) / 100
+        elif name == 'lineSpacing':
+            kind = _HWPX_SPACING.get((_attribute(item, 'type') or '').upper())
+            value = int(_attribute(item, 'value') or 0)
+            numbers.update(line_spacing_type=kind, line_spacing_value=value if kind == 'percent' else value / 100)
+    return numbers
+
+
+def _hwpx_rows(paragraph: ET.Element, characters: dict[str, dict[str, Any]]) -> tuple[str, list[dict[str, Any]]]:
+    text = ''
+    runs: list[dict[str, Any]] = []
+    for run in paragraph:
+        if _local(run) != 'run':
+            continue
+        values = characters[_attribute(run, 'charPrIDRef') or '']
+        shown = ''
+        for item in run:
+            if _local(item) != 't':
+                continue
+            shown += item.text or ''
+            for inner in item:
+                shown += _HWPX_INLINE.get(_local(inner), '') + (inner.tail or '')
+        if shown:
+            text += shown
+            runs.append({'text': shown, 'length': len(shown), **values})
+    return text, runs
+
+
+def package_format(path: Path) -> list[dict[str, Any]]:
+    """Each paragraph's text and values, read from the HWPX file with no help from Hancom, in the live document's order."""
+    with zipfile.ZipFile(path) as archive:
+        infos = archive.infolist()
+        if sum(info.file_size for info in infos if re.fullmatch(r'Contents/(section\d+|header)\.xml', info.filename)) > MAX_PACKAGE_TEXT_BYTES:
+            raise PackageUnreadable('package_limit', 'The text of this HWPX package is larger than this inspection reads.')
+        header = ET.fromstring(archive.read('Contents/header.xml'))
+        names = sorted((info.filename for info in infos if re.fullmatch(r'Contents/section\d+\.xml', info.filename)), key=lambda name: int(re.search(r'\d+', name).group()))
+        sections = [ET.fromstring(archive.read(name)) for name in names]
+    fonts: dict[tuple[str, str], str] = {}
+    for face in header.iter():
+        if _local(face) == 'fontface':
+            language = (_attribute(face, 'lang') or '').lower()
+            for font in face:
+                if _local(font) == 'font':
+                    fonts[(language, _attribute(font, 'id') or '')] = _attribute(font, 'face') or ''
+    characters = {_attribute(item, 'id') or '': _hwpx_character(item, fonts) for item in header.iter() if _local(item) == 'charPr'}
+    shapes = {_attribute(item, 'id') or '': _hwpx_paragraph(item) for item in header.iter() if _local(item) == 'paraPr'}
+    rows: list[dict[str, Any]] = []
+
+    def visit(element: ET.Element) -> None:
+        for child in element:
+            name = _local(child)
+            if name in {'header', 'footer'}:
+                continue
+            if name == 'p':
+                text, runs = _hwpx_rows(child, characters)
+                rows.append({'text': text, 'format': {'runs': runs, 'paragraph': shapes[_attribute(child, 'paraPrIDRef') or '']}})
+            visit(child)
+
+    for section in sections:
+        visit(section)
+    return rows
+
+
+def persisted_format(path: Path, live: list[dict[str, Any]], *, truncated: bool = False) -> dict[str, Any]:
+    """The live document's values against what the saved file holds. Only text that lines up can be compared; the rest stays unverified."""
+    def unverified(reason: str) -> dict[str, Any]:
+        return {'state': 'unverified', 'reason': reason, 'paragraphs_checked': 0, 'mismatches': []}
+
+    try:
+        saved = package_format(path)
+    except PackageUnreadable as exc:
+        return unverified(exc.code)
+    except (zipfile.BadZipFile, ET.ParseError, zlib.error, KeyError, ValueError, OSError, RuntimeError, NotImplementedError, EOFError):
+        return unverified('package_format_unreadable')
+    if len(live) > len(saved) or (not truncated and len(live) != len(saved)):
+        return unverified('paragraph_count_differs')
+    mismatches: list[dict[str, Any]] = []
+    limited = truncated
+    for index, (mine, theirs) in enumerate(zip(live, saved)):
+        # The live list shows a bounded start of each paragraph's text.
+        if not theirs['text'].startswith(mine['text']):
+            return unverified('paragraph_text_differs')
+        fact = mine.get('format')
+        if not isinstance(fact, dict):
+            return unverified('live_format_unavailable')
+        limited = limited or fact.get('runs_truncated') is True
+        for item in _range_changes(fact, theirs['format']):
+            mismatches.append({'paragraph_index': index, **item})
+        paragraph = _changed_fields(fact.get('paragraph') or {}, theirs['format']['paragraph'], _PARAGRAPH_FIELDS)
+        if paragraph:
+            mismatches.append({'paragraph_index': index, 'text': mine['text'][:60], 'changes': paragraph})
+    state = 'mismatch' if mismatches else 'partial' if limited else 'match'
+    return {'state': state, 'paragraphs_checked': len(live), 'mismatches': mismatches[:_MAX_FORMAT_ROWS]}
+
+
+def _format_word(name: str, value: Any) -> str:
+    if value is None:
+        return '확인 못함'
+    if name in {'bold', 'italic', 'underline'}:
+        return '예' if value else '아니요'
+    if name == 'align':
+        return _ALIGN_WORDS.get(value, str(value))
+    if name == 'line_spacing_type':
+        return _SPACING_WORDS.get(value, str(value))
+    if isinstance(value, float):
+        text = f'{value:g}'
+        return f'{text}pt' if name in {'size_pt', 'left_indent_pt', 'right_indent_pt', 'first_line_indent_pt'} else text
+    return str(value)
+
+
+def _change_clause(changes: dict[str, dict[str, Any]]) -> str:
+    return ', '.join(f"{_FORMAT_LABELS[name]} {_format_word(name, item['before'])}→{_format_word(name, item['after'])}" for name, item in changes.items())
+
+
+def _format_lines(comparison: dict[str, Any]) -> list[str]:
+    lines: list[str] = []
+    for change in comparison['changes']:
+        if change['kind'] != 'format_changed':
+            continue
+        for item in change.get('ranges') or []:
+            lines.append(f"서식 변경: \"{item['text'][:30]}\" — {_change_clause(item['changes'])}")
+        if change.get('paragraph'):
+            lines.append(f"문단 서식 변경: \"{change['text'][:30]}\" — {_change_clause(change['paragraph'])}")
+        if change.get('other_properties'):
+            lines.append(f"서식 변경: \"{change['text'][:30]}\" — 글꼴·크기·굵기·기울임·밑줄·색·정렬·여백·줄 간격이 아닌 다른 서식이 바뀌었습니다.")
+    return lines
+
+
 def _short_id(review_id: str | None, review: dict[str, Any]) -> str:
     """A review of this session by its short name; another session's keeps its full identity."""
     owner, _, name = str(review_id).partition('/')
@@ -398,6 +634,13 @@ def summarize(review: dict[str, Any]) -> str:
             lines.append(f"{label} 대비: 확인한 범위에서 {found or '바뀐 문단 없음'}")
         else:
             lines.append(f"{label} 대비: {found or '바뀐 문단 없음'}")
+        rows = _format_lines(comparison)
+        lines.extend(rows[:8])
+        if len(rows) > 8:
+            lines.append(f'서식 변경 {len(rows) - 8}건 더: review.json과 summary.md에 있습니다.')
+        coverage_format = (review.get('coverage') or {}).get('format') or {}
+        if coverage_format.get('state') in {'partial', 'unverified'}:
+            lines.append('서식 변경 중 일부는 어떤 값이 바뀌었는지 확인하지 못했습니다.')
         if comparison.get('numbers_not_compared'):
             lines.append(f"번호 {comparison['numbers_not_compared']}개는 인쇄된 번호를 읽지 않았거나 읽지 못해 종류와 수준만 비교했습니다.")
         changed = [_EVIDENCE_LABELS[name] for name, value in comparison['evidence'].items() if value == 'changed']
@@ -408,6 +651,12 @@ def summarize(review: dict[str, Any]) -> str:
             lines.append('보존 확인: 확인 못함 — ' + ', '.join(unproven))
         if not changed and not unproven:
             lines.append('보존 확인: 머리말·꼬리말, 스타일, 그림 데이터, 번호 정의 동일')
+    persisted = review.get('persisted_format')
+    if isinstance(persisted, dict):
+        lines.append({'match': f"저장본 서식: 문단 {persisted.get('paragraphs_checked')}개가 저장 파일의 값과 일치합니다.",
+                      'partial': f"저장본 서식: 읽은 문단 {persisted.get('paragraphs_checked')}개는 일치합니다. 문서 일부는 비교하지 못했습니다.",
+                      'mismatch': f"저장본 서식: 저장 파일의 값과 다른 곳이 {len(persisted.get('mismatches') or [])}건 있습니다.",
+                      'unverified': '저장본 서식: 저장 파일과 비교하지 못했습니다.'}[persisted['state']])
     saved = review.get('saved_output')
     if isinstance(saved, dict) and saved.get('retrieved') is False:
         lines.append('최신 저장본을 산출물 폴더로 복사하지 못했습니다. hwpx_save를 다시 호출하세요. 복사 전에는 닫기를 거부합니다.')
@@ -416,7 +665,8 @@ def summarize(review: dict[str, Any]) -> str:
 
 
 def assemble(*, session_id: str, review_id: str, readback: dict[str, Any], pdf: dict[str, Any] | None, pages: list[dict[str, Any]],
-             texts: list[str] | None, baseline: dict[str, Any] | None, saved_output: dict[str, Any] | None, render_error: str | None) -> dict[str, Any]:
+             texts: list[str] | None, baseline: dict[str, Any] | None, saved_output: dict[str, Any] | None, render_error: str | None,
+             persisted_format: dict[str, Any] | None = None) -> dict[str, Any]:
     """One review from the backend readback and the native render: what was covered, what it shows, what changed."""
     available = readback.get('available') is not False
     paragraphs = readback.get('paragraphs') if available else None
@@ -447,17 +697,19 @@ def assemble(*, session_id: str, review_id: str, readback: dict[str, Any], pdf: 
     unread_lists = list_numbering(paragraphs, truncated=truncated)
     current['coverage'] = {'paragraphs': paragraph_coverage, 'pages': page_coverage, 'text': text_coverage, 'controls': 'unverified' if controls is None else 'complete', 'list_numbering': unread_lists}
     current['comparison'] = compare(baseline, current, current['numbering']) if baseline else None
+    current['coverage']['format'] = format_coverage(current['comparison'])
+    current['persisted_format'] = persisted_format
     statuses = [row['status'] for row in current['numbering']]
     if 'unverified' in {paragraph_coverage['state'], page_coverage['state'], text_coverage['state']}:
         coverage_status = 'unverified'
     elif ('partial' in {paragraph_coverage['state'], page_coverage['state']} or controls is None or any(status != 'match' and status != 'mismatch' for status in statuses)
           or current['page_numbers'].get('state') in {'partial', 'unverified'} or (current['comparison'] or {}).get('state', 'complete') != 'complete'
-          or unread_lists['state'] == 'unverified'):
+          or unread_lists['state'] == 'unverified' or current['coverage']['format']['state'] != 'complete'):
         coverage_status = 'partial'
     else:
         coverage_status = 'complete'
     current['coverage']['status'] = coverage_status
-    mismatch = 'mismatch' in statuses or current['page_numbers'].get('state') == 'missing'
+    mismatch = 'mismatch' in statuses or current['page_numbers'].get('state') == 'missing' or (persisted_format or {}).get('state') == 'mismatch'
     current['review_status'] = 'mismatch' if mismatch else coverage_status
     current['numbering_all_match'] = False if 'mismatch' in statuses else (True if statuses and coverage_status != 'unverified' and paragraph_coverage['state'] == 'complete' and page_coverage['state'] == 'complete' and unread_lists['state'] == 'none' and all(status == 'match' for status in statuses) else None)
     current['summary_text'] = summarize(current)
@@ -469,6 +721,17 @@ _ROW_WORDS = {'match': '예', 'mismatch': '아니요', 'outside_rendered_pages':
 
 def _cell(text: Any) -> str:
     return str('' if text is None else text).replace('|', '\\|').replace('\n', ' ')
+
+
+def _format_table_rows(comparison: dict[str, Any]) -> list[str]:
+    rows: list[str] = []
+    for change in comparison['changes']:
+        if change['kind'] != 'format_changed':
+            continue
+        rows += [f"| {_cell(item['text'][:60])} | {_FORMAT_LABELS[name]} | {_format_word(name, value['before'])} | {_format_word(name, value['after'])} |"
+                 for item in change.get('ranges') or [] for name, value in item['changes'].items()]
+        rows += [f"| (문단 전체) | {_FORMAT_LABELS[name]} | {_format_word(name, value['before'])} | {_format_word(name, value['after'])} |" for name, value in (change.get('paragraph') or {}).items()]
+    return rows
 
 
 def to_markdown(review: dict[str, Any]) -> str:
@@ -515,6 +778,22 @@ def to_markdown(review: dict[str, Any]) -> str:
             out.append('- 표 셀 등 본문 밖 문단: 전체를 비교하지 못함')
         else:
             out.append(f"- 표 셀 등 본문 밖 문단 {comparison['nested_paragraph_count']}개: {'내용 동일' if comparison['nested_paragraphs_identical'] else '변경 감지'}")
+        out.append('')
+    rows = _format_table_rows(comparison) if comparison else []
+    if rows:
+        out += ['## 서식 변경 상세', '', '| 범위 | 항목 | 이전 | 이후 |', '|---|---|---|---|'] + rows[:_MAX_FORMAT_ROWS] + ['']
+    persisted = review.get('persisted_format')
+    if persisted:
+        words = {'match': '일치', 'partial': '읽은 범위에서 일치', 'mismatch': '불일치', 'unverified': '비교하지 못함'}
+        out += ['## 저장된 서식 확인', '', f"- 판정: {words[persisted['state']]}", f"- 비교한 문단: {persisted.get('paragraphs_checked')}개"]
+        if persisted.get('path'):
+            out.append(f"- 비교한 파일: {persisted['path']}")
+        if persisted.get('reason'):
+            out.append(f"- 이유: {persisted['reason']}")
+        if persisted.get('mismatches'):
+            out += ['', '| 범위 | 항목 | 실행 중 문서 | 저장 파일 |', '|---|---|---|---|']
+            out += [f"| {_cell(item.get('text'))} | {_FORMAT_LABELS[name]} | {_format_word(name, value['before'])} | {_format_word(name, value['after'])} |"
+                    for item in persisted['mismatches'] for name, value in item['changes'].items()]
         out.append('')
     saved = review.get('saved_output')
     out += ['## 파일', '']

@@ -506,6 +506,13 @@ def validate_step_for_op(op: str, *, service: Any, index: int, step: dict[str, A
                         else native_paragraph_edit.validate_remove_step(step))
         except native_paragraph_edit.NativeNumberingInputError as exc:
             _raise(error_type, f'command-bundle step {index} {op}: {exc}')
+    elif op in {'character_format_exact', 'paragraph_format_exact'}:
+        from app import native_format
+
+        try:
+            (native_format.validate_character_step if op == 'character_format_exact' else native_format.validate_paragraph_step)(step)
+        except native_format.NativeNumberingInputError as exc:
+            _raise(error_type, f'command-bundle step {index} {op}: {exc}')
     elif op in {'control_inventory', 'table_frame_inventory', 'export_pdf', 'where'}:
         pass
     else:
@@ -604,6 +611,12 @@ def run_step_for_op(op: str, *, service: Any, handle: Any, step: dict[str, Any],
         run = service._bundle_paragraph_insert_exact if op == 'paragraph_insert_exact' else service._bundle_paragraph_remove_exact  # noqa: SLF001
         result = run(handle.hwp, step, protection=service._numbering_protection_reader(handle), on_mutating=handle.mark_mutating_intent)  # noqa: SLF001
         return result, True, list(result.get('warnings') or [])
+    if op in {'character_format_exact', 'paragraph_format_exact'}:
+        result = service._bundle_format_exact(  # noqa: SLF001
+            handle.hwp, step, kind='character' if op == 'character_format_exact' else 'paragraph', on_mutating=handle.mark_mutating_intent
+        )
+        # A value already present is a proven no-op, not a new dirty delta.
+        return result, result['result']['changed'] is not False, list(result.get('warnings') or [])
     if op == 'paragraph_delete_exact':
         result = service._bundle_paragraph_delete_exact(handle.hwp, step)  # noqa: SLF001
         return result, True, list(result.get('warnings') or [])
