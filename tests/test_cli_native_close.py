@@ -293,6 +293,23 @@ class NativeCloseTests(unittest.TestCase):
                 self.assertEqual([e[0] for e in events].count('quit'),0 if held else 1)
                 self.assertEqual(len(transport),1 if held else 2)
 
+    def test_clean_export_adds_no_close_debt_but_never_discharges_earlier_debt(self):
+        for modified_after,earlier_debt,expected in ((False,False,False),(True,False,True),(False,True,True)):
+            with self.subTest(modified_after=modified_after,earlier_debt=earlier_debt):
+                manager,session,events,state,*_=self.owned()
+                session._normal_close_requires_save=earlier_debt
+                def export(handle):
+                    state['modified']=modified_after
+                    return {}
+                manager.execute(session_id='close-case',command_name='export',handler=export)
+                self.assertIs(session._normal_close_requires_save,expected)
+                state['modified']=False
+
+    def test_numbering_readback_adds_no_close_debt(self):
+        manager,session,*_=self.owned()
+        manager.execute(session_id='close-case',command_name='numbering-readback',handler=lambda handle:{})
+        self.assertFalse(session._normal_close_requires_save)
+
     def test_public_service_close_only_cleans_managed_files_after_native_complete(self):
         manager,session,events,state,*_=self.owned()
         service=object.__new__(LocalCliService)

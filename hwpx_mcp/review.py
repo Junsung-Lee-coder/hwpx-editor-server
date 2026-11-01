@@ -87,9 +87,11 @@ def rendered_page_numbers(readback: dict[str, Any], page_texts: list[str]) -> di
     for index, text in enumerate(page_texts):
         number = start + index
         shown = f'- {number} -' if dash else str(number)
-        # A footer can share the printed line, so the number is matched as its own token.
+        # A footer can share the printed line, so the number is its own token on the page's outermost line at that edge.
         pattern = rf'(?:^|\s)-\s*{number}\s*-(?:\s|$)' if dash else rf'(?:^|\s){number}(?:\s|$)'
-        pages.append({'page': index + 1, 'expected': shown, 'found': any(re.search(pattern, line) for line in text.splitlines())})
+        lines = [line for line in text.splitlines() if line.strip()]
+        edge = lines[-1 if control.get('draw_pos') in {4, 5, 6} else 0] if lines else ''
+        pages.append({'page': index + 1, 'expected': shown, 'found': re.search(pattern, edge) is not None})
     return {'present': True, 'position': _POSITIONS.get(control.get('draw_pos')), 'start_number': start, 'side_char': 'dash' if dash else 'none',
             'pages': pages, 'all_found': all(page['found'] for page in pages)}
 
@@ -167,6 +169,12 @@ def compare_packages(source: dict[str, Any], saved: dict[str, Any]) -> dict[str,
     }
 
 
+def _short_id(review_id: str | None, review: dict[str, Any]) -> str:
+    """A review of this session by its short name; another session's keeps its full identity."""
+    owner, _, name = str(review_id).partition('/')
+    return name if owner == review.get('session_id') else f'이전 문서 {name}'
+
+
 def summarize(review: dict[str, Any]) -> str:
     """Short answer first: is the numbering what was asked for, did anything else change, is it saved."""
     rows = review['numbering']
@@ -183,7 +191,7 @@ def summarize(review: dict[str, Any]) -> str:
         for change in comparison['changes']:
             counts[change['kind']] = counts.get(change['kind'], 0) + 1
         names = {'added': '추가', 'removed': '삭제', 'number_changed': '번호 변경', 'format_changed': '서식 변경'}
-        lines.append(f"{comparison['baseline']} 대비: " + (', '.join(f'{names[key]} {value}건' for key, value in counts.items()) or '바뀐 문단 없음'))
+        lines.append(f"{_short_id(comparison['baseline'], review)} 대비: " + (', '.join(f'{names[key]} {value}건' for key, value in counts.items()) or '바뀐 문단 없음'))
         changed = [_EVIDENCE_LABELS[name] for name, state in comparison['evidence'].items() if state != 'unchanged']
         lines.append('보존 확인: ' + ('변경 감지 — ' + ', '.join(changed) if changed else '머리말·꼬리말, 스타일, 그림 데이터, 번호 정의 동일'))
     lines.append('저장 안 된 변경 있음' if review['document_is_modified'] else '저장 안 된 변경 없음')
@@ -195,7 +203,7 @@ def _cell(text: Any) -> str:
 
 
 def to_markdown(review: dict[str, Any]) -> str:
-    out = [f"# 문서 확인 요약 ({review['review_id']})", '', review['summary_text'].replace('\n', '  \n'), '']
+    out = [f"# 문서 확인 요약: {review['document']}", '', review['summary_text'].replace('\n', '  \n'), '']
     if review['numbering']:
         out += ['## 번호 문단 (한글이 만든 PDF 기준)', '', '| 쪽 | 수준 | 화면 번호 | 기대 번호 | 일치 | 내용 |', '|---|---|---|---|---|---|']
         out += [f"| {_cell(row['page'])} | {row['level']} | {_cell(row['rendered_label'])} | {_cell(row['expected_label'])} | {'예' if row['matches'] else '아니요'} | {_cell(row['text'][:60])} |"
@@ -207,7 +215,7 @@ def to_markdown(review: dict[str, Any]) -> str:
         out.append('')
     comparison = review.get('comparison')
     if comparison:
-        out += [f"## 바뀐 내용 ({comparison['baseline']} 대비)", '']
+        out += [f"## 바뀐 내용 ({_short_id(comparison['baseline'], review)} 대비)", '']
         names = {'added': '추가', 'removed': '삭제', 'number_changed': '번호 변경', 'format_changed': '서식 변경'}
         for change in comparison['changes']:
             arrow = f" ({change.get('before') or '번호 없음'} → {change.get('after') or '번호 없음'})" if change['kind'] == 'number_changed' else (f" ({change['after']})" if change.get('after') else (f" ({change['before']})" if change.get('before') else ''))
