@@ -124,7 +124,8 @@ class LocalCliBundleControlsMixin:
                 member = native_numbering._native_member(hwp, name)  # noqa: SLF001
                 if member is native_numbering._NATIVE_ABSENT:  # noqa: SLF001
                     continue  # Only an absent API permits trying another spelling.
-                if name in ('Page', 'CurrentPage'):
+                # Locked pyhwpx exposes current_page as a property; other spellings stay method-only.
+                if name in ('Page', 'CurrentPage') or (name == 'current_page' and not callable(member)):
                     value = member
                 else:
                     if not callable(member):
