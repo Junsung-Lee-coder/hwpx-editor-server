@@ -355,7 +355,9 @@ class Facade:
         """Stream to a name no consumer accepts and check the length, so an interrupted copy can never pass as a file."""
         async with http.stream('GET', self.settings.backend.rstrip('/') + route) as response:
             if response.status_code != 200:
-                raise BackendFailure('ARTIFACT_NOT_FOUND' if response.status_code in {404, 409} else 'ARTIFACT_DOWNLOAD_FAILED', f'{what} could not be retrieved.')
+                # Only a 404 says there is nothing to retrieve; a 409 is the backend refusing a copy it cannot vouch for.
+                code = {404: 'ARTIFACT_NOT_FOUND', 409: 'ARTIFACT_CUSTODY_MISMATCH'}.get(response.status_code, 'ARTIFACT_DOWNLOAD_FAILED')
+                raise BackendFailure(code, f'{what} could not be retrieved.')
             declared = response.headers.get('content-length')
             size = 0
             with partial.open('xb') as stream:

@@ -699,9 +699,10 @@ class SurfaceParityTests(unittest.TestCase):
                     self._api(api_hwp, 2, find)
                 cli = self._bundle(cli_hwp, 2, find)
                 self.assertFalse(cli['ok'])
-                # The strict missing-target guard proves restoration; an
-                # inner ambiguity refusal alone does not carry that proof.
-                self.assertEqual(cli['steps'][0]['mutation_may_have_persisted'], label == 'ambiguous')
+                # Both refusals come from returned positions and are reported only after restoration
+                # and preservation are proved, so neither reads as a possible edit.
+                self.assertIs(cli['steps'][0]['mutation_may_have_persisted'], False)
+                self.assertEqual(cli['steps'][0]['refusal_code'], 'target_ambiguous' if label == 'ambiguous' else 'target_not_found')
                 self.assertEqual(executes(api_hwp), [])
                 self.assertEqual(executes(cli_hwp), [])
         for label, heading in (('bullet', 3), ('number', 2)):

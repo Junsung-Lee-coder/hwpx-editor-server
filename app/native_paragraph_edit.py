@@ -14,11 +14,12 @@ from __future__ import annotations
 import difflib
 from typing import Any, Callable, Mapping
 
-from app.native_numbering_census import CensusTextUnusable
+from app.native_numbering_census import CensusTextUnusable, _digest_tokens
 from app.native_numbering import (
     ControlEnumerationUnproven,
     NativeNumberingInputError,
     NativeNumberingMutationError,
+    NativeNumberingReadFailure,
     NativeNumberingRefusal,
     STEP_MATCH_MAX_CHARS,
     _MutationReach,
@@ -33,7 +34,7 @@ from app.native_numbering import (
     _mark_noncomplete,
     _multiset_delta,
     _native_method,
-    _page_number_props,
+    _read_page_number_props,
     _read_protection,
     _read_target_state,
     _reject_unknown_keys,
@@ -47,6 +48,7 @@ from app.native_numbering import (
 )
 
 TEXT_MAX_CHARS = 4000
+_NO_MEDIA_SHA256 = _digest_tokens([])
 _COMPARED = ('header_footer', 'styles_sha256', 'numberings_sha256', 'bindata_sha256', 'media_sha256', 'outline_shapes', 'page_restarts')
 
 
@@ -277,6 +279,8 @@ def remove_paragraph(
 
 
 _PARAGRAPH_LIMIT = 2000
+# In a review, a definition list the fully resolved document does not have: an inventory that was read and is empty.
+EMPTY_INVENTORY = 'absent'
 _READBACK_TEXT_LIMIT = 300
 
 
@@ -288,6 +292,8 @@ def numbering_readback(hwp: Any, *, protection: Callable[[], Any]) -> dict[str, 
     """
     try:
         state = _read_target_state(hwp)
+    except NativeNumberingReadFailure:
+        raise  # Unknown, so no later read follows.
     except NativeNumberingRefusal:
         state = None
     result: dict[str, Any] = {'available': True, 'reason': None, 'paragraphs': None, 'paragraphs_truncated': False, 'paragraph_total': None, 'evidence': None,
@@ -302,6 +308,12 @@ def numbering_readback(hwp: Any, *, protection: Callable[[], Any]) -> dict[str, 
             'header_footer': census['header_footer'], 'styles_sha256': census['styles_sha256'], 'media_sha256': census['media_sha256'],
             'numberings_sha256': census['numberings_sha256'], 'bindata_sha256': census['bindata_sha256'],
         }
+        if census['paragraphs'] is not None and census['definitions'] is not None:
+            # Every paragraph reference resolved, so nothing can be using a list that is not there. Storage without a list stays unproven.
+            if census['numberings_sha256'] is None:
+                result['evidence']['numberings_sha256'] = EMPTY_INVENTORY
+            if census['bindata_sha256'] is None and census['media_sha256'] == _NO_MEDIA_SHA256:
+                result['evidence']['bindata_sha256'] = EMPTY_INVENTORY
         result['page_restarts'] = [next((value for key, value in entry['attrs'] if key == 'number'), None) for entry in census['page_restarts'] or []]
         if census['paragraphs'] is None:
             result.update(available=False, reason='paragraphs_unresolved')
@@ -312,6 +324,7 @@ def numbering_readback(hwp: Any, *, protection: Callable[[], Any]) -> dict[str, 
                 {
                     'text': item['text'][:_READBACK_TEXT_LIMIT], 'heading': item['heading'], 'level': item['level'],
                     'in_body': item.get('body_index') is not None, 'content_sha256': item['content_sha256'],
+                    'numbering_ref_sha256': item.get('numbering_ref_sha256'),
                 }
                 for item in census['paragraphs'][:_PARAGRAPH_LIMIT]
             ]
@@ -325,7 +338,7 @@ def numbering_readback(hwp: Any, *, protection: Callable[[], Any]) -> dict[str, 
         for control, name in chain:
             controls[name] = controls.get(name, 0) + 1
             if name == 'pgnp':
-                props = _page_number_props(control, allow_unset_new_number=True)
+                props = _read_page_number_props(control, allow_unset_new_number=True)
                 page_numbers.append(None if props is None else {'draw_pos': props['DrawPos'], 'side_char': props['SideChar']})
         result.update(controls=controls, page_numbers=page_numbers)
     result.update(page_count=hwp.PageCount, document_is_modified=hwp.IsModified, caret_unchanged=state is not None and _read_target_state(hwp) == state)

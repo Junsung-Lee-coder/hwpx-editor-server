@@ -125,7 +125,7 @@ def _native_diagnostic(site: object, error: BaseException) -> dict[str, str]:
         from app.edit_ops import EditOperationError
         from app.local_cli_service_support import LocalCliMutationError
         from app.native_numbering import (
-            NativeNumberingInputError, NativeNumberingRefusal, NativeNumberingMutationError,
+            NativeNumberingInputError, NativeNumberingReadFailure, NativeNumberingRefusal, NativeNumberingMutationError,
         )
         diagnostic.update(cause_class='UNKNOWN', cause2_class='UNKNOWN', refusal_code='UNKNOWN')
         # Optional fixed source-bound phase, never arbitrary error text or
@@ -154,6 +154,7 @@ def _native_diagnostic(site: object, error: BaseException) -> dict[str, str]:
                               (LocalCliMutationError, 'LocalCliMutationError'),
                               (NativeNumberingInputError, 'NativeNumberingInputError'),
                               (NativeNumberingRefusal, 'NativeNumberingRefusal'),
+                              (NativeNumberingReadFailure, 'NativeNumberingReadFailure'),
                               (NativeNumberingMutationError, 'NativeNumberingMutationError')):
                 if type(current) is cls:
                     label = name
@@ -1640,6 +1641,18 @@ class LocalCliLiveSession:
             data['error_code'] = 'NATIVE_CUSTODY_HELD'
             data['recovery'] = {'state': 'quarantined'}
 
+    @staticmethod
+    def _may_have_edited(command: _LiveCommand, handle: Any) -> bool:
+        """For a hold after the handler: unknown counts as an edit unless this command's own returned result shows none."""
+        if handle.mutation_intent:
+            return True
+        if command.name == 'numbering-readback':
+            return False
+        if command.name != 'command-bundle' or type(command.result) is not dict or command.result.get('dirty') is not False:
+            return True
+        steps = command.result.get('steps')
+        return type(steps) is not list or not all(type(step) is dict and (step.get('ok') is True or type(step.get('refusal_code')) is str) for step in steps)
+
     def _mark_mutating_intent(self) -> None:
         self._lifetime_edit_possible = True
         if self._active_command is None or self._active_command.name != 'save':
@@ -2594,8 +2607,13 @@ class LocalCliLiveSession:
                 if command.name == '__close__':
                     refusal: LocalCliRuntimeError | None = None
                     # An exact native True needs a save; refuse here, before the finalizer would treat it as a failed close.
-                    native_modified = (not self._native_custody_held and not self._allow_native_cleanup
-                                       and getattr(hwp, 'IsModified', None) is True)
+                    native_modified = False
+                    if not self._native_custody_held and not self._allow_native_cleanup:
+                        try:
+                            native_modified = getattr(hwp, 'IsModified', None) is True
+                        except BaseException as exc:
+                            # Unknown, and not an edit: the same refusal below settles it on this thread, with no later SDK call.
+                            self._hold_native_custody(command, 'The native modified state could not be read at close; session retained.', exc, may_have_mutated=False)
                     with self._state_lock:
                         if self._native_custody_held and not self._allow_native_cleanup:
                             # Admitted before a numbering callback became held; custody is re-checked at dequeue.
@@ -2733,7 +2751,7 @@ class LocalCliLiveSession:
                     if not command.custody_held:
                         # A failed read-only readback retains the session, but it is not an edit.
                         self._hold_native_custody(command, 'The native command outcome is unknown; session retained.', exc,
-                                                  may_have_mutated=command.name != 'numbering-readback' or handle.mutation_intent)
+                                                  may_have_mutated=self._may_have_edited(command, handle))
                     command.native_diagnostic = _native_diagnostic(handle.diagnostic_site, exc)
                     if command.custody_held:
                         with self._state_lock:
@@ -2764,7 +2782,8 @@ class LocalCliLiveSession:
                             # successful; this later session-report fault must
                             # not discard its possible edits or stop its STA.
                             if not command.custody_held:
-                                self._hold_native_custody(command, 'Session reporting failed; native custody retained.', report_error)
+                                self._hold_native_custody(command, 'Session reporting failed; native custody retained.', report_error,
+                                                          may_have_mutated=self._may_have_edited(command, handle))
                             if isinstance(command.error, LocalCliNativeCustodyHeldError):
                                 command.error.reporting_errors.append(report_error)
         except BaseException as exc:

@@ -30,7 +30,7 @@ $mcpProcess = Start-Process -FilePath '.mcp-venv\Scripts\python.exe' -ArgumentLi
 .mcp-venv\Scripts\python.exe -m hwpx_mcp.client --url http://127.0.0.1:18766/mcp --tool hwpx_health
 ```
 
-`input` 폴더는 미리 만들고 시험용 HWP/HWPX 복사본만 넣으세요. `source_path`는 클라이언트가 아닌 어댑터 컴퓨터의 절대 경로입니다. 입력은 25 MiB 이하로 제한됩니다. 토큰을 화면에 출력하거나 설정 파일·저장소에 기록하지 마세요. 다른 터미널의 클라이언트에는 안전한 방법으로 같은 토큰을 전달해야 합니다.
+`input` 폴더는 미리 만들고 시험용 HWP/HWPX 복사본만 넣으세요. `source_path`는 클라이언트가 아닌 어댑터 컴퓨터의 절대 경로입니다. 입력은 25 MiB 이하로 제한됩니다(자세한 내용은 아래 "크기 제한"). 토큰을 화면에 출력하거나 설정 파일·저장소에 기록하지 마세요. 다른 터미널의 클라이언트에는 안전한 방법으로 같은 토큰을 전달해야 합니다.
 
 일반 MCP 클라이언트에는 전송 종류를 Streamable HTTP로, URL을 위 주소로, `Authorization` 헤더를 `Bearer <전용 토큰>`으로 지정합니다. MCP `2026-07-28`의 요청별 메타데이터와 `Mcp-Method`·`Mcp-Name` 헤더를 지원하는 클라이언트가 필요합니다. 제품마다 설정 형식이 다르므로 확인하지 않은 설정 JSON을 공통 형식으로 제공하지 않습니다. 함께 제공한 `hwpx_mcp.client`가 공식 SDK를 사용하는 연결 확인용 클라이언트입니다.
 
@@ -59,11 +59,11 @@ $mcpProcess = Start-Process -FilePath '.mcp-venv\Scripts\python.exe' -ArgumentLi
 
 `hwpx_proof`의 `{"kind": "review"}`는 문서를 바꾸거나 저장하지 않고 다음을 한 번에 돌려줍니다. 선택 항목은 `dpi`(72~300, 기본 100), `max_pages`(기본 30), `inline_images`(MCP 응답에 바로 넣을 미리보기 수, 기본 3), `compare_to`(비교 기준, 예: `<session_id>/review-1`)입니다.
 
-- `review_status`: 먼저 읽을 값입니다. `complete`(전체 확인), `partial`(일부만 확인), `unverified`(확인하지 못함), `mismatch`(확인한 범위에서 불일치)로 나뉘며, `coverage`에 문단·쪽·PDF 글자별 범위가 있습니다. 요약 첫 줄도 같은 내용입니다.
+- `review_status`: 먼저 읽을 값입니다. `complete`(전체 확인), `partial`(일부만 확인), `unverified`(확인하지 못함), `mismatch`(확인한 범위에서 불일치)로 나뉘며, `coverage`에 문단·쪽·PDF 글자별 범위가 있습니다. 요약 첫 줄도 같은 내용입니다. 인쇄된 번호를 대조하는 것은 본문의 개요 번호뿐입니다. 자동 번호, 글머리표, 표 셀 안 개요 번호가 있는 문서는 `coverage.list_numbering`에 종류별 개수가 들어가고 `partial`이 되며, 요약 첫 줄과 `summary.md`에 해당 문단을 밝힙니다. 번호 없는 일반 문단만 있는 문서와 그림이 없는 문서는 다른 범위가 모두 확인되면 `complete`입니다.
 - `summary_text`: 확인 범위, 쪽 수, 번호 일치 여부, 쪽 번호, 비교 결과, 저장 여부를 담은 짧은 요약. MCP 응답의 두 번째 텍스트로도 들어 있고, 그 뒤에 쪽 미리보기 이미지가 이어집니다.
 - `numbering`: 번호 문단별 수준, Hancom이 만든 PDF에 실제 찍힌 번호(`rendered_label`), 수준 순서로 계산한 기대 번호(`expected_label`), 상태(`status`: `match`, `mismatch`, `outside_rendered_pages`, `unverified`). `numbering_all_match`는 문서 전체를 확인해 모두 일치할 때만 `true`, 불일치가 있으면 `false`, 그 밖에는 `null`입니다.
 - `page_numbers`: 쪽 번호 컨트롤의 위치와 시작 번호, 쪽별 인쇄 여부. `all_found`는 모든 쪽을 읽은 경우에만 `true`이고, 일부만 읽었거나 PDF 글자를 읽지 못하면 `null`입니다.
-- `comparison`: 기준 시점 대비 추가·삭제·번호 변경·서식 변경 문단과 머리말·꼬리말, 스타일, 그림 데이터, 번호 정의, 표·그림 개수, 표 셀 내용. 증거는 `unchanged`, `changed`, `unproven`으로 구분하고, `state`는 비교 범위를 알려 줍니다. `compare_to`를 주지 않으면 그 세션의 첫 확인이 기준입니다.
+- `comparison`: 기준 시점 대비 추가·삭제·번호 변경·서식 변경 문단과 머리말·꼬리말, 스타일, 그림 데이터, 번호 정의, 표·그림 개수, 표 셀 내용. 모든 문단의 번호 종류와 수준을 비교합니다. 자동 번호, 글머리표, 표 셀 안 개요 번호는 인쇄된 번호를 읽지 않으므로 종류, 수준, 번호 정의가 같으면 `numbers_not_compared`로 세고 `state`는 `partial`입니다. 증거는 `unchanged`, `changed`, `unproven`으로 구분하고, `state`는 비교 범위를 알려 줍니다. 문서에 그림 데이터 목록이 정말 없다는 것을 구조로 확인한 경우 값은 `absent`이고, 읽지 못한 경우에만 `unproven`이 됩니다. `compare_to`를 주지 않으면 그 세션의 첫 확인이 기준입니다.
 
 문서가 너무 커서 구조를 읽을 수 없으면(HWPML2X 3,200만 자 초과 등) `review_status`가 `unverified`가 되고 PDF와 미리보기는 그대로 돌려줍니다. 이 실패는 문서를 변경됨으로 표시하거나 세션을 보류시키지 않습니다.
 - `pdf`, `pages`, `summary_path`, `json_path`, `saved_output`: 산출물 폴더의 PDF, 쪽별 PNG, 읽기 쉬운 `summary.md`, 전체 기계 판독용 `review.json`, 마지막 저장 파일.
@@ -73,10 +73,18 @@ $mcpProcess = Start-Process -FilePath '.mcp-venv\Scripts\python.exe' -ArgumentLi
 번호 체계 `1.` → `가.` → `1)` → `가)`는 `official_numbering_apply`로 지정합니다. 번호는 Hancom이 매기므로 문단을 넣거나 지우면 뒤따르는 번호가 자동으로 다시 매겨집니다.
 
 - 같은 수준 이어 쓰기와 삽입: `{"op": "paragraph_insert_exact", "match": "기준 문단의 고유한 문구", "expected_page": 1, "text": "새 문단", "position": "after", "confirm_layout": true}`. `position`은 `after`(기본) 또는 `before`이며 새 문단은 기준 문단의 번호 수준을 물려받습니다. 첫 본문 문단 앞, 쪽·단 나눔으로 시작하는 문단 앞, 같은 글이 이미 있는 경우는 변경 전에 거부합니다.
-- 삭제: `{"op": "paragraph_remove_exact", "match": "지울 문단의 고유한 문구", "expected_page": 1, "expected_text": "그 문단의 전체 글", "confirm_remove": true}`. `match`는 위치만 찾고, `expected_text`가 문단 전체 글과 정확히 같아야 지웁니다(`target_text_mismatch`). 그림·표 같은 개체가 들어 있는 문단, 표 셀 안 문단, 구역의 마지막 문단, 쪽·단 나눔이 걸린 문단 또는 그 바로 앞 문단은 변경 전에 거부하며 `refusal_code`로 이유를 알려 줍니다.
+- 삭제: `{"op": "paragraph_remove_exact", "match": "지울 문단의 고유한 문구", "expected_page": 1, "expected_text": "그 문단의 전체 글", "confirm_remove": true}`. `match`는 위치만 찾고, `expected_text`가 문단 전체 글과 정확히 같아야 지웁니다(`target_text_mismatch`). 문단 안의 탭은 `\t`, 줄 바꿈은 `\n`, 묶음 빈칸은 U+00A0, 고정폭 빈칸은 U+2007로 적어야 같은 글로 봅니다. 공백으로 바꾸거나 일부만 적은 글은 거부합니다. `hwpx_proof` 확인의 `review.json`에 있는 문단 `text`가 같은 표기를 씁니다(문단당 300자까지). 이 네 가지 밖의 요소가 글 안에 있는 문단은 개체가 있는 문단과 같이 거부합니다. 그림·표 같은 개체가 들어 있는 문단, 표 셀 안 문단, 구역의 마지막 문단, 쪽·단 나눔이 걸린 문단 또는 그 바로 앞 문단은 변경 전에 거부하며 `refusal_code`로 이유를 알려 줍니다.
 - 되돌리기와 다시 실행: `{"op": "undo"}`, `{"op": "redo"}`. 이 세션에서 추적한 편집 범위 안에서만 동작합니다. 되돌릴 편집이 없으면 네이티브 호출 없이 `no_undo_available`·`no_redo_available`로 거부하고 문서는 변경됨으로 표시되지 않습니다. 결과의 `confirmation`에 호출 전후 문서를 비교한 실제 변화가 들어 있습니다. 개요 번호 정의를 바꾼 뒤 수준까지 따로 지정한 경우(네이티브 동작 두 번)는 Undo 한 번으로 되돌릴 수 없으므로 `undo_not_counted`로 거부합니다.
 
-네이티브 호출 전에 문서를 증거로 쓸 수 없다고 판단한 요청(너무 큰 문서, 불완전한 구조, 대상 없음 등)은 `refusal_code`와 함께 거부되며 변경 가능으로 표시하거나 세션을 보류시키지 않습니다. 네이티브 호출이 시작된 뒤 결과를 알 수 없으면 지금처럼 보류합니다.
+네이티브 호출 전에 문서를 증거로 쓸 수 없다고 판단한 요청(너무 큰 문서, 불완전한 구조, 대상 없음, 여러 문단에 일치하는 `match`(`target_ambiguous`), 표 셀 안 문단(`target_not_in_body`), 컨트롤 수 한계(`control_enumeration_unavailable`) 등)은 캐럿과 문서가 그대로임을 확인한 뒤 `refusal_code`와 함께 거부되며 변경 가능으로 표시하거나 세션을 보류시키지 않습니다. 같은 세션에서 다른 대상으로 계속 작업하거나 닫을 수 있고, 그 전에 있던 저장되지 않은 변경은 그대로 남습니다. 네이티브 호출이 시작된 뒤 결과를 알 수 없으면 지금처럼 보류합니다. 네이티브 읽기 자체가 예외로 실패한 경우에도 거부로 바꾸지 않고, 다음 SDK 호출 없이 세션을 보류하되 편집이 있었던 것으로 표시하지 않습니다. 닫을 때 문서 변경 상태를 읽지 못한 경우도 같습니다.
+
+## 크기 제한
+
+- 열기: `hwpx_open`은 25 MiB 이하의 파일만 받고, 넘으면 `SOURCE_SIZE_LIMIT`로 거부합니다. 산출물 폴더의 저장본을 다시 열 때도 같은 제한입니다.
+- 저장본 복사: `hwpx_save`와 `hwpx_close`는 저장본을 256 MiB까지 산출물 폴더로 복사합니다. 25 MiB를 넘는 저장본은 복사되지만 `hwpx_open`으로 다시 열어 확인할 수는 없습니다.
+- 256 MiB 초과: 복사하지 않고 `saved_output.code`에 `ARTIFACT_SIZE_LIMIT`를 알려 줍니다. 복사되지 않은 내용이 있으면 `hwpx_close`는 `SAVED_OUTPUT_NOT_RETRIEVED`로 계속 거부하고 아무것도 지우지 않으므로, 이 어댑터만으로는 그 세션을 닫을 수 없습니다.
+- 저장본 검사: 복사한 파일을 메모리에 올리지 않고 내려받아 검사합니다. 메모리에 올리는 것은 구역과 헤더의 글뿐이며 패키지 전체에서 합계 64 MiB까지입니다. 이 글 합계, 압축을 푼 패키지 전체 512 MiB 또는 멤버 4,096개를 넘으면 저장본은 그대로 두고 `saved_output.package` 없이 `package_error`를 `package_limit`로 알려 주며, 열었던 파일과의 비교는 제공하지 않습니다. 검사 중 메모리 사용은 이 글의 복사본과 문자열 변환을 합쳐 최대 약 400 MiB입니다. 열 때도 입력 파일에 같은 검사를 합니다.
+- 누적: 저장할 때마다 `saved` 폴더에 `001-`, `002-`처럼 새 파일이 생기고, 확인할 때마다 `review-N` 폴더에 PDF와 PNG가 생깁니다. 어댑터는 이 파일들을 지우지 않으므로 필요 없는 산출물은 직접 정리해야 합니다.
 
 
 관리 세션 판정에는 `metadata.local_cli_v1.opened_via == "local_cli_v1"`가 반드시 필요합니다. `bridge`나 `closed_via` 표시는 열기 출처를 대신하지 않는 추가 수명주기 정보이므로, 해당 표시만 있는 세션은 명령을 받을 수 없습니다. `state`가 `closed` 또는 `closed_cleanup_pending`인 세션은 상태 조회만 허용되며 새 명령·저장·증명·닫기 요청은 `SESSION_CLOSED`로 거부됩니다.

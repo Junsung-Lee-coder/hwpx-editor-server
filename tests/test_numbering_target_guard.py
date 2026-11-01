@@ -183,7 +183,9 @@ class NumberingTargetGuardTests(unittest.TestCase):
         with patch.object(session, '_persist_command', fail):
             with self.assertRaises(svc.LocalCliServiceError):
                 self.run_bundle(service, match='N2NOMATCH')
-            self.assert_held(manager, session, hwp, calls, at_hold)
+            # The failed report still retains custody. The refusal it failed to report published no native edit,
+            # so it no longer records one; a report failing after a real edit is pinned in test_repair_ordinary_refusals.
+            self.assert_held(manager, session, hwp, calls, at_hold, may_have_mutated=False)
 
     def test_protection_and_nonexact_native_read_failure_issue_no_restore_or_later_sdk(self):
         for mode in ('protection', 'nonexact_defaults', 'false_defaults'):

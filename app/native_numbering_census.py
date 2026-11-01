@@ -34,6 +34,8 @@ _REFERENCE_LISTS = {
 }
 _SHELL_LEVELS = frozenset({'1', '2', '3', '4'})
 _MASKED_SHAPE_ATTRS = frozenset({'headingtype', 'level', 'headingidref'})
+# Characters Hancom writes as an element inside CHAR, as observed on Hancom 2024. Anything else there stays a control.
+_INLINE_CHARACTERS = {'tab': '\t', 'linebreak': '\n', 'nbspace': '\u00a0', 'fwspace': '\u2007'}
 
 
 class CensusError(RuntimeError):
@@ -124,7 +126,7 @@ def _page_restarts(
         depth: int,
     ) -> None:
         if depth > _MAX_DEPTH:
-            raise CensusError('HWPML2X nesting is too deep')
+            raise CensusTextUnusable('HWPML2X nesting is too deep')
         survivors = 0
         for child in element:
             position = survivors
@@ -176,7 +178,7 @@ def _digest_tokens(tokens: list[str]) -> str:
 
 def _canonical(element: ET.Element, out: list[str], depth: int = 0, *, storage: bool = False) -> None:
     if depth > _MAX_DEPTH:
-        raise CensusError('HWPML2X nesting is too deep')
+        raise CensusTextUnusable('HWPML2X nesting is too deep')
     name = _name(element)
     out.append('<' + name)
     for key, value in sorted((k.rsplit('}', 1)[-1].lower(), v) for k, v in element.attrib.items()):
@@ -198,14 +200,17 @@ def _element_digest(element: ET.Element, *, storage: bool = False) -> str:
 
 def _para_text(paragraph: ET.Element, depth: int = 0) -> str:
     if depth > _MAX_DEPTH:
-        raise CensusError('HWPML2X nesting is too deep')
+        raise CensusTextUnusable('HWPML2X nesting is too deep')
     parts: list[str] = []
     for child in paragraph:
         name = _name(child)
         if name in {'p', 'header', 'footer'}:
             continue
-        if name == 'char' and child.text:
-            parts.append(child.text)
+        if name == 'char':
+            parts.append(child.text or '')
+            for inner in child:
+                parts.append(_INLINE_CHARACTERS.get(_name(inner), ''))
+                parts.append(inner.tail or '')
         parts.append(_para_text(child, depth + 1))
     return ''.join(parts)
 
@@ -235,7 +240,7 @@ def _shape_table(root: ET.Element) -> dict[str, tuple[str | None, int | None]]:
     return table
 
 
-def _number_refs(root: ET.Element) -> dict[str, str | None]:
+def _number_refs(root: ET.Element, attribute: str = 'headingidref') -> dict[str, str | None]:
     refs: dict[str, str | None] = {}
     for lst in root.iter():
         if _name(lst) != 'parashapelist':
@@ -243,7 +248,7 @@ def _number_refs(root: ET.Element) -> dict[str, str | None]:
         for shape in lst:
             shape_id = _attr(shape, 'id') if _name(shape) == 'parashape' else None
             if shape_id is not None:
-                ref = _attr(shape, 'headingidref')
+                ref = _attr(shape, attribute)
                 refs[shape_id.strip()] = ref.strip() if ref is not None else None
     return refs
 
@@ -293,7 +298,7 @@ class _Resolver:
 
     def _collect(self, element: ET.Element, body: ET.Element, depth: int) -> None:
         if depth > _MAX_DEPTH:
-            raise CensusError('HWPML2X nesting is too deep')
+            raise CensusTextUnusable('HWPML2X nesting is too deep')
         for child in element:
             if child is body:
                 continue
@@ -312,14 +317,14 @@ class _Resolver:
                         if (not identities or any(not value for _key, value in identities)
                                 or len({key for key, _value in identities}) != len(identities)
                                 or len({value for _key, value in identities}) != 1):
-                            raise CensusError('BINITEM identity is missing or contradictory')
+                            raise CensusTextUnusable('BINITEM identity is missing or contradictory')
                         item_id = identities[0][1]
                     if item_id is None:
                         continue
                     key = item_id.strip()
                     if key in index:
                         if name == 'bindatalist' and (native_binitem or _name(index[key]) == 'binitem'):
-                            raise CensusError('BINITEM identity is duplicated')
+                            raise CensusTextUnusable('BINITEM identity is duplicated')
                         self.ambiguous.add((name, key))
                     index[key] = item
             else:
@@ -367,7 +372,7 @@ class _Resolver:
         depth: int = 0,
     ) -> list[str] | None:
         if depth > _MAX_DEPTH:
-            raise CensusError('HWPML2X nesting is too deep')
+            raise CensusTextUnusable('HWPML2X nesting is too deep')
         name = _name(element)
         is_root = depth == 0
         if strip and name in PAGE_NUMBER_ELEMENTS and not is_root:
@@ -512,6 +517,8 @@ def _styles_digest(root: ET.Element, resolver: _Resolver) -> str | None:
 def _paragraph_structure(element: ET.Element) -> dict[str, Any]:
     """Fixed facts a paragraph edit must know: native break flags and inline controls by element name."""
     controls = [_name(child) for run in element if _name(run) == 'text' for child in run if _name(child) != 'char']
+    controls += [_name(inner) for run in element if _name(run) == 'text' for child in run if _name(child) == 'char'
+                 for inner in child if _name(inner) not in _INLINE_CHARACTERS]
     return {
         'page_break': (_attr(element, 'pagebreak') or '').strip().lower() == 'true',
         'column_break': (_attr(element, 'columnbreak') or '').strip().lower() == 'true',
@@ -554,6 +561,8 @@ def parse_hwpml2x_census(text: Any) -> dict[str, Any]:
 
     shapes = _shape_table(root)
     number_refs = _number_refs(root)
+    # Native PARASHAPE names the definition in Heading (observed on Hancom 2024); the outline-sharing proof keeps its own input.
+    native_heading_refs = _number_refs(root, 'heading')
     outline_refs = _outline_refs(body)
     resolver = _Resolver(root, body)
     outline_bindings_complete = _outline_bindings_complete(resolver, body)
@@ -564,7 +573,7 @@ def parse_hwpml2x_census(text: Any) -> dict[str, Any]:
 
     def visit(element: ET.Element, section: int, depth: int) -> None:
         if depth > _MAX_DEPTH:
-            raise CensusError('HWPML2X nesting is too deep')
+            raise CensusTextUnusable('HWPML2X nesting is too deep')
         for child in element:
             name = _name(child)
             if name == 'section':
@@ -599,7 +608,8 @@ def parse_hwpml2x_census(text: Any) -> dict[str, Any]:
             paragraphs = None
             break
         number_ref = number_refs.get(shape_ref.strip()) if shape_ref is not None else None
-        definitions = _paragraph_definitions(resolver, element, shape_ref, heading, number_ref)
+        native_ref = native_heading_refs.get(shape_ref.strip()) if shape_ref is not None else None
+        definitions = _paragraph_definitions(resolver, element, shape_ref, heading, number_ref if number_ref is not None else native_ref)
         inst_ids = [value for key, value in _lower_attrs_all(element) if key == 'instid']
         shares_outline: bool | None
         if heading != 'NUMBER':

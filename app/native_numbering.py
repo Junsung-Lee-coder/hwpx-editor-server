@@ -43,6 +43,10 @@ class NativeNumberingRefusal(EditOperationError):
         self.code = code
 
 
+class NativeNumberingReadFailure(NativeNumberingRefusal):
+    """A native read raised, so nothing is known: never a clean refusal, and no further SDK call or restoration follows."""
+
+
 class NativeNumberingMutationError(EditOperationError):
     """A native mutation call was issued and the final document state is not proven."""
 
@@ -230,6 +234,10 @@ class ControlEnumerationUnproven(RuntimeError):
     """The control chain returned values this code will not read further; the read itself changed nothing."""
 
 
+class ControlEnumerationLimit(ControlEnumerationUnproven):
+    """Every identifier read was exact text and the chain is simply longer than this code reads: a fact about the document."""
+
+
 def _control_ids(hwp: Any) -> list[tuple[Any, str]]:
     head = hwp.HeadCtrl
     controls: list[tuple[Any, str]] = []
@@ -242,7 +250,7 @@ def _control_ids(hwp: Any) -> list[tuple[Any, str]]:
             raise ControlEnumerationUnproven('control identifier is not exact text')
         controls.append((ctrl, ctrl_id))
         ctrl = ctrl.Next
-    raise ControlEnumerationUnproven(f'control enumeration exceeded {_MAX_CONTROLS} controls')
+    raise ControlEnumerationLimit(f'control enumeration exceeded {_MAX_CONTROLS} controls')
 
 
 def _preflight_census(hwp: Any) -> tuple[str, list[tuple[Any, str]]]:
@@ -303,7 +311,7 @@ def _get_pos(hwp: Any) -> tuple[int, int, int]:
     try:
         value = getter()
     except Exception as exc:
-        raise NativeNumberingRefusal('native caret read failed', code='target_unlocatable') from exc
+        raise NativeNumberingReadFailure('native caret read failed', code='target_unlocatable') from exc
     if (type(value) is list or type(value) is tuple) and len(value) == 3 and all(_exact_index(item) for item in value):
         return (value[0], value[1], value[2])
     raise NativeNumberingRefusal('native caret read is not canonical', code='target_unlocatable')
@@ -330,8 +338,8 @@ def _get_selection(hwp: Any) -> tuple[int, ...] | None:
     getter = _native_method(hwp, 'get_selected_pos', 'GetSelectedPos')
     try:
         value = getter()
-    except Exception:
-        return None
+    except Exception as exc:
+        raise NativeNumberingReadFailure('native selection read failed', code='target_unlocatable') from exc
     return _parse_selected_pos(value)
 
 
@@ -431,6 +439,15 @@ def _page_number_props(
             except BaseException:
                 pass  # Diagnostic failure must not change the unreadable outcome.
         return None
+    return values
+
+
+def _read_page_number_props(ctrl: Any, *, allow_unset_new_number: bool = False) -> dict[str, int | None] | None:
+    """None only for values the native getter returned; a getter that raised stays a typed technical failure."""
+    diagnostic: list[tuple[str, str, Any]] = []
+    values = _page_number_props(ctrl, _diagnostic=diagnostic, allow_unset_new_number=allow_unset_new_number)
+    if values is None and any(stage != 'validate' for stage, _name, _value in diagnostic):
+        raise NativeNumberingReadFailure('document already has a page number control and its settings could not be read', code='existing_page_number')
     return values
 
 
@@ -1083,7 +1100,7 @@ def _apply_page_number(hwp: Any, request: Any, *, protection: Callable[[], Any] 
             code='existing_page_number',
         )
     if len(existing) == 1:
-        current = _page_number_props(existing[0])
+        current = _read_page_number_props(existing[0])
         if current is not None and current == expected:
             return _page_number_result(
                 req,
@@ -1607,6 +1624,8 @@ def _apply_official_numbering(
         _require_complete(before_census)
         hits = _census_hits(before_census['paragraphs'], target_find, target_match_case)
         if len(hits) != 1:
+            if on_semantic_refusal is not None:
+                on_semantic_refusal()  # Pure validated census; no SDK before the following refusal.
             raise NativeNumberingRefusal(
                 f'the target paragraph is not uniquely identifiable in the document census ({len(hits)} candidates), '
                 'so its numbering change cannot be told apart from other paragraphs; refusing before any mutation',
@@ -1811,7 +1830,14 @@ def _official_result(
     }
 
 
-def _locate_unique_body_paragraph(hwp: Any, find: str, *, match_case: bool) -> tuple[int, int]:
+def _locate_unique_body_paragraph(hwp: Any, find: str, *, match_case: bool,
+                                   on_semantic_refusal: Callable[[], None] | None = None) -> tuple[int, int]:
+    def semantic(message: str, code: str) -> NativeNumberingRefusal:
+        """Judged only from positions the native search returned; a caller still owes restoration before calling it clean."""
+        if on_semantic_refusal is not None:
+            on_semantic_refusal()
+        return NativeNumberingRefusal(message, code=code)
+
     mover = _native_method(hwp, 'MoveDocBegin')
     finder = _native_method(hwp, 'find')
     selected_getter = _native_method(hwp, 'get_selected_pos', 'GetSelectedPos')
@@ -1826,14 +1852,15 @@ def _locate_unique_body_paragraph(hwp: Any, find: str, *, match_case: bool) -> t
         if matched is False:
             break
         try:
-            selected = _parse_selected_pos(selected_getter())
-        except Exception:
-            selected = None
+            selected_value = selected_getter()
+        except Exception as exc:
+            raise NativeNumberingReadFailure('native selection read failed during the text search', code='target_unlocatable') from exc
+        selected = _parse_selected_pos(selected_value)
         if not selected:
             raise NativeNumberingRefusal('a text match could not be located by position', code='target_unlocatable')
         slist, spara, elist, epara = selected[0], selected[1], selected[3], selected[4]
         if slist != elist or spara != epara:
-            raise NativeNumberingRefusal('the text match spans more than one paragraph', code='target_unlocatable')
+            raise semantic('the text match spans more than one paragraph', 'target_unlocatable')
         key = (slist, spara)
         if key not in found:
             found.append(key)
@@ -1842,14 +1869,11 @@ def _locate_unique_body_paragraph(hwp: Any, find: str, *, match_case: bool) -> t
         raise NativeNumberingRefusal('text search did not terminate', code='target_unlocatable')
 
     if not found:
-        raise NativeNumberingRefusal(f'target text {find!r} was not found', code='target_not_found')
+        raise semantic(f'target text {find!r} was not found', 'target_not_found')
     if len(found) > 1:
-        raise NativeNumberingRefusal(
-            f'target text {find!r} appears in {len(found)} paragraphs; refusing to guess which one to number',
-            code='target_ambiguous',
-        )
+        raise semantic(f'target text {find!r} appears in {len(found)} paragraphs; refusing to guess which one to number', 'target_ambiguous')
     if found[0][0] != 0:
-        raise NativeNumberingRefusal('the target paragraph is not in the main body text list (for example a table cell)', code='target_not_in_body')
+        raise semantic('the target paragraph is not in the main body text list (for example a table cell)', 'target_not_in_body')
     return found[0]
 
 
@@ -1870,7 +1894,7 @@ def apply_official_numbering_at_match(
         raise NativeNumberingInputError('match_case must be true or false')
     _require_haction(hwp, 'GetDefault', 'Execute')
 
-    list_id, para = _locate_unique_body_paragraph(hwp, find, match_case=match_case)
+    list_id, para = _locate_unique_body_paragraph(hwp, find, match_case=match_case, on_semantic_refusal=on_semantic_refusal)
     try:
         _set_pos(hwp, (list_id, para, 0))
     except Exception as exc:

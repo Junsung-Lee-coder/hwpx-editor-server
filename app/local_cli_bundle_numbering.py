@@ -63,6 +63,10 @@ class _NumberingCleanRefusal(LocalCliRuntimeError):
 class _NumberingSemanticRefusal(LocalCliRuntimeError):
     """Issued only after trusted semantic branch and complete restored-state proof."""
 
+    def __init__(self, message: str, *, code: str) -> None:
+        super().__init__(message)
+        self.code = code
+
 
 def _guard_protection(protection: Callable[[], Any] | None,
                       on_incomplete: Callable[[], None] | None = None) -> dict[str, Any]:
@@ -95,8 +99,12 @@ def _guard_protection(protection: Callable[[], Any] | None,
 
 def _page_refusal_changed_nothing(refusal: native_numbering.NativeNumberingRefusal) -> bool:
     """Judged from returned document evidence, before the temporary navigation; a failed native read stays unproven."""
+    if type(refusal) is not native_numbering.NativeNumberingRefusal:
+        return False
     if refusal.code == 'protection_unavailable':
         return type(refusal.__cause__) is native_numbering_census.CensusTextUnusable
+    if refusal.code == 'control_enumeration_unavailable':
+        return type(refusal.__cause__) is native_numbering.ControlEnumerationLimit
     return refusal.code in {'existing_page_number', 'section_count_unprovable', 'header_footer_unprovable', 'preservation_unprovable'}
 
 
@@ -191,6 +199,8 @@ class LocalCliBundleNumberingMixin:
         except _NumberingTargetNotFound as exc:
             restored()
             raise native_numbering.NativeNumberingRefusal('No target on the expected page.', code='target_not_found') from exc
+        except native_numbering.NativeNumberingReadFailure:
+            raise  # Unknown: the service holds, and neither restoration nor any other SDK call follows.
         except native_numbering.NativeNumberingRefusal:
             restored()
             raise
@@ -295,7 +305,17 @@ class LocalCliBundleNumberingMixin:
             if before is None:
                 raise LocalCliRuntimeError('Numbering preservation evidence is incomplete.')
             native_numbering._require_complete(before)  # noqa: SLF001
-            text_before, controls_before = native_numbering._preflight_census(hwp)  # noqa: SLF001
+            try:
+                text_before, controls_before = native_numbering._preflight_census(hwp)  # noqa: SLF001
+            except native_numbering.NativeNumberingRefusal as refusal:
+                # Only a chain of exact identifiers longer than the limit; a raising or inexact read stays unknown.
+                if type(refusal.__cause__) is not native_numbering.ControlEnumerationLimit:
+                    raise
+                if (native_numbering._read_target_state(hwp) != original  # noqa: SLF001
+                        or native_numbering._read_protection(checked_protection) != before):  # noqa: SLF001
+                    raise LocalCliRuntimeError('Numbering control limit preservation is unproven.') from refusal
+                guard_verified = True
+                raise _NumberingCleanRefusal(str(refusal), code='control_enumeration_unavailable') from refusal
             phase, reason = 'pre_target', 'finder_failed'
             try:
                 target = self._find_text_on_expected_page(
@@ -337,12 +357,13 @@ class LocalCliBundleNumberingMixin:
                     if native_numbering._read_target_state(hwp) != original:  # noqa: SLF001
                         raise LocalCliRuntimeError('Numbering semantic refusal restoration is unproven.')
                 guard_verified = True
-                raise _NumberingSemanticRefusal('Numbering semantic preflight refused; state and preservation verified.') from refusal
+                raise _NumberingSemanticRefusal('Numbering semantic preflight refused; state and preservation verified.', code=refusal.code) from refusal
         except BaseException as exc:
             if not isinstance(exc, Exception):
                 raise  # Preserve control-flow identity; the caller retains custody.
             if guard_verified and not issued_mutation and (type(exc) is native_numbering.NativeNumberingRefusal
-                                                          or type(exc) is _NumberingSemanticRefusal):
+                                                          or type(exc) is _NumberingSemanticRefusal
+                                                          or type(exc) is _NumberingCleanRefusal):
                 raise  # trusted producer and completed proof, never class/code alone
             # Inner-native refusals may also wrap failed getters/nonexact
             # native returns. Their class/code alone is not restoration or

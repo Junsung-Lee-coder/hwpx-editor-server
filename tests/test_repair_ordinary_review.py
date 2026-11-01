@@ -302,6 +302,12 @@ class WholeParagraphText(unittest.TestCase):
         self.assertEqual(row['rendered_label'], '1.')
 
 
+    def test_a_short_first_line_only_matches_a_whole_printed_line(self):
+        row = review.rendered_numbering([para('가\n둘째 줄', 'OUTLINE', 0)], ['가나다라 다른 문단\n1. 가\n둘째 줄\n'])[0]
+        self.assertEqual(row['rendered_label'], '1.')
+        self.assertEqual(row['status'], 'match')
+
+
 class PackageMemoryLimit(unittest.TestCase):
     """N8: the section text kept in memory has one limit for the whole package, not one per member."""
 

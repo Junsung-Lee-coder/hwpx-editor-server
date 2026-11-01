@@ -84,7 +84,11 @@ class CellHwp:
 
 
 class SpanningHwp:
-    """Mixin: the search for the match returns a selection across two paragraphs."""
+    """Mixin: the search for the match returns a selection across two paragraphs. SetPos ends it, as observed natively."""
+
+    def set_pos(self, list_id, para, pos):
+        self.selection_para = None
+        super().set_pos(list_id, para, pos)
 
     def get_selected_pos(self):
         if self.selection_para is None:

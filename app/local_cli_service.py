@@ -7206,8 +7206,7 @@ class LocalCliService(
                     }
                     if target_refused and not mutation_may_have_persisted:
                         from app.local_cli_runtime import _native_diagnostic
-                        status['refusal_code'] = ('semantic_refusal' if type(exc) is _NumberingSemanticRefusal
-                                                  else exc.code if type(exc) is _NumberingCleanRefusal
+                        status['refusal_code'] = (exc.code if type(exc) is _NumberingSemanticRefusal or type(exc) is _NumberingCleanRefusal
                                                   else _native_diagnostic('bundle_step', exc)['refusal_code'])
                     if numbering:
                         # Fixed labels only, so a caller can see the stopping phase without opening the journal.

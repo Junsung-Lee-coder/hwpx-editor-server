@@ -15,6 +15,7 @@ import zlib
 
 MAX_PACKAGE_MEMBERS = 4096
 MAX_PACKAGE_TOTAL_BYTES = 512 * 1024 * 1024
+# Section and header text kept in memory, for one package as a whole. It is decoded once more to count controls.
 MAX_PACKAGE_TEXT_BYTES = 64 * 1024 * 1024
 _READ_CHUNK = 1024 * 1024
 _HANGUL = '가나다라마바사아자차카타파하'
@@ -89,10 +90,15 @@ def rendered_numbering(paragraphs: list[dict[str, Any]], page_texts: list[str] |
         if item['heading'] != 'OUTLINE' or not item.get('in_body'):
             continue
         whole = _compact(item['text'])
+        # A line break can end the first printed line early; then that line must end with exactly this text.
+        first_line = _compact(item['text'].split('\n', 1)[0]) if '\n' in item['text'] else ''
         row = {'level': item['level'] + 1, 'text': item['text'], 'expected_label': next(expected), 'rendered_label': None, 'page': None}
         # The first printed line of a long paragraph can hold only the start of its text.
         for wanted in (whole[:24], whole[:10]) if whole else ():
             found = next((index for index in range(cursor, len(lines)) if wanted in lines[index][1]), None)
+            if found is None and first_line:
+                wanted = first_line
+                found = next((index for index in range(cursor, len(lines)) if lines[index][1].endswith(wanted)), None)
             if found is not None:
                 row['rendered_label'] = lines[found][1][:lines[found][1].find(wanted)] or None
                 row['page'] = lines[found][0]
@@ -177,8 +183,9 @@ def compare(baseline: dict[str, Any], current: dict[str, Any], rows: list[dict[s
                 if old_known and new_known:
                     if old_label != new_label:
                         changes.append({'kind': 'number_changed', 'text': after[right]['text'], 'before': old_label, 'after': new_label})
-                elif (before[left]['heading'], before[left]['level']) != (after[right]['heading'], after[right]['level']):
-                    changes.append({'kind': 'number_changed', 'text': after[right]['text'], 'before': old_label, 'after': new_label})
+                elif ((before[left]['heading'], before[left]['level'], before[left].get('numbering_ref_sha256'))
+                      != (after[right]['heading'], after[right]['level'], after[right].get('numbering_ref_sha256'))):
+                    changes.append({'kind': 'number_changed', 'text': after[right]['text'], 'before': old_label or _numbering_kind(before[left]), 'after': new_label or _numbering_kind(after[right])})
                 else:
                     uncompared += 1
                 if before[left]['content_sha256'] != after[right]['content_sha256']:
@@ -186,9 +193,9 @@ def compare(baseline: dict[str, Any], current: dict[str, Any], rows: list[dict[s
             continue
         # What runs off the end of a truncated list says nothing about the document.
         if not (baseline.get('paragraphs_truncated') and i2 == len(before)):
-            changes.extend({'kind': 'removed', 'text': before[index]['text'], 'before': old_labels[index][0]} for index in range(i1, i2))
+            changes.extend({'kind': 'removed', 'text': before[index]['text'], 'before': old_labels[index][0] or _numbering_kind(before[index])} for index in range(i1, i2))
         if not (current.get('paragraphs_truncated') and j2 == len(after)):
-            changes.extend({'kind': 'added', 'text': after[index]['text'], 'after': new_labels[index][0]} for index in range(j1, j2))
+            changes.extend({'kind': 'added', 'text': after[index]['text'], 'after': new_labels[index][0] or _numbering_kind(after[index])} for index in range(j1, j2))
     partial = 'partial' in states
     cells_before = [item['text'] for item in before if not item.get('in_body')]
     cells_after = [item['text'] for item in after if not item.get('in_body')]
@@ -211,8 +218,34 @@ def _labels_by_paragraph(paragraphs: list[dict[str, Any]], rows: list[dict[str, 
             row = next(pending, {})
             labels.append((row.get('rendered_label'), row.get('status') in {'match', 'mismatch'}))
         else:
-            labels.append((None, True))
+            labels.append((None, item['heading'] == 'NONE'))
     return labels
+
+
+def _numbering_kind(item: dict[str, Any]) -> str | None:
+    """What a paragraph's numbering is when no printed label was read for it; None for a paragraph without numbering."""
+    heading, level = item['heading'], item['level']
+    return {'NUMBER': f'자동 번호 {level + 1}수준', 'BULLET': '글머리표', 'OUTLINE': f'개요 번호 {level + 1}수준'}.get(heading)
+
+
+def list_numbering(paragraphs: list[dict[str, Any]] | None) -> dict[str, Any]:
+    """Numbered paragraphs whose printed label is not read: this review counts them and never calls them verified."""
+    items = paragraphs or []
+    counts = {'number': sum(item['heading'] == 'NUMBER' for item in items), 'bullet': sum(item['heading'] == 'BULLET' for item in items),
+              'nested_outline': sum(item['heading'] == 'OUTLINE' and not item.get('in_body') for item in items)}
+    return {'state': 'unverified' if any(counts.values()) else 'none', **counts}
+
+
+def _unread_list_paragraphs(paragraphs: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+    return [item for item in paragraphs or [] if item['heading'] in {'NUMBER', 'BULLET'} or (item['heading'] == 'OUTLINE' and not item.get('in_body'))]
+
+
+def _list_numbering_text(coverage: dict[str, Any]) -> str | None:
+    """One clause naming each kind, or None when the document has none."""
+    if coverage.get('state') != 'unverified':
+        return None
+    parts = [f'{label} {coverage[key]}개' for key, label in (('number', '자동 번호'), ('bullet', '글머리표'), ('nested_outline', '표 셀 안 개요 번호')) if coverage[key]]
+    return ', '.join(parts)
 
 
 def package_inventory(path: Path) -> dict[str, Any]:
@@ -224,10 +257,11 @@ def package_inventory(path: Path) -> dict[str, Any]:
             infos = archive.infolist()
             if len(infos) > MAX_PACKAGE_MEMBERS or sum(info.file_size for info in infos) > MAX_PACKAGE_TOTAL_BYTES:
                 raise PackageUnreadable('package_limit', 'The HWPX package is larger than this inspection reads.')
-            for info in infos:
-                kept = bytearray() if re.fullmatch(r'Contents/(section\d+|header)\.xml', info.filename) else None
-                if kept is not None and info.file_size > MAX_PACKAGE_TEXT_BYTES:
-                    raise PackageUnreadable('package_limit', 'An HWPX text member is larger than this inspection reads.')
+            is_text = [re.fullmatch(r'Contents/(section\d+|header)\.xml', info.filename) is not None for info in infos]
+            if sum(info.file_size for info, text in zip(infos, is_text) if text) > MAX_PACKAGE_TEXT_BYTES:
+                raise PackageUnreadable('package_limit', 'The text of this HWPX package is larger than this inspection reads.')
+            for info, text in zip(infos, is_text):
+                kept = bytearray() if text else None
                 digest = hashlib.sha256()
                 with archive.open(info) as stream:
                     while chunk := stream.read(_READ_CHUNK):
@@ -289,6 +323,9 @@ def _coverage_notes(review: dict[str, Any]) -> list[str]:
         notes.append('PDF 글자를 읽지 못했습니다')
     if coverage.get('controls') == 'unverified':
         notes.append('컨트롤 목록을 끝까지 읽지 못했습니다')
+    unread = _list_numbering_text(coverage.get('list_numbering') or {})
+    if unread:
+        notes.append(f'{unread}는 인쇄된 번호를 확인하지 않았습니다')
     return notes
 
 
@@ -319,11 +356,14 @@ def summarize(review: dict[str, Any]) -> str:
     if 'numbering_all_match' in review:
         all_seen_match = review['numbering_all_match'] is True
     structure_read = (review.get('coverage') or {}).get('paragraphs', {}).get('state') != 'unverified'
-    first = f"{review['page_count']}쪽, 번호 문단 {len(rows)}개" if structure_read else f"{review['page_count']}쪽, 번호 문단은 확인하지 못함"
+    lists = (review.get('coverage') or {}).get('list_numbering') or {}
+    first = (f"{review['page_count']}쪽, {'개요 ' if lists.get('state') == 'unverified' else ''}번호 문단 {len(rows)}개" if structure_read
+             else f"{review['page_count']}쪽, 번호 문단은 확인하지 못함")
     if all_seen_match:
         first += ' — 렌더링된 번호가 모두 기대와 일치합니다.'
     elif rows and readable and statuses.count('match') and 'mismatch' not in statuses:
-        first += f" — 확인한 {statuses.count('match')}개는 일치, {len(rows) - statuses.count('match')}개는 확인하지 못했습니다."
+        unseen = len(rows) - statuses.count('match')
+        first += f" — 확인한 {statuses.count('match')}개는 일치" + (f", {unseen}개는 확인하지 못했습니다." if unseen else '합니다.')
     lines = [line for line in (_headline(review), first) if line]
     if not readable:
         lines.append('PDF 글자를 읽을 수 없어 번호와 쪽 번호를 확인하지 못했습니다. 미리보기 이미지로 직접 확인하세요.')
@@ -353,7 +393,7 @@ def summarize(review: dict[str, Any]) -> str:
         else:
             lines.append(f"{label} 대비: {found or '바뀐 문단 없음'}")
         if comparison.get('numbers_not_compared'):
-            lines.append(f"번호 {comparison['numbers_not_compared']}개는 인쇄된 번호를 읽지 못한 쪽이 있어 수준만 비교했습니다.")
+            lines.append(f"번호 {comparison['numbers_not_compared']}개는 인쇄된 번호를 읽지 않았거나 읽지 못해 종류와 수준만 비교했습니다.")
         changed = [_EVIDENCE_LABELS[name] for name, value in comparison['evidence'].items() if value == 'changed']
         unproven = [_EVIDENCE_LABELS[name] for name, value in comparison['evidence'].items() if value == 'unproven']
         if changed:
@@ -398,20 +438,22 @@ def assemble(*, session_id: str, review_id: str, readback: dict[str, Any], pdf: 
         paragraph_coverage = {'state': 'partial' if truncated else 'complete', 'reviewed': len(paragraphs), 'total': paragraph_total if paragraph_total is not None else len(paragraphs)}
     page_coverage = {'state': 'unverified' if not pages else ('complete' if pages_complete else 'partial'), 'rendered': len(pages), 'total': native_pages}
     text_coverage = {'state': 'complete' if readable else 'unverified'}
-    current['coverage'] = {'paragraphs': paragraph_coverage, 'pages': page_coverage, 'text': text_coverage, 'controls': 'unverified' if controls is None else 'complete'}
+    unread_lists = list_numbering(paragraphs)
+    current['coverage'] = {'paragraphs': paragraph_coverage, 'pages': page_coverage, 'text': text_coverage, 'controls': 'unverified' if controls is None else 'complete', 'list_numbering': unread_lists}
     current['comparison'] = compare(baseline, current, current['numbering']) if baseline else None
     statuses = [row['status'] for row in current['numbering']]
     if 'unverified' in {paragraph_coverage['state'], page_coverage['state'], text_coverage['state']}:
         coverage_status = 'unverified'
     elif ('partial' in {paragraph_coverage['state'], page_coverage['state']} or controls is None or any(status != 'match' and status != 'mismatch' for status in statuses)
-          or current['page_numbers'].get('state') in {'partial', 'unverified'} or (current['comparison'] or {}).get('state', 'complete') != 'complete'):
+          or current['page_numbers'].get('state') in {'partial', 'unverified'} or (current['comparison'] or {}).get('state', 'complete') != 'complete'
+          or unread_lists['state'] == 'unverified'):
         coverage_status = 'partial'
     else:
         coverage_status = 'complete'
     current['coverage']['status'] = coverage_status
     mismatch = 'mismatch' in statuses or current['page_numbers'].get('state') == 'missing'
     current['review_status'] = 'mismatch' if mismatch else coverage_status
-    current['numbering_all_match'] = False if 'mismatch' in statuses else (True if statuses and coverage_status != 'unverified' and paragraph_coverage['state'] == 'complete' and page_coverage['state'] == 'complete' and all(status == 'match' for status in statuses) else None)
+    current['numbering_all_match'] = False if 'mismatch' in statuses else (True if statuses and coverage_status != 'unverified' and paragraph_coverage['state'] == 'complete' and page_coverage['state'] == 'complete' and unread_lists['state'] == 'none' and all(status == 'match' for status in statuses) else None)
     current['summary_text'] = summarize(current)
     return current
 
@@ -429,11 +471,20 @@ def to_markdown(review: dict[str, Any]) -> str:
     if coverage:
         out += ['## 확인 범위', '', f"- 판정: {status_label(review['review_status'])}", f"- 문단: {coverage['paragraphs']['reviewed']}개 읽음 (전체 {coverage['paragraphs']['total'] if coverage['paragraphs']['total'] is not None else '알 수 없음'})",
                 f"- 쪽: {coverage['pages']['rendered']}쪽 렌더링 (전체 {coverage['pages']['total'] if coverage['pages']['total'] is not None else '알 수 없음'})",
-                f"- PDF 글자: {'읽음' if coverage['text']['state'] == 'complete' else '읽지 못함'}", '']
+                f"- PDF 글자: {'읽음' if coverage['text']['state'] == 'complete' else '읽지 못함'}"]
+        unread = _list_numbering_text(coverage.get('list_numbering') or {})
+        if unread:
+            out.append(f'- 자동 번호·글머리표: {unread}는 확인하지 않음')
+        out.append('')
     if review['numbering']:
         out += ['## 번호 문단 (한글이 만든 PDF 기준)', '', '| 쪽 | 수준 | 화면 번호 | 기대 번호 | 일치 | 내용 |', '|---|---|---|---|---|---|']
         out += [f"| {_cell(row['page'])} | {row['level']} | {_cell(row['rendered_label'])} | {_cell(row['expected_label'])} | {_ROW_WORDS[_row_status(row)]} | {_cell(row['text'][:60])} |"
                 for row in review['numbering']]
+        out.append('')
+    unread_rows = _unread_list_paragraphs(review.get('paragraphs'))
+    if unread_rows:
+        out += ['## 인쇄된 번호를 확인하지 않은 문단', '', '| 종류 | 내용 |', '|---|---|']
+        out += [f"| {_numbering_kind(item)} | {_cell(item['text'][:60])} |" for item in unread_rows]
         out.append('')
     if review['page_numbers'].get('present'):
         out += ['## 쪽 번호', '']
