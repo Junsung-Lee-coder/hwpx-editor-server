@@ -69,6 +69,8 @@ class Backend(BaseHTTPRequestHandler):
     copy_mode = 'ok'  # ok, status500, truncated, corrupt, oversize, no_artifact, custody_mismatch
     readback_paragraphs = None
     readback_evidence = None
+    readback_truncated = False
+    held = False
     dirty = False
     readback_mode = 'ok'
     close_mode = 'ok'
@@ -90,7 +92,7 @@ class Backend(BaseHTTPRequestHandler):
         if self.path.startswith('/interactive/session/status'):
             return self.reply({'ok': True, 'session': {'session_id': SID, 'state': 'ready', 'metadata': {'local_cli_v1': {'opened_via': 'local_cli_v1'}}}})
         if self.path == '/local-cli/status':
-            return self.reply({'ok': True, 'session_id': SID, 'working_copy_dirty': type(self).dirty})
+            return self.reply({'ok': True, 'session_id': SID, 'working_copy_dirty': type(self).dirty, 'native_custody_held': type(self).held})
         if self.path.endswith('/artifact/export'):
             return self.reply(pdf_bytes(type(self).printed))
         if self.path.endswith('/artifact/working-copy'):
@@ -121,13 +123,15 @@ class Backend(BaseHTTPRequestHandler):
                 return self.reply({'ok': True, 'session_id': SID, 'available': False, 'reason': 'census_unavailable', 'source_filename': 'fixture.hwpx', 'page_count': 2, 'document_is_modified': False,
                                    'paragraphs': None, 'controls': {'tbl': 1}, 'page_numbers': [], 'page_restarts': [], 'evidence': None, 'caret_unchanged': True})
             return self.reply({'ok': True, 'session_id': SID, 'available': True, 'source_filename': 'fixture.hwpx', 'page_count': 2, 'document_is_modified': False,
-                               'paragraphs': type(self).readback_paragraphs or [paragraph('Alpha'), paragraph('Beta')], 'paragraph_total': len(type(self).readback_paragraphs or 'ab'), 'controls': {'tbl': 1}, 'page_numbers': [], 'page_restarts': [], 'caret_unchanged': True,
+                               'paragraphs': type(self).readback_paragraphs or [paragraph('Alpha'), paragraph('Beta')], 'paragraph_total': 2500 if type(self).readback_truncated else len(type(self).readback_paragraphs or 'ab'), 'paragraphs_truncated': type(self).readback_truncated, 'controls': {'tbl': 1}, 'page_numbers': [], 'page_restarts': [], 'caret_unchanged': True,
                                'evidence': {'header_footer': [], 'styles_sha256': 's', 'media_sha256': 'm', 'numberings_sha256': 'n', 'bindata_sha256': 'b', **(type(self).readback_evidence or {})}})
         if self.path == '/local-cli/export':
             return self.reply({'ok': True, 'session_id': SID, 'download_path': f'/local-cli/session/{SID}/artifact/export'})
         if self.path == '/local-cli/save':
             return self.reply({'ok': True, 'session_id': SID, 'filename': 'fixture-edited.hwpx', 'download_path': f'/local-cli/session/{SID}/artifact/working-copy'})
         if self.path == '/local-cli/close':
+            if type(self).close_mode == 'held':
+                return self.reply({'detail': 'native_custody_held: The live local CLI session holds a native command whose outcome is unknown; it is retained and is not closed, discarded or released by this runtime.'}, 409)
             if type(self).close_mode == 'save_required':
                 return self.reply({'detail': 'save_required: the document has unsaved changes; call hwpx_save first.'}, 409)
             return self.reply({'ok': True, 'cleanup': {'removed': True}})
@@ -186,6 +190,8 @@ class Base(unittest.IsolatedAsyncioTestCase):
         Backend.readback_mode = 'ok'
         Backend.readback_paragraphs = None
         Backend.readback_evidence = None
+        Backend.readback_truncated = False
+        Backend.held = False
         Backend.close_mode = 'ok'
         Backend.printed = [['1. Alpha', '2. Beta'], ['second page']]
         shutil.rmtree(self.root / 'artifacts', ignore_errors=True)
