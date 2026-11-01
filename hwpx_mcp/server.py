@@ -123,6 +123,7 @@ def rejection_summary(value: dict[str, Any]) -> dict[str, Any]:
         'reason': failed.get('refusal_code') or diagnostic.get('numbering_reason') or (coded.group(1) if coded else detail),
         'message': detail if coded else None,
         'stopped_before_edit': failed.get('mutation_may_have_persisted') is False if failed else None,
+        'found_page': failed.get('found_page'),
         'session_held': value.get('native_custody_held') is True or (coded is not None and coded.group(1) == 'native_custody_held'),
     }
     return {key: item for key, item in summary.items() if item is not None}

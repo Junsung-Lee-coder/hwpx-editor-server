@@ -605,11 +605,17 @@ def _block_words(hwp: Any) -> list[str] | None:
     return None if paragraphs is None else [item['text'] for item in paragraphs]
 
 
+def _require_page(found: int, expected: int) -> None:
+    if found != expected:
+        refusal = NativeNumberingRefusal('the target is not on expected_page', code='target_wrong_page')
+        refusal.found_page = found
+        raise refusal
+
+
 def _select(hwp: Any, block: tuple[int, ...], words: list[str] | None, page_of: Callable[[], int], expected_page: int) -> None:
     list_id, start_para, start_pos, _end_list, end_para, end_pos = block
     _set_pos(hwp, (list_id, start_para, start_pos))
-    if page_of() != expected_page:
-        raise NativeNumberingRefusal('the target is not on expected_page', code='target_wrong_page')
+    _require_page(page_of(), expected_page)
     selected = hwp.select_text(start_para, start_pos, end_para, end_pos, list_id)
     if selected is not True or _get_selection(hwp) != block:
         raise NativeNumberingRefusal('the requested range could not be selected exactly', code='selection_unverified')
@@ -848,8 +854,7 @@ def apply_format(
         if already:
             # The caller gives back what it found, as it does after a refusal.
             _set_pos(hwp, (list_id, para, block[2]))
-            if page_of() != request['expected_page']:
-                raise NativeNumberingRefusal('the target is not on expected_page', code='target_wrong_page')
+            _require_page(page_of(), request['expected_page'])
             return {'changed': False, 'status': 'already_set', 'target': target, 'requested': dict(wanted), 'before': report(rows, before['model']), 'after': report(rows, before['model']),
                     'native_actions': [], 'pre_state_sha256': None, 'post_state_sha256': None}
         _select(hwp, block, words, page_of, request['expected_page'])

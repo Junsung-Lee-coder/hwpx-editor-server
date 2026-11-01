@@ -220,6 +220,15 @@ class Refusals(unittest.TestCase):
                 state = (hwp.cursor, hwp.selection)
                 refusal(self, Flow(hwp).step(**{**CHARACTER, 'bold': True, **fields}), code, hwp, state)
 
+    def test_wrong_page_says_where_the_target_is(self) -> None:
+        hwp = sample_document(pages={3: 2})
+        flow = Flow(hwp)
+        flow.service._bundle_page_evidence = lambda doc, **kwargs: {'page': doc.current_page}
+        outcome = flow.step(**CHARACTER, match='English', bold=True)
+        self.assertEqual(outcome['steps'][0]['refusal_code'], 'target_wrong_page')
+        self.assertEqual(outcome['steps'][0]['found_page'], 2)
+        self.assertTrue(flow.step(**{**CHARACTER, 'expected_page': 2}, match='English', bold=True)['ok'])
+
     def test_a_stale_paragraph_identity_is_refused(self) -> None:
         hwp = sample_document()
         refusal(self, character(hwp, paragraph_index=4, expected_text='바뀐 글', bold=True), 'target_text_mismatch', hwp)

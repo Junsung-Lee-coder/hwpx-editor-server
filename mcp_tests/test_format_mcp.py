@@ -54,6 +54,11 @@ class FormattingCommands(Base):
         details = result.structured_content['error']['details']
         self.assertEqual((details['reason'], details['stopped_before_edit'], details['session_held']), ('target_ambiguous', True, False))
 
+    async def test_a_wrong_page_refusal_names_the_page(self):
+        Backend.bundle_reply = {'ok': False, 'steps': [{'ok': False, 'refusal_code': 'target_wrong_page', 'found_page': 2, 'mutation_may_have_persisted': False}]}
+        details = (await self.command(CHARACTER)).structured_content['error']['details']
+        self.assertEqual((details['reason'], details['found_page']), ('target_wrong_page', 2))
+
     async def test_an_unknown_outcome_reaches_the_caller_as_held(self):
         Backend.bundle_reply = {'ok': False, 'native_custody_held': True, 'steps': [{'ok': False, 'mutation_may_have_persisted': True, 'native_custody_held': True}]}
         details = (await self.command(PARAGRAPH)).structured_content['error']['details']
