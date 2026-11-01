@@ -103,6 +103,17 @@ class Compare(unittest.TestCase):
         self.assertIn('저장 안 된 변경 있음', text)
 
 
+class Unreadable(unittest.TestCase):
+    def test_missing_pdf_text_is_said_plainly_instead_of_reading_as_a_wrong_number(self):
+        text = review.summarize({'session_id': 'a', 'page_count': 3, 'pages_rendered': 2, 'pages_truncated': True, 'document_is_modified': False,
+                                 'rendered_text_available': False, 'page_numbers': {'present': True, 'all_found': False, 'position': None, 'start_number': 1},
+                                 'numbering': [{'matches': False, 'text': 'Alpha', 'rendered_label': None, 'expected_label': '1.'}], 'comparison': None})
+        self.assertIn('PDF 글자를 읽을 수 없어', text)
+        self.assertIn('앞 2쪽까지만', text)
+        self.assertNotIn('기대와 다른', text)
+        self.assertNotIn('모두 기대와 일치', text)
+
+
 class Package(unittest.TestCase):
     def test_inventory_and_payload_comparison_ignore_a_member_rename(self):
         with tempfile.TemporaryDirectory() as raw:

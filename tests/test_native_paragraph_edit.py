@@ -187,6 +187,15 @@ class ParagraphRemove(unittest.TestCase):
 
 
 class UndoAccounting(unittest.TestCase):
+    def test_an_undo_refusal_reaches_the_caller_with_its_reason(self) -> None:
+        from app.local_cli_runtime import LocalCliRuntimeError
+        from app.local_cli_service import LocalCliUndoRefused, as_http_error
+        refused = as_http_error(LocalCliUndoRefused('undo refused: private detail'))
+        self.assertEqual(refused.status_code, 409)
+        self.assertIn('cannot be undone', refused.detail)
+        self.assertNotIn('private detail', refused.detail)
+        self.assertEqual(as_http_error(LocalCliRuntimeError('private')).detail, 'Local CLI native operation failed.')
+
     def test_one_counted_step_after_a_paragraph_edit(self) -> None:
         flow = Flow(_doc('Title', 'Item', 'Tail'))
         self.assertTrue(flow.step(match='Item', text='Next', position='after', **INSERT)['ok'])

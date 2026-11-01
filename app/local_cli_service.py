@@ -7529,7 +7529,7 @@ class LocalCliService(
         if blocked and not isinstance(undo_count_raw, int):
             # Fail closed: counting native Undo steps could revert part of an
             # edit, or an older edit too.
-            raise LocalCliRuntimeError(
+            raise LocalCliUndoRefused(
                 f'undo refused: {blocked}. Retain the working copy and owning STA instead of counting undos; full native close is unsupported for this unproved or held session. Separately authorized exact-owned operator closure is required.'
             )
         undo_count = int(undo_count_raw) if isinstance(undo_count_raw, int) and undo_count_raw > 1 else 1
@@ -7734,9 +7734,15 @@ class LocalCliService(
 
 
 
+class LocalCliUndoRefused(LocalCliRuntimeError):
+    """Undo was refused before any native call; its fixed reason text is safe to show the caller."""
+
+
 def as_http_error(exc: Exception) -> HTTPException:
     if isinstance(exc, LocalCliServiceError):
         return HTTPException(status_code=exc.status_code, detail=exc.message)
+    if type(exc) is LocalCliUndoRefused:
+        return HTTPException(status_code=409, detail='The last edit cannot be undone as one counted step; no undo was performed.')
     if isinstance(exc, LocalCliRuntimeError):
         return HTTPException(status_code=500, detail='Local CLI native operation failed.')
     return HTTPException(status_code=500, detail='Local CLI request failed.')

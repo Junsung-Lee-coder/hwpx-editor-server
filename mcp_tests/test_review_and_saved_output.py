@@ -239,6 +239,15 @@ class ReviewAndSavedOutput(unittest.IsolatedAsyncioTestCase):
         await self.call('hwpx_command', {'session_id': SID, 'request': {'op': 'paragraph_remove_exact', 'match': 'Item', 'expected_page': 1, 'confirm_remove': True}})
         self.assertEqual(Backend.calls[-1][2]['steps'][0]['op'], 'paragraph_remove_exact')
 
+    async def test_a_refusal_leads_with_its_reason(self):
+        from hwpx_mcp.server import rejection_summary
+        refused = {'ok': False, 'steps': [{'ok': False, 'refusal_code': 'target_has_controls', 'mutation_may_have_persisted': False}]}
+        self.assertEqual(rejection_summary(refused), {'reason': 'target_has_controls', 'stopped_before_edit': True, 'session_held': False})
+        held = {'ok': False, 'native_custody_held': True, 'steps': [{'ok': False, 'mutation_may_have_persisted': True,
+                                                                     'failure_diagnostic': {'numbering_reason': 'native_failed'}}]}
+        self.assertEqual(rejection_summary(held), {'reason': 'native_failed', 'stopped_before_edit': False, 'session_held': True})
+        self.assertEqual(rejection_summary({'detail': 'blocked'}), {'reason': 'blocked', 'session_held': False})
+
     async def test_paragraph_edit_schema_is_closed(self):
         for request in (
             {'op': 'paragraph_remove_exact', 'match': 'Item', 'expected_page': 1, 'confirm_remove': False},

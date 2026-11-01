@@ -178,12 +178,17 @@ def _short_id(review_id: str | None, review: dict[str, Any]) -> str:
 def summarize(review: dict[str, Any]) -> str:
     """Short answer first: is the numbering what was asked for, did anything else change, is it saved."""
     rows = review['numbering']
-    lines = [f"{review['page_count']}쪽, 번호 문단 {len(rows)}개" + (' — 렌더링된 번호가 모두 기대와 일치합니다.' if rows and all(row['matches'] for row in rows) else '')]
-    wrong = [row for row in rows if not row['matches']]
+    readable = review.get('rendered_text_available') is not False
+    lines = [f"{review['page_count']}쪽, 번호 문단 {len(rows)}개" + (' — 렌더링된 번호가 모두 기대와 일치합니다.' if readable and rows and all(row['matches'] for row in rows) else '')]
+    if not readable:
+        lines.append('PDF 글자를 읽을 수 없어 번호와 쪽 번호를 확인하지 못했습니다. 미리보기 이미지로 직접 확인하세요.')
+    if review.get('pages_truncated'):
+        lines.append(f"미리보기는 앞 {review['pages_rendered']}쪽까지만 만들었습니다.")
+    wrong = [row for row in rows if not row['matches']] if readable else []
     if wrong:
         lines.append(f'번호가 기대와 다른 문단 {len(wrong)}개: ' + ', '.join(f"{row['text'][:20]}({row['rendered_label']} / 기대 {row['expected_label']})" for row in wrong[:5]))
     pages = review['page_numbers']
-    if pages.get('present'):
+    if pages.get('present') and readable:
         lines.append('쪽 번호: ' + ('모든 쪽에서 확인됨' if pages['all_found'] else '일부 쪽에서 확인되지 않음') + f" ({pages['position']}, {pages['start_number']}부터)")
     comparison = review.get('comparison')
     if comparison:

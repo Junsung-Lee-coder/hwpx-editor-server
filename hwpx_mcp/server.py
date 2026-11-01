@@ -89,6 +89,19 @@ def envelope(operation, *, sid=None, result=None, error=None):
                     document_id=sid, result=result, error=error).model_dump(mode='json')
 
 
+def rejection_summary(value: dict[str, Any]) -> dict[str, Any]:
+    """What stopped the operation, in the first fields a caller reads, from the backend's own fixed labels."""
+    steps = value.get('steps')
+    failed = next((step for step in steps if isinstance(step, dict) and step.get('ok') is False), {}) if isinstance(steps, list) else {}
+    diagnostic = failed.get('failure_diagnostic') if isinstance(failed.get('failure_diagnostic'), dict) else {}
+    summary = {
+        'reason': failed.get('refusal_code') or diagnostic.get('numbering_reason') or value.get('detail'),
+        'stopped_before_edit': failed.get('mutation_may_have_persisted') is False if failed else None,
+        'session_held': value.get('native_custody_held') is True,
+    }
+    return {key: item for key, item in summary.items() if item is not None}
+
+
 class Facade:
     def __init__(self, settings: Settings):
         self.settings = settings
@@ -113,7 +126,7 @@ class Facade:
                 # Preserve journal identifiers and backend evidence, not the
                 # exception/HTTP request (which could contain credentials).
                 raise BackendFailure('BACKEND_REJECTED', 'Backend rejected the operation; inspect its evidence before retrying.',
-                                     {'http_status': response.status_code, 'backend': value})
+                                     {'http_status': response.status_code, **rejection_summary(value), 'backend': value})
             return value
 
     async def session(self, http, sid):
