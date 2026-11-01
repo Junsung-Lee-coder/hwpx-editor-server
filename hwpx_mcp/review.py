@@ -318,7 +318,8 @@ def summarize(review: dict[str, Any]) -> str:
     all_seen_match = rows and readable and all(status == 'match' for status in statuses)
     if 'numbering_all_match' in review:
         all_seen_match = review['numbering_all_match'] is True
-    first = f"{review['page_count']}쪽, 번호 문단 {len(rows)}개"
+    structure_read = (review.get('coverage') or {}).get('paragraphs', {}).get('state') != 'unverified'
+    first = f"{review['page_count']}쪽, 번호 문단 {len(rows)}개" if structure_read else f"{review['page_count']}쪽, 번호 문단은 확인하지 못함"
     if all_seen_match:
         first += ' — 렌더링된 번호가 모두 기대와 일치합니다.'
     elif rows and readable and statuses.count('match') and 'mismatch' not in statuses:

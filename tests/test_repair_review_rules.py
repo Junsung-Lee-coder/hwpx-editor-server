@@ -88,6 +88,7 @@ class Coverage(unittest.TestCase):
         result = built(None, ['1. Alpha\n'], available=False, reason='census_unavailable', page_count=1)
         self.assertEqual(result['review_status'], 'unverified')
         self.assertIn('문서 구조', result['summary_text'].splitlines()[0])
+        self.assertNotIn('번호 문단 0개', result['summary_text'])
         self.assertEqual(result['coverage']['paragraphs']['state'], 'unverified')
         self.assertEqual(len(result['pages']), 1)
 

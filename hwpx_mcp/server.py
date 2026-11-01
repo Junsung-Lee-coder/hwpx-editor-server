@@ -88,6 +88,13 @@ def file_sha256(path):
     return digest.hexdigest()
 
 
+def discard(path):
+    try:
+        path.unlink(missing_ok=True)
+    except OSError:
+        pass  # Its name is one no consumer accepts; a leftover is never treated as output.
+
+
 def write_json_atomic(path, value):
     temporary = path.with_name(f'.{path.name}.{uuid.uuid4().hex}.tmp')
     temporary.write_text(json.dumps(value, ensure_ascii=False, indent=2), encoding='utf-8')
@@ -203,7 +210,11 @@ class Facade:
                     Session(session_id=sid)
                     if result.get('working_copy_id') != sid:
                         raise BackendFailure('SESSION_IDENTITY_MISMATCH', 'Open did not return its managed working-copy identity.')
-                    await asyncio.to_thread(self.record_source, sid, source)
+                    try:
+                        await asyncio.to_thread(self.record_source, sid, source)
+                    except OSError:
+                        # The session is open and its identity must reach the caller; only a later comparison is lost.
+                        result = {**result, 'source_record_error': 'SOURCE_RECORD_NOT_WRITTEN'}
                 else:
                     record = await self.session(http, sid)
                     if name == 'hwpx_status':
@@ -362,7 +373,7 @@ class Facade:
             await self.fetch_complete(http, route, partial, what)
             os.replace(partial, target)
         finally:
-            partial.unlink(missing_ok=True)
+            discard(partial)
 
     async def export_pdf(self, http, sid, pdf):
         result = await self.request(http, 'POST', '/local-cli/export', json={'session_id': sid})
@@ -406,7 +417,7 @@ class Facade:
             await self.fetch_complete(http, route, partial, 'Saved document', limit=MAX_SAVED_FILE)
             return await self.publish_verified(sid, partial, name)
         finally:
-            partial.unlink(missing_ok=True)
+            discard(partial)
 
     async def publish_verified(self, sid, partial, name):
         folder = self.session_dir(sid) / 'saved'
@@ -433,7 +444,6 @@ class Facade:
     def record_saved_failure(self, sid, code, message):
         """The older copy, if any, is no longer the latest; say so where review and close will read it."""
         folder = self.session_dir(sid)
-        folder.mkdir(parents=True, exist_ok=True)
         previous = self.read_json(folder / 'latest-saved.json') or {}
         last = previous if previous.get('retrieved') is True else previous.get('last_retrieved')
         failure = {
@@ -442,6 +452,7 @@ class Facade:
             'last_retrieved': {key: last[key] for key in ('path', 'sha256', 'size_bytes')} if last else None,
         }
         try:
+            folder.mkdir(parents=True, exist_ok=True)
             write_json_atomic(folder / 'latest-saved.json', failure)
         except OSError:
             pass  # The returned failure still carries it; the close guard fetches again regardless.
@@ -489,7 +500,7 @@ class Facade:
         except (httpx2.TimeoutException, httpx2.TransportError, OSError):
             failure = self.record_saved_failure(sid, 'ARTIFACT_DOWNLOAD_FAILED', 'Saved document could not be copied to the artifact root.')
         finally:
-            partial.unlink(missing_ok=True)
+            discard(partial)
         raise BackendFailure('SAVED_OUTPUT_NOT_RETRIEVED',
                              'The saved document could not be copied out, so the session was not closed and nothing was deleted. Call hwpx_save or hwpx_close again.',
                              {'session_held': False, 'saved_output': failure})

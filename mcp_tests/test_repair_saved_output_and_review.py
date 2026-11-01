@@ -316,6 +316,27 @@ class SavedOutputNeverLost(Base):
         self.assertEqual(result.structured_content['error']['code'], 'SAVE_REQUIRED')
         self.assertEqual(self.published(), [])
 
+    async def test_a_local_write_failure_refuses_close_and_recovers_after_it_clears(self):
+        await self.opened()
+        self.saved_dir.parent.mkdir(parents=True, exist_ok=True)
+        self.saved_dir.write_bytes(b'blocks the saved folder')
+        saved = await self.save()
+        self.assertFalse(saved['retrieved'])
+        refused = await self.close()
+        self.assertEqual(refused.structured_content['error']['code'], 'SAVED_OUTPUT_NOT_RETRIEVED')
+        self.assertEqual(self.close_posts(), [])
+        self.saved_dir.unlink()
+        result = await self.close()
+        self.assertFalse(result.is_error, result.structured_content)
+        self.assertEqual(Path(result.structured_content['result']['saved_output']['path']).read_bytes(), Backend.saved)
+
+    async def test_a_partial_name_cannot_be_opened(self):
+        self.saved_dir.mkdir(parents=True)
+        partial = self.saved_dir / '.incoming-x.part'
+        partial.write_bytes(Backend.saved)
+        refused = await self.call('hwpx_open', {'request': {'source_path': str(partial)}})
+        self.assertEqual(refused.structured_content['error']['code'], 'SOURCE_NOT_ALLOWED')
+
     async def test_a_published_copy_is_complete_and_its_record_is_current(self):
         await self.opened()
         saved = await self.save()
@@ -380,6 +401,14 @@ class ReviewWithoutPdfText(Base):
 
 
 class HostilePackageOnOpen(Base):
+    async def test_a_source_record_failure_still_returns_the_open_session(self):
+        (self.root / 'artifacts').mkdir(parents=True)
+        (self.root / 'artifacts' / SID).write_bytes(b'blocks the session folder')
+        result = await self.call('hwpx_open', {'request': {'source_path': str(self.source)}})
+        self.assertFalse(result.is_error, result.structured_content)
+        self.assertEqual(result.structured_content['session_id'], SID)
+        self.assertEqual(result.structured_content['result']['source_record_error'], 'SOURCE_RECORD_NOT_WRITTEN')
+
     def write(self, name, data):
         path = self.root / 'input' / name
         path.write_bytes(data)
