@@ -741,8 +741,8 @@ def _first_number_source(census: Mapping[str, Any], start: int) -> str:
                 and number.isascii() and number.isdigit() and int(number) == start):
             return 'existing_restart'
         raise NativeNumberingRefusal(
-            'the document already sets a page restart; Hancom would rewrite it to the requested start and its Undo would not put it back, '
-            'so the page number was not added',
+            'the document already sets a page restart apart from the requested start; Hancom rewrites one on the first page to the request, '
+            'with an Undo that does not put it back, so the page number was not added',
             code='existing_page_restart',
         )
     if start != 1:

@@ -78,7 +78,7 @@ $mcpProcess = Start-Process -FilePath '.mcp-venv\Scripts\python.exe' -ArgumentLi
 | 새 번호 조판이 없음 | 2 이상 | 쪽 번호와 새 번호 조판을 넣습니다. `new_number_source`는 `hwpml2x_page_restart` |
 | 구역 시작이 2 이상이고 새 번호 조판이 없음 | 1 또는 생략 | 변경 전에 `existing_section_page_start`로 거부합니다. 넣어도 그 구역의 시작 번호가 인쇄되기 때문입니다. 시작 번호를 명시하면 됩니다 |
 | 첫 문단에 요청과 같은 번호의 새 번호 조판이 있음 | 같은 번호 | 쪽 번호를 넣고 그 조판은 그대로 둡니다 |
-| 그 밖의 새 번호 조판이 있음 | 모두 | 변경 전에 `existing_page_restart`로 거부합니다. Hancom이 첫 쪽의 조판을 요청 값으로 고쳐 쓰고, 되돌리기로 돌아오지 않기 때문입니다 |
+| 그 밖의 새 번호 조판이 있음(뒤쪽 문단의 조판 포함) | 모두 | 변경 전에 `existing_page_restart`로 거부합니다. Hancom이 첫 쪽의 조판을 요청 값으로 고쳐 쓰고 되돌리기로 돌아오지 않는데, 이 확인은 조판이 첫 쪽에 있는지 가리지 않기 때문입니다 |
 | 쪽 번호가 이미 있음 | 모두 | 변경 전에 `existing_page_number`로 거부합니다 |
 
 거부되면 세션은 보류되지 않고 저장하지 않은 이전 변경도 그대로 남습니다. 실제 인쇄된 번호는 `hwpx_proof`의 `review`가 PDF에서 확인합니다.
