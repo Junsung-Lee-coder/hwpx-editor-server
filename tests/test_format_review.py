@@ -284,7 +284,7 @@ class NumberMarkReview(unittest.TestCase):
         change = next(item for item in review['comparison']['changes'] if item['kind'] == 'number_mark_changed')
         self.assertEqual(change['paragraph_index'], 1)
         self.assertEqual(change['changes'], {'bold': {'before': False, 'after': True}, 'text_color': {'before': '#000000', 'after': '#C00000'}})
-        self.assertEqual(review['coverage']['number_mark'], {'state': 'changed', 'numbered': 1, 'compared': 1, 'changed': 1, 'not_compared': 0})
+        self.assertEqual(review['coverage']['number_mark'], {'state': 'changed', 'numbered': 1, 'compared': 1, 'changed': 1, 'not_compared': 0, 'new': 0})
         self.assertIn('번호 모양 변경: [1] 둘째 수준 — 굵게 아니요→예', review['summary_text'])
         self.assertIn('| [1] 둘째 수준 | 번호 표시 | 굵게 | 아니요 | 예 |', rules.to_markdown(review))
 
@@ -308,6 +308,16 @@ class NumberMarkReview(unittest.TestCase):
         review = assembled([unknown], [unknown])
         self.assertEqual(review['coverage']['number_mark']['not_compared'], 1)
         self.assertEqual(review['review_status'], 'partial')
+
+    def test_a_paragraph_that_just_got_its_number_has_no_old_mark_to_compare(self) -> None:
+        review = assembled([para('문단')], [numbered('문단', mark={}, index=0)])
+        self.assertEqual(review['coverage']['number_mark'], {'state': 'compared', 'numbered': 1, 'compared': 0, 'changed': 0, 'not_compared': 0, 'new': 1})
+        self.assertEqual(review['review_status'], 'complete')
+
+    def test_an_added_numbered_paragraph_has_none_either(self) -> None:
+        review = assembled([numbered('첫째', mark={}, index=0)], [numbered('첫째', mark={}, index=0), numbered('새 문단', mark={}, index=1)])
+        self.assertEqual(review['coverage']['number_mark']['new'], 1)
+        self.assertEqual(review['coverage']['number_mark']['not_compared'], 0)
 
     def test_no_numbered_paragraph_has_nothing_to_compare(self) -> None:
         review = assembled([para('문단')], [para('문단')])

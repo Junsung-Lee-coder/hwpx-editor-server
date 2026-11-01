@@ -227,12 +227,12 @@ def number_mark_coverage(paragraphs: list[dict[str, Any]] | None, comparison: di
     """How much of the look of the printed numbers was compared. A label's text, kind and level say nothing about it."""
     numbered = [item for item in paragraphs or [] if item.get('heading') in {'NUMBER', 'BULLET', 'OUTLINE'}]
     if not numbered:
-        return {'state': 'none', 'numbered': 0, 'compared': 0, 'changed': 0, 'not_compared': 0}
-    tally = (comparison or {}).get('number_marks') or {'compared': 0, 'changed': 0}
-    compared, changed = tally['compared'], tally['changed']
-    missing = max(len(numbered) - compared, 0) if comparison and comparison.get('state') != 'unverified' else len(numbered)
+        return {'state': 'none', 'numbered': 0, 'compared': 0, 'changed': 0, 'not_compared': 0, 'new': 0}
+    tally = (comparison or {}).get('number_marks') or {}
+    compared, changed, new = tally.get('compared', 0), tally.get('changed', 0), tally.get('new', 0)
+    missing = max(len(numbered) - compared - new, 0) if comparison and comparison.get('state') != 'unverified' else len(numbered)
     state = 'not_compared' if missing else 'changed' if changed else 'compared'
-    return {'state': state, 'numbered': len(numbered), 'compared': compared, 'changed': changed, 'not_compared': missing}
+    return {'state': state, 'numbered': len(numbered), 'compared': compared, 'changed': changed, 'not_compared': missing, 'new': new}
 
 
 def format_coverage(comparison: dict[str, Any] | None) -> dict[str, Any]:
@@ -264,7 +264,7 @@ def compare(baseline: dict[str, Any], current: dict[str, Any], rows: list[dict[s
     controls = None if before_controls is None or after_controls is None else {
         name: {'before': before_controls.get(name, 0), 'after': after_controls.get(name, 0)} for name in sorted(set(before_controls) | set(after_controls))}
     result = {'baseline': baseline.get('review_id'), 'changes': [], 'evidence': evidence, 'controls': controls, 'numbers_not_compared': 0,
-              'nested_paragraphs_identical': None, 'nested_paragraph_count': None, 'nested_format_changes': None, 'number_marks': {'compared': 0, 'changed': 0}}
+              'nested_paragraphs_identical': None, 'nested_paragraph_count': None, 'nested_format_changes': None, 'number_marks': {'compared': 0, 'changed': 0, 'new': 0}}
     states = {_paragraph_state(baseline), _paragraph_state(current)}
     if 'unverified' in states:
         return {**result, 'state': 'unverified'}
@@ -273,7 +273,7 @@ def compare(baseline: dict[str, Any], current: dict[str, Any], rows: list[dict[s
     changes: list[dict[str, Any]] = []
     uncompared = 0
     nested_format = 0
-    marks = {'compared': 0, 'changed': 0}
+    marks = {'compared': 0, 'changed': 0, 'new': 0}
     matcher = difflib.SequenceMatcher(None, [item['text'] for item in before], [item['text'] for item in after], autojunk=False)
     for op, i1, i2, j1, j2 in matcher.get_opcodes():
         if op == 'equal':
@@ -291,7 +291,9 @@ def compare(baseline: dict[str, Any], current: dict[str, Any], rows: list[dict[s
                     changes.append({'kind': 'format_changed', 'text': after[right]['text'], 'paragraph_index': after[right].get('index', right), **format_changes(before[left], after[right])})
                     nested_format += not after[right].get('in_body')
                 old_mark, new_mark = _mark_values(before[left]), _mark_values(after[right])
-                if old_mark is not None and new_mark is not None:
+                if before[left]['heading'] == 'NONE' and after[right]['heading'] != 'NONE':
+                    marks['new'] += 1  # It had no mark, so there is no earlier look to compare.
+                elif old_mark is not None and new_mark is not None:
                     marks['compared'] += 1
                     mark_changes = _changed_fields(old_mark, new_mark, ('kind', 'source', *_CHARACTER_FIELDS))
                     if mark_changes:
@@ -303,6 +305,7 @@ def compare(baseline: dict[str, Any], current: dict[str, Any], rows: list[dict[s
             changes.extend({'kind': 'removed', 'text': before[index]['text'], 'before': old_labels[index][0] or _numbering_kind(before[index])} for index in range(i1, i2))
         if not (current.get('paragraphs_truncated') and j2 == len(after)):
             changes.extend({'kind': 'added', 'text': after[index]['text'], 'after': new_labels[index][0] or _numbering_kind(after[index])} for index in range(j1, j2))
+            marks['new'] += sum(after[index]['heading'] != 'NONE' for index in range(j1, j2))
     partial = 'partial' in states
     cells_before = [item['text'] for item in before if not item.get('in_body')]
     cells_after = [item['text'] for item in after if not item.get('in_body')]
