@@ -385,6 +385,12 @@ class FormatHwp:
                     self.cursor = (slist, para_index, pos)
                     return True
                 at += width(atom)
+        # A block ending right before a control that joins ends after it (measured).
+        at = 0
+        for atom in self.lists[slist][epara]['atoms']:
+            if at == epos and (atom.get('joins') or atom.get('raw')) and (spara, spos) != (epara, epos):
+                epos += width(atom)
+            at += width(atom)
         self.selection = (slist, spara, spos, slist, epara, epos)
         self.cursor = (slist, epara, epos)
         return True
@@ -480,13 +486,7 @@ class FormatHwp:
                 joins = lambda atom: atom.get('raw') or atom.get('joins')  # noqa: E731
                 every = para['atoms']
                 low = next(index for index, atom in enumerate(every) if atom is atoms[0])
-                high = next(index for index, atom in enumerate(every) if atom is atoms[-1]) + 1
-                taken = every[:low] if all(joins(atom) for atom in every[:low]) else []
-                for atom in every[high:]:
-                    if not joins(atom):
-                        break
-                    taken.append(atom)
-                for atom in taken:
+                for atom in every[:low] if all(joins(atom) for atom in every[:low]) else []:
                     atom['cs'] = self._char_with(atom['cs'], items)
             if old_end is not None and (number < epara or epos == para_length(para)):
                 para['end'] = self._char_with(old_end, items)

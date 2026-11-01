@@ -131,6 +131,7 @@ class OtherControlsBesideARange(unittest.TestCase):
         self.assertEqual(lead_shapes(hwp, 1), [RED_CHAR, RED_CHAR])
         self.assertEqual(styled(hwp, 0, 1), [('앞글자', RED_CHAR), ('뒤글자', char())])
         self.assertEqual(value['result']['joined_controls'], ['bookmark', 'bookmark'])
+        self.assertEqual(hwp.executes()[0][3], (0, 1, 0, 0, 1, 19), 'the block names where Hancom really ends it')
 
     def test_a_range_right_after_an_invisible_control_with_text_before_it_does_not(self) -> None:
         hwp = FormatHwp([paragraph('제목'), paragraph('앞글자', bookmark(), '뒤글자'), paragraph('끝')])
@@ -163,9 +164,25 @@ class OtherControlsBesideARange(unittest.TestCase):
             with self.subTest(name=name):
                 hwp = FormatHwp(body)
                 outcome = character(hwp, match=match, **RED)
-                refusal(self, outcome, 'target_beside_unmeasured_control', hwp)
+                refusal(self, outcome, 'target_beside_unproven_control', hwp)
                 self.assertIn('ellipse', outcome['steps'][0]['refusal_message'])
                 self.assertNotIn('table, picture', outcome['steps'][0]['refusal_message'])
+
+    def test_a_hidden_comment_right_after_the_range_or_before_a_range_of_paragraphs_is_refused(self) -> None:
+        hidden = lambda: control('<HIDDENCOMMENT/>', 'tcmt', joins=True)  # noqa: E731
+        hwp = FormatHwp([paragraph('제목'), paragraph('본문', hidden(), ' 글자'), paragraph('끝')])
+        refusal(self, character(hwp, match='본문', **RED), 'target_beside_unproven_control', hwp)
+        hwp = FormatHwp([paragraph('제목'), paragraph(hidden(), '본문 글자'), paragraph('끝 문단')])
+        refusal(self, character(hwp, match='본문 글자', through_match='끝', **RED), 'target_beside_unproven_control', hwp)
+        hwp = FormatHwp([paragraph('제목'), paragraph(hidden(), '본문 글자'), paragraph('끝 문단')])
+        result_of(self, character(hwp, match='본문 글자', **RED))
+
+    def test_a_paragraph_format_on_text_before_an_invisible_control_names_the_true_block(self) -> None:
+        hwp = FormatHwp([paragraph('제목'), paragraph('앞글자', bookmark(), '뒤글자'), paragraph('끝')])
+        result_of(self, para_format(hwp, match='앞글자', align='center'))
+        self.assertEqual(hwp.executes()[0][3], (0, 1, 0, 0, 1, 11))
+        self.assertEqual(hwp.lists[0][1]['shape']['Align'], 'Center')
+        self.assertEqual(lead_shapes(hwp, 1), [char()])
 
     def test_a_control_nothing_measured_elsewhere_in_the_paragraph_does_not_matter(self) -> None:
         hwp = FormatHwp([paragraph('제목'), paragraph('본문 글자 ', unmeasured(), ' 뒤쪽'), paragraph('끝')])

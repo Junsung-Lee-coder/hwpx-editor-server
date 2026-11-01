@@ -84,14 +84,14 @@ _MARK_KINDS = {'number': 'number', 'bullet': 'bullet', 'outline': 'outline'}
 _UNDERLINE_NATIVE = {'none': 0, 'bottom': 1, 'top': 3}
 _UNSET_CHAR_SHAPE = '4294967295'
 # Measured on Hancom 13.0.0.3457. These print nothing where they stand and live in the text run beside them: a block starting at a
-# paragraph's first text takes those before it into its run, and a block ending right before them takes those too. Their data and the
-# printed page number stay as they were.
+# paragraph's first text takes those before it into its run, and a block ending right before them ends after them and takes them too.
+# Their data and the printed page number stay as they were.
 _JOINING_CONTROLS = frozenset({'secdef', 'coldef', 'header', 'footer', 'pagenum', 'newnum', 'bookmark', 'pagehiding', 'hiddencomment', 'indexmark'})
-_JOINING_AFTER_TEXT = _JOINING_CONTROLS - {'secdef', 'coldef'}
+# A hidden comment's own paragraph shows up in a block touching it, so a block over its neighbours or a range of paragraphs cannot prove what it selected.
+_JOINING_AFTER_TEXT = _JOINING_CONTROLS - {'secdef', 'coldef', 'hiddencomment'}
 # Measured the same way: these keep their own shape beside a block in every position.
 _OWN_SHAPE_CONTROLS = frozenset({'picture', 'table', 'rectangle', 'equation', 'footnote', 'endnote', 'autonum', 'fieldbegin', 'fieldend'})
 _PRINTS_NOTHING = _JOINING_CONTROLS | {'fieldbegin', 'fieldend'}
-# A hidden comment's own paragraph shows up in a block starting after it, so a range of paragraphs cannot prove what it selected.
 _PARAGRAPH_RANGE_LEAD = _JOINING_CONTROLS - {'hiddencomment'}
 _PARAGRAPH_FIELDS = ('align', 'left_indent_pt', 'right_indent_pt', 'first_line_indent_pt', 'line_spacing_type', 'line_spacing_value')
 _TARGET_FIELDS = ('match', 'through_match', 'paragraph_index', 'expected_text', 'expected_page')
@@ -750,19 +750,19 @@ def _joined_controls(rows: list[dict[str, Any]]) -> list[str]:
 
 
 def _require_measured_neighbours(rows: list[dict[str, Any]]) -> None:
-    """Whether a control touching the range joins its run decides the proof afterwards, so one never measured stops the edit before it starts."""
+    """Whether a control touching the range joins its run decides the proof afterwards, so one that cannot be proven stops the edit before it starts."""
     atoms, low = rows[0]['paragraph']['atoms'], rows[0]['first'] or 0
     start = low
     while start and 'control' in atoms[start - 1]:
         start -= 1
-    unmeasured = {atom['control'] for atom in atoms[start:low]} - _JOINING_CONTROLS - _OWN_SHAPE_CONTROLS
+    unproven = {atom['control'] for atom in atoms[start:low]} - (_JOINING_CONTROLS if len(rows) == 1 else _PARAGRAPH_RANGE_LEAD) - _OWN_SHAPE_CONTROLS
     atoms, high = rows[-1]['paragraph']['atoms'], rows[-1]['last'] or 0
     stop = high
     while stop < len(atoms) and 'control' in atoms[stop]:
         stop += 1
-    unmeasured |= {atom['control'] for atom in atoms[high:stop]} - _JOINING_AFTER_TEXT - _OWN_SHAPE_CONTROLS
-    if unmeasured:
-        raise NativeNumberingRefusal(f"the range touches a control whose effect on the text beside it has not been measured ({', '.join(sorted(unmeasured))[:120]}); leave at least one character between it and the range", code='target_beside_unmeasured_control')
+    unproven |= {atom['control'] for atom in atoms[high:stop]} - _JOINING_AFTER_TEXT - _OWN_SHAPE_CONTROLS
+    if unproven:
+        raise NativeNumberingRefusal(f"the range touches a control this edit cannot be proven to leave alone ({', '.join(sorted(unproven))[:120]}); leave at least one character between it and the range", code='target_beside_unproven_control')
 
 
 def _refuse_range_controls(atoms: list[dict[str, Any]]) -> None:
@@ -808,7 +808,9 @@ def _native_list(hwp: Any, rows: list[dict[str, Any]]) -> tuple[int, int]:
 
 def _character_block(rows: list[dict[str, Any]], list_id: int, para: int) -> tuple[tuple[int, ...], list[str]]:
     first, last = rows[0], rows[-1]
-    block = (list_id, para, _position_of(first['paragraph'], first['first']), list_id, para + len(rows) - 1, _position_of(last['paragraph'], last['last']))
+    # Measured: a block ending right before a control that prints nothing ends after it, so the block says so and the selection check can hold.
+    trail = _joined(last['paragraph']['atoms'], last['first'] or 0, last['last'] or 0)[1]
+    block = (list_id, para, _position_of(first['paragraph'], first['first']), list_id, para + len(rows) - 1, _position_of(last['paragraph'], last['last'] + trail))
     words = [''.join(atom['char'] for atom in row['paragraph']['atoms'][row['first'] or 0:row['last'] or 0]) for row in rows]
     return block, words
 
@@ -835,7 +837,8 @@ def _paragraph_block(rows: list[dict[str, Any]], list_id: int, para: int, model:
     stop = first
     while stop < len(atoms) and 'char' in atoms[stop]:
         stop += 1
-    return (list_id, para, _position_of(paragraph, first), list_id, para, _position_of(paragraph, stop)), [''.join(atom['char'] for atom in atoms[first:stop])]
+    end = stop + _joined(atoms, first, stop)[1]
+    return (list_id, para, _position_of(paragraph, first), list_id, para, _position_of(paragraph, end)), [''.join(atom['char'] for atom in atoms[first:stop])]
 
 
 def _block_words(hwp: Any) -> list[str] | None:
