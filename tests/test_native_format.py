@@ -259,6 +259,16 @@ class Refusals(unittest.TestCase):
         with patch('app.native_format.installed_font_families', side_effect=OSError('no GDI')):
             result_of(self, character(hwp, match='English', font_family='함초롬돋움'))
 
+    def test_a_built_in_font_used_by_the_document_still_needs_the_session_list(self) -> None:
+        from app import native_format
+        hwp = sample_document()
+        text = hwp.get_text_file('HWPML2X', '').replace('Type="ttf"', 'Type="hft"')
+        self.assertEqual(native_format.parse_format_model(text)['fonts'], set())
+        real = hwp.get_text_file
+        hwp.get_text_file = lambda fmt='UNICODE', option='': real(fmt, option).replace('Type="ttf"', 'Type="hft"')
+        with patch('app.native_format.installed_font_families', return_value=set()):
+            refusal(self, character(hwp, match='English', font_family='함초롬돋움'), 'font_not_available', hwp)
+
     def test_selection_that_does_not_hold_the_exact_text_stops_before_the_action(self) -> None:
         hwp = sample_document()
         hwp.position_drift = 1

@@ -88,7 +88,7 @@ GUI에서 범위를 직접 선택해 둘 필요가 없습니다. 명령마다 �
 - `through_match`: 선택 항목. 범위가 끝나는 곳의 글자로, 이것도 한 곳에만 있어야 합니다. 여러 문단에 걸친 범위는 본문에서만 쓸 수 있습니다.
 - `paragraph_index`와 `expected_text`: `match` 대신 문단 하나를 지정합니다. 번호는 `review.json`의 문단 `index`이고 `expected_text`는 그 문단의 전체 글입니다(빈 문단은 빈 문자열). 전체 글이 같은 문단이 여러 개여도 본문 문단은 구별됩니다. `review.json`의 `text`는 문단당 300자까지이므로 더 긴 문단은 `match`를 쓰세요.
 
-글자 서식: `{"op": "character_format_exact", "match": "고유한 문구", "expected_page": 1, "font_family": "맑은 고딕", "size_pt": 13.5, "bold": true, "italic": false, "underline": true, "text_color": "#C03020", "confirm_layout": true}`. 항목은 하나 이상 지정하며 지정한 항목만 바뀝니다. `size_pt`는 포인트(0.1~4096, 0.1 단위), `text_color`는 `#RRGGBB`입니다. `font_family`는 문서에 이미 있거나 이 Windows 세션에 설치된 글꼴만 받습니다. Hancom은 없는 글꼴 이름도 받아 렌더링할 때 다른 글꼴로 바꾸므로 변경 전에 `font_not_available`로 거부합니다. 설치 목록을 읽지 못하면 `font_availability_unknown`입니다. 문서에서 쓰지 않는 Hancom 내장 HFT 글꼴은 이 목록에 없어 거부됩니다. `underline=true`는 아래쪽 밑줄입니다.
+글자 서식: `{"op": "character_format_exact", "match": "고유한 문구", "expected_page": 1, "font_family": "맑은 고딕", "size_pt": 13.5, "bold": true, "italic": false, "underline": true, "text_color": "#C03020", "confirm_layout": true}`. 항목은 하나 이상 지정하며 지정한 항목만 바뀝니다. `size_pt`는 포인트(0.1~4096, 0.1 단위), `text_color`는 `#RRGGBB`입니다. `font_family`는 문서에 이미 있는 TTF 글꼴이나 이 Windows 세션의 글꼴 목록에 있는 글꼴만 받습니다. Hancom은 없는 글꼴 이름도 받아 렌더링할 때 다른 글꼴로 바꾸므로 변경 전에 `font_not_available`로 거부합니다. 글꼴 목록을 읽지 못하면 `font_availability_unknown`입니다. Hancom 내장 HFT 글꼴은 같은 이름이 이 목록에 없으면 문서에서 쓰고 있어도 거부됩니다. `underline=true`는 아래쪽 밑줄입니다.
 
 문단 서식: `{"op": "paragraph_format_exact", "match": "문단 안의 고유한 문구", "expected_page": 1, "align": "center", "left_indent_pt": 20, "right_indent_pt": 10, "first_line_indent_pt": 5, "line_spacing_type": "percent", "line_spacing_value": 180, "confirm_layout": true}`. 
 
