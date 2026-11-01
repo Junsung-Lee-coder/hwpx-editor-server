@@ -88,7 +88,7 @@ GUI에서 범위를 직접 선택해 둘 필요가 없습니다. 명령마다 �
 - `through_match`: 선택 항목. 범위가 끝나는 곳의 글자로, 이것도 한 곳에만 있어야 합니다. 여러 문단에 걸친 범위는 본문에서만 쓸 수 있습니다.
 - `paragraph_index`와 `expected_text`: `match` 대신 문단 하나를 지정합니다. 번호는 `review.json`의 문단 `index`이고 `expected_text`는 그 문단의 전체 글입니다(빈 문단은 빈 문자열). 전체 글이 같은 문단이 여러 개여도 본문 문단은 구별됩니다. `review.json`의 `text`는 문단당 300자까지이므로 더 긴 문단은 `match`를 쓰세요.
 
-글자 서식: `{"op": "character_format_exact", "match": "고유한 문구", "expected_page": 1, "font_family": "맑은 고딕", "size_pt": 13.5, "bold": true, "italic": false, "underline": true, "text_color": "#C03020", "confirm_layout": true}`. 항목은 하나 이상 지정하며 지정한 항목만 바뀝니다. `size_pt`는 포인트(0.1~4096, 0.1 단위), `text_color`는 `#RRGGBB`입니다. `font_family`는 문서에 이미 있는 TTF 글꼴이나 이 Windows 세션의 글꼴 목록에 있는 글꼴만 받습니다. Hancom은 없는 글꼴 이름도 받아 렌더링할 때 다른 글꼴로 바꾸므로 변경 전에 `font_not_available`로 거부합니다. 글꼴 목록을 읽지 못하면 `font_availability_unknown`입니다. Hancom 내장 HFT 글꼴은 같은 이름이 이 목록에 없으면 문서에서 쓰고 있어도 거부됩니다. `underline=true`는 아래쪽 밑줄입니다.
+글자 서식: `{"op": "character_format_exact", "match": "고유한 문구", "expected_page": 1, "font_family": "맑은 고딕", "size_pt": 13.5, "bold": true, "italic": false, "underline": true, "text_color": "#C03020", "confirm_layout": true}`. 항목은 하나 이상 지정하며 지정한 항목만 바뀝니다. `size_pt`는 포인트(0.1~4096, 0.1 단위), `text_color`는 `#RRGGBB`입니다. `font_family`는 문서에 이미 있는 TTF 글꼴이나 이 Windows 세션의 글꼴 목록에 있는 글꼴만 받습니다. Hancom은 없는 글꼴 이름도 받아 렌더링할 때 다른 글꼴로 바꾸므로 변경 전에 `font_not_available`로 거부합니다. 글꼴 목록을 읽지 못하면 `font_availability_unknown`입니다. Hancom 내장 HFT 글꼴은 같은 이름이 이 목록에 없으면 문서에서 쓰고 있어도 거부됩니다. `underline=true`는 아래쪽 밑줄이며, 위쪽 밑줄이 있는 범위에 주면 아래쪽 밑줄로 바뀝니다.
 
 문단 서식: `{"op": "paragraph_format_exact", "match": "문단 안의 고유한 문구", "expected_page": 1, "align": "center", "left_indent_pt": 20, "right_indent_pt": 10, "first_line_indent_pt": 5, "line_spacing_type": "percent", "line_spacing_value": 180, "confirm_layout": true}`. 
 
@@ -96,6 +96,15 @@ GUI에서 범위를 직접 선택해 둘 필요가 없습니다. 명령마다 �
 - `left_indent_pt`, `right_indent_pt`: 왼쪽·오른쪽 여백(포인트, 0~570.2, 0.1 단위)
 - `first_line_indent_pt`: 포인트(±570.2, 0.1 단위). 양수는 첫 줄을 그만큼 들여 쓰고, 음수(내어쓰기)는 첫 줄을 왼쪽 여백에 두고 다음 줄부터 그만큼 들여 씁니다.
 - `line_spacing_type`과 `line_spacing_value`는 함께 지정합니다. `percent`는 글자에 따른 비율(1~500의 정수), `fixed`는 고정 값, `at_least`는 최소, `between_lines`는 여백만 지정이며 이 셋의 값은 포인트(0.1 단위)입니다.
+
+받는 범위의 양 끝 값(크기 0.1·4096pt, 여백·첫 줄 570.2pt, 줄 간격 1·500%와 0.1·841.8pt, 여백만 지정 0pt)은 Hancom 2024 13.0.0.3457에서 값이 그대로 저장되고 다시 열어도 유지되는 것을 확인했습니다. 페이지보다 큰 값도 그대로 저장되며 쪽 수가 늘어납니다.
+
+**번호와 글머리표의 모양.** 번호 문단의 인쇄된 번호나 글머리표는 번호 정의가 모양을 지정하지 않으면 문단 마지막 글자 묶음의 글자 모양을 따릅니다(자동 번호, 개요 번호, 글머리표에서 측정). 그래서 범위가 문단 끝에 닿으면 번호 모양도 함께 바뀌려 합니다. 범위가 그 전에 끝나면 영향이 없습니다.
+
+- 기본값 `number_mark: "preserve"`: 번호 모양을 그대로 둡니다. 범위가 문단 끝에 닿으면 문단 끝 캐럿에서 네이티브 동작을 한 번 더 실행해 이전 값을 돌려놓습니다. 글자는 바뀌지 않으며 결과의 `native_actions`에 `Execute:CharShape:paragraph-end`가 추가됩니다. 번호 정의가 모양을 지정한 문단은 영향이 없어 추가 동작이 없습니다.
+- `number_mark: "follow"`: 번호 모양도 같은 변경을 따르게 합니다. Hancom이 물려주는 그대로이며, 번호 모양만 따로 지정하는 기능은 아닙니다.
+- 범위가 번호 문단의 끝을 지나 다음 문단까지 이어지면 기본값에서는 변경 전에 `target_changes_number_mark`로 거부합니다. 문단마다 따로 지정하거나 `follow`를 주세요. 번호가 쓰는 글꼴이 TTF가 아니어서 돌려놓을 수 없을 때도 같은 코드로 거부합니다.
+- 결과의 `result.number_marks`에 번호 문단별 `before`, `after`, `changed`, 모양의 출처 `source`(`paragraph_end`, `definition`, `unknown`)가 있습니다.
 
 `match`로 지정하면 그 글자가 든 문단 전체에 적용되고 이웃 문단은 바뀌지 않습니다. 요청한 값이 이미 모두 적용되어 있으면 네이티브 호출 없이 `status`가 `already_set`, `dirty=false`이고 Undo 단계도 늘지 않습니다.
 
@@ -109,7 +118,8 @@ GUI에서 범위를 직접 선택해 둘 필요가 없습니다. 명령마다 �
 | `target_text_mismatch` | `paragraph_index`의 문단이 `expected_text`와 다름 |
 | `target_wrong_page` | 대상이 `expected_page`에 없음. 결과의 `found_page`가 실제 쪽 |
 | `target_crosses_control` | 글자 범위가 표·그림 같은 개체를 가로지름 |
-| `target_has_controls` | 여러 문단 범위에 표·그림 같은 개체가 든 문단이 있음. 문단마다 따로 지정하면 됩니다 |
+| `target_has_controls` | 여러 문단 범위에 표·그림 같은 개체가 든 문단이 있음. 문단마다 따로 지정하면 됩니다. 구역의 첫 문단이 가진 보이지 않는 구역 컨트롤은 해당하지 않아, 제목과 본문을 한 범위로 지정할 수 있습니다 |
+| `target_changes_number_mark` | 범위가 번호 문단의 끝을 지나가거나 번호 모양을 돌려놓을 수 없음. 위 번호 설명 참고 |
 | `target_in_header_footer` | 글자가 머리말이나 꼬리말에 있음 |
 | `target_unsupported_context` | 표 셀이 아닌 개체 안의 글자(글상자, 각주, 캡션 등) |
 | `target_range_unsupported` | `through_match`가 `match`보다 앞에 있거나, 표 셀과 여러 문단에 걸침 |
@@ -122,9 +132,11 @@ GUI에서 범위를 직접 선택해 둘 필요가 없습니다. 명령마다 �
 
 네이티브 동작이 시작된 뒤 결과가 요청과 다르거나 알 수 없으면(요청 밖의 글자·문단 변경, 저장되지 않은 값, 읽기 실패) 되돌리거나 다시 시도하지 않고 위 번호 문단 편집과 같이 세션을 보류합니다.
 
-되돌리기와 다시 실행은 받아들인 서식 명령 하나당 한 번씩입니다. 결과의 `confirmation.expected_state`가 `{"compared": true, "matches": true}`이면 문서가 그 명령 전(되돌리기) 또는 후(다시 실행) 상태와 같다는 뜻입니다. `matches`가 `false`이면 `undo_state_mismatch`·`redo_state_mismatch`로 실패하고 이후 되돌리기는 `undo_not_counted`로 거부됩니다.
+되돌리기와 다시 실행은 받아들인 서식 명령 하나당 한 번씩이며, 번호 모양을 돌려놓은 명령은 네이티브 두 단계를 한 번에 되돌립니다(`native_undo_steps: 2`). 결과의 `confirmation.expected_state`가 `{"compared": true, "matches": true}`이면 문서가 그 명령 전(되돌리기) 또는 후(다시 실행) 상태와 같다는 뜻입니다. `matches`가 `false`이면 `undo_state_mismatch`·`redo_state_mismatch`로 실패하고 이후 되돌리기는 `undo_not_counted`로 거부됩니다.
 
-확인은 `hwpx_proof`의 `review`로 합니다. 요약과 `summary.md`의 "서식 변경 상세"에 바뀐 범위, 항목, 이전 값, 이후 값이 있고, `comparison.changes`의 `format_changed` 항목에 `ranges`와 `paragraph`로 같은 내용이 들어 있습니다. `coverage.format.state`는 바뀐 서식을 값으로 모두 설명하면 `complete`, 이 항목들이 아닌 다른 서식이 바뀌었거나 목록이 잘렸으면 `partial`, 값을 읽지 못했으면 `unverified`이며 뒤의 두 경우 `review_status`도 `partial`이 됩니다. 저장되지 않은 변경이 없고 저장본이 있으면 `persisted_format`이 Hancom을 거치지 않고 HWPX 파일을 직접 읽어 비교한 결과를 줍니다(`match`, `partial`, `mismatch`, `unverified`). `mismatch`이면 `review_status`도 `mismatch`입니다. `review.json`의 각 문단에는 `index`, `context`(`body`, `table_cell`, `other`)와 `format`(글자 묶음별 값과 문단 값)이 있습니다.
+확인은 `hwpx_proof`의 `review`로 합니다. `summary.md`의 "서식 변경 상세"는 행마다 문단(대괄호 안 숫자는 `review.json`의 `index`, 그 뒤에 글 일부, 글이 없으면 `(빈 문단)`, `(표만 있는 문단)`처럼 표시), 범위, 항목, 이전 값, 이후 값을 보여 줍니다. 이 표는 200행까지이고 넘으면 그렇게 알리며, 전체는 `comparison.changes`에 있습니다. `coverage.format.state`는 바뀐 서식을 값으로 모두 설명하면 `complete`, 이 항목들이 아닌 다른 서식이 바뀌었거나(이름 있는 값과 함께 바뀐 경우 포함) 목록이 잘렸으면 `partial`, 값을 읽지 못했으면 `unverified`이며 뒤의 두 경우 `review_status`도 `partial`이 됩니다. 정의의 번호가 달라졌을 뿐 내용이 같으면 변경으로 보지 않습니다. "표 셀 등 본문 밖 문단"의 "글 동일"은 글만 비교한 결과이며, 서식이 바뀐 셀 문단은 그 수를 함께 적습니다.
+
+번호 모양은 `coverage.number_mark`에 있습니다. `state`는 번호 문단이 없으면 `none`, 비교해 바뀌지 않았으면 `compared`, 바뀐 것이 있으면 `changed`(`comparison.changes`에 `number_mark_changed`로 표시), 비교할 기준이나 값이 없으면 `not_compared`입니다. `not_compared`이면 `review_status`는 `partial`이며, 세션의 첫 확인은 비교 기준이 없어 이 경우에 해당합니다. 새로 번호가 붙은 문단은 `new`로 세고 이전 모양과 비교하지 않습니다. 이 비교는 서식 값으로 계산한 것이며 인쇄된 모양은 미리보기로 확인합니다. 저장되지 않은 변경이 없고 저장본이 있으면 `persisted_format`이 Hancom을 거치지 않고 HWPX 파일을 직접 읽어 비교한 결과를 줍니다(`match`, `partial`, `mismatch`, `unverified`). `mismatch`이면 `review_status`도 `mismatch`입니다. 저장본 비교에는 번호 모양도 포함됩니다. `review.json`의 각 문단에는 `index`, `context`(`body`, `table_cell`, `other`)와 `format`(글자 묶음별 값, 문단 값, 번호 모양, 개체 목록)이 있습니다. 글자 묶음 값이 아주 많은 문서는 응답 크기 안에서 뒤쪽 문단의 묶음을 생략하고 `runs_truncated`로 알립니다.
 
 ## 크기 제한
 

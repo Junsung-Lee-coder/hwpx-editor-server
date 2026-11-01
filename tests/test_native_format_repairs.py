@@ -145,6 +145,31 @@ class NumberMarkDefault(unittest.TestCase):
             refusal(self, Flow(hwp).step(**CHARACTER, match='번호 앞글 꼬리글', font_family='굴림'), 'target_changes_number_mark', hwp)
 
 
+class SourceOnlyRefusals(unittest.TestCase):
+    """Refusals no native run has exercised; TESTING.md lists them as source-only."""
+
+    def test_a_caption_is_refused_as_an_unsupported_context(self) -> None:
+        from tests.native_format_fakes import captioned_picture
+        hwp = FormatHwp([paragraph('제목'), paragraph(captioned_picture(paragraph('캡션 안 문구'))), paragraph('끝')])
+        refusal(self, character(hwp, match='캡션 안', bold=True), 'target_unsupported_context', hwp)
+        refusal(self, para_format(hwp, match='캡션 안', align='center'), 'target_unsupported_context', hwp)
+
+    def test_a_blank_cell_paragraph_cannot_be_located(self) -> None:
+        from tests.native_format_fakes import table
+        hwp = FormatHwp([paragraph('제목'), paragraph(table(paragraph('가'), paragraph('나'), paragraph('다'), paragraph('')))])
+        index = native_format.parse_format_model(hwp.get_text_file('HWPML2X', ''))['paragraphs'][-1]['index']
+        refusal(self, para_format(hwp, paragraph_index=index, expected_text='', align='center'), 'target_unlocatable', hwp)
+
+    def test_a_range_over_two_paragraphs_of_one_cell_is_refused(self) -> None:
+        model = {'header_footer_text': [], 'paragraphs': [
+            {'index': 0, 'context': 'table_cell', 'text': '셀 첫째', 'atoms': [{'char': c} for c in '셀 첫째']},
+            {'index': 1, 'context': 'table_cell', 'text': '셀 둘째', 'atoms': [{'char': c} for c in '셀 둘째']},
+        ]}
+        with self.assertRaises(native_format.NativeNumberingRefusal) as caught:
+            native_format._resolve(model, {'match': '첫째', 'through_match': '둘째'})
+        self.assertEqual(caught.exception.code, 'target_range_unsupported')
+
+
 class NumberMarkFollow(unittest.TestCase):
     def test_the_explicit_scope_lets_the_mark_follow_in_one_action_and_says_so(self) -> None:
         hwp = numbered_document()

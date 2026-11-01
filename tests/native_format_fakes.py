@@ -76,6 +76,11 @@ def textbox(*inner: dict[str, Any]) -> dict[str, Any]:
     return {'ctrl': 'gso', 'drawtext': list(inner)}
 
 
+def captioned_picture(*inner: dict[str, Any]) -> dict[str, Any]:
+    """A picture with a caption: a nested list that is not a table cell."""
+    return {'ctrl': 'gso', 'caption': list(inner)}
+
+
 def width(atom: dict[str, Any]) -> int:
     return 8 if 'ctrl' in atom or atom.get('c') == '\t' else 1
 
@@ -144,7 +149,7 @@ class FormatHwp:
     def _number_cells(self, paragraphs: list[dict[str, Any]]) -> None:
         for para in paragraphs:
             for atom in para['atoms']:
-                for name in ('cells', 'drawtext'):
+                for name in ('cells', 'drawtext', 'caption'):
                     for inner in atom.get(name, []):
                         self.lists[len(self.lists) + 100] = [inner]
                         self._number_cells([inner])
@@ -178,7 +183,7 @@ class FormatHwp:
                         chars.append(atom['cs'])
                     if atom['cs']['Font'] not in fonts:
                         fonts.append(atom['cs']['Font'])
-                    for name in ('cells', 'drawtext'):
+                    for name in ('cells', 'drawtext', 'caption'):
                         visit(atom.get(name, []))
                 if para.get('end') is not None:
                     if para['end'] not in chars:
@@ -248,6 +253,9 @@ class FormatHwp:
             elif 'drawtext' in atom:
                 inner = ''.join(self._p(item, chars, paras) for item in atom['drawtext'])
                 out.append(f'<RECTANGLE Ratio="0"><DRAWINGOBJECT><DRAWTEXT><PARALIST>{inner}</PARALIST></DRAWTEXT></DRAWINGOBJECT></RECTANGLE>')
+            elif 'caption' in atom:
+                inner = ''.join(self._p(item, chars, paras) for item in atom['caption'])
+                out.append(_PICTURE.replace('</PICTURE>', f'<CAPTION><PARALIST>{inner}</PARALIST></CAPTION></PICTURE>'))
             else:
                 out.append(atom['xml'])
         flush()
