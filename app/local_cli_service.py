@@ -51,8 +51,10 @@ from app.local_cli_runtime import (
     _RECOVERY_ARTIFACT_KINDS,
     _artifact_kind_from_key,
     _bounded_journal_value,
+    _exception_label,
     LocalCliRuntimeError,
     LocalCliRuntimeHandle,
+    LocalCliNativeCustodyHeldError,
     LocalCliRuntimeTimeoutError,
     apply_char_style,
     capture_screenshot_artifact,
@@ -67,6 +69,7 @@ from app.local_cli_runtime import (
     save_document,
     snapshot_live_location,
 )
+from app import native_paragraph_edit
 from app.local_cli_type_guard import type_insert_guard_reason
 from app.command_packages.runtime import get_command_package_registry
 from app.raw_readback import RawReadbackMismatch, build_raw_target_readback
@@ -94,6 +97,7 @@ from app.local_cli_service_support import (
     _MACRO_PREVIEW_STRING_CHARS,
     _MACRO_PREVIEW_ITEMS,
     _BUNDLE_MAX_STEPS,
+    _BUNDLE_WHOLE_DOCUMENT_PROOF_OPS,
     _BUNDLE_ALLOWED_OPS,
     _BUNDLE_SAFE_HACTION_NAMES,
     _BUNDLE_SAFE_PYHWPX_CALLS,
@@ -107,14 +111,118 @@ from app.local_cli_service_support import (  # noqa: F401
     _require_observed_cell_format_mutation,
 )
 from app.local_cli_bundle_controls import LocalCliBundleControlsMixin
+from app.local_cli_bundle_numbering import LocalCliBundleNumberingMixin
 from app.local_cli_bundle_paragraphs import LocalCliBundleParagraphsMixin
 from app.local_cli_cell_margins import LocalCliCellMarginsMixin
+from app.local_cli_table_structure import LocalCliTableStructureMixin
+from app.local_cli_layout import LocalCliLayoutMixin
+from app.local_cli_object_insert import LocalCliObjectInsertMixin
+from app.media_guard import MediaGuardError, media_change_reasons, media_inventory, public_counts
+
+
+# How `hwpx undo` may count a bundle step that changed the document. This
+# table is the only authority; a step's own `undo` report (`hwpx_undo`)
+# restates it for the caller and never makes an edit undoable by itself.
+#   'refuse'             - never counted: `undo` refuses after the step.
+#   'single_native_edit' - one undo unit only when the step succeeded and its
+#                          result reports exactly one native edit.
+# Ops not listed count one undo unit per changed step.
+_BUNDLE_UNDO_POLICY: dict[str, str] = {
+    'layout_exact': 'refuse',
+    'object_insert_exact': 'refuse',
+    'table_structure_exact': 'single_native_edit',
+    # One native action is one counted Undo; a definition plus a paragraph write is not one step and refuses.
+    'official_numbering_apply': 'single_native_edit',
+    'page_number_apply': 'single_native_edit',
+    'paragraph_insert_exact': 'single_native_edit',
+    'paragraph_remove_exact': 'single_native_edit',
+}
+_UNDO_UNVERIFIED_BUNDLE_OPS = frozenset(_BUNDLE_UNDO_POLICY)
+
+
+class LocalCliUndoRefused(LocalCliRuntimeError):
+    """Undo or Redo stopped with the document unchanged; the code selects a fixed reason that is safe to show the caller."""
+
+    def __init__(self, message: str, *, code: str = 'undo_not_counted') -> None:
+        super().__init__(message)
+        self.code = code
+
+
+_HELD_LABEL = 'native_custody_held'
+_HISTORY_REFUSALS = {
+    'no_undo_available': 'this session has no edit to undo; no native undo was called.',
+    'no_redo_available': 'there is no undone edit to reapply; no native redo was called.',
+    'undo_not_counted': 'the last edit cannot be undone as one counted step; no undo was performed.',
+    'undo_not_applied': 'Hancom reported nothing to undo and the document is unchanged.',
+    'redo_not_applied': 'Hancom reported nothing to redo and the document is unchanged.',
+    'undo_evidence_unavailable': 'this document cannot be compared before and after, so no native undo was called and it is unchanged.',
+    'redo_evidence_unavailable': 'this document cannot be compared before and after, so no native redo was called and it is unchanged.',
+}
+# The edit commands outside command bundles; each is one tracked edit whose native count the command itself records.
+_DIRECT_EDIT_COMMANDS = frozenset({
+    'replace', 'cell-replace', 'type', 'anchor-insert', 'figure-section', 'image', 'image-at-anchor', 'fontsize', 'bold',
+    'font', 'bullet', 'table', 'list', 'action', 'insert-text-file', 'pycall',
+})
+
+
+def _bundle_step_single_undo(step: dict[str, Any]) -> bool:
+    policy = _BUNDLE_UNDO_POLICY.get(str(step.get('op')))
+    if policy is None:
+        return True
+    if policy != 'single_native_edit':
+        return False
+    result = step.get('result') if isinstance(step.get('result'), dict) else {}
+    undo = result.get('undo') if isinstance(result.get('undo'), dict) else {}
+    return step.get('ok') is True and undo.get('native_editing_actions') == 1
+
+
+def _record_bundle_undo_state(binding: dict[str, Any], steps: list[Any], prior: dict[str, Any]) -> None:
+    """Set how `undo` may revert this bundle: a native step count, refusal, or the prior state.
+
+    Only steps that changed (or may have changed) the document count. A
+    bundle with no such step, even on an already-dirty document, leaves the
+    undo state exactly as it was before the bundle (``prior``), so it can
+    never turn an earlier refusal into a one-step Undo.
+    """
+    dirty_steps = [step for step in steps if isinstance(step, dict) and step.get('dirty')]
+    if not dirty_steps:
+        binding.update(prior)
+        return
+    unverified = sorted({str(step.get('op')) for step in dirty_steps if not _bundle_step_single_undo(step)})
+    if unverified:
+        binding['pending_logical_undo_count'] = None
+        binding['logical_undo_unverified'] = (
+            f'{", ".join(unverified)} changed the document with native actions that cannot be undone as one counted step'
+        )
+    else:
+        binding['pending_logical_undo_count'] = len(dirty_steps)
+        # Drop this bundle's own start marker; an older unverified edit below
+        # these steps still blocks undo once they are undone.
+        binding['logical_undo_unverified'] = prior.get('logical_undo_unverified')
+    _track_history_edit(binding, None if unverified else len(dirty_steps))
+
+
+def _track_history_edit(binding: dict[str, Any], native_steps: Any) -> None:
+    """The edits this session can undo, newest last: native step counts, or None for an edit that cannot be counted."""
+    if isinstance(binding.get('undo_stack'), list):
+        binding['undo_stack'].append(native_steps)
+        binding['redo_stack'] = []
+
+
+_STYLE_SELECTION_CONSUMED_WARNING = (
+    'No active selection remains after this style edit; reselect the range before the next font or fontsize '
+    'command, or pass --at-caret to style the caret position on purpose.'
+)
 
 
 class LocalCliService(
     LocalCliBundleControlsMixin,
+    LocalCliBundleNumberingMixin,
     LocalCliBundleParagraphsMixin,
     LocalCliCellMarginsMixin,
+    LocalCliTableStructureMixin,
+    LocalCliObjectInsertMixin,
+    LocalCliLayoutMixin,
 ):
     def __init__(self, *, settings: Any, interactive_sessions: Any):
         self.settings = settings
@@ -542,7 +650,7 @@ class LocalCliService(
             except Exception:
                 return False
         try:
-            self.runtime_manager.close_session(session_id)
+            self.runtime_manager.close_session(session_id, **({'prior_dirty': True} if binding.get('working_copy_dirty') is True or binding.get('dirty') is True else {}))
         except Exception:
             # Do not remove the managed session root while native/COM teardown
             # is uncertain.  The binding remains the ownership record for a
@@ -725,7 +833,7 @@ class LocalCliService(
             )
         if require_live and binding.get('live_session_bound') is False:
             raise LocalCliServiceError(
-                'The local CLI session is no longer live; close it and open a new managed copy.',
+                'The local CLI session is no longer live; retain its managed files. Full native close is unsupported for this unproved or held session; do not automatically reopen or discard it.',
                 status_code=409,
             )
         if require_live and not self.runtime_manager.has_session(resolved_session_id):
@@ -2275,13 +2383,15 @@ class LocalCliService(
     def _run_single_action(self, hwp: Any, *, actions: tuple[str, ...], methods: tuple[str, ...], error_message: str) -> None:
         run = getattr(getattr(hwp, 'HAction', None), 'Run', None)
         if callable(run):
+            # A false or failed Run may already have acted, so no fallback call follows it.
             for action in actions:
                 try:
                     raw = run(action)
-                    if raw is None or bool(raw):
-                        return
-                except Exception:
-                    continue
+                except Exception as exc:
+                    raise LocalCliServiceError(error_message, status_code=500) from exc
+                if raw is None or bool(raw):
+                    return
+            raise LocalCliServiceError(error_message, status_code=500)
         for method_name in methods:
             method = getattr(hwp, method_name, None)
             if callable(method):
@@ -2295,6 +2405,23 @@ class LocalCliService(
 
     def _style_scope_label(self, snapshot: dict[str, Any]) -> str:
         return 'current selection' if bool(snapshot.get('has_selection')) else 'current caret position'
+
+    def _style_selection_refusal(self, binding: dict[str, Any], before: dict[str, Any], *, command: str, at_caret: bool) -> str | None:
+        """Refuse a caret-only style edit right after a selected-range style edit whose selection did not survive (issue #2)."""
+        marker = binding.get('style_selection_consumed')
+        if at_caret or not isinstance(marker, dict) or before.get('has_selection') is True:
+            return None
+        return (
+            f"{command} refused; no change was made: the previous {marker.get('command') or 'style'} command applied to a "
+            'selection that is no longer active, so this command would only affect the caret position. Reselect the '
+            f'range (hwpx select ...) and run {command} again, once per property, or pass --at-caret to style the caret '
+            'position on purpose.'
+        )
+
+    def _style_selection_marker(self, command: str, before: dict[str, Any], after: dict[str, Any]) -> dict[str, Any] | None:
+        if before.get('has_selection') is True and after.get('has_selection') is not True:
+            return {'command': command, 'selected_pos': before.get('selected_pos')}
+        return None
 
     def _style_value_label(self, value: float) -> str:
         numeric = float(value)
@@ -2660,6 +2787,26 @@ class LocalCliService(
                 'pagebreak_before',
                 'confirm_layout',
             },
+            'page_number_apply': {
+                'op',
+                'operation',
+                'label',
+                'position',
+                'start_number',
+                'side_char',
+                'confirm_layout',
+            },
+            'official_numbering_apply': {
+                'op',
+                'operation',
+                'label',
+                'match',
+                'expected_page',
+                'level',
+                'confirm_layout',
+            },
+            'paragraph_insert_exact': {'op', 'operation', 'label', 'match', 'expected_page', 'text', 'position', 'confirm_layout'},
+            'paragraph_remove_exact': {'op', 'operation', 'label', 'match', 'expected_page', 'expected_text', 'confirm_remove'},
             'paragraph_delete_exact': {
                 'op',
                 'operation',
@@ -2813,6 +2960,73 @@ class LocalCliService(
                 'split_group_count',
                 'split_group_hash',
             },
+            'table_structure_exact': {
+                'op',
+                'operation',
+                'label',
+                'section_anchor',
+                'page_from',
+                'page_to',
+                'around',
+                'target_id',
+                'expected_hash',
+                'expected_page',
+                'action',
+                'row',
+                'col',
+                'end_row',
+                'end_col',
+                'count',
+                'split_rows',
+                'split_cols',
+                'expected_rows',
+                'expected_cols',
+                'confirm_layout',
+                'max_controls',
+            },
+            'object_insert_exact': {
+                'op',
+                'operation',
+                'label',
+                'kind',
+                'expected_pos',
+                'confirm_mutation',
+                'text',
+                'url',
+                'display_text',
+                'name',
+                'script',
+                'width_mm',
+                'height_mm',
+                'treat_as_char',
+                'apply_to',
+            },
+            'layout_exact': {
+                'op',
+                'operation',
+                'label',
+                'kind',
+                'expected_pos',
+                'paper_width_mm',
+                'paper_height_mm',
+                'landscape',
+                'margin_top_mm',
+                'margin_bottom_mm',
+                'margin_left_mm',
+                'margin_right_mm',
+                'header_len_mm',
+                'footer_len_mm',
+                'gutter_len_mm',
+                'count',
+                'gap_mm',
+                'same_width',
+                'apply_to',
+                'section_index',
+                'marker_text',
+                'expected_before',
+                'confirm_layout',
+            },
+            'layout_inspect': {'op', 'operation', 'label'},
             'table_split_exact': {
                 'op',
                 'operation',
@@ -3457,6 +3671,14 @@ class LocalCliService(
                     )
 
             cleaned.append(step)
+        # Counted on normalized ops ('operation' alias, whitespace): each exact step
+        # needs two whole-document proofs within one bundle time limit.
+        exact_steps = [step['op'] for step in cleaned if step['op'] in _BUNDLE_WHOLE_DOCUMENT_PROOF_OPS]
+        if len(exact_steps) > 1:
+            raise LocalCliServiceError(
+                f'command-bundle accepts at most one whole-document exact edit step ({", ".join(sorted(_BUNDLE_WHOLE_DOCUMENT_PROOF_OPS))}); got {len(exact_steps)}',
+                status_code=400,
+            )
         return cleaned
 
     def _execute_command_bundle_step(
@@ -3469,6 +3691,12 @@ class LocalCliService(
         op = str(step.get('op') or '')
         warnings: list[str] = []
 
+        # Numbering publishes intent at actual Execute boundaries. Other
+        # packages are conservative before invocation, never error callbacks.
+        if op not in {'page_number_apply', 'official_numbering_apply', 'paragraph_insert_exact', 'paragraph_remove_exact',
+                      'control_inventory', 'table_frame_inventory', 'style_inspect', 'where'}:
+            if handle.mark_mutating_intent is not None:
+                handle.mark_mutating_intent()
         package = self.command_packages.get(op)
         if package is not None:
             return package.run(service=self, handle=handle, step=step, binding=binding)
@@ -3648,14 +3876,32 @@ class LocalCliService(
             return result, False, warnings
 
         if op == 'where':
-            location = snapshot_live_location(
-                hwp=handle.hwp,
-                source_filename=handle.source_filename,
-                working_copy_id=handle.session_id,
-            )
+            location = self._bundle_where_location(handle.hwp, source_filename=handle.source_filename, working_copy_id=handle.session_id)
             return {'location': self._bundle_compact_location(location)}, False, warnings
 
         raise LocalCliRuntimeError(f'Unsupported command-bundle op: {op}')
+
+    def _bundle_where_location(self, hwp: Any, *, source_filename: str, working_copy_id: str) -> dict[str, Any]:
+        """Read-only location for a bundle ``where`` step that never disturbs a live selection.
+
+        The nearby-paragraph capture moves the caret to read neighbouring
+        paragraphs and restores only the caret, which drops a selection that a
+        later step (hyperlink, memo) depends on; the compact bundle location
+        does not report that preview, so it is skipped here. The selection
+        range is re-read afterwards and any change is refused.
+        """
+        before = _snapshot_cursor_context(hwp)
+        location = snapshot_live_location(
+            hwp=hwp,
+            source_filename=source_filename,
+            working_copy_id=working_copy_id,
+            include_nearby_context=False,
+        )
+        after = _snapshot_cursor_context(hwp)
+        for key in ('pos', 'selected_pos', 'has_selection'):
+            if before.get(key) != after.get(key):
+                raise LocalCliRuntimeError(f'command-bundle where changed the live {key} ({before.get(key)!r} -> {after.get(key)!r}); refusing to continue')
+        return location
 
     def _record_local_cli_command(
         self,
@@ -3726,7 +3972,10 @@ class LocalCliService(
                 command_name=command_name,
                 handler=handler,
                 timeout=timeout,
+                **({'prior_dirty': True} if binding.get('working_copy_dirty') is True or binding.get('dirty') is True else {}),
             )
+            if command_name in _DIRECT_EDIT_COMMANDS:
+                _track_history_edit(binding, 'direct')
             binding['_expected_command_generation'] = command_generation
             try:
                 command_status = self.runtime_manager.command_status(session_id)
@@ -3756,6 +4005,9 @@ class LocalCliService(
                     'semantic_ok': command_status.get('semantic_ok'),
                     'recovery': command_status.get('recovery'),
                 }
+                if command_status.get('custody_held') is True:
+                    result['native_custody_held'] = True
+                    result['_local_cli_command']['custody_held'] = True
             command_sequence = command_status.get('sequence')
             if isinstance(command_sequence, int) and command_sequence >= native_command_sequence:
                 binding['_expected_native_command_sequence'] = native_command_sequence
@@ -3763,6 +4015,40 @@ class LocalCliService(
                 binding.pop('pending_command', None)
             return result
         except LocalCliRuntimeError as exc:
+            if isinstance(exc, LocalCliNativeCustodyHeldError):
+                # The owning STA is retained with a numbering outcome that is not proven. Project the dirty,
+                # held state into the binding and report an error; never treat the held session as stale.
+                binding['_expected_command_generation'] = command_generation
+                held_status = {}
+                try:
+                    held_status = self.runtime_manager.command_status(session_id)
+                    held_sequence = int(held_status.get('sequence'))
+                except (TypeError, ValueError, LocalCliRuntimeError):
+                    held_sequence = native_command_sequence
+                binding['_expected_native_command_sequence'] = native_command_sequence
+                binding['native_command_sequence'] = max(native_command_sequence, held_sequence)
+                # Only the owning runtime's positive unissued command evidence
+                # can avoid new debt. Missing status remains conservative;
+                # custody and prior binding debt are never discharged here.
+                unissued_current = (held_status.get('command') == command_name
+                                    and type(held_status.get('sequence')) is int
+                                    and held_status['sequence'] > native_command_sequence
+                                    and held_status.get('custody_held') is True
+                                    and held_status.get('timed_out') is False
+                                    and held_status.get('may_have_mutated') is False)
+                binding['working_copy_dirty'] = (binding.get('working_copy_dirty') is True
+                                                 or binding.get('dirty') is True or not unissued_current)
+                binding['native_custody_held'] = True
+                try:
+                    self._save_binding(binding)
+                except Exception as save_error:
+                    exc.reporting_errors.append(save_error)
+                raise LocalCliServiceError(
+                    f'{_HELD_LABEL}: Local CLI native command left the live session held: its outcome is unknown. '
+                    'The session is retained and is not closed, retried or '
+                    'released by this service.',
+                    status_code=500,
+                ) from exc
             if isinstance(exc, LocalCliRuntimeTimeoutError):
                 try:
                     command_status = self.runtime_manager.command_status(session_id, exc.command_id)
@@ -3903,13 +4189,13 @@ class LocalCliService(
                     status_code=409,
                 )
             if active_session_id and self.runtime_manager.has_session(active_session_id):
-                raise LocalCliServiceError('A local CLI document is already open. Close it before opening another one.', status_code=409)
+                raise LocalCliServiceError('A local CLI document is already open. Full native close is unsupported for this unproved or held session; retain it and obtain separately authorized exact-owned operator closure before opening another one.', status_code=409)
             if (
                 active_binding.get('document_session_state') in {'reconciled', 'reconciled_cleanup_pending'}
                 or isinstance(active_binding.get('artifact_custody'), dict)
             ):
                 raise LocalCliServiceError(
-                    'A reconciled local CLI session must be explicitly closed after downloading its artifacts.',
+                    'A reconciled local CLI session remains retained after artifact download; full native close is unsupported for this unproved or held session.',
                     status_code=409,
                 )
             if not self._cleanup_stale_binding(active_binding):
@@ -4056,6 +4342,8 @@ class LocalCliService(
                 'document_session_state': 'open',
                 'live_session_bound': True,
                 'working_copy_dirty': False,
+                'undo_stack': [],
+                'redo_stack': [],
                 'last_find': None,
                 'cursor_pos': None,
                 'selected_range': None,
@@ -4570,9 +4858,13 @@ class LocalCliService(
         if isinstance(active_binding, dict) and session_id:
             if pending_reconciliation is not None:
                 live_bound = False
+            elif active_binding.get('native_custody_held') is True:
+                live_bound = False
             elif live_bound:
                 live_bound = self._probe_live_binding(active_binding)
-            if not live_bound:
+            if not live_bound and not (
+                isinstance(active_binding, dict) and active_binding.get('native_custody_held') is True
+            ):
                 active_binding = self._read_binding()
                 if isinstance(active_binding, dict):
                     if self._binding_has_pending_reconciliation(active_binding):
@@ -4620,6 +4912,10 @@ class LocalCliService(
                 f'reconcile command {pending_reconciliation.get("command_id")}'
                 if pending_reconciliation is not None
                 else
+                f'session {session_id} is held after a numbering command with an unknown native outcome; '
+                'it is retained and needs operator release'
+                if isinstance(active_binding, dict) and active_binding.get('native_custody_held') is True
+                else
                 f'retry close cleanup for session {session_id}'
                 if cleanup_pending
                 else
@@ -4638,6 +4934,7 @@ class LocalCliService(
             ),
             'live_session_bound': live_bound,
             'command_reconciliation': pending_reconciliation,
+            'native_custody_held': bool((active_binding or {}).get('native_custody_held')),
             'working_copy_dirty': bool((active_binding or {}).get('working_copy_dirty')),
             'command_bundle_route_active': True,
             'server_primitive_version': 'local-cli-command-bundle/v2-style-inspect',
@@ -6227,34 +6524,45 @@ class LocalCliService(
             'warnings': result.get('warnings'),
         }
 
-    def font_size(self, *, size_pt: float, session_id: str | None = None) -> dict[str, Any]:
+    def font_size(self, *, size_pt: float, at_caret: bool = False, session_id: str | None = None) -> dict[str, Any]:
         binding = self._load_active_binding(session_id=session_id)
         if isinstance(size_pt, bool) or float(size_pt) <= 0:
             raise LocalCliServiceError('fontsize must be a positive point value', status_code=400)
 
         def _handler(handle: LocalCliRuntimeHandle) -> dict[str, Any]:
             before = _snapshot_cursor_context(handle.hwp)
+            refusal = self._style_selection_refusal(binding, before, command='fontsize', at_caret=at_caret)
+            if refusal:
+                return {'refused': refusal}
             style_result = apply_char_style(handle.hwp, height_pt=float(size_pt))
             snapshot = _snapshot_cursor_context(handle.hwp)
             context = _capture_nearby_text_context(handle.hwp)
+            location = snapshot_live_location(
+                hwp=handle.hwp,
+                source_filename=handle.source_filename,
+                working_copy_id=handle.session_id,
+            )
             return {
                 'before': before,
                 'style_result': style_result,
                 'snapshot': snapshot,
                 'context': context,
-                'location': snapshot_live_location(
-                    hwp=handle.hwp,
-                    source_filename=handle.source_filename,
-                    working_copy_id=handle.session_id,
-                ),
+                'location': location,
+                # The context and location reads above select paragraphs, so the selection is judged after them.
+                'final_cursor': _snapshot_cursor_context(handle.hwp),
             }
 
         result = self._execute_live(binding=binding, command_name='fontsize', task_label='local_cli.fontsize', handler=_handler)
+        if result.get('refused'):
+            raise LocalCliServiceError(str(result['refused']), status_code=409)
         before = result.get('before') if isinstance(result.get('before'), dict) else {}
         style_result = result.get('style_result') if isinstance(result.get('style_result'), dict) else {}
         snapshot = result.get('snapshot') if isinstance(result.get('snapshot'), dict) else {}
         context = result.get('context') if isinstance(result.get('context'), dict) else {}
         location = result.get('location') if isinstance(result.get('location'), dict) else {}
+        final_cursor = result.get('final_cursor') if isinstance(result.get('final_cursor'), dict) else {}
+        marker = self._style_selection_marker('fontsize', before, final_cursor)
+        binding['style_selection_consumed'] = marker
         binding = self._update_live_binding(binding, location=location, dirty=True, clear_selection_cache=True)
         size_label = self._style_value_label(float(size_pt))
         scope_label = self._style_scope_label(before)
@@ -6288,6 +6596,8 @@ class LocalCliService(
             'next': 'Run `hwpx save` and rendered proof (`hwpx export-proof-range` or `hwpx page-screenshot`) before trusting layout.',
             'caret_pos': snapshot.get('pos'),
             'context': context,
+            'selection_consumed': marker is not None,
+            **({'warning': _STYLE_SELECTION_CONSUMED_WARNING} if marker is not None else {}),
             **self._compact_state_payload(location=location, context=context),
         }
 
@@ -6435,7 +6745,7 @@ class LocalCliService(
             **self._compact_state_payload(location=location, context=context),
         }
 
-    def font_family(self, *, face_name: str, session_id: str | None = None) -> dict[str, Any]:
+    def font_family(self, *, face_name: str, at_caret: bool = False, session_id: str | None = None) -> dict[str, Any]:
         binding = self._load_active_binding(session_id=session_id)
         normalized_face_name = str(face_name or '').strip()
         if not normalized_face_name:
@@ -6443,27 +6753,38 @@ class LocalCliService(
 
         def _handler(handle: LocalCliRuntimeHandle) -> dict[str, Any]:
             before = _snapshot_cursor_context(handle.hwp)
+            refusal = self._style_selection_refusal(binding, before, command='font', at_caret=at_caret)
+            if refusal:
+                return {'refused': refusal}
             style_result = apply_char_style(handle.hwp, face_name=normalized_face_name)
             snapshot = _snapshot_cursor_context(handle.hwp)
             context = _capture_nearby_text_context(handle.hwp)
+            location = snapshot_live_location(
+                hwp=handle.hwp,
+                source_filename=handle.source_filename,
+                working_copy_id=handle.session_id,
+            )
             return {
                 'before': before,
                 'style_result': style_result,
                 'snapshot': snapshot,
                 'context': context,
-                'location': snapshot_live_location(
-                    hwp=handle.hwp,
-                    source_filename=handle.source_filename,
-                    working_copy_id=handle.session_id,
-                ),
+                'location': location,
+                # The context and location reads above select paragraphs, so the selection is judged after them.
+                'final_cursor': _snapshot_cursor_context(handle.hwp),
             }
 
         result = self._execute_live(binding=binding, command_name='font', task_label='local_cli.font', handler=_handler)
+        if result.get('refused'):
+            raise LocalCliServiceError(str(result['refused']), status_code=409)
         before = result.get('before') if isinstance(result.get('before'), dict) else {}
         style_result = result.get('style_result') if isinstance(result.get('style_result'), dict) else {}
         snapshot = result.get('snapshot') if isinstance(result.get('snapshot'), dict) else {}
         context = result.get('context') if isinstance(result.get('context'), dict) else {}
         location = result.get('location') if isinstance(result.get('location'), dict) else {}
+        final_cursor = result.get('final_cursor') if isinstance(result.get('final_cursor'), dict) else {}
+        marker = self._style_selection_marker('font', before, final_cursor)
+        binding['style_selection_consumed'] = marker
         binding = self._update_live_binding(binding, location=location, dirty=True, clear_selection_cache=True)
         scope_label = self._style_scope_label(before)
         summary = (
@@ -6482,6 +6803,8 @@ class LocalCliService(
             'summary': summary,
             'caret_pos': snapshot.get('pos'),
             'context': context,
+            'selection_consumed': marker is not None,
+            **({'warning': _STYLE_SELECTION_CONSUMED_WARNING} if marker is not None else {}),
             **self._compact_state_payload(location=location, context=context),
         }
 
@@ -6644,7 +6967,19 @@ class LocalCliService(
             'summary': summary,
         }
 
-    def action(self, *, action_name: str, session_id: str | None = None) -> dict[str, Any]:
+    def _media_inventory_readback(self, hwp: Any) -> dict[str, Any]:
+        getter = getattr(hwp, 'get_text_file', None)
+        if not callable(getter):
+            getter = getattr(hwp, 'GetTextFile', None)
+        if not callable(getter):
+            raise MediaGuardError('get_text_file is unavailable on this machine')
+        try:
+            xml_text = getter('HWPML2X', '')
+        except Exception as exc:
+            raise MediaGuardError(f'HWPML2X readback failed: {type(exc).__name__}') from exc
+        return media_inventory(xml_text)
+
+    def action(self, *, action_name: str, allow_media_change: bool = False, session_id: str | None = None) -> dict[str, Any]:
         action = self._validate_action_name(action_name)
         binding = self._load_active_binding(session_id=session_id)
 
@@ -6652,31 +6987,87 @@ class LocalCliService(
             run = getattr(getattr(handle.hwp, 'HAction', None), 'Run', None)
             if not callable(run):
                 raise LocalCliRuntimeError('HAction.Run is unavailable on this machine')
+            before: dict[str, Any] | None = None
+            handle.diagnostic_site = 'action_pre_read'
+            if not allow_media_change:
+                # A deletion over a text-looking selection can still remove an adjacent inline picture (issue #3), so
+                # the picture/BinData inventory is read first and the action runs only on the unmoved selection.
+                cursor = _snapshot_cursor_context(handle.hwp)
+                try:
+                    before = self._media_inventory_readback(handle.hwp)
+                except MediaGuardError as exc:
+                    return {'refused': f'the picture/BinData inventory could not be read before the action ({exc})'}
+                cursor_after_read = _snapshot_cursor_context(handle.hwp)
+                if any(cursor.get(key) != cursor_after_read.get(key) for key in ('pos', 'selected_pos', 'has_selection', 'selected_pos_error', 'selection_mode')):
+                    return {'refused': 'the caret or selection changed while the document was read'}
+            handle.diagnostic_site = 'action_native'
             raw_result = run(action)
-            return {
+            handle.diagnostic_site = 'action_post_read'
+            result: dict[str, Any] = {
                 'result_type': type(raw_result).__name__,
                 'result_preview': self._macro_result_preview(raw_result),
                 'succeeded': raw_result is None or bool(raw_result),
             }
+            if before is None:
+                result['media_guard'] = {'status': 'not_checked', 'reason': 'allow_media_change was requested'}
+                return result
+            try:
+                after = self._media_inventory_readback(handle.hwp)
+            except MediaGuardError as exc:
+                result['media_guard'] = {
+                    'status': 'unknown',
+                    'reasons': [f'the picture/BinData inventory could not be read after the action ({exc})'],
+                    'before': public_counts(before),
+                    'after': None,
+                }
+                return result
+            reasons = media_change_reasons(before, after)
+            result['media_guard'] = {
+                'status': 'changed' if reasons else 'unchanged',
+                'reasons': reasons,
+                'before': public_counts(before),
+                'after': public_counts(after),
+            }
+            return result
 
         result = self._execute_live(binding=binding, command_name='action', task_label='local_cli.action', handler=_handler)
+        if result.get('refused'):
+            raise LocalCliServiceError(f'action {action} refused; no native action was run: {result["refused"]}.', status_code=409)
         result_type = str(result.get('result_type') or 'NoneType')
         result_preview = result.get('result_preview')
         succeeded = bool(result.get('succeeded'))
-        binding = self._save_binding({**binding, 'last_find': None})
+        media_guard = result.get('media_guard') if isinstance(result.get('media_guard'), dict) else {}
         summary = f'action {action} -> {"ok" if succeeded else "false"}'
-        self._record_local_cli_command(
-            'action',
-            binding=binding,
-            summary=summary,
-            payload={
-                'action': action,
-                'succeeded': succeeded,
-                'result_type': result_type,
-                'result_preview': result_preview,
-                'macro_warning': 'action is a dev/macro escape hatch; run hwpx where/export after stateful actions before trusting layout.',
-            },
-        )
+        payload = {
+            'ok': succeeded,
+            'action': action,
+            'succeeded': succeeded,
+            'result_type': result_type,
+            'result_preview': result_preview,
+            'media_guard': media_guard,
+            'macro_warning': 'action is a dev/macro escape hatch; run hwpx where/export after stateful actions before trusting layout.',
+        }
+        if media_guard.get('status') in {'changed', 'unknown'}:
+            payload['ok'] = False
+            reasons = '; '.join(str(reason) for reason in media_guard.get('reasons') or [])
+            binding = self._save_binding(
+                {
+                    **binding,
+                    'last_find': None,
+                    'working_copy_dirty': True,
+                    'pending_logical_undo_count': None,
+                    'logical_undo_unverified': f'action {action} may have removed or changed pictures or embedded BinData',
+                }
+            )
+            self._record_local_cli_command('action', binding=binding, summary=f'action {action} changed pictures or BinData', payload=payload)
+            raise LocalCliServiceError(
+                f'action {action} ran, but pictures or embedded BinData may have changed: {reasons}. The edit may have '
+                'persisted in the working copy. Retain the working copy and owning STA; full native close is unsupported for this unproved or held session. Do not retry or reopen automatically; hwpx undo is '
+                'refused for this edit. Pass --allow-media-change only when removing or changing a picture is intended.',
+                status_code=409,
+            )
+        binding = self._save_binding({**binding, 'last_find': None})
+        self._record_local_cli_command('action', binding=binding, summary=summary, payload=payload)
         return {
             'ok': succeeded,
             'command': 'action',
@@ -6684,6 +7075,7 @@ class LocalCliService(
             'action': action,
             'result_type': result_type,
             'result_preview': result_preview,
+            'media_guard': media_guard,
             'warning': 'action is a dev/macro escape hatch; run hwpx where/export after stateful actions before trusting layout.',
             'summary': summary,
         }
@@ -6739,6 +7131,7 @@ class LocalCliService(
             artifacts: dict[str, Any] = {}
             dirty = False
             ok = True
+            custody_held = False
 
             for index, step in enumerate(cleaned_steps, start=1):
                 step_before = self._bundle_compact_snapshot(handle.hwp)
@@ -6759,12 +7152,44 @@ class LocalCliService(
                         'warnings': step_warnings,
                     }
                     warnings.extend(step_warnings)
-                except Exception as exc:
+                except BaseException as exc:
+                    # Read no exception properties/callbacks before custody.
+                    # Producer invocation intent is independent of error tags.
+                    from app.native_numbering import NativeNumberingRefusal
+                    from app.local_cli_bundle_numbering import _NumberingCleanRefusal, _NumberingSemanticRefusal
+                    numbering = step.get('op') in {'official_numbering_apply', 'page_number_apply', 'paragraph_insert_exact', 'paragraph_remove_exact'}
+                    target_refused = numbering and (type(exc) is NativeNumberingRefusal or type(exc) is _NumberingSemanticRefusal or type(exc) is _NumberingCleanRefusal)
+                    # Paragraph edits publish intent exactly when the native call is issued; numbering keeps its stricter projection.
+                    mutation_may_have_persisted = handle.mutation_intent or (step.get('op') == 'official_numbering_apply' and not target_refused)
+                    held = False
+                    if (mutation_may_have_persisted or (numbering and not target_refused)) and handle.hold_native_custody is not None:
+                        if mutation_may_have_persisted:
+                            handle.hold_native_custody('Bundle mutator outcome unknown; session retained.', exc)
+                        else:
+                            handle.hold_native_custody('Numbering inspection unproven before mutation; session retained.', exc,
+                                                       may_have_mutated=False)
+                        held = True
+                    if not isinstance(exc, Exception) and not held:
+                        raise
                     ok = False
-                    mutation_may_have_persisted = bool(getattr(exc, 'mutation_may_have_persisted', False))
-                    rollback = getattr(exc, 'rollback', {})
-                    if not isinstance(rollback, dict):
-                        rollback = {}
+                    # Only our exact producer classes may carry bounded public
+                    # text/rollback. Never inspect an arbitrary subclass's
+                    # descriptors, metadata, metaclass name or representation.
+                    error_text = 'Native command failed; outcome is unproven.'
+                    if target_refused:
+                        error_text = 'Numbering preflight refused; original state and preservation verified.'
+                    rollback = {}
+                    if type(exc) is LocalCliMutationError or type(exc) is LocalCliRuntimeError:
+                        args = BaseException.__dict__['args'].__get__(exc)
+                        if type(args) is tuple and len(args) == 1 and type(args[0]) is str:
+                            error_text = args[0]
+                        if not held and type(exc) is LocalCliMutationError:
+                            data = BaseException.__dict__['__dict__'].__get__(exc)
+                            for key, value in dict.items(data):
+                                if type(key) is str and key == 'rollback' and type(value) is dict:
+                                    for field, flag in dict.items(value):
+                                        if type(field) is str and field in ('attempted', 'succeeded') and type(flag) is bool:
+                                            rollback[field] = flag
                     dirty = dirty or mutation_may_have_persisted
                     status = {
                         'index': index,
@@ -6773,8 +7198,8 @@ class LocalCliService(
                         'ok': False,
                         'dirty': mutation_may_have_persisted,
                         'before': step_before,
-                        'after': self._bundle_compact_snapshot(handle.hwp),
-                        'error': f'{type(exc).__name__}: {exc}',
+                        'after': {} if held else self._bundle_compact_snapshot(handle.hwp),
+                        'error': ('LocalCliMutationError' if type(exc) is LocalCliMutationError else _exception_label(exc)) + ': ' + error_text,
                         'mutation_may_have_persisted': mutation_may_have_persisted,
                         'rollback': rollback,
                         'mutation': {
@@ -6782,11 +7207,22 @@ class LocalCliService(
                             'rollback': rollback,
                         },
                     }
+                    if target_refused and not mutation_may_have_persisted:
+                        from app.local_cli_runtime import _native_diagnostic
+                        status['refusal_code'] = (exc.code if type(exc) is _NumberingSemanticRefusal or type(exc) is _NumberingCleanRefusal
+                                                  else _native_diagnostic('bundle_step', exc)['refusal_code'])
+                    if numbering:
+                        # Fixed labels only, so a caller can see the stopping phase without opening the journal.
+                        from app.local_cli_runtime import _native_diagnostic
+                        status['failure_diagnostic'] = _native_diagnostic('bundle_step', exc)
+                    if held:
+                        status['native_custody_held'] = True
+                        custody_held = True
                     step_results.append(status)
                     break
                 step_results.append(status)
 
-            after_location = snapshot_live_location(
+            after_location = {} if custody_held else snapshot_live_location(
                 hwp=handle.hwp,
                 source_filename=handle.source_filename,
                 working_copy_id=handle.session_id,
@@ -6803,6 +7239,15 @@ class LocalCliService(
             }
 
         prior_native_sequence = binding.get('native_command_sequence', 0)
+        # Ops in _BUNDLE_UNDO_POLICY refuse undo from the start, so a timeout
+        # or crash mid-bundle cannot leave an older undo count in place;
+        # _record_bundle_undo_state settles it once the steps are known.
+        prior_undo_state = {key: binding.get(key) for key in ('pending_logical_undo_count', 'logical_undo_unverified')}
+        exact_ops = sorted({str(step.get('op')) for step in cleaned_steps if step.get('op') in _UNDO_UNVERIFIED_BUNDLE_OPS})
+        if exact_ops:
+            binding['pending_logical_undo_count'] = None
+            binding['logical_undo_unverified'] = f'{", ".join(exact_ops)} bundle started and its outcome was not recorded'
+            binding = self._save_binding(binding)
         result = self._execute_live(
             binding=binding,
             command_name='command-bundle',
@@ -6834,18 +7279,32 @@ class LocalCliService(
             binding=binding,
             artifacts=result.get('artifacts') if isinstance(result.get('artifacts'), dict) else {},
         )
-        binding = self._update_live_binding(
-            binding,
-            location=location,
-            artifacts=artifacts,
-            dirty=dirty,
-            clear_last_find=dirty,
-            clear_selection_cache=dirty,
-        )
-        if dirty:
-            dirty_step_count = sum(1 for step in (result.get('steps') or []) if isinstance(step, dict) and step.get('dirty'))
-            binding['pending_logical_undo_count'] = max(1, dirty_step_count)
-            binding = self._save_binding(binding)
+        native_custody_held = result.get('native_custody_held') is True
+        if native_custody_held:
+            # Custody also protects incomplete pre-edit inspections. It does
+            # not itself create edit debt; the reducer preserves all prior debt.
+            binding['working_copy_dirty'] = dirty
+            binding['dirty'] = dirty
+            binding['native_custody_held'] = True
+            binding['last_find'] = None
+            binding['selected_range'] = None
+            binding['last_selection'] = None
+            binding['unsafe_selection_for_type'] = None
+            binding['updated_at'] = utc_now_iso()
+            # No undo count can be trusted after an unknown native outcome.
+            binding['pending_logical_undo_count'] = None
+            binding['logical_undo_unverified'] = 'a numbering step in this bundle has an unknown native outcome'
+        else:
+            binding = self._update_live_binding(
+                binding,
+                location=location,
+                artifacts=artifacts,
+                dirty=dirty,
+                clear_last_find=dirty,
+                clear_selection_cache=dirty,
+            )
+            _record_bundle_undo_state(binding, result.get('steps') or [], prior_undo_state)
+        binding = self._save_binding(binding)
         summary = f"command-bundle {'succeeded' if result.get('ok') else 'stopped'}: {len(result.get('steps') or [])}/{len(cleaned_steps)} step(s)"
         self._record_local_cli_command(
             'command-bundle',
@@ -6882,6 +7341,7 @@ class LocalCliService(
                 binding=binding,
             ),
             **self._compact_state_payload(location=location),
+            **({'native_custody_held': True} if native_custody_held else {}),
         }
 
     def screenshot(self, *, session_id: str | None = None) -> dict[str, Any]:
@@ -6925,17 +7385,30 @@ class LocalCliService(
         working_copy_path = self._working_copy_path(binding)
 
         def _handler(handle: LocalCliRuntimeHandle) -> dict[str, Any]:
-            save_document(handle.hwp)
+            handle.diagnostic_site = 'save_precondition'
+            if handle.observe_pre_save is None:
+                raise LocalCliRuntimeError('Pre-Save observation is unavailable on this runtime.')
+            diagnostic = handle.observe_pre_save()
+            # Exact False is deliberate clean-noop, not an uncalled Save return.
+            clean_noop = diagnostic['is_modified_value'] is False
+            diagnostic['save_decision'] = 'clean_noop' if clean_noop else 'ordinary_save'
+            if not clean_noop:
+                handle.diagnostic_site = 'save_native'
+                if save_document(handle.hwp, diagnostic=diagnostic) is not True:
+                    raise LocalCliRuntimeError('Ordinary Save did not return an affirmative result; custody retained.')
+            handle.diagnostic_site = 'save_file_readback'
             if working_copy_path.is_symlink() or not working_copy_path.is_file():
-                raise LocalCliRuntimeError('Native save returned without a regular working-copy file.')
+                raise LocalCliRuntimeError('Save/checkpoint readback has no regular working-copy file.')
             try:
                 working_copy_size = working_copy_path.stat().st_size
             except OSError as exc:
                 raise LocalCliRuntimeError('Saved working-copy readback failed.') from exc
             if working_copy_size <= 0:
-                raise LocalCliRuntimeError('Native save produced an empty working copy.')
+                raise LocalCliRuntimeError('Save/checkpoint readback found an empty working copy.')
             working_copy_custody = {}
+            handle.diagnostic_site = 'save_custody_readback'
             self._verify_artifact_readback(binding, working_copy_path, readback=working_copy_custody)
+            handle.diagnostic_site = 'save_location_readback'
             location = snapshot_live_location(
                 hwp=handle.hwp,
                 source_filename=handle.source_filename,
@@ -6943,7 +7416,8 @@ class LocalCliService(
             )
             return {
                 'location': location,
-                'ordinary_save_confirmed': True,
+                'ordinary_save_confirmed': not clean_noop,
+                'clean_save_noop_confirmed': clean_noop,
                 'working_copy_size_bytes': working_copy_size,
                 'working_copy_custody': working_copy_custody,
             }
@@ -6963,6 +7437,8 @@ class LocalCliService(
             ordinary_save_confirmed=result.get('ordinary_save_confirmed') is True,
         )
         working_copy_custody = result.get('working_copy_custody')
+        if result.get('ordinary_save_confirmed') is True and semantic_ok is True and dirty is False and 'dirty' in binding:
+            binding['dirty'] = False  # settle the legacy alias only with the same Save proof
         if isinstance(working_copy_custody, dict):
             custody_map = binding.get('artifact_custody') if isinstance(binding.get('artifact_custody'), dict) else {}
             custody_map['working-copy'] = working_copy_custody
@@ -6976,7 +7452,7 @@ class LocalCliService(
         self._record_local_cli_command(
             'save',
             binding=binding,
-            summary='saved active working copy',
+            summary='confirmed clean working copy; ordinary Save not called' if result.get('clean_save_noop_confirmed') is True else 'saved active working copy',
             payload={
                 'working_copy_path': str(working_copy_path),
                 'dirty': dirty,
@@ -6997,12 +7473,21 @@ class LocalCliService(
         resolved_session_id = self._binding_session_id(binding)
 
         def _handler(handle: LocalCliRuntimeHandle) -> dict[str, Any]:
-            artifact_path = export_document_pdf(
-                session_root=handle.session_root,
-                source_filename=handle.source_filename,
-                hwp=handle.hwp,
-                log_path=handle.log_path,
-            )
+            hwp = handle.hwp
+            clean_before = getattr(hwp, 'IsModified', None) is False
+            path_before = getattr(hwp, 'Path', None)
+            try:
+                artifact_path = export_document_pdf(
+                    session_root=handle.session_root,
+                    source_filename=handle.source_filename,
+                    hwp=hwp,
+                    log_path=handle.log_path,
+                )
+            except LocalCliRuntimeError:
+                # The same exact-clean proof as a successful export, plus an unchanged document path.
+                if clean_before and getattr(hwp, 'IsModified', None) is False and getattr(hwp, 'Path', None) == path_before:
+                    return {'export_failed': True}
+                raise
             return {
                 'artifact_path': str(artifact_path),
                 'location': snapshot_live_location(
@@ -7013,6 +7498,8 @@ class LocalCliService(
             }
 
         result = self._execute_live(binding=binding, command_name='export', task_label='local_cli.export', handler=_handler)
+        if result.get('export_failed') is True:
+            raise LocalCliServiceError('export_failed: Hancom could not export this document to PDF; the document is unchanged.', status_code=422)
         location = result.get('location') if isinstance(result.get('location'), dict) else {}
         artifact_path = str(result.get('artifact_path') or '')
         artifacts = self._validated_artifact_projection(
@@ -7026,6 +7513,54 @@ class LocalCliService(
             'session_id': resolved_session_id,
             'filename': self._artifact_name(kind='export', source_filename=str(binding.get('source_filename') or 'document.hwpx')),
             'download_path': self._artifact_download_path(session_id=resolved_session_id, kind='export'),
+        }
+
+    def _run_history_action(self, handle: LocalCliRuntimeHandle, name: str, native_steps: int) -> dict[str, Any]:
+        """Undo or Redo with no second call once one may have been issued, compared with the document before and after."""
+        hwp = handle.hwp
+        protection = self._numbering_protection_reader(handle)
+        before = native_paragraph_edit.history_evidence(hwp, protection)
+        if before is None:
+            # Returned facts about this document, read before any native history call.
+            return {'not_applied': True, 'evidence_unavailable': True}
+        run = getattr(getattr(hwp, 'HAction', None), 'Run', None)
+        call = (lambda: run(name)) if callable(run) else getattr(hwp, name, None)
+        if not callable(call):
+            raise LocalCliRuntimeError(f'pyhwpx {name.lower()} is unavailable on this machine')
+        for step in range(native_steps):
+            raw = call()
+            if raw is True:
+                continue
+            after = native_paragraph_edit.history_evidence(hwp, protection) if raw is False and step == 0 else None
+            if after is not None and not native_paragraph_edit.history_confirmation(before, after)['document_changed']:
+                # Observed: native False with nothing to undo changes nothing. The comparison proves it for this call.
+                return {'not_applied': True}
+            raise LocalCliRuntimeError(f'Native {name} did not return True; its outcome is unknown.')
+        after = native_paragraph_edit.history_evidence(hwp, protection)
+        return {
+            'confirmation': native_paragraph_edit.history_confirmation(before, after),
+            'snapshot': _snapshot_cursor_context(hwp),
+            'context': _capture_nearby_text_context(hwp),
+            'location': snapshot_live_location(hwp=hwp, source_filename=handle.source_filename, working_copy_id=handle.session_id),
+        }
+
+    def numbering_readback(self, *, session_id: str | None = None) -> dict[str, Any]:
+        """Read-only numbering, page-number and preservation facts for a readable review of the live document."""
+        binding = self._load_active_binding(session_id=session_id)
+
+        def _handler(handle: LocalCliRuntimeHandle) -> dict[str, Any]:
+            return native_paragraph_edit.numbering_readback(handle.hwp, protection=self._numbering_protection_reader(handle))
+
+        result = self._execute_live(binding=binding, command_name='numbering-readback', task_label='local_cli.numbering_readback', handler=_handler)
+        result.pop('_local_cli_command', None)
+        return {
+            'ok': True,
+            'session_id': self._binding_session_id(binding),
+            'schema_version': 'local-cli/numbering-readback/v1',
+            'read_only': True,
+            'working_copy_dirty': binding.get('working_copy_dirty') is True,
+            'source_filename': str(binding.get('source_filename') or ''),
+            **result,
         }
 
     def where(self, *, session_id: str | None = None) -> dict[str, Any]:
@@ -7063,35 +7598,36 @@ class LocalCliService(
 
     def undo(self, *, session_id: str | None = None) -> dict[str, Any]:
         binding = self._load_active_binding(session_id=session_id)
+        tracked = binding.get('undo_stack') if isinstance(binding.get('undo_stack'), list) else None
+        if tracked is not None and not tracked:
+            raise LocalCliUndoRefused('undo refused: no tracked edit in this session.', code='no_undo_available')
         undo_count_raw = binding.get('pending_logical_undo_count')
-        undo_count = int(undo_count_raw) if isinstance(undo_count_raw, int) and undo_count_raw > 1 else 1
+        blocked = binding.get('logical_undo_unverified')
+        if (blocked and not isinstance(undo_count_raw, int)) or (tracked is not None and tracked[-1] is None):
+            # Fail closed: counting native Undo steps could revert part of an
+            # edit, or an older edit too.
+            raise LocalCliUndoRefused(
+                f'undo refused: {blocked or "the last edit cannot be undone as one counted step"}. Retain the working copy and owning STA instead of counting undos; full native close is unsupported for this unproved or held session. Separately authorized exact-owned operator closure is required.',
+                code='undo_not_counted',
+            )
+        if tracked is not None and type(tracked[-1]) is int:
+            undo_count = tracked[-1]
+        else:
+            undo_count = int(undo_count_raw) if isinstance(undo_count_raw, int) and undo_count_raw > 1 else 1
 
-        def _handler(handle: LocalCliRuntimeHandle) -> dict[str, Any]:
-            for _ in range(undo_count):
-                self._run_single_action(
-                    handle.hwp,
-                    actions=('Undo',),
-                    methods=('Undo',),
-                    error_message='pyhwpx undo is unavailable on this machine',
-                )
-            snapshot = _snapshot_cursor_context(handle.hwp)
-            context = _capture_nearby_text_context(handle.hwp)
-            return {
-                'snapshot': snapshot,
-                'context': context,
-                'location': snapshot_live_location(
-                    hwp=handle.hwp,
-                    source_filename=handle.source_filename,
-                    working_copy_id=handle.session_id,
-                ),
-            }
-
-        result = self._execute_live(binding=binding, command_name='undo', task_label='local_cli.undo', handler=_handler)
+        result = self._execute_live(binding=binding, command_name='undo', task_label='local_cli.undo',
+                                    handler=lambda handle: self._run_history_action(handle, 'Undo', undo_count))
+        if result.get('evidence_unavailable') is True:
+            raise LocalCliUndoRefused('undo refused: the document cannot be compared before and after.', code='undo_evidence_unavailable')
+        if result.get('not_applied') is True:
+            raise LocalCliUndoRefused('undo refused: Hancom had nothing to undo.', code='undo_not_applied')
         snapshot = result.get('snapshot') if isinstance(result.get('snapshot'), dict) else {}
         context = result.get('context') if isinstance(result.get('context'), dict) else {}
         location = result.get('location') if isinstance(result.get('location'), dict) else {}
         binding = self._update_live_binding(binding, location=location, dirty=True, clear_last_find=True, clear_selection_cache=True)
         binding['pending_logical_undo_count'] = None
+        if isinstance(binding.get('undo_stack'), list) and binding['undo_stack']:
+            binding.setdefault('redo_stack', []).append(binding['undo_stack'].pop())
         binding = self._save_binding(binding)
         self._record_local_cli_command('undo', binding=binding, summary=f'applied undo to the live document ({undo_count} native step(s))', payload={'cursor': snapshot.get('pos'), 'native_undo_steps': undo_count})
         return {
@@ -7100,41 +7636,35 @@ class LocalCliService(
             'native_undo_steps': undo_count,
             'caret_pos': snapshot.get('pos'),
             'context': context,
+            'confirmation': result.get('confirmation'),
         }
 
     def redo(self, *, session_id: str | None = None) -> dict[str, Any]:
         binding = self._load_active_binding(session_id=session_id)
-
-        def _handler(handle: LocalCliRuntimeHandle) -> dict[str, Any]:
-            self._run_single_action(
-                handle.hwp,
-                actions=('Redo',),
-                methods=('Redo',),
-                error_message='pyhwpx redo is unavailable on this machine',
-            )
-            snapshot = _snapshot_cursor_context(handle.hwp)
-            context = _capture_nearby_text_context(handle.hwp)
-            return {
-                'snapshot': snapshot,
-                'context': context,
-                'location': snapshot_live_location(
-                    hwp=handle.hwp,
-                    source_filename=handle.source_filename,
-                    working_copy_id=handle.session_id,
-                ),
-            }
-
-        result = self._execute_live(binding=binding, command_name='redo', task_label='local_cli.redo', handler=_handler)
+        tracked = binding.get('redo_stack') if isinstance(binding.get('redo_stack'), list) else None
+        if tracked is not None and not tracked:
+            raise LocalCliUndoRefused('redo refused: no undone edit to reapply.', code='no_redo_available')
+        redo_count = tracked[-1] if tracked is not None and type(tracked[-1]) is int else 1
+        result = self._execute_live(binding=binding, command_name='redo', task_label='local_cli.redo',
+                                    handler=lambda handle: self._run_history_action(handle, 'Redo', redo_count))
+        if result.get('evidence_unavailable') is True:
+            raise LocalCliUndoRefused('redo refused: the document cannot be compared before and after.', code='redo_evidence_unavailable')
+        if result.get('not_applied') is True:
+            raise LocalCliUndoRefused('redo refused: Hancom had nothing to redo.', code='redo_not_applied')
         snapshot = result.get('snapshot') if isinstance(result.get('snapshot'), dict) else {}
         context = result.get('context') if isinstance(result.get('context'), dict) else {}
         location = result.get('location') if isinstance(result.get('location'), dict) else {}
         binding = self._update_live_binding(binding, location=location, dirty=True, clear_last_find=True, clear_selection_cache=True)
+        if isinstance(binding.get('redo_stack'), list) and binding['redo_stack']:
+            binding.setdefault('undo_stack', []).append(binding['redo_stack'].pop())
+            binding = self._save_binding(binding)
         self._record_local_cli_command('redo', binding=binding, summary='applied redo to the live document', payload={'cursor': snapshot.get('pos')})
         return {
             'ok': True,
             'summary': 'redo applied',
             'caret_pos': snapshot.get('pos'),
             'context': context,
+            'confirmation': result.get('confirmation'),
         }
 
     def artifact(self, *, kind: str, session_id: str | None = None) -> tuple[Path, str]:
@@ -7161,7 +7691,7 @@ class LocalCliService(
         # new work as soon as close begins; mark the tombstone only after
         # native close succeeds so a close timeout remains reconcilable.
         try:
-            self.runtime_manager.close_session(resolved_session_id)
+            self.runtime_manager.close_session(resolved_session_id, **({'prior_dirty': True} if binding.get('working_copy_dirty') is True or binding.get('dirty') is True else {}))
         except LocalCliRuntimeTimeoutError as exc:
             try:
                 command_status = self.runtime_manager.command_status(resolved_session_id, exc.command_id)
@@ -7212,7 +7742,41 @@ class LocalCliService(
                 status_code=504,
             ) from exc
         except LocalCliRuntimeError as exc:
-            raise LocalCliServiceError('Local CLI native close failed.', status_code=500) from exc
+            if getattr(exc, 'save_required', False) is True:
+                raise LocalCliServiceError('save_required: the document has unsaved changes; call save first. It was not closed.', status_code=409) from exc
+            # A reporting-only failure must not rewrite already-proven native
+            # completion or invite another Quit. This is a Python status read.
+            try:
+                close_status = self.runtime_manager.command_status(resolved_session_id, f'{resolved_session_id}:close')
+            except Exception:
+                close_status = {}
+            if (close_status.get('state') in {'succeeded', 'completed_after_timeout'}
+                    and close_status.get('semantic_ok') is True and close_status.get('completed') is True):
+                binding['cleanup_pending'] = True
+                binding['live_session_bound'] = False
+                binding['document_session_state'] = 'closed_cleanup_pending'
+                try:
+                    self._save_binding(binding)
+                except Exception:
+                    pass
+                raise LocalCliServiceError('Native close completed; reporting or managed cleanup is pending. Files are retained; native teardown must not be replayed.', status_code=500) from exc
+            holds = getattr(self.runtime_manager, 'native_custody_held', None)
+            if callable(holds) and holds(resolved_session_id) is True:
+                # The owning runtime's flag, not this exception's text. Earlier debt in the binding is left as it is.
+                try:
+                    current_sequence = self._parse_binding_generation(binding.get('native_command_sequence', 0))
+                    binding['_expected_native_command_sequence'] = current_sequence
+                    binding['native_command_sequence'] = max(current_sequence, int(self.runtime_manager.latest_command_sequence(resolved_session_id)))
+                    binding['native_custody_held'] = True
+                    self._save_binding(binding)
+                except Exception:
+                    pass
+                raise LocalCliServiceError(
+                    f'{_HELD_LABEL}: The live local CLI session holds a native command whose outcome is unknown; '
+                    'it is retained and is not closed, discarded or released by this runtime.',
+                    status_code=409,
+                ) from exc
+            raise LocalCliServiceError('Local CLI full native close is unavailable or incomplete; session custody and managed files are retained.', status_code=500) from exc
 
         if binding.get('session_root_path'):
             try:
@@ -7253,6 +7817,8 @@ class LocalCliService(
 def as_http_error(exc: Exception) -> HTTPException:
     if isinstance(exc, LocalCliServiceError):
         return HTTPException(status_code=exc.status_code, detail=exc.message)
+    if type(exc) is LocalCliUndoRefused:
+        return HTTPException(status_code=409, detail=f'{exc.code}: {_HISTORY_REFUSALS[exc.code]}')
     if isinstance(exc, LocalCliRuntimeError):
         return HTTPException(status_code=500, detail='Local CLI native operation failed.')
     return HTTPException(status_code=500, detail='Local CLI request failed.')

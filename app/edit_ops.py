@@ -32,6 +32,8 @@ SUPPORTED_OPS = {
     'align_paragraph',
     'paragraph_shape',
     'list_paragraph',
+    'page_number',
+    'official_numbering',
     'replace_empty_native_list_scaffold',
     'native_action',
     'cursor_replace_text',
@@ -124,6 +126,61 @@ def _extract_step_summary_metadata(op: dict[str, Any]) -> dict[str, Any]:
     return item
 
 
+NATIVE_NUMBERING_OPS = {'page_number', 'official_numbering'}
+QUEUED_JOB_NUMBERING_UNSUPPORTED_NOTE = (
+    'page_number and official_numbering are not supported by the queued edit-job runtime: that worker quits the '
+    'Hancom SDK and uninitializes COM when a job fails, so it cannot keep the document open after an uncertain '
+    'native numbering outcome. Use the caller-owned library or the protected interactive command_bundle '
+    '(CLI/MCP) page_number_apply / official_numbering_apply steps instead.'
+)
+
+
+class NativeNumberingJobRuntimeUnsupported(EditOperationError):
+    code = 'native_numbering_job_runtime_unsupported'
+
+
+def require_queued_job_runtime_support(operations: Any) -> None:
+    """Refuse a whole queued job that contains N1/N2, before the edit worker runs any COM, SDK or edit step."""
+    found = sorted({str(item.get('op')) for item in operations if isinstance(item, dict) and item.get('op') in NATIVE_NUMBERING_OPS})
+    if found:
+        raise NativeNumberingJobRuntimeUnsupported(f'{", ".join(found)}: {QUEUED_JOB_NUMBERING_UNSUPPORTED_NOTE}')
+_NATIVE_NUMBERING_META_KEYS = {
+    'op',
+    'step_id',
+    'metadata',
+    'verification',
+    'verification_mode',
+    'needs_visual_verification',
+}
+_OFFICIAL_NUMBERING_OP_KEYS = {'find', 'level', 'match_case'}
+
+
+def _validate_native_numbering_op(index: int, op: str, item: dict[str, Any]) -> None:
+    from app import native_numbering
+
+    try:
+        if op == 'page_number':
+            allowed = set(native_numbering.PAGE_NUMBER_REQUEST_KEYS)
+            native_numbering.normalize_page_number_request({k: v for k, v in item.items() if k not in _NATIVE_NUMBERING_META_KEYS})
+        else:
+            allowed = _OFFICIAL_NUMBERING_OP_KEYS
+            _require_native_numbering_target(item)
+            native_numbering.normalize_official_numbering_request({'level': item.get('level')} if 'level' in item else {})
+        unknown = sorted(str(k) for k in item if k not in allowed and k not in _NATIVE_NUMBERING_META_KEYS)
+        if unknown:
+            raise EditOperationError(f'operation {op!r} has unsupported field(s): {", ".join(unknown)}')
+    except EditOperationError as exc:
+        raise EditOperationError(f'operation #{index} ({op}) is invalid: {exc}') from exc
+
+
+def _require_native_numbering_target(item: dict[str, Any]) -> None:
+    find = item.get('find')
+    if not isinstance(find, str) or find == '' or '\n' in find or '\r' in find:
+        raise EditOperationError("field 'find' must be a non-empty single-line string")
+    if 'match_case' in item and not isinstance(item['match_case'], bool):
+        raise EditOperationError("field 'match_case' must be true or false")
+
+
 def normalize_operations(raw: Any) -> list[dict[str, Any]]:
     if isinstance(raw, dict) and 'operations' in raw:
         raw = raw['operations']
@@ -140,6 +197,8 @@ def normalize_operations(raw: Any) -> list[dict[str, Any]]:
         if op not in SUPPORTED_OPS:
             supported = ', '.join(sorted(SUPPORTED_OPS))
             raise EditOperationError(f'operation #{index} uses unsupported op={op!r}. Supported: {supported}')
+        if op in NATIVE_NUMBERING_OPS:
+            _validate_native_numbering_op(index, op, item)
         normalized.append(dict(item))
     return normalized
 
@@ -4241,6 +4300,30 @@ def apply_edit_operations(
             if op_type == 'list_paragraph':
                 count = _apply_list_paragraph(hwp, op)
                 _record_summary(index, op_type, {'matches': count})
+                continue
+
+            if op_type == 'page_number':
+                from app import native_numbering, native_numbering_census
+
+                result = native_numbering.apply_page_number(
+                    hwp,
+                    native_numbering.page_number_request_from_op(op),
+                    protection=native_numbering_census.live_protection_reader(hwp),
+                )
+                _record_summary(index, op_type, result)
+                continue
+
+            if op_type == 'official_numbering':
+                from app import native_numbering, native_numbering_census
+
+                result = native_numbering.apply_official_numbering_at_match(
+                    hwp,
+                    find=op.get('find'),
+                    level=op.get('level'),
+                    match_case=op.get('match_case', True),
+                    protection=native_numbering_census.live_protection_reader(hwp),
+                )
+                _record_summary(index, op_type, result)
                 continue
 
             if op_type == 'replace_empty_native_list_scaffold':

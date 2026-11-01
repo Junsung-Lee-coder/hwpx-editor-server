@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from typing import Annotated, Any, Literal
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.models import CellMarginsGetRequest
 
@@ -92,13 +92,86 @@ class CellFormatStep(Closed):
         return self
 
 
+class PageNumberStep(Closed):
+    # Prefix/suffix text is unsupported by the native action, so it has no field.
+    op: Literal['page_number_apply']
+    label: Label = 'mcp:page-number-apply'
+    position: Literal['top-left', 'top-center', 'top-right', 'bottom-left', 'bottom-center', 'bottom-right']
+    start_number: int = Field(default=1, ge=1, le=65535)
+    side_char: Literal['none', 'dash'] = 'none'
+    confirm_layout: bool
+
+    @field_validator('confirm_layout')
+    @classmethod
+    def require_confirm_layout(cls, value: bool) -> bool:
+        if value is not True:
+            raise ValueError('confirm_layout must be true')
+        return value
+
+
+class OfficialNumberingStep(Closed):
+    op: Literal['official_numbering_apply']
+    label: Label = 'mcp:official-numbering-apply'
+    match: Annotated[str, Field(min_length=1, max_length=500)]
+    expected_page: int = Field(ge=1, le=10000)
+    level: int = Field(ge=1, le=4)
+    confirm_layout: bool
+
+    @field_validator('confirm_layout')
+    @classmethod
+    def require_confirm_layout(cls, value: bool) -> bool:
+        if value is not True:
+            raise ValueError('confirm_layout must be true')
+        return value
+
+    @model_validator(mode='after')
+    def require_single_line_match(self) -> 'OfficialNumberingStep':
+        if not self.match.strip() or '\n' in self.match or '\r' in self.match:
+            raise ValueError('official_numbering_apply match must be a non-blank single line')
+        return self
+
+
+class _ParagraphTarget(Closed):
+    match: Annotated[str, Field(min_length=1, max_length=500)]
+    expected_page: int = Field(ge=1, le=10000)
+
+    @model_validator(mode='after')
+    def require_single_line_match(self):
+        if not self.match.strip() or '\n' in self.match or '\r' in self.match:
+            raise ValueError('match must be a non-blank single line')
+        return self
+
+
+class ParagraphInsertStep(_ParagraphTarget):
+    op: Literal['paragraph_insert_exact']
+    label: Label = 'mcp:paragraph-insert-exact'
+    text: Annotated[str, Field(min_length=1, max_length=4000)]
+    position: Literal['after', 'before'] = 'after'
+    confirm_layout: Literal[True]
+
+
+class ParagraphRemoveStep(_ParagraphTarget):
+    op: Literal['paragraph_remove_exact']
+    label: Label = 'mcp:paragraph-remove-exact'
+    expected_text: Annotated[str, Field(min_length=1, max_length=4000)]
+    confirm_remove: Literal[True]
+
+
+class UndoStep(Closed):
+    op: Literal['undo']
+
+
+class RedoStep(Closed):
+    op: Literal['redo']
+
+
 class Reconcile(Closed):
     op: Literal['command_reconcile']
     command_id: Annotated[str, Field(min_length=1, max_length=128, pattern=r'^[a-zA-Z0-9_.:-]+$')]
 
 
 class Command(Session):
-    request: Annotated[ContextStep | SelectionStep | ReadbackStep | CellFormatStep | Reconcile,
+    request: Annotated[ContextStep | SelectionStep | ReadbackStep | CellFormatStep | PageNumberStep | OfficialNumberingStep | ParagraphInsertStep | ParagraphRemoveStep | UndoStep | RedoStep | Reconcile,
                        Field(discriminator='op')]
 
 
@@ -112,8 +185,16 @@ class PageProof(Closed):
     dpi: int = Field(default=160, ge=72, le=600)
 
 
+class ReviewProof(Closed):
+    kind: Literal['review']
+    dpi: int = Field(default=100, ge=72, le=300)
+    max_pages: int = Field(default=30, ge=1, le=200)
+    inline_images: int = Field(default=3, ge=0, le=8)
+    compare_to: Annotated[str, Field(pattern=r'^[a-f0-9]{32}/review-[0-9]{1,6}$')] | None = None
+
+
 class Proof(Session):
-    request: Annotated[FrameProof | PageProof, Field(discriminator='kind')]
+    request: Annotated[FrameProof | PageProof | ReviewProof, Field(discriminator='kind')]
 
 
 class Error(Closed):

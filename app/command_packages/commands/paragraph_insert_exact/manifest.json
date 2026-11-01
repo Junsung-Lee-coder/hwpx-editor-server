@@ -1,0 +1,18 @@
+{
+  "op": "paragraph_insert_exact",
+  "version": "local-cli/paragraph-insert-exact/v1-package",
+  "summary": "Command-bundle package for paragraph_insert_exact: one new body paragraph beside one uniquely matched paragraph with one native InsertText, inheriting its numbering level.",
+  "module": "app.command_packages.commands.paragraph_insert_exact.run",
+  "read_only": false,
+  "dirty_default": true,
+  "allowed_keys": [
+    "op",
+    "operation",
+    "label",
+    "match",
+    "expected_page",
+    "text",
+    "position",
+    "confirm_layout"
+  ]
+}

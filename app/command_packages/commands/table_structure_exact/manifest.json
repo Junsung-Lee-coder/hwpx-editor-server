@@ -1,0 +1,32 @@
+{
+  "op": "table_structure_exact",
+  "version": "local-cli/table-structure-exact/v1-package",
+  "summary": "Insert/delete table rows or columns, merge cells, or split a cell on one exact pre-proven table, verified by HWPML grid readback.",
+  "module": "app.command_packages.commands.table_structure_exact.run",
+  "read_only": false,
+  "dirty_default": true,
+  "allowed_keys": [
+    "op",
+    "operation",
+    "label",
+    "section_anchor",
+    "page_from",
+    "page_to",
+    "around",
+    "target_id",
+    "expected_hash",
+    "expected_page",
+    "action",
+    "row",
+    "col",
+    "end_row",
+    "end_col",
+    "count",
+    "split_rows",
+    "split_cols",
+    "expected_rows",
+    "expected_cols",
+    "confirm_layout",
+    "max_controls"
+  ]
+}

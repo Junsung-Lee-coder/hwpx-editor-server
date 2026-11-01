@@ -1,0 +1,17 @@
+{
+  "op": "official_numbering_apply",
+  "version": "local-cli/official-numbering-apply/v1-package",
+  "summary": "Command-bundle package for official_numbering_apply: native outline numbering at level 1-4 on one uniquely matched paragraph.",
+  "module": "app.command_packages.commands.official_numbering_apply.run",
+  "read_only": false,
+  "dirty_default": true,
+  "allowed_keys": [
+    "op",
+    "operation",
+    "label",
+    "match",
+    "expected_page",
+    "level",
+    "confirm_layout"
+  ]
+}

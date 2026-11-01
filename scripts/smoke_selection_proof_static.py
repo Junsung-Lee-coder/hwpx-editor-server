@@ -22,6 +22,7 @@ runtime_stub.LocalCliRuntimeError = LocalCliRuntimeError
 # The static helper never exercises timeout construction; alias the
 # dependency-light error class so the service import remains complete.
 setattr(runtime_stub, 'LocalCliRuntimeTimeoutError', LocalCliRuntimeError)
+setattr(runtime_stub, 'LocalCliNativeCustodyHeldError', LocalCliRuntimeError)
 runtime_stub.LocalCliRuntimeHandle = type('LocalCliRuntimeHandle', (), {})
 runtime_stub._RECOVERY_STATES = {
     'none', 'pending_execution', 'quarantined', 'saving', 'failed', 'preserved',
@@ -44,7 +45,9 @@ def _bounded_journal_value(value, *, depth=0, key_hint=None):
     return value
 
 runtime_stub._bounded_journal_value = _bounded_journal_value
+# Selection proofs do not exercise runtime exception/journal reporting.
 for name in (
+    '_exception_label',
     'apply_char_style',
     'capture_screenshot_artifact',
     'create_table_at_cursor',

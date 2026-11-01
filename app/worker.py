@@ -30,6 +30,7 @@ from app.edit_ops import (
     _verify_table_snapshot,
     apply_edit_operations,
     load_instruction_payload_from_file,
+    require_queued_job_runtime_support,
 )
 from app.logging_utils import configure_logger
 from app.native_actions import get_native_capabilities
@@ -2586,6 +2587,7 @@ MATCH_REQUIRED_OPS = {
     'align_paragraph',
     'paragraph_shape',
     'list_paragraph',
+    'official_numbering',
     'replace_empty_native_list_scaffold',
     'native_action',
     'table_cell_action',
@@ -2752,6 +2754,12 @@ def edit_and_convert_with_pyhwpx(
     if sys.platform != 'win32':
         raise RuntimeError('HWPX edit worker must run on Windows in an interactive user session.')
 
+    # The finally below quits the SDK and uninitializes COM, so it cannot retain custody after an uncertain
+    # numbering outcome: refuse the whole job before this function touches COM, the SDK or any edit. The caller's
+    # export preflight (perform_native_export_preflight) may already have constructed and quit an empty probe instance.
+    preflight_payload = load_instruction_payload_from_file(instructions_path)
+    require_queued_job_runtime_support(preflight_payload['operations'])
+
     pythoncom = None
     try:
         import pythoncom  # type: ignore
@@ -2784,7 +2792,7 @@ def edit_and_convert_with_pyhwpx(
         # Phase 1: load instructions/tracking first so every later branch can leave coherent
         # evidence, even when Hancom automation fails mid-run.
         update_runtime_status(log_path, phase='load_instruction_payload')
-        instruction_payload = load_instruction_payload_from_file(instructions_path)
+        instruction_payload = preflight_payload
         operations = instruction_payload['operations']
         validation = instruction_payload.get('validation') or {}
         metadata_dir = instructions_path.parent

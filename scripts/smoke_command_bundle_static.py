@@ -111,6 +111,8 @@ def require_bundle_shape() -> None:
         'cell-format-exact',
         'table-cell-structure-exact',
         'paragraph-style-apply-exact',
+        'page-number-apply',
+        'official-numbering-apply',
         'text-table-to-native',
     }
     missing = expected - set(recipe_names())

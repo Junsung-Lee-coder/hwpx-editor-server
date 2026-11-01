@@ -12,7 +12,7 @@ import types
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from app import readiness
 from app.interactive_session_manager import InteractiveSessionManager
@@ -220,28 +220,99 @@ class G8TerminalInteractiveStateRedTests(unittest.TestCase):
 
 class G8TerminalRuntimeFinalizerRedTests(unittest.TestCase):
     def test_cleanup_exception_cannot_prevent_closed_signal(self) -> None:
+        # Only a positively pre-constructor failure permits no-native closure.
+        # The old constructor-raises fixture never reached its close fault.
+        for reporting_error in (False, True):
+            with self.subTest(reporting_error=reporting_error), tempfile.TemporaryDirectory() as raw:
+                session = LocalCliLiveSession(
+                    session_id="finalizer-test",
+                    session_root=Path(raw),
+                    working_copy_path=Path(raw) / "document.hwpx",
+                    source_filename="document.hwpx",
+                )
+                fake_pyhwpx = types.ModuleType("pyhwpx")
+                setattr(fake_pyhwpx, "Hwp", object)
+                pythoncom = SimpleNamespace(CoInitialize=Mock(), CoUninitialize=Mock())
+                runtime = __import__("app.local_cli_runtime", fromlist=["close_hwp_instance"])
+
+                def report(*args, **kwargs):
+                    if reporting_error and kwargs.get("phase") == "local_cli_session_finalized":
+                        raise RuntimeError("finalization report failed")
+
+                with patch.dict(sys.modules, {"pyhwpx": fake_pyhwpx, "pythoncom": pythoncom}), patch.object(
+                    runtime, "current_windows_session_snapshot", side_effect=RuntimeError("preflight failed")
+                ), patch.object(runtime, "create_hwp_instance_with_recovery") as constructor, patch.object(
+                    runtime, "close_hwp_instance", side_effect=RuntimeError("close failed")
+                ) as close, patch.object(runtime, "update_runtime_status", side_effect=report) as status:
+                    session._run()
+                self.assertIsInstance(session._start_future.exception(timeout=2), runtime.LocalCliRuntimeError)
+                self.assertFalse(getattr(session, "_constructor_invoked", False))
+                constructor.assert_not_called()
+                close.assert_not_called()
+                pythoncom.CoInitialize.assert_called_once_with()
+                pythoncom.CoUninitialize.assert_called_once_with()
+                self.assertTrue(session._closed.is_set())
+                self.assertFalse(session._native_custody_held)
+                self.assertEqual(session._cleanup_errors, ["finalization_status"] if reporting_error else [])
+                self.assertEqual([call.kwargs["phase"] for call in status.call_args_list], ["local_cli_session_finalized"])
+
+    def test_constructor_exception_retains_unknown_custody_without_teardown(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             session = LocalCliLiveSession(
-                session_id="finalizer-test",
+                session_id="constructor-unknown-test",
                 session_root=Path(raw),
                 working_copy_path=Path(raw) / "document.hwpx",
                 source_filename="document.hwpx",
             )
             fake_pyhwpx = types.ModuleType("pyhwpx")
             setattr(fake_pyhwpx, "Hwp", object)
+            pythoncom = SimpleNamespace(CoInitialize=Mock(), CoUninitialize=Mock())
             runtime = __import__("app.local_cli_runtime", fromlist=["close_hwp_instance"])
-            with patch.dict(sys.modules, {"pyhwpx": fake_pyhwpx}), patch.object(
-                runtime,
-                "create_hwp_instance_with_recovery",
-                side_effect=RuntimeError("startup failed"),
-            ), patch.object(
-                runtime,
-                "close_hwp_instance",
-                side_effect=RuntimeError("close failed"),
-            ):
-                session._run()
-            self.assertFalse(session._closed.is_set())
-            self.assertTrue(session.is_terminal())
+            waiting = threading.Event()
+            queue_get = session._commands.get
+
+            def observe_get(*args, **kwargs):
+                if kwargs.get("block", True):
+                    waiting.set()
+                return queue_get(*args, **kwargs)
+
+            with patch.dict(sys.modules, {"pyhwpx": fake_pyhwpx, "pythoncom": pythoncom}), patch.object(
+                runtime, "current_windows_session_snapshot", return_value={"interactive": True}
+            ), patch.object(runtime, "_native_close_processes", return_value=None, create=True), patch.object(
+                runtime, "create_hwp_instance_with_recovery", side_effect=RuntimeError("startup failed")
+            ) as constructor, patch.object(runtime, "close_hwp_instance") as close, patch.object(
+                runtime, "update_runtime_status"
+            ), patch.object(session._commands, "get", side_effect=observe_get):
+                session._thread.start()
+                try:
+                    error = session._start_future.exception(timeout=2)
+                    self.assertIsInstance(error, runtime.LocalCliNativeCustodyHeldError)
+                    self.assertTrue(waiting.wait(2), "finalizer did not reach its custody wait")
+                    constructor.assert_called_once()
+                    self.assertTrue(session._constructor_invoked)
+                    self.assertTrue(session._native_custody_held)
+                    self.assertTrue(session._quarantined)
+                    self.assertFalse(session._allow_native_cleanup)
+                    self.assertFalse(session._closed.is_set())
+                    self.assertTrue(session._thread.is_alive())
+                    pythoncom.CoInitialize.assert_called_once_with()
+                    pythoncom.CoUninitialize.assert_not_called()
+                    close.assert_not_called()
+                finally:
+                    # Existing test-only release + wake: never native authority,
+                    # and always reap the owned thread even if an assertion fails.
+                    if session._thread.is_alive():
+                        # Startup delivery precedes finalizer entry. Wait for
+                        # the actual hold before releasing, so an early failed
+                        # assertion cannot race a later UNKNOWN re-latch.
+                        waiting.wait(2)
+                        session._allow_native_cleanup = True
+                        session._commands.put(runtime._LiveCommand("test-release", "__close__", None, runtime.Future()))
+                    session._thread.join(2)
+                    self.assertFalse(session._thread.is_alive(), "test-owned STA leaked")
+                self.assertFalse(session._closed.is_set())
+                pythoncom.CoUninitialize.assert_not_called()
+                close.assert_not_called()
 
     def test_pending_probe_cannot_become_ready_by_flipping_top_level_fields(self) -> None:
         identity = readiness.current_worker_identity()

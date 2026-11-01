@@ -1,0 +1,17 @@
+    def reopened_problems(self, last_census, reopened_census, last_view, reopened_view, target_text: str, native_level: int) -> list[str]:
+        numbering = self.sdk['numbering']
+        problems = [] if reopened_view == last_view else ['numbering view differs']
+        try:
+            last, reopened = numbering._validated_census(last_census), numbering._validated_census(reopened_census)
+            incomplete = list(numbering._incomplete(reopened)) + [f'last applied census: {reason}' for reason in numbering._incomplete(last)]
+            problems += incomplete
+            if not incomplete:
+                texts = [item['text'] for item in last['paragraphs']]
+                if texts.count(target_text) != 1:
+                    problems.append('the last request target is not a single paragraph of the applied census')
+                else:
+                    problems += numbering._official_delta_problems(last, reopened, target_index=texts.index(target_text),
+                                                                   native_level=native_level, define=False)
+        except Exception as exc:  # noqa: BLE001 - an unreadable snapshot cannot prove preservation
+            problems.append(f'protection comparison unresolved: {type(exc).__name__}')
+        return problems

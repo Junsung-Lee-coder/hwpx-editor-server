@@ -1,0 +1,17 @@
+{
+  "op": "paragraph_remove_exact",
+  "version": "local-cli/paragraph-remove-exact/v1-package",
+  "summary": "Command-bundle package for paragraph_remove_exact: remove one uniquely matched text-only body paragraph with one native Delete and whole-document preservation proof.",
+  "module": "app.command_packages.commands.paragraph_remove_exact.run",
+  "read_only": false,
+  "dirty_default": true,
+  "allowed_keys": [
+    "op",
+    "operation",
+    "label",
+    "match",
+    "expected_page",
+    "expected_text",
+    "confirm_remove"
+  ]
+}

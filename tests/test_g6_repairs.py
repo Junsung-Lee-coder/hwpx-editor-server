@@ -44,6 +44,7 @@ class LocalCliRuntimeManagerLifecycleTests(unittest.TestCase):
             session._closed.set()
 
         thread = threading.Thread(target=finish_cleanup)
+        session._thread = thread  # bind the real owned cleanup thread for close's final join
         thread.start()
 
         def run_close() -> None:
