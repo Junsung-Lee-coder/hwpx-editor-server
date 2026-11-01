@@ -359,6 +359,27 @@ class TitleAndBodyRange(unittest.TestCase):
         self.assertEqual([p['shape']['Align'] for p in hwp.lists[0]], ['Center', 'Center', 'Justify'])
         self.assertEqual(len(value['result']['after']), 2)
 
+    def test_character_formatting_from_the_first_text_of_a_section_takes_its_controls_along(self) -> None:
+        for fields, para_count in (({'match': '제목 문단'}, 1), ({'match': '제목 문단', 'through_match': '본문'}, 2)):
+            with self.subTest(fields=fields):
+                hwp = FormatHwp([paragraph('제목 문단'), paragraph('본문 문단'), paragraph('끝 문단')])
+                value = result_of(self, character(hwp, bold=True, **fields))
+                self.assertEqual(hwp.executes()[0][3][:3], (0, 0, 32))
+                self.assertEqual(len(value['target']['paragraphs']), para_count)
+                self.assertEqual(styled(hwp, 0, 0), [('제목 문단', char(Bold=True))])
+
+    def test_that_allowance_does_not_reach_a_range_starting_later_or_a_visible_object(self) -> None:
+        def corrupt(doc):
+            for atom in doc.lists[0][0]['atoms']:
+                if atom.get('raw'):
+                    atom['cs'] = char(Bold=True)
+        hwp = FormatHwp([paragraph('제목 문단'), paragraph('본문 문단')])
+        hwp.after_execute = corrupt
+        owned = owned_doc(self, hwp)
+        with patch('app.local_cli_service.snapshot_live_location', return_value={}), patch('app.local_cli_runtime.snapshot_live_location', return_value={}):
+            outcome = owned.service.command_bundle(steps=[{'label': 'x', **CHARACTER, 'match': '목 문단', 'bold': True}])
+        self.assertTrue(outcome['native_custody_held'])
+
     def test_a_visible_object_in_the_first_paragraph_is_still_refused(self) -> None:
         from tests.native_format_fakes import picture
         hwp = FormatHwp([paragraph(picture(), '제목 문단'), paragraph('본문 문단')])

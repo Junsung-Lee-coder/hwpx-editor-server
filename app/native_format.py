@@ -1009,11 +1009,13 @@ def _character_problems(before: Mapping[str, Any], after: Mapping[str, Any], row
             problems.append(f"paragraph {left['index']} changed its content")
             continue
         low, high = spans.get(left['index'], (0, 0))
+        # A block starting at a section's first text takes the section's leading controls into its run (measured); they show nothing.
+        lead = low if high > low and low and all(atom.get('control') in _SECTION_CONTROLS for atom in left['atoms'][:low]) else 0
         for number, (one, two) in enumerate(zip(left['atoms'], right['atoms'])):
             if one.get('char') != two.get('char') or one.get('control') != two.get('control'):
                 problems.append(f"paragraph {left['index']} changed its content")
                 break
-            inside = low <= number < high
+            inside = low <= number < high or number < lead
             expected = _char_after(one['shape'], wanted) if inside else one['shape']
             if not _same_character(two['shape'], expected, wanted if inside else {}):
                 problems.append(f"paragraph {left['index']} has a character format other than requested")

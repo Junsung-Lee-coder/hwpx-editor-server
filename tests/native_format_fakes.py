@@ -430,6 +430,11 @@ class FormatHwp:
             old_end = para.get('end')
             for atom in atoms:
                 atom['cs'] = self._char_with(atom['cs'], items)
+            # A block starting right after a section's leading controls takes them into the same run (measured).
+            lead = [atom for atom in para['atoms'] if atom.get('raw')]
+            if lead and atoms and para['atoms'][len(lead)] is atoms[0]:
+                for atom in lead:
+                    atom['cs'] = self._char_with(atom['cs'], items)
             if old_end is not None and (number < epara or epos == para_length(para)):
                 para['end'] = self._char_with(old_end, items)
 
