@@ -1736,11 +1736,11 @@ def _apply_official_numbering(
             if delta:
                 codes.append('census_delta_mismatch')
             # UNICODE is a native plain-text export, not a literal-content oracle
-            # after numbering. Admit its delta only on the demonstrated paragraph-
-            # only path with complete, target-specific structural preservation.
-            # Definition-changing paths and absent/legacy evidence stay strict.
+            # after numbering: it prints the labels. Admit its delta only with
+            # complete, target-specific structural preservation, observed for the
+            # paragraph-only and the definition paths. Absent/legacy evidence stays strict.
             census_text_preserved = (
-                not defined and not delta
+                not delta
                 and _official_text_evidence_complete(before_census)
                 and _official_text_evidence_complete(after_census)
             )

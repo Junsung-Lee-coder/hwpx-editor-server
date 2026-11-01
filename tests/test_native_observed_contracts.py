@@ -121,6 +121,42 @@ class ObservedOutlineDefinitionAssignsTheParagraph(unittest.TestCase):
         self.assertEqual(len(result['native_actions']), 2)
         self.assertEqual((hwp.paragraphs[1]['heading_type'], hwp.paragraphs[1]['level']), (1, 2))
 
+    def labelled_export(self, hwp):
+        plain = hwp.get_text_file
+
+        def get_text_file(fmt='UNICODE', option=''):
+            if fmt != 'UNICODE':
+                return plain(fmt, option)
+            return '\r\n'.join(('1. ' if p['heading_type'] == 1 else '') + str(p['text']) for p in hwp.paragraphs)
+
+        hwp.get_text_file = get_text_file
+        return hwp
+
+    def test_the_labelled_text_export_is_admitted_on_the_definition_path_with_full_proof(self) -> None:
+        for level in (1, 2):
+            with self.subTest(level=level):
+                hwp = self.labelled_export(self.doc())
+                self.assertTrue(self.apply(hwp, level)['changed'])
+
+    def test_text_loss_on_the_definition_path_stays_unknown(self) -> None:
+        hwp = self.labelled_export(self.doc())
+        execute = hwp.HAction.Execute
+
+        def losing(name, hset):
+            result = execute(name, hset)
+            if name == 'OutlineNumber':
+                hwp.paragraphs[0]['text'] = 'Tit'
+            return result
+
+        hwp.HAction.Execute = losing
+        with self.assertRaises(nn.NativeNumberingMutationError):
+            self.apply(hwp, 1)
+
+    def test_without_protection_the_text_export_stays_strict(self) -> None:
+        hwp = self.labelled_export(self.doc())
+        with self.assertRaises((nn.NativeNumberingMutationError, nn.NativeNumberingRefusal)):
+            nn.apply_official_numbering_at_match(hwp, find='Item', level=1)
+
     def test_any_other_paragraph_change_during_the_definition_stays_unknown(self) -> None:
         for assigned in ((1, 2), (2, 0), (3, 0)):
             with self.subTest(assigned=assigned), self.assertRaises(nn.NativeNumberingMutationError):
