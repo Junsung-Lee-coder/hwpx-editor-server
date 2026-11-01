@@ -264,6 +264,13 @@ def _lists_digest(root: ET.Element, names: set[str]) -> str | None:
     return _digest_tokens([_element_digest(element) for element in found])
 
 
+def _run_is_empty(run: ET.Element) -> bool:
+    """No text and at most empty CHAR children; native Undo leaves one such run, with no element and nothing to show (observed on Hancom 2024)."""
+    return not (run.text or '').strip() and all(
+        _name(child) == 'char' and len(child) == 0 and not child.text and not (child.tail or '').strip() for child in run
+    )
+
+
 class _Resolver:
     """Digests elements with every definition reference replaced by the referenced definition's content."""
 
@@ -379,7 +386,7 @@ class _Resolver:
             return None
         if strip_restart and not is_root and _is_bare_page_restart(element):
             return None
-        if drop_empty_runs and not is_root and name == 'text' and len(element) == 0 and not (element.text or '').strip():
+        if drop_empty_runs and not is_root and name == 'text' and _run_is_empty(element):
             return None
         if prune and name == 'p' and not is_root:
             return ['<p/>']

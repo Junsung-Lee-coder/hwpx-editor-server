@@ -308,6 +308,32 @@ class WholeParagraphText(unittest.TestCase):
         self.assertEqual(row['status'], 'match')
 
 
+class EmptyRunAfterUndo(unittest.TestCase):
+    """Captured natively: Undo of a removal leaves an empty run in the next paragraph, which holds a table and shows nothing new."""
+
+    OWNER = '표포함센티널-자기 글자'
+
+    def paragraph(self, text):
+        return next(item for item in census.parse_hwpml2x_census(text)['paragraphs'] if item['text'] == self.OWNER)
+
+    def test_it_is_not_a_content_change(self):
+        before, after = capture('tabbed-before-remove-undo'), capture('tabbed-after-remove-undo')
+        self.assertNotEqual(self.paragraph(before)['sha256'], self.paragraph(after)['sha256'])
+        self.assertEqual(self.paragraph(before)['content_sha256'], self.paragraph(after)['content_sha256'])
+
+    def test_a_run_with_text_after_it_is_still_a_change(self):
+        before, after = capture('tabbed-before-remove-undo'), capture('tabbed-after-remove-undo')
+        self.assertIn('<TEXT CharShape="0"><CHAR/></TEXT>', after)
+        changed = after.replace('<TEXT CharShape="0"><CHAR/></TEXT>', '<TEXT CharShape="0"><CHAR>x</CHAR></TEXT>', 1)
+        self.assertNotEqual(self.paragraph(before)['content_sha256'], census.parse_hwpml2x_census(changed)['paragraphs'][9]['content_sha256'])
+
+    def test_an_inline_element_in_the_run_is_still_a_change(self):
+        before, after = capture('tabbed-before-remove-undo'), capture('tabbed-after-remove-undo')
+        changed = after.replace('<TEXT CharShape="0"><CHAR/></TEXT>', '<TEXT CharShape="0"><CHAR><TAB/></CHAR></TEXT>', 1)
+        parsed = census.parse_hwpml2x_census(changed)
+        self.assertNotEqual(self.paragraph(before)['content_sha256'], next(item for item in parsed['paragraphs'] if item['text'].startswith(self.OWNER))['content_sha256'])
+
+
 class PackageMemoryLimit(unittest.TestCase):
     """N8: the section text kept in memory has one limit for the whole package, not one per member."""
 
