@@ -1618,6 +1618,7 @@ def _apply_official_numbering(
 
     actions: list[str] = []
     defined = False
+    defined_assigned_outline = False
     status = 'level_changed' if heading == _HEADING_OUTLINE else 'applied'
     format_status = 'verified_existing'
     if not format_matches:
@@ -1634,6 +1635,12 @@ def _apply_official_numbering(
             raise NativeNumberingMutationError(
                 f'paragraph state could not be verified after the outline definition: exception of class {_exception_class_label(exc)}; nothing was rolled back', fixed_reason=reason
             ) from exc
+        # Native OutlineNumber also makes a plain caret paragraph an outline paragraph at the first level (observed on
+        # Hancom 2024); that exact transition is its own effect, and any other change stays an unknown outcome.
+        defined_assigned_outline = heading == _HEADING_NONE and redefined_heading == _HEADING_OUTLINE and redefined_level == 0
+        if defined_assigned_outline:
+            heading, level = redefined_heading, redefined_level
+            status = 'format_defined' if level == native_level else status
         if redefined_heading != heading or redefined_level != level:
             reason = _fixed_reason(
                 lambda: _official_reason(
@@ -1723,7 +1730,7 @@ def _apply_official_numbering(
                 target_index=target_index,
                 native_level=native_level,
                 define=not format_matches,
-                target_written=paragraph_written,
+                target_written=paragraph_written or defined_assigned_outline,
             )
             problems.extend(delta)
             if delta:

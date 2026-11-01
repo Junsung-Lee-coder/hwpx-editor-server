@@ -10,6 +10,9 @@ import unittest
 from app import native_numbering as nn
 from app.local_cli_bundle_controls import LocalCliBundleControlsMixin
 from app.local_cli_runtime import LocalCliRuntimeError
+from app.native_numbering_census import live_protection_reader
+from tests.native_numbering_fakes import FakeCtrl, shape_items
+from tests.test_native_numbering_census import _HwpmlHwp
 
 
 class ObservedNoSelection(unittest.TestCase):
@@ -80,6 +83,48 @@ class ObservedPageProperty(unittest.TestCase):
 
         with self.assertRaises(RuntimeError):
             self.evidence(Raising())
+
+
+class ObservedOutlineDefinitionAssignsTheParagraph(unittest.TestCase):
+    """Hancom 2024: OutlineNumber on a plain caret paragraph also gives it HeadingType=1/Level=0."""
+
+    def doc(self, assigned=(1, 0)):
+        hwp = _HwpmlHwp(
+            paragraphs=[{'text': 'Title', 'heading_type': 0, 'level': 0}, {'text': 'Item', 'heading_type': 0, 'level': 0}],
+            controls=[FakeCtrl('secd')],
+        )
+        hwp.outline_shape.update(shape_items((('^1.', 0), ('^2:', 8), ('^3)', 0), ('^4)', 8))))
+        execute = hwp.HAction.Execute
+
+        def native_execute(name, hset):
+            result = execute(name, hset)
+            if name == 'OutlineNumber':
+                hwp.current_paragraph().update(heading_type=assigned[0], level=assigned[1])
+            return result
+
+        hwp.HAction.Execute = native_execute
+        return hwp
+
+    def apply(self, hwp, level):
+        return nn.apply_official_numbering_at_match(hwp, find='Item', level=level, protection=live_protection_reader(hwp))
+
+    def test_first_level_is_reached_by_the_definition_alone(self) -> None:
+        hwp = self.doc()
+        result = self.apply(hwp, 1)
+        self.assertEqual(result['status'], 'format_defined')
+        self.assertEqual(len(result['native_actions']), 1)
+        self.assertEqual((hwp.paragraphs[1]['heading_type'], hwp.paragraphs[1]['level']), (1, 0))
+
+    def test_a_deeper_level_is_one_definition_plus_one_paragraph_write(self) -> None:
+        hwp = self.doc()
+        result = self.apply(hwp, 3)
+        self.assertEqual(len(result['native_actions']), 2)
+        self.assertEqual((hwp.paragraphs[1]['heading_type'], hwp.paragraphs[1]['level']), (1, 2))
+
+    def test_any_other_paragraph_change_during_the_definition_stays_unknown(self) -> None:
+        for assigned in ((1, 2), (2, 0), (3, 0)):
+            with self.subTest(assigned=assigned), self.assertRaises(nn.NativeNumberingMutationError):
+                self.apply(self.doc(assigned), 1)
 
 
 if __name__ == '__main__':

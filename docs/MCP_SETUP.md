@@ -71,7 +71,7 @@ $mcpProcess = Start-Process -FilePath '.mcp-venv\Scripts\python.exe' -ArgumentLi
 
 - 같은 수준 이어 쓰기와 삽입: `{"op": "paragraph_insert_exact", "match": "기준 문단의 고유한 문구", "expected_page": 1, "text": "새 문단", "position": "after", "confirm_layout": true}`. `position`은 `after`(기본) 또는 `before`이며 새 문단은 기준 문단의 번호 수준을 물려받습니다. 첫 본문 문단 앞, 쪽·단 나눔으로 시작하는 문단 앞, 같은 글이 이미 있는 경우는 변경 전에 거부합니다.
 - 삭제: `{"op": "paragraph_remove_exact", "match": "지울 문단의 고유한 문구", "expected_page": 1, "confirm_remove": true}`. 그림·표 같은 개체가 들어 있는 문단, 표 셀 안 문단, 구역의 마지막 문단, 쪽·단 나눔이 걸린 문단 또는 그 바로 앞 문단은 변경 전에 거부하며 `refusal_code`로 이유를 알려 줍니다.
-- 되돌리기와 다시 실행: `{"op": "undo"}`, `{"op": "redo"}`. 위 편집과 쪽 번호, 번호 지정은 각각 Undo 한 번으로 되돌아갑니다. 개요 번호 정의까지 함께 바꾼 번호 지정은 Undo 한 번으로 되돌릴 수 없으므로 거부합니다.
+- 되돌리기와 다시 실행: `{"op": "undo"}`, `{"op": "redo"}`. 위 편집과 쪽 번호, 번호 지정은 각각 Undo 한 번으로 되돌아갑니다. 개요 번호 정의를 바꾼 뒤 수준까지 따로 지정한 경우(네이티브 동작 두 번)는 Undo 한 번으로 되돌릴 수 없으므로 거부합니다.
 
 
 관리 세션 판정에는 `metadata.local_cli_v1.opened_via == "local_cli_v1"`가 반드시 필요합니다. `bridge`나 `closed_via` 표시는 열기 출처를 대신하지 않는 추가 수명주기 정보이므로, 해당 표시만 있는 세션은 명령을 받을 수 없습니다. `state`가 `closed` 또는 `closed_cleanup_pending`인 세션은 상태 조회만 허용되며 새 명령·저장·증명·닫기 요청은 `SESSION_CLOSED`로 거부됩니다.
