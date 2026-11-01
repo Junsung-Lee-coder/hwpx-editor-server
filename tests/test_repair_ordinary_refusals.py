@@ -22,7 +22,6 @@ NUMBERING = {'op': 'official_numbering_apply', 'label': 'x', 'match': 'Item', 'e
 PAGE = {'op': 'page_number_apply', 'label': 'x', 'position': 'bottom-center', 'start_number': 1, 'side_char': 'none', 'confirm_layout': True}
 REMOVE = {'op': 'paragraph_remove_exact', 'label': 'x', 'match': 'Item', 'expected_page': 1, 'expected_text': 'Item', 'confirm_remove': True}
 INSERT = {'op': 'paragraph_insert_exact', 'label': 'x', 'match': 'Item', 'expected_page': 1, 'text': 'New', 'position': 'after', 'confirm_layout': True}
-MUTATORS = {'Execute', 'Run', 'select_text'}
 SYNTHETIC = 'synthetic SDK fault'
 
 
@@ -58,7 +57,7 @@ class Base(unittest.TestCase):
         self.assertEqual(owned.cleanup_events(), [])
 
 
-def fail_after(hwp, name, skip=0, record=True):
+def fail_after(hwp, name, skip=0):
     """A named SDK getter raises from its (skip+1)th call on, and marks that moment in the call log."""
     real = getattr(hwp, name)
     mark, seen = [], [0]
@@ -66,9 +65,8 @@ def fail_after(hwp, name, skip=0, record=True):
     def read(*args, **kwargs):
         seen[0] += 1
         if seen[0] > skip:
-            if record:
-                hwp.calls.append((f'failed_{name}',))
-                mark[:] = [len(hwp.calls)]
+            hwp.calls.append((f'failed_{name}',))
+            mark[:] = [len(hwp.calls)]
             raise OSError(SYNTHETIC)
         return real(*args, **kwargs)
 
