@@ -2677,10 +2677,17 @@ class LocalCliLiveSession:
                     # bundles, export and selection/movement helpers) enter
                     # here. Unknown callers fail conservatively. Only audited
                     # read commands avoid current intent; earlier intent stays.
-                    if command.name not in {'health_probe', 'find', 'info', 'where', 'screenshot', 'command-bundle'}:
+                    if command.name not in {'health_probe', 'find', 'info', 'where', 'screenshot', 'command-bundle', 'numbering-readback'}:
+                        clean_export = command.name == 'export' and not self._normal_close_requires_save and handle.hwp.IsModified is False
                         self._mark_mutating_intent()
+                    else:
+                        clean_export = False
                     command.result = command.handler(handle)
                     handle.diagnostic_site = 'handler_returned'
+                    if clean_export and handle.hwp.IsModified is False:
+                        # Exact-clean before and after with no earlier debt: a PDF export adds no preservation debt.
+                        # Earlier debt is never discharged here; only a proved ordinary Save does that.
+                        self._normal_close_requires_save = False
                     self._apply_normalized_outcome(command, command.result)
                     if command.name in _MUTATING_COMMANDS - {'command-bundle'} and command.semantic_ok is not True and not command.custody_held:
                         # A failed mutator's false per-step flags do not prove

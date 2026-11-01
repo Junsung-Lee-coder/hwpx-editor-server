@@ -85,9 +85,11 @@ def rendered_page_numbers(readback: dict[str, Any], page_texts: list[str]) -> di
     dash = control.get('side_char') == 45
     pages = []
     for index, text in enumerate(page_texts):
-        shown = f'-{start + index}-' if dash else str(start + index)
-        lines = [_compact(line) for line in text.splitlines() if line.strip()]
-        pages.append({'page': index + 1, 'expected': shown, 'found': shown in lines})
+        number = start + index
+        shown = f'- {number} -' if dash else str(number)
+        # A footer can share the printed line, so the number is matched as its own token.
+        pattern = rf'(?:^|\s)-\s*{number}\s*-(?:\s|$)' if dash else rf'(?:^|\s){number}(?:\s|$)'
+        pages.append({'page': index + 1, 'expected': shown, 'found': any(re.search(pattern, line) for line in text.splitlines())})
     return {'present': True, 'position': _POSITIONS.get(control.get('draw_pos')), 'start_number': start, 'side_char': 'dash' if dash else 'none',
             'pages': pages, 'all_found': all(page['found'] for page in pages)}
 
@@ -157,10 +159,10 @@ def _outline_shape_count(archive: zipfile.ZipFile) -> int | None:
 
 
 def compare_packages(source: dict[str, Any], saved: dict[str, Any]) -> dict[str, Any]:
-    names = sorted(set(source['bindata']) | set(saved['bindata']))
     return {
-        'bindata_identical': source['bindata'] == saved['bindata'],
-        'bindata_files': len(names),
+        # Hancom may rename a member on save (image1.png to image1.PNG); the payload is what must survive.
+        'bindata_identical': sorted(source['bindata'].values()) == sorted(saved['bindata'].values()),
+        'bindata_files': len(saved['bindata']),
         **{key: {'source': source[key], 'saved': saved[key]} for key in ('tables', 'pictures', 'headers', 'footers', 'page_number_controls')},
     }
 
@@ -208,7 +210,7 @@ def to_markdown(review: dict[str, Any]) -> str:
         out += [f"## 바뀐 내용 ({comparison['baseline']} 대비)", '']
         names = {'added': '추가', 'removed': '삭제', 'number_changed': '번호 변경', 'format_changed': '서식 변경'}
         for change in comparison['changes']:
-            arrow = f" ({change.get('before')} → {change.get('after')})" if change['kind'] == 'number_changed' else (f" ({change['after']})" if change.get('after') else (f" ({change['before']})" if change.get('before') else ''))
+            arrow = f" ({change.get('before') or '번호 없음'} → {change.get('after') or '번호 없음'})" if change['kind'] == 'number_changed' else (f" ({change['after']})" if change.get('after') else (f" ({change['before']})" if change.get('before') else ''))
             out.append(f"- {names[change['kind']]}: {change['text'][:60]}{arrow}")
         if not comparison['changes']:
             out.append('- 바뀐 문단 없음')
