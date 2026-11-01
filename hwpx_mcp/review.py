@@ -228,12 +228,16 @@ def _numbering_kind(item: dict[str, Any]) -> str | None:
     return {'NUMBER': f'자동 번호 {level + 1}수준', 'BULLET': '글머리표', 'OUTLINE': f'개요 번호 {level + 1}수준'}.get(heading)
 
 
-def list_numbering(paragraphs: list[dict[str, Any]] | None) -> dict[str, Any]:
-    """Numbered paragraphs whose printed label is not read: this review counts them and never calls them verified."""
-    items = paragraphs or []
-    counts = {'number': sum(item['heading'] == 'NUMBER' for item in items), 'bullet': sum(item['heading'] == 'BULLET' for item in items),
-              'nested_outline': sum(item['heading'] == 'OUTLINE' and not item.get('in_body') for item in items)}
-    return {'state': 'unverified' if any(counts.values()) else 'none', **counts}
+def list_numbering(paragraphs: list[dict[str, Any]] | None, *, truncated: bool = False) -> dict[str, Any]:
+    """Numbered paragraphs whose printed label is not read: this review counts them and never calls them verified.
+
+    'none' describes a whole document that was read. Unread structure has no counts; a truncated list counts only what it read.
+    """
+    if paragraphs is None:
+        return {'state': 'unverified', 'number': None, 'bullet': None, 'nested_outline': None}
+    counts = {'number': sum(item['heading'] == 'NUMBER' for item in paragraphs), 'bullet': sum(item['heading'] == 'BULLET' for item in paragraphs),
+              'nested_outline': sum(item['heading'] == 'OUTLINE' and not item.get('in_body') for item in paragraphs)}
+    return {'state': 'partial' if truncated else 'unverified' if any(counts.values()) else 'none', **counts}
 
 
 def _unread_list_paragraphs(paragraphs: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
@@ -241,11 +245,13 @@ def _unread_list_paragraphs(paragraphs: list[dict[str, Any]] | None) -> list[dic
 
 
 def _list_numbering_text(coverage: dict[str, Any]) -> str | None:
-    """One clause naming each kind, or None when the document has none."""
-    if coverage.get('state') != 'unverified':
+    """One clause naming each kind found, or None when none was found."""
+    if coverage.get('state') not in {'unverified', 'partial'}:
         return None
     parts = [f'{label} {coverage[key]}개' for key, label in (('number', '자동 번호'), ('bullet', '글머리표'), ('nested_outline', '표 셀 안 개요 번호')) if coverage[key]]
-    return ', '.join(parts)
+    if not parts:
+        return None
+    return ('읽은 문단 중 ' if coverage['state'] == 'partial' else '') + ', '.join(parts)
 
 
 def package_inventory(path: Path) -> dict[str, Any]:
@@ -357,7 +363,7 @@ def summarize(review: dict[str, Any]) -> str:
         all_seen_match = review['numbering_all_match'] is True
     structure_read = (review.get('coverage') or {}).get('paragraphs', {}).get('state') != 'unverified'
     lists = (review.get('coverage') or {}).get('list_numbering') or {}
-    first = (f"{review['page_count']}쪽, {'개요 ' if lists.get('state') == 'unverified' else ''}번호 문단 {len(rows)}개" if structure_read
+    first = (f"{review['page_count']}쪽, {'개요 ' if _list_numbering_text(lists) else ''}번호 문단 {len(rows)}개" if structure_read
              else f"{review['page_count']}쪽, 번호 문단은 확인하지 못함")
     if all_seen_match:
         first += ' — 렌더링된 번호가 모두 기대와 일치합니다.'
@@ -438,7 +444,7 @@ def assemble(*, session_id: str, review_id: str, readback: dict[str, Any], pdf: 
         paragraph_coverage = {'state': 'partial' if truncated else 'complete', 'reviewed': len(paragraphs), 'total': paragraph_total if paragraph_total is not None else len(paragraphs)}
     page_coverage = {'state': 'unverified' if not pages else ('complete' if pages_complete else 'partial'), 'rendered': len(pages), 'total': native_pages}
     text_coverage = {'state': 'complete' if readable else 'unverified'}
-    unread_lists = list_numbering(paragraphs)
+    unread_lists = list_numbering(paragraphs, truncated=truncated)
     current['coverage'] = {'paragraphs': paragraph_coverage, 'pages': page_coverage, 'text': text_coverage, 'controls': 'unverified' if controls is None else 'complete', 'list_numbering': unread_lists}
     current['comparison'] = compare(baseline, current, current['numbering']) if baseline else None
     statuses = [row['status'] for row in current['numbering']]

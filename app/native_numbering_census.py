@@ -271,6 +271,11 @@ def _run_is_empty(run: ET.Element) -> bool:
     )
 
 
+def _has_other_content(paragraph: ET.Element) -> bool:
+    """An empty run is noise only beside something else; alone it is what holds an empty paragraph's character shape."""
+    return any(_name(child) != 'text' or not _run_is_empty(child) for child in paragraph)
+
+
 class _Resolver:
     """Digests elements with every definition reference replaced by the referenced definition's content."""
 
@@ -610,7 +615,7 @@ def parse_hwpml2x_census(text: Any) -> dict[str, Any]:
             masked = resolver.digest(element, prune=True, root_paragraph=True, mask_shape=True)
             stripped = resolver.digest(element, prune=True, root_paragraph=True, strip=True)
             restart_stripped = resolver.digest(element, prune=True, root_paragraph=True, strip=True, strip_restart=True)
-            content = resolver.digest(element, prune=True, root_paragraph=True, mask_shape=True, strip=True, strip_restart=True, drop_empty_runs=True)
+            content = resolver.digest(element, prune=True, root_paragraph=True, mask_shape=True, strip=True, strip_restart=True, drop_empty_runs=_has_other_content(element))
         except _Unresolved:
             paragraphs = None
             break

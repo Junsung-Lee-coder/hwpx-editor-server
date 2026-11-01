@@ -148,12 +148,15 @@ class LocalCliUndoRefused(LocalCliRuntimeError):
         self.code = code
 
 
+_HELD_LABEL = 'native_custody_held'
 _HISTORY_REFUSALS = {
     'no_undo_available': 'this session has no edit to undo; no native undo was called.',
     'no_redo_available': 'there is no undone edit to reapply; no native redo was called.',
     'undo_not_counted': 'the last edit cannot be undone as one counted step; no undo was performed.',
     'undo_not_applied': 'Hancom reported nothing to undo and the document is unchanged.',
     'redo_not_applied': 'Hancom reported nothing to redo and the document is unchanged.',
+    'undo_evidence_unavailable': 'this document cannot be compared before and after, so no native undo was called and it is unchanged.',
+    'redo_evidence_unavailable': 'this document cannot be compared before and after, so no native redo was called and it is unchanged.',
 }
 # The edit commands outside command bundles; each is one tracked edit whose native count the command itself records.
 _DIRECT_EDIT_COMMANDS = frozenset({
@@ -4041,7 +4044,7 @@ class LocalCliService(
                 except Exception as save_error:
                     exc.reporting_errors.append(save_error)
                 raise LocalCliServiceError(
-                    'Local CLI native command left the live session held: its outcome is unknown. '
+                    f'{_HELD_LABEL}: Local CLI native command left the live session held: its outcome is unknown. '
                     'The session is retained and is not closed, retried or '
                     'released by this service.',
                     status_code=500,
@@ -7517,6 +7520,9 @@ class LocalCliService(
         hwp = handle.hwp
         protection = self._numbering_protection_reader(handle)
         before = native_paragraph_edit.history_evidence(hwp, protection)
+        if before is None:
+            # Returned facts about this document, read before any native history call.
+            return {'not_applied': True, 'evidence_unavailable': True}
         run = getattr(getattr(hwp, 'HAction', None), 'Run', None)
         call = (lambda: run(name)) if callable(run) else getattr(hwp, name, None)
         if not callable(call):
@@ -7526,7 +7532,7 @@ class LocalCliService(
             if raw is True:
                 continue
             after = native_paragraph_edit.history_evidence(hwp, protection) if raw is False and step == 0 else None
-            if before is not None and after is not None and not native_paragraph_edit.history_confirmation(before, after)['document_changed']:
+            if after is not None and not native_paragraph_edit.history_confirmation(before, after)['document_changed']:
                 # Observed: native False with nothing to undo changes nothing. The comparison proves it for this call.
                 return {'not_applied': True}
             raise LocalCliRuntimeError(f'Native {name} did not return True; its outcome is unknown.')
@@ -7611,6 +7617,8 @@ class LocalCliService(
 
         result = self._execute_live(binding=binding, command_name='undo', task_label='local_cli.undo',
                                     handler=lambda handle: self._run_history_action(handle, 'Undo', undo_count))
+        if result.get('evidence_unavailable') is True:
+            raise LocalCliUndoRefused('undo refused: the document cannot be compared before and after.', code='undo_evidence_unavailable')
         if result.get('not_applied') is True:
             raise LocalCliUndoRefused('undo refused: Hancom had nothing to undo.', code='undo_not_applied')
         snapshot = result.get('snapshot') if isinstance(result.get('snapshot'), dict) else {}
@@ -7639,6 +7647,8 @@ class LocalCliService(
         redo_count = tracked[-1] if tracked is not None and type(tracked[-1]) is int else 1
         result = self._execute_live(binding=binding, command_name='redo', task_label='local_cli.redo',
                                     handler=lambda handle: self._run_history_action(handle, 'Redo', redo_count))
+        if result.get('evidence_unavailable') is True:
+            raise LocalCliUndoRefused('redo refused: the document cannot be compared before and after.', code='redo_evidence_unavailable')
         if result.get('not_applied') is True:
             raise LocalCliUndoRefused('redo refused: Hancom had nothing to redo.', code='redo_not_applied')
         snapshot = result.get('snapshot') if isinstance(result.get('snapshot'), dict) else {}
@@ -7750,6 +7760,22 @@ class LocalCliService(
                 except Exception:
                     pass
                 raise LocalCliServiceError('Native close completed; reporting or managed cleanup is pending. Files are retained; native teardown must not be replayed.', status_code=500) from exc
+            holds = getattr(self.runtime_manager, 'native_custody_held', None)
+            if callable(holds) and holds(resolved_session_id) is True:
+                # The owning runtime's flag, not this exception's text. Earlier debt in the binding is left as it is.
+                try:
+                    current_sequence = self._parse_binding_generation(binding.get('native_command_sequence', 0))
+                    binding['_expected_native_command_sequence'] = current_sequence
+                    binding['native_command_sequence'] = max(current_sequence, int(self.runtime_manager.latest_command_sequence(resolved_session_id)))
+                    binding['native_custody_held'] = True
+                    self._save_binding(binding)
+                except Exception:
+                    pass
+                raise LocalCliServiceError(
+                    f'{_HELD_LABEL}: The live local CLI session holds a native command whose outcome is unknown; '
+                    'it is retained and is not closed, discarded or released by this runtime.',
+                    status_code=409,
+                ) from exc
             raise LocalCliServiceError('Local CLI full native close is unavailable or incomplete; session custody and managed files are retained.', status_code=500) from exc
 
         if binding.get('session_root_path'):

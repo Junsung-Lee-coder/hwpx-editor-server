@@ -16,6 +16,7 @@ from typing import Any, Callable, Mapping
 
 from app.native_numbering_census import CensusTextUnusable, _digest_tokens
 from app.native_numbering import (
+    ControlEnumerationLimit,
     ControlEnumerationUnproven,
     NativeNumberingInputError,
     NativeNumberingMutationError,
@@ -360,16 +361,20 @@ _HISTORY_CHANGE_LIMIT = 50
 
 
 def history_evidence(hwp: Any, protection: Callable[[], Any]) -> dict[str, Any] | None:
-    """What Undo/Redo is compared with. None means this document cannot be used as evidence; the call may still run."""
+    """What Undo/Redo is compared with. None means this document cannot be used as evidence, which no read exception can mean."""
     try:
         census = _validated_census(protection())
     except CensusTextUnusable:
         return None
     if census['paragraphs'] is None:
         return None
+    try:
+        controls = [name for _control, name in _control_ids(hwp)]
+    except ControlEnumerationLimit:
+        return None
     return {
         'paragraphs': [{key: item[key] for key in ('text', 'heading', 'level', 'content_sha256')} for item in census['paragraphs']],
-        'controls': [name for _control, name in _control_ids(hwp)],
+        'controls': controls,
         'digests': {name: census[name] for name in ('header_footer', 'styles_sha256', 'numberings_sha256', 'media_sha256', 'page_restarts')},
     }
 

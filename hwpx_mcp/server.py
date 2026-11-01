@@ -123,7 +123,7 @@ def rejection_summary(value: dict[str, Any]) -> dict[str, Any]:
         'reason': failed.get('refusal_code') or diagnostic.get('numbering_reason') or (coded.group(1) if coded else detail),
         'message': detail if coded else None,
         'stopped_before_edit': failed.get('mutation_may_have_persisted') is False if failed else None,
-        'session_held': value.get('native_custody_held') is True or (detail is not None and 'left the live session held' in detail),
+        'session_held': value.get('native_custody_held') is True or (coded is not None and coded.group(1) == 'native_custody_held'),
     }
     return {key: item for key, item in summary.items() if item is not None}
 
@@ -474,6 +474,7 @@ class Facade:
     async def close_guard(self, http, sid):
         """Close deletes the managed working copy, so its content must already exist outside it, verified, or close is refused."""
         live = await self.request(http, 'GET', '/local-cli/status')
+        held = live.get('session_id') == sid and live.get('native_custody_held') is True
         if live.get('session_id') == sid and live.get('working_copy_dirty') is True:
             return self.read_json(self.session_dir(sid) / 'latest-saved.json')  # The backend refuses this close with its save reason.
         record = self.read_json(self.session_dir(sid) / 'latest-saved.json')
@@ -504,8 +505,9 @@ class Facade:
         finally:
             discard(partial)
         raise BackendFailure('SAVED_OUTPUT_NOT_RETRIEVED',
-                             'The saved document could not be copied out, so the session was not closed and nothing was deleted. Call hwpx_save or hwpx_close again.',
-                             {'session_held': False, 'saved_output': failure})
+                             'The saved document could not be copied out, so the session was not closed and nothing was deleted. '
+                             + ('The session is held, so it stays retained.' if held else 'Call hwpx_save or hwpx_close again.'),
+                             {'session_held': held, 'saved_output': failure})
 
     @staticmethod
     def read_json(path):

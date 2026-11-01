@@ -1407,61 +1407,61 @@ def _census_hits(paragraphs: list[dict[str, Any]] | None, find: str | None, matc
 def _prove_outline_scope(census: dict[str, Any] | None, target_find: str | None, match_case: bool = True,
                          on_semantic_refusal: Callable[[], None] | None = None) -> None:
     """Refuse (before mutation) unless redefining the caret section's outline cannot touch another outline paragraph."""
+
+    def refused(message: str, code: str) -> NativeNumberingRefusal:
+        """Judged only from the validated census with no SDK call; a caller still owes restoration before calling it clean."""
+        if on_semantic_refusal is not None:
+            on_semantic_refusal()
+        return NativeNumberingRefusal(message, code=code)
+
     paragraphs = census['paragraphs'] if census is not None else None
     if paragraphs is None or not target_find:
-        raise NativeNumberingRefusal(
+        raise refused(
             'the section outline definition differs from the official 1. 가. 1) 가) levels and the paragraphs using outline '
             'numbering in this section cannot be inspected, so redefining it is refused',
-            code='outline_usage_unprovable',
+            'outline_usage_unprovable',
         )
     hits = _census_hits(paragraphs, target_find, match_case)
     if len(hits) != 1:
-        raise NativeNumberingRefusal(
-            f'the target paragraph is not uniquely identifiable in the document census ({len(hits)} candidates)',
-            code='outline_usage_unprovable',
-        )
+        raise refused(f'the target paragraph is not uniquely identifiable in the document census ({len(hits)} candidates)', 'outline_usage_unprovable')
     target = paragraphs[hits[0]]
     others = [item for item in paragraphs if item is not target and item['section'] == target['section'] and item['heading'] == 'OUTLINE']
     if others:
-        if on_semantic_refusal is not None:
-            on_semantic_refusal()  # Pure validated census; no SDK before the following refusal.
-        raise NativeNumberingRefusal(
+        raise refused(
             f'the section already uses a different outline definition for {len(others)} other outline paragraph(s); '
             'redefining it would change their numbers, so it is refused',
-            code='foreign_outline_definition',
+            'foreign_outline_definition',
         )
     shared = [item for item in paragraphs if item is not target and item.get('shares_outline_numbering') is True]
     if shared:
-        if on_semantic_refusal is not None:
-            on_semantic_refusal()  # Pure validated census; no SDK before the following refusal.
-        raise NativeNumberingRefusal(
+        raise refused(
             f'{len(shared)} numbered paragraph(s) use the numbering definition that the section outline uses; '
             'redefining the outline would change their numbers, so it is refused',
-            code='foreign_outline_definition',
+            'foreign_outline_definition',
         )
     unknown = [
         item for item in paragraphs
         if item is not target and item['heading'] == 'NUMBER' and item.get('shares_outline_numbering') is not False
     ]
     if unknown:
-        raise NativeNumberingRefusal(
+        raise refused(
             f'{len(unknown)} numbered paragraph(s) have no readable numbering reference, so it cannot be shown that they '
             'do not use the section outline definition; redefining it is refused',
-            code='outline_usage_unprovable',
+            'outline_usage_unprovable',
         )
     elsewhere = [item for item in paragraphs if item['section'] != target['section'] and item['heading'] == 'OUTLINE']
     if elsewhere:
-        raise NativeNumberingRefusal(
+        raise refused(
             f'{len(elsewhere)} outline paragraph(s) lie in another section, and nothing shows that they use a different '
             'outline definition than the target section; redefining it is refused',
-            code='outline_usage_unprovable',
+            'outline_usage_unprovable',
         )
     shapes = [shape for shape in census.get('outline_shapes') or () if shape != 'none']
     if len(shapes) != len(set(shapes)):
-        raise NativeNumberingRefusal(
+        raise refused(
             'more than one section references the same outline definition, so redefining it would change another section; '
             'it is refused',
-            code='outline_usage_unprovable',
+            'outline_usage_unprovable',
         )
 
 
@@ -1866,6 +1866,9 @@ def _locate_unique_body_paragraph(hwp: Any, find: str, *, match_case: bool,
             found.append(key)
         _require_motion_result(advance())
     else:
+        if len(found) > 1:
+            # Exact positions in more than one paragraph already answer the question; one paragraph may be a stuck search.
+            raise semantic(f'target text {find!r} appears in more than one paragraph; refusing to guess which one to number', 'target_ambiguous')
         raise NativeNumberingRefusal('text search did not terminate', code='target_unlocatable')
 
     if not found:

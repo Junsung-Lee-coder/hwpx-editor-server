@@ -2970,6 +2970,15 @@ class LocalCliRuntimeManager:
             raise LocalCliRuntimeError('Live CLI reconciliation acknowledgement is unavailable: session is unknown.')
         return acknowledge_command_journal(root, command_id)
 
+    def native_custody_held(self, session_id: str) -> bool:
+        """The owning session's own in-memory flag; no SDK read."""
+        with self._lock:
+            session = self._sessions.get(session_id)
+        if session is None:
+            return False
+        with session._state_lock:
+            return session._native_custody_held is True
+
     def latest_command_sequence(self, session_id: str, *, session_root: Path | None = None) -> int:
         with self._lock:
             session = self._sessions.get(session_id)
