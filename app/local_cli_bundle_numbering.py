@@ -294,7 +294,7 @@ class LocalCliBundleNumberingMixin:
             'mutation': name,
             'target': result['target'],
             'requested': result['requested'],
-            'result': {key: result[key] for key in ('changed', 'status', 'before', 'after', 'number_marks', 'native_actions')},
+            'result': {key: result[key] for key in ('changed', 'status', 'before', 'after', 'number_marks', 'joined_controls', 'native_actions')},
             'undo': {'native_editing_actions': len(result['native_actions']), 'pre_state_sha256': result['pre_state_sha256'], 'post_state_sha256': result['post_state_sha256']},
             'warnings': [_RENDER_PROOF_WARNING],
         }

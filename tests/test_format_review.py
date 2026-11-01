@@ -5,6 +5,7 @@ import io
 from pathlib import Path
 import tempfile
 import unittest
+import unittest.mock
 import zipfile
 
 from hwpx_mcp import review as rules
@@ -311,18 +312,216 @@ class NumberMarkReview(unittest.TestCase):
 
     def test_a_paragraph_that_just_got_its_number_has_no_old_mark_to_compare(self) -> None:
         review = assembled([para('문단')], [numbered('문단', mark={}, index=0)])
-        self.assertEqual(review['coverage']['number_mark'], {'state': 'compared', 'numbered': 1, 'compared': 0, 'changed': 0, 'not_compared': 0, 'new': 1})
-        self.assertNotIn('번호 모양은 비교하지 않았습니다', review['summary_text'])
+        self.assertEqual(review['coverage']['number_mark'], {'state': 'new_only', 'numbered': 1, 'compared': 0, 'changed': 0, 'not_compared': 0, 'new': 1})
+        self.assertEqual(review['review_status'], 'partial')
+        self.assertIn('번호 모양: 새 번호 문단 1개는 이전 모양이 없어 비교하지 못했습니다', review['summary_text'])
+        self.assertIn('새 번호 문단 1개의 번호 모양은 이전 값이 없어 비교하지 못했습니다', review['summary_text'].splitlines()[0])
+        self.assertNotIn('비교해', review['summary_text'])
+        markdown = rules.to_markdown(review)
+        self.assertIn('- 판정: 새 번호라 이전 모양이 없어 비교하지 못함', markdown)
+        self.assertIn('- 번호 문단 1개 중 비교 0개, 바뀜 0개, 새 번호 1개, 비교 못함 0개', markdown)
+        self.assertNotIn('비교했고', markdown)
+        self.assertNotIn('서식 값으로 비교한 결과', markdown)
+        self.assertIn('번호 글자·종류·수준 확인과는 별개', markdown)
+
+    def test_only_new_marks_cannot_leave_an_otherwise_whole_review_complete(self) -> None:
+        current = {**numbered('문단', mark={}, index=0), 'heading': 'OUTLINE', 'text': '문단'}
+        readback = {'available': True, 'paragraphs': [current], 'paragraph_total': 1, 'evidence': side([])['evidence'], 'controls': {}, 'page_count': 1, 'page_numbers': [], 'document_is_modified': True, 'source_filename': 'doc.hwpx'}
+        review = rules.assemble(session_id='s', review_id='s/review-2', readback=readback, pdf=None, pages=[{'page': 1, 'path': 'p.png', 'sha256': 'x', 'width': 1, 'height': 1}], texts=['1. 문단'],
+                                baseline=side([para('문단')]), saved_output=None, render_error=None)
+        self.assertEqual(review['numbering'][0]['status'], 'match', 'the label is verified on its own')
+        self.assertEqual(review['coverage']['number_mark']['state'], 'new_only')
+        self.assertEqual(review['review_status'], 'partial')
+        self.assertNotIn('전체 확인 완료', review['summary_text'])
+        self.assertIn('렌더링된 번호가 모두 기대와 일치합니다', review['summary_text'], 'a verified label stays reported apart')
+        keeps = next(line for line in review['summary_text'].splitlines() if line.startswith('보존 확인'))
+        self.assertIn('번호 모양', keeps, 'the preservation line says the marks are not part of it')
+
+    def test_new_and_existing_marks_together_are_mixed_and_partial(self) -> None:
+        review = assembled([numbered('첫째', mark={}, index=0), para('둘째', index=1)], [numbered('첫째', mark={}, index=0), numbered('둘째', mark={}, index=1)])
+        self.assertEqual(review['coverage']['number_mark'], {'state': 'mixed', 'numbered': 2, 'compared': 1, 'changed': 0, 'not_compared': 0, 'new': 1})
+        self.assertEqual(review['review_status'], 'partial')
+        self.assertIn('번호 모양: 번호 문단 1개를 비교해 바뀌지 않았습니다. 새 번호 문단 1개는 이전 모양이 없어 비교하지 못했습니다', review['summary_text'])
+        markdown = rules.to_markdown(review)
+        self.assertIn('- 판정: 일부만 비교함, 새 번호는 이전 모양이 없음', markdown)
+        self.assertIn('비교 1개, 바뀜 0개, 새 번호 1개, 비교 못함 0개', markdown)
+
+    def test_new_marks_next_to_a_changed_one_keep_both_counts(self) -> None:
+        review = assembled([numbered('첫째', mark={}, index=0), para('둘째', index=1)], [numbered('첫째', mark={'bold': True}, index=0), numbered('둘째', mark={}, index=1)])
+        self.assertEqual(review['coverage']['number_mark'], {'state': 'mixed', 'numbered': 2, 'compared': 1, 'changed': 1, 'not_compared': 0, 'new': 1})
+        self.assertIn('번호 문단 1개를 비교해 1개가 바뀌었습니다. 새 번호 문단 1개는', review['summary_text'])
+        self.assertIn('번호 모양 변경: [0] 첫째', review['summary_text'])
 
     def test_an_added_numbered_paragraph_has_none_either(self) -> None:
         review = assembled([numbered('첫째', mark={}, index=0)], [numbered('첫째', mark={}, index=0), numbered('새 문단', mark={}, index=1)])
+        self.assertEqual(review['coverage']['number_mark']['state'], 'mixed')
         self.assertEqual(review['coverage']['number_mark']['new'], 1)
         self.assertEqual(review['coverage']['number_mark']['not_compared'], 0)
+
+    def test_a_definition_that_cannot_be_read_is_missing_not_new(self) -> None:
+        unknown = numbered('둘째', mark={'source': 'unknown'}, index=1)
+        review = assembled([numbered('첫째', mark={}, index=0), unknown], [numbered('첫째', mark={}, index=0), unknown])
+        self.assertEqual(review['coverage']['number_mark'], {'state': 'not_compared', 'numbered': 2, 'compared': 1, 'changed': 0, 'not_compared': 1, 'new': 0})
+        self.assertEqual(review['review_status'], 'partial')
+        self.assertIn('번호 모양: 번호 문단 2개 중 1개를 비교하지 못했습니다', review['summary_text'])
+        self.assertIn('번호 문단 1개의 번호 모양을 비교하지 못했습니다', review['summary_text'].splitlines()[0])
+        self.assertIn('- 판정: 일부 또는 전체를 비교하지 못함', rules.to_markdown(review))
+
+    def test_genuinely_compared_marks_can_still_be_complete(self) -> None:
+        row = {**numbered('문단', mark={}, index=0), 'heading': 'OUTLINE'}
+        readback = {'available': True, 'paragraphs': [row], 'paragraph_total': 1, 'evidence': side([])['evidence'], 'controls': {}, 'page_count': 1, 'page_numbers': [], 'document_is_modified': True, 'source_filename': 'doc.hwpx'}
+        baseline = side([row])
+        baseline['numbering'] = [{'text': '문단', 'rendered_label': '1.', 'status': 'match'}]
+        review = rules.assemble(session_id='s', review_id='s/review-2', readback=readback, pdf=None, pages=[{'page': 1, 'path': 'p.png', 'sha256': 'x', 'width': 1, 'height': 1}], texts=['1. 문단'],
+                                baseline=baseline, saved_output=None, render_error=None)
+        self.assertEqual(review['coverage']['number_mark']['state'], 'compared')
+        self.assertEqual(review['review_status'], 'complete')
+        self.assertIn('번호 모양: 번호 문단 1개를 비교해 바뀌지 않았습니다', review['summary_text'])
+        self.assertIn('- 판정: 비교했고 바뀌지 않음', rules.to_markdown(review))
 
     def test_no_numbered_paragraph_has_nothing_to_compare(self) -> None:
         review = assembled([para('문단')], [para('문단')])
         self.assertEqual(review['coverage']['number_mark']['state'], 'none')
         self.assertEqual(review['review_status'], 'complete')
+
+
+class TruthfulNames(unittest.TestCase):
+    def test_top_and_bottom_underlines_are_both_known_values(self) -> None:
+        top, bottom = {'underline': True, 'underline_type': 'top'}, {'underline': True}
+        for old, new, word_old, word_new in ((top, bottom, '위쪽', '아래쪽'), (bottom, top, '아래쪽', '위쪽')):
+            with self.subTest(old=word_old):
+                review = assembled([para('문단', [run('문단', **old)], index=2)], [para('문단', [run('문단', **new)], sha='x', index=2)])
+                change = review['comparison']['changes'][0]
+                self.assertEqual(change['ranges'][0]['changes'], {'underline_type': {'before': {'위쪽': 'top', '아래쪽': 'bottom'}[word_old], 'after': {'위쪽': 'top', '아래쪽': 'bottom'}[word_new]}})
+                self.assertIn(f'| [2] 문단 | 문단 | 밑줄 위치 | {word_old} | {word_new} |', rules.to_markdown(review))
+                self.assertNotIn('확인 못함', '\n'.join(line for line in rules.to_markdown(review).splitlines() if '밑줄 위치' in line))
+                self.assertEqual(review['coverage']['format']['state'], 'complete')
+
+    def test_turning_a_bottom_underline_on_is_one_row(self) -> None:
+        review = assembled([para('문단', index=0)], [para('문단', [run('문단', underline=True)], sha='x', index=0)])
+        self.assertEqual(review['comparison']['changes'][0]['ranges'][0]['changes'], {'underline': {'before': False, 'after': True}})
+
+    def test_turning_a_top_underline_on_names_the_position(self) -> None:
+        review = assembled([para('문단', index=0)], [para('문단', [run('문단', underline=True, underline_type='top')], sha='x', index=0)])
+        changes = review['comparison']['changes'][0]['ranges'][0]['changes']
+        self.assertEqual(changes['underline_type'], {'before': 'none', 'after': 'top'})
+        self.assertIn('| 밑줄 위치 | 없음 | 위쪽 |', rules.to_markdown(review))
+
+    def test_a_position_change_with_an_unmeasured_shape_change_stays_partial(self) -> None:
+        old, new = run('문단', underline=True, underline_type='top', underline_style='a'), run('문단', underline=True, underline_style='b')
+        review = assembled([para('문단', [old], index=0)], [para('문단', [new], sha='x', index=0)])
+        self.assertTrue(review['comparison']['changes'][0]['other_properties'])
+        self.assertEqual(review['coverage']['format']['state'], 'partial')
+
+    def facts(self, text, *, heading='NONE', rest='same', index=0, sha=None, ref=None, **shape):
+        row = para(text, sha=sha, index=index, **shape)
+        row['heading'] = heading
+        row['numbering_ref_sha256'] = ref
+        row['format']['paragraph_rest'] = rest
+        row['format']['paragraph_heading'] = heading
+        row['format']['objects_sha256'] = 'objects'
+        return row
+
+    def test_a_number_change_alone_leaves_no_unexplained_format_row(self) -> None:
+        review = assembled([self.facts('문단')], [self.facts('문단', heading='NUMBER', sha='x', ref='r')])
+        kinds = [item['kind'] for item in review['comparison']['changes']]
+        self.assertEqual(kinds, ['number_changed'])
+        self.assertEqual(review['coverage']['format']['state'], 'complete')
+        self.assertNotIn('다른 서식', review['summary_text'])
+        self.assertNotIn('이름 없는', rules.to_markdown(review))
+
+    def test_a_number_change_with_a_named_change_is_explained(self) -> None:
+        review = assembled([self.facts('문단')], [self.facts('문단', heading='NUMBER', sha='x', ref='r', align='center')])
+        change = next(item for item in review['comparison']['changes'] if item['kind'] == 'format_changed')
+        self.assertEqual(list(change['paragraph']), ['align'])
+        self.assertNotIn('other_properties', change)
+        self.assertEqual(review['coverage']['format']['state'], 'complete')
+
+    def test_a_number_and_named_and_unexplained_change_together_stay_partial(self) -> None:
+        review = assembled([self.facts('문단')], [self.facts('문단', heading='NUMBER', sha='x', ref='r', rest='other', align='center')])
+        change = next(item for item in review['comparison']['changes'] if item['kind'] == 'format_changed')
+        self.assertEqual(list(change['paragraph']), ['align'])
+        self.assertTrue(change['other_properties'])
+        self.assertEqual(review['coverage']['format']['state'], 'partial')
+        self.assertEqual(review['review_status'], 'partial')
+
+    def test_a_heading_difference_no_row_reports_stays_unexplained(self) -> None:
+        old, new = self.facts('문단', heading='NUMBER', ref='r'), self.facts('문단', heading='NUMBER', sha='x', ref='r')
+        new['format']['paragraph_heading'] = 'other'
+        review = assembled([old], [new])
+        self.assertEqual([item['kind'] for item in review['comparison']['changes']], ['format_changed'])
+        self.assertTrue(review['comparison']['changes'][0]['other_properties'])
+
+    def test_a_changed_definition_is_not_explained_by_a_number_row(self) -> None:
+        old, new = self.facts('문단', heading='NUMBER', ref='r'), self.facts('문단', heading='NUMBER', sha='x', ref='s')
+        new['format']['paragraph_heading'] = 'other'
+        review = assembled([old], [new])
+        self.assertEqual({item['kind'] for item in review['comparison']['changes']}, {'number_changed', 'format_changed'})
+        change = next(item for item in review['comparison']['changes'] if item['kind'] == 'format_changed')
+        self.assertTrue(change['other_properties'])
+        self.assertEqual(review['coverage']['format']['state'], 'partial')
+
+    def test_a_paragraph_without_object_facts_is_not_called_blank(self) -> None:
+        old, new = para('', index=4), para('', sha='x', index=4)
+        del old['format'], new['format']
+        review = assembled([old], [new])
+        self.assertEqual(review['coverage']['format']['state'], 'unverified')
+        markdown = rules.to_markdown(review)
+        self.assertIn('[4] (글 없음, 내용 확인 못함)', markdown)
+        self.assertNotIn('(빈 문단)', markdown)
+        self.assertNotIn('(표만', markdown)
+
+    def test_facts_without_an_object_list_are_not_called_blank(self) -> None:
+        old, new = para('', [], index=4, align='left'), para('', [], sha='x', index=4, align='right')
+        review = assembled([old], [new])
+        self.assertIn('[4] (글 없음, 내용 확인 못함)', rules.to_markdown(review))
+
+    def test_a_known_blank_and_a_known_table_paragraph_keep_their_names(self) -> None:
+        for objects, word in (([], '(빈 문단)'), (['table'], '(표만 있는 문단)'), (['picture'], '(그림만 있는 문단)')):
+            with self.subTest(word=word):
+                old, new = para('', [], index=4, align='left'), para('', [], sha='x', index=4, align='right')
+                old['format']['objects'] = new['format']['objects'] = objects
+                review = assembled([old], [new])
+                self.assertIn(f'[4] {word}', rules.to_markdown(review))
+
+    def test_a_range_beyond_the_shown_text_is_named_by_its_length(self) -> None:
+        old = run('가' * 200, length=260)
+        changed = [run('가' * 200, length=240), {**run('', length=20), 'bold': True}]
+        review = assembled([para('가' * 200, [old], index=1)], [para('가' * 200, changed, sha='x', index=1)])
+        rows = review['comparison']['changes'][0]['ranges']
+        self.assertEqual(rows[0]['text'], '')
+        self.assertEqual(rows[0]['length'], 20)
+        markdown = rules.to_markdown(review)
+        self.assertIn('(앞부분 밖 글자 20개)', markdown)
+        self.assertNotIn('|  | 굵게', markdown)
+        self.assertIn('(앞부분 밖 글자 20개)', review['summary_text'])
+
+    def test_a_range_of_spaces_and_a_cut_range_say_so(self) -> None:
+        review = assembled([para('가 나', [run('가 나')], index=1)], [para('가 나', [run('가'), run(' ', bold=True), run('나')], sha='x', index=1)])
+        self.assertIn('(공백 1개)', rules.to_markdown(review))
+        long_text = '가' * 90
+        review = assembled([para(long_text, [run(long_text)], index=1)], [para(long_text, [run(long_text, bold=True)], sha='y', index=1)])
+        self.assertIn('가' * 60 + '…', rules.to_markdown(review))
+        self.assertIn('가' * 30 + '…"', review['summary_text'])
+
+    def test_a_cut_paragraph_name_in_a_number_row_says_so(self) -> None:
+        text = '가' * 90
+        review = assembled([para(text, index=1)], [numbered(text, mark={}, index=1, sha='x')])
+        self.assertIn('가' * 60 + '…', rules.to_markdown(review))
+
+    def test_more_saved_differences_than_the_table_shows_are_counted(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / 'x.hwpx'
+            path.write_bytes(b'x')
+            rows = [{'text': f'문단{n}', 'format': {'runs': [run(f'문단{n}', bold=True)], 'paragraph': PARAGRAPH, 'mark': None}} for n in range(205)]
+            live = [para(f'문단{n}', index=n) for n in range(205)]
+            with unittest.mock.patch.object(rules, 'package_format', return_value=rows):
+                result = rules.persisted_format(path, live)
+        self.assertEqual(result['mismatch_total'], 205)
+        self.assertEqual(len(result['mismatches']), 200)
+        review = assembled([para('문단')], [para('문단')], persisted_format=result)
+        self.assertIn('다른 곳이 205건', review['summary_text'])
+        self.assertIn('앞 200건만 보여 줍니다', rules.to_markdown(review))
 
 
 NUMBERED_HEADER = HEADER.replace('</hh:paraProperties>', '<hh:paraPr id="2"><hh:align horizontal="JUSTIFY"/><hh:heading type="NUMBER" idRef="1" level="0"/><hp:switch><hp:case hp:required-namespace="x"><hh:margin><hc:intent value="0" unit="HWPUNIT"/><hc:left value="0" unit="HWPUNIT"/><hc:right value="0" unit="HWPUNIT"/></hh:margin><hh:lineSpacing type="PERCENT" value="160" unit="HWPUNIT"/></hp:case></hp:switch></hh:paraPr></hh:paraProperties><hh:numberings><hh:numbering id="1"><hh:paraHead level="1" charPrIDRef="4294967295"/></hh:numbering></hh:numberings>')

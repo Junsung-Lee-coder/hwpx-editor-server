@@ -83,8 +83,14 @@ _CHARACTER_FIELDS = ('font_family', 'size_pt', 'bold', 'italic', 'underline', 't
 _MARK_KINDS = {'number': 'number', 'bullet': 'bullet', 'outline': 'outline'}
 _UNDERLINE_NATIVE = {'none': 0, 'bottom': 1, 'top': 3}
 _UNSET_CHAR_SHAPE = '4294967295'
-# The controls of a section's first paragraph, which a reader never sees as objects in its text.
-_SECTION_CONTROLS = frozenset({'secdef', 'coldef', 'header', 'footer'})
+# Measured on Hancom 13.0.0.3457. These print nothing where they stand and live in the text run beside them: a block starting at a
+# paragraph's first text takes those before it into its run, and a block ending right before them takes those too. Their data and the
+# printed page number stay as they were.
+_JOINING_CONTROLS = frozenset({'secdef', 'coldef', 'header', 'footer', 'pagenum', 'newnum', 'bookmark', 'pagehiding', 'hiddencomment', 'indexmark'})
+_JOINING_AFTER_TEXT = _JOINING_CONTROLS - {'secdef', 'coldef'}
+# Measured the same way: these keep their own shape beside a block in every position.
+_OWN_SHAPE_CONTROLS = frozenset({'picture', 'table', 'rectangle', 'equation', 'footnote', 'endnote', 'autonum', 'fieldbegin', 'fieldend'})
+_PRINTS_NOTHING = _JOINING_CONTROLS | {'fieldbegin', 'fieldend'}
 _PARAGRAPH_FIELDS = ('align', 'left_indent_pt', 'right_indent_pt', 'first_line_indent_pt', 'line_spacing_type', 'line_spacing_value')
 _TARGET_FIELDS = ('match', 'through_match', 'paragraph_index', 'expected_text', 'expected_page')
 
@@ -331,6 +337,14 @@ def _object_digest(element: ET.Element, resolver: _Resolver) -> str | None:
         return None
 
 
+def _control_atom(element: ET.Element, width: int | None, shape: dict[str, Any], resolver: _Resolver) -> dict[str, Any]:
+    atom = {'control': _name(element), 'width': width, 'shape': shape, 'digest': _object_digest(element, resolver)}
+    if atom['digest'] == '':
+        # A page number or bare restart is no object, but its own values are still its data.
+        atom['data'] = _short_digest([[_name(item), sorted(item.attrib.items())] for item in element.iter()])
+    return atom
+
+
 def _atoms(paragraph: ET.Element, chars: Mapping[str, dict[str, Any]], resolver: _Resolver) -> list[dict[str, Any]]:
     """Everything in a paragraph in native order: one item per character or control, with its width and character shape."""
     atoms: list[dict[str, Any]] = []
@@ -347,7 +361,7 @@ def _atoms(paragraph: ET.Element, chars: Mapping[str, dict[str, Any]], resolver:
 
         for child in run:
             if _name(child) != 'char':
-                atoms.append({'control': _name(child), 'width': _CONTROL_WIDTH, 'shape': shape, 'digest': _object_digest(child, resolver)})
+                atoms.append(_control_atom(child, _CONTROL_WIDTH, shape, resolver))
                 add(child.tail)
                 continue
             add(child.text)
@@ -356,7 +370,7 @@ def _atoms(paragraph: ET.Element, chars: Mapping[str, dict[str, Any]], resolver:
                 if name in _INLINE_CHARACTERS:
                     atoms.append({'char': _INLINE_CHARACTERS[name], 'width': _CONTROL_WIDTH if name == 'tab' else 1, 'shape': shape})
                 else:
-                    atoms.append({'control': name, 'width': None, 'shape': shape, 'digest': _object_digest(inner, resolver)})
+                    atoms.append(_control_atom(inner, None, shape, resolver))
                 add(inner.tail)
             add(child.tail)
     return atoms
@@ -533,10 +547,18 @@ def _underline_style(props: Mapping[str, Any]) -> dict[str, str]:
     return {'underline_style': _short_digest({key: value for key, value in props['underline'].items() if key != 'type'})}
 
 
+_HEADING_ATTRS = frozenset({'headingtype', 'level', 'heading'})
+
+
+def _para_heading(props: Mapping[str, Any]) -> str:
+    """A paragraph shape's numbering values, which a review can explain by the number change it reports."""
+    return _short_digest({key: value for key, value in props['attrs'].items() if key in _HEADING_ATTRS})
+
+
 def _para_remainder(props: Mapping[str, Any]) -> str:
-    """Everything in a paragraph shape that public_paragraph does not name, by content."""
+    """Everything in a paragraph shape that public_paragraph and _para_heading do not name, by content."""
     children = {name: {key: value for key, value in facts.items() if name != 'paramargin' or key not in {'left', 'right', 'indent', 'linespacing', 'linespacingtype'}} for name, facts in props['children'].items()}
-    return _short_digest({'attrs': {key: value for key, value in props['attrs'].items() if key != 'align'}, 'children': children})
+    return _short_digest({'attrs': {key: value for key, value in props['attrs'].items() if key != 'align' and key not in _HEADING_ATTRS}, 'children': children})
 
 
 def _objects(atoms: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -575,7 +597,8 @@ def readback_format(paragraph: Mapping[str, Any]) -> dict[str, Any]:
         'runs_truncated': len(runs) > _READBACK_RUNS,
         'paragraph': public_paragraph(paragraph['shape']),
         'paragraph_rest': _para_remainder(paragraph['shape']),
-        'objects': [atom['control'] for atom in objects if atom['control'] not in _SECTION_CONTROLS],
+        'paragraph_heading': _para_heading(paragraph['shape']),
+        'objects': [atom['control'] for atom in objects if atom['control'] not in _JOINING_CONTROLS],
         'objects_sha256': _short_digest([atom['digest'] for atom in objects]),
     }
     mark = public_mark(paragraph)
@@ -697,8 +720,55 @@ def _require_no_control_inside(rows: list[dict[str, Any]]) -> None:
         atoms = row['paragraph']['atoms']
         low = 0 if position else row['first'] or 0
         high = len(atoms) if position < len(rows) - 1 else row['last'] or 0
-        if any('char' not in atom for atom in atoms[low:high]):
+        crossed = [atom['control'] for atom in atoms[low:high] if 'char' not in atom]
+        if crossed and _PRINTS_NOTHING.issuperset(crossed):
+            raise NativeNumberingRefusal('the range would cross an invisible control in the text, such as a bookmark, page number or section setting; end it before the control or start after it', code='target_crosses_invisible_control')
+        if crossed:
             raise NativeNumberingRefusal('the range would cross a table, picture or other object in the text', code='target_crosses_control')
+
+
+def _joined(atoms: list[dict[str, Any]], low: int, high: int) -> tuple[int, int]:
+    """How many controls before and after the atoms low..high Hancom takes into a block over them."""
+    if high <= low:
+        return 0, 0
+    lead = low if all(atom.get('control') in _JOINING_CONTROLS for atom in atoms[:low]) else 0
+    trail = 0
+    while high + trail < len(atoms) and atoms[high + trail].get('control') in _JOINING_AFTER_TEXT:
+        trail += 1
+    return lead, trail
+
+
+def _joined_controls(rows: list[dict[str, Any]]) -> list[str]:
+    names: list[str] = []
+    for row in rows:
+        atoms, low, high = row['paragraph']['atoms'], row['first'] or 0, row['last'] or 0
+        lead, trail = _joined(atoms, low, high)
+        names += [atom['control'] for atom in (*atoms[:lead], *atoms[high:high + trail])]
+    return names
+
+
+def _require_measured_neighbours(rows: list[dict[str, Any]]) -> None:
+    """Whether a control touching the range joins its run decides the proof afterwards, so one never measured stops the edit before it starts."""
+    atoms, low = rows[0]['paragraph']['atoms'], rows[0]['first'] or 0
+    start = low
+    while start and 'control' in atoms[start - 1]:
+        start -= 1
+    unmeasured = {atom['control'] for atom in atoms[start:low]} - _JOINING_CONTROLS - _OWN_SHAPE_CONTROLS
+    atoms, high = rows[-1]['paragraph']['atoms'], rows[-1]['last'] or 0
+    stop = high
+    while stop < len(atoms) and 'control' in atoms[stop]:
+        stop += 1
+    unmeasured |= {atom['control'] for atom in atoms[high:stop]} - _JOINING_AFTER_TEXT - _OWN_SHAPE_CONTROLS
+    if unmeasured:
+        raise NativeNumberingRefusal(f"the range touches a control whose effect on the text beside it has not been measured ({', '.join(sorted(unmeasured))[:120]}); leave at least one character between it and the range", code='target_beside_unmeasured_control')
+
+
+def _refuse_range_controls(atoms: list[dict[str, Any]]) -> None:
+    names = [atom['control'] for atom in atoms if 'char' not in atom]
+    if names and _PRINTS_NOTHING.issuperset(names):
+        raise NativeNumberingRefusal('a range of paragraphs with an invisible control, such as a bookmark, page number or section setting, anywhere but before the first text of its first paragraph is refused; format the paragraphs one at a time', code='target_has_invisible_controls')
+    if names:
+        raise NativeNumberingRefusal('a range of paragraphs holding a table, picture or other object is refused', code='target_has_controls')
 
 
 def _native_list(hwp: Any, rows: list[dict[str, Any]]) -> tuple[int, int]:
@@ -746,12 +816,10 @@ def _paragraph_block(rows: list[dict[str, Any]], list_id: int, para: int, model:
     if len(rows) > 1:
         first_atoms = rows[0]['paragraph']['atoms']
         lead = next((number for number, atom in enumerate(first_atoms) if 'char' in atom), len(first_atoms))
-        # A section's own controls come before the selected text and stay out of the block; anything a reader sees is refused.
-        if lead == len(first_atoms) and lead or any(atom['control'] not in _SECTION_CONTROLS for atom in first_atoms[:lead]) or any('char' not in atom for atom in first_atoms[lead:]):
-            raise NativeNumberingRefusal('a range of paragraphs holding a table, picture or other object is refused', code='target_has_controls')
+        # The measured invisible controls come before the selected text and stay out of the block; anything else is refused.
+        _refuse_range_controls(first_atoms if lead == len(first_atoms) or not _JOINING_CONTROLS.issuperset(atom['control'] for atom in first_atoms[:lead]) else first_atoms[lead:])
         for row in rows[1:]:
-            if any('char' not in atom for atom in row['paragraph']['atoms']):
-                raise NativeNumberingRefusal('a range of paragraphs holding a table, picture or other object is refused', code='target_has_controls')
+            _refuse_range_controls(row['paragraph']['atoms'])
         end = _end_position(rows[-1]['paragraph'])
         return (list_id, para, _position_of(rows[0]['paragraph'], lead), list_id, para + len(rows) - 1, end), [row['paragraph']['text'] for row in rows]
     paragraph = rows[0]['paragraph']
@@ -890,7 +958,8 @@ def _already_paragraph(rows: list[dict[str, Any]], wanted: Mapping[str, Any]) ->
 
 def _reaches_end(row: Mapping[str, Any], *, last: bool) -> bool:
     """Whether the block runs through this paragraph's last run; only then does the paragraph end take the new values."""
-    return not last or (bool(row['paragraph']['atoms']) and row['last'] == len(row['paragraph']['atoms']))
+    atoms = row['paragraph']['atoms']
+    return not last or (bool(atoms) and (row['last'] or 0) + _joined(atoms, row['first'] or 0, row['last'] or 0)[1] == len(atoms))
 
 
 def _inherits_mark(paragraph: Mapping[str, Any]) -> bool:
@@ -934,7 +1003,7 @@ def _mark_restore(rows: list[dict[str, Any]], wanted: Mapping[str, Any], policy:
         return None
     plans = [plan for plan in plans if plan['items']]
     if len(rows) > 1 and plans:
-        raise NativeNumberingRefusal('this range would change the number mark of a paragraph it runs through; format the paragraphs one at a time or give number_mark=follow', code='target_changes_number_mark')
+        raise NativeNumberingRefusal("a range of several paragraphs that reaches a numbered paragraph's end, the last paragraph's end included, would change that number mark; end the range earlier, format the paragraphs one at a time or give number_mark=follow", code='target_changes_number_mark')
     return plans[0] if plans else None
 
 
@@ -995,6 +1064,11 @@ def _mark_problems(rows: list[dict[str, Any]], after: list[dict[str, Any]], want
     return problems
 
 
+def _same_atom(one: Mapping[str, Any], two: Mapping[str, Any]) -> bool:
+    """The same character, or the same control with the same data; its character shape is compared by the caller."""
+    return all(one.get(key) == two.get(key) for key in ('char', 'control', 'digest', 'data'))
+
+
 def _character_problems(before: Mapping[str, Any], after: Mapping[str, Any], rows: list[dict[str, Any]], wanted: Mapping[str, Any], policy: str = 'preserve') -> list[str]:
     problems = _document_problems(before, after, rows, allowed_lists={'charshapelist', 'facenamelist'})
     old, new = before['model']['paragraphs'], after['model']['paragraphs']
@@ -1009,13 +1083,12 @@ def _character_problems(before: Mapping[str, Any], after: Mapping[str, Any], row
             problems.append(f"paragraph {left['index']} changed its content")
             continue
         low, high = spans.get(left['index'], (0, 0))
-        # A block starting at a section's first text takes the section's leading controls into its run (measured); they show nothing.
-        lead = low if high > low and low and all(atom.get('control') in _SECTION_CONTROLS for atom in left['atoms'][:low]) else 0
+        lead, trail = _joined(left['atoms'], low, high)
         for number, (one, two) in enumerate(zip(left['atoms'], right['atoms'])):
-            if one.get('char') != two.get('char') or one.get('control') != two.get('control'):
+            if not _same_atom(one, two):
                 problems.append(f"paragraph {left['index']} changed its content")
                 break
-            inside = low <= number < high or number < lead
+            inside = low <= number < high + trail or number < lead
             expected = _char_after(one['shape'], wanted) if inside else one['shape']
             if not _same_character(two['shape'], expected, wanted if inside else {}):
                 problems.append(f"paragraph {left['index']} has a character format other than requested")
@@ -1036,7 +1109,7 @@ def _paragraph_problems(before: Mapping[str, Any], after: Mapping[str, Any], row
         if right['shape'] != expected:
             problems.append(f"paragraph {left['index']} has a paragraph format other than requested")
         if len(left['atoms']) != len(right['atoms']) or any(
-                one.get('char') != two.get('char') or one.get('control') != two.get('control') or one['shape'] != two['shape'] for one, two in zip(left['atoms'], right['atoms'])):
+                not _same_atom(one, two) or one['shape'] != two['shape'] for one, two in zip(left['atoms'], right['atoms'])):
             problems.append(f"paragraph {left['index']} changed its characters")
     return problems
 
@@ -1103,6 +1176,8 @@ def apply_format(
             if 'font_family' in wanted:
                 _require_font(wanted['font_family'], before['model'])
             already = _already_character(rows, wanted)
+            if not already:
+                _require_measured_neighbours(rows)
             restoring = None if already else _mark_restore(rows, wanted, policy)
         else:
             already = _already_paragraph(rows, wanted)
@@ -1122,7 +1197,7 @@ def apply_format(
             _set_pos(hwp, (list_id, para, block[2]))
             _require_page(page_of(), request['expected_page'])
             return {'changed': False, 'status': 'already_set', 'target': target, 'requested': dict(wanted), 'before': report(rows, before['model']), 'after': report(rows, before['model']),
-                    'number_marks': marks(before['model']), 'native_actions': [], 'pre_state_sha256': None, 'post_state_sha256': None}
+                    'number_marks': marks(before['model']), 'joined_controls': [], 'native_actions': [], 'pre_state_sha256': None, 'post_state_sha256': None}
         _select(hwp, block, words, page_of, request['expected_page'])
         creator = _native_method(hwp, 'CreateAction')
         action = creator(action_name)
@@ -1156,7 +1231,7 @@ def apply_format(
         if _get_selection(hwp) != ():
             raise NativeNumberingMutationError('the selection did not end after the formatting; nothing was rolled back')
         return {'changed': True, 'status': 'formatted', 'target': target, 'requested': dict(wanted), 'before': report(rows, before['model']), 'after': report(rows, after['model']),
-                'number_marks': marks(after['model'], restoring is not None), 'native_actions': native_actions, 'pre_state_sha256': _state_sha(before), 'post_state_sha256': _state_sha(after)}
+                'number_marks': marks(after['model'], restoring is not None), 'joined_controls': _joined_controls(rows) if character else [], 'native_actions': native_actions, 'pre_state_sha256': _state_sha(before), 'post_state_sha256': _state_sha(after)}
 
     try:
         return body()

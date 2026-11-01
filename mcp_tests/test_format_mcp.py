@@ -16,6 +16,7 @@ CHARACTER = {'op': 'character_format_exact', 'match': '표적', 'expected_page':
 PARAGRAPH = {'op': 'paragraph_format_exact', 'paragraph_index': 2, 'expected_text': '', 'expected_page': 1, 'align': 'center', 'left_indent_pt': 10.0, 'right_indent_pt': 5.0, 'first_line_indent_pt': -2.5,
              'line_spacing_type': 'percent', 'line_spacing_value': 180, 'confirm_layout': True}
 FORMAT = {'runs': [], 'runs_truncated': False, 'paragraph': {'align': 'justify', 'left_indent_pt': 0.0, 'right_indent_pt': 0.0, 'first_line_indent_pt': 0.0, 'line_spacing_type': 'percent', 'line_spacing_value': 160}}
+MARK = {'font_family': '바탕', 'size_pt': 10.0, 'bold': False, 'italic': False, 'underline': False, 'text_color': '#000000'}
 
 
 def run(text, **changes):
@@ -90,6 +91,32 @@ class FormattingReview(Base):
         self.assertIn('Beta', result.content[0].text)
         markdown = Path(value['summary_path']).read_text(encoding='utf-8')
         self.assertIn('| [0] Alpha Beta | Beta | 글자색 | #000000 | #C00000 |', markdown)
+
+
+    async def test_a_number_added_after_the_first_review_is_told_as_new_in_the_reply_and_the_file(self):
+        Backend.printed = [['Alpha'], ['second page']]
+        Backend.readback_paragraphs = [{**paragraph('Alpha', 'NONE'), 'index': 0, 'context': 'body', 'format': {**FORMAT, 'runs': [run('Alpha')]}}]
+        first = await self.call('hwpx_proof', {'session_id': SID, 'request': {'kind': 'review', 'inline_images': 0}})
+        self.assertFalse(first.is_error, first.structured_content)
+        Backend.printed = [['1. Alpha'], ['second page']]
+        Backend.readback_paragraphs = [{**paragraph('Alpha', 'OUTLINE'), 'index': 0, 'context': 'body', 'content_sha256': 'numbered',
+                                        'format': {**FORMAT, 'runs': [run('Alpha')], 'mark': {'kind': 'outline', 'source': 'paragraph_end', **MARK}}}]
+        result = await self.call('hwpx_proof', {'session_id': SID, 'request': {'kind': 'review', 'inline_images': 0}})
+        value = result.structured_content['result']
+        self.assertEqual(value['coverage']['number_mark'], {'state': 'new_only', 'numbered': 1, 'compared': 0, 'changed': 0, 'not_compared': 0, 'new': 1})
+        self.assertEqual(value['review_status'], 'partial')
+        self.assertIn('새 번호 문단 1개', result.content[0].text)
+        self.assertNotIn('비교해', result.content[0].text)
+        markdown = Path(value['summary_path']).read_text(encoding='utf-8')
+        self.assertIn('새 번호 1개', markdown)
+        self.assertNotIn('비교했고', markdown)
+
+    def test_a_refusal_gives_its_reason_in_the_first_fields_a_caller_reads(self):
+        from hwpx_mcp.server import rejection_summary
+        summary = rejection_summary({'ok': False, 'steps': [{'ok': False, 'refusal_code': 'target_changes_number_mark', 'refusal_message': "a range reaching a numbered paragraph's end", 'mutation_may_have_persisted': False}]})
+        self.assertEqual(summary['reason'], 'target_changes_number_mark')
+        self.assertEqual(summary['message'], "a range reaching a numbered paragraph's end")
+        self.assertIs(summary['stopped_before_edit'], True)
 
 
 if __name__ == '__main__':

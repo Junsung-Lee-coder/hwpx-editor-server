@@ -8,7 +8,9 @@ into the previous caret edit of the same paragraph in the Undo history; a blank 
 its own start to the next paragraph's start, which leaves that next paragraph alone; Undo gives the selection back and Redo
 leaves a caret. Hancom drops definitions nothing uses. The paragraph's last text run decides its printed number mark: a block
 reaching the paragraph end also changes a trailing empty run, and a sparse CharShape on the bare caret at the paragraph end
-writes that run without touching text, as its own Undo step. Not Hancom evidence.
+writes that run without touching text, as its own Undo step. A block starting at a paragraph's first text takes the invisible
+controls before it into its run and one ending right before invisible controls takes those too; objects, fields and notes keep their
+own shape. Not Hancom evidence.
 """
 from __future__ import annotations
 
@@ -74,6 +76,41 @@ def table(*cells: dict[str, Any]) -> dict[str, Any]:
 def textbox(*inner: dict[str, Any]) -> dict[str, Any]:
     """A drawn rectangle holding its own text: a nested list that is not a table cell."""
     return {'ctrl': 'gso', 'drawtext': list(inner)}
+
+
+def control(xml: str, ctrl: str = 'ctrl', *, joins: bool = False, **fields: Any) -> dict[str, Any]:
+    """A control by its HWPML element; joins=True is a control Hancom was measured to take into a block touching it."""
+    return {'ctrl': ctrl, 'xml': xml, **({'joins': True} if joins else {}), **fields}
+
+
+def page_number(**fields: Any) -> dict[str, Any]:
+    return control('<PAGENUM FormatType="Digit" Pos="BottomCenter" SideChar="-"/>', 'pgnp', joins=True, **fields)
+
+
+def new_number(**fields: Any) -> dict[str, Any]:
+    return control('<NEWNUM Number="3" NumberType="Page"/>', 'nwno', joins=True, **fields)
+
+
+def bookmark(name: str = '책갈피', **fields: Any) -> dict[str, Any]:
+    return control(f'<BOOKMARK Name="{name}"/>', 'bokm', joins=True, **fields)
+
+
+def page_hiding(**fields: Any) -> dict[str, Any]:
+    return control('<PAGEHIDING/>', 'pghd', joins=True, **fields)
+
+
+def index_mark(**fields: Any) -> dict[str, Any]:
+    return control('<INDEXMARK/>', 'idxm', joins=True, **fields)
+
+
+def footnote_like(**fields: Any) -> dict[str, Any]:
+    """A field's end: a control measured to keep its own shape beside a block."""
+    return control('<FIELDEND/>', 'fend', **fields)
+
+
+def unmeasured(**fields: Any) -> dict[str, Any]:
+    """An element no native measurement covers."""
+    return control('<ELLIPSE Ratio="0"/>', 'gso', **fields)
 
 
 def captioned_picture(*inner: dict[str, Any]) -> dict[str, Any]:
@@ -438,10 +475,18 @@ class FormatHwp:
             old_end = para.get('end')
             for atom in atoms:
                 atom['cs'] = self._char_with(atom['cs'], items)
-            # A block starting right after a section's leading controls takes them into the same run (measured).
-            lead = [atom for atom in para['atoms'] if atom.get('raw')]
-            if lead and atoms and para['atoms'][len(lead)] is atoms[0]:
-                for atom in lead:
+            # A block starting at the first text takes the invisible controls before it into its run, and those right after its end (measured).
+            if atoms:
+                joins = lambda atom: atom.get('raw') or atom.get('joins')  # noqa: E731
+                every = para['atoms']
+                low = next(index for index, atom in enumerate(every) if atom is atoms[0])
+                high = next(index for index, atom in enumerate(every) if atom is atoms[-1]) + 1
+                taken = every[:low] if all(joins(atom) for atom in every[:low]) else []
+                for atom in every[high:]:
+                    if not joins(atom):
+                        break
+                    taken.append(atom)
+                for atom in taken:
                     atom['cs'] = self._char_with(atom['cs'], items)
             if old_end is not None and (number < epara or epos == para_length(para)):
                 para['end'] = self._char_with(old_end, items)
