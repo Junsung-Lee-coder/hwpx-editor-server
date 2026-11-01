@@ -221,7 +221,7 @@ class ParagraphFormatStep(_FormatTarget):
         if not all(_in_tenths(value) for value in (self.left_indent_pt, self.right_indent_pt, self.first_line_indent_pt)):
             raise ValueError('indents go in steps of 0.1 points')
         if self.line_spacing_type == 'percent':
-            if self.line_spacing_value != int(self.line_spacing_value) or not 1 <= self.line_spacing_value <= 500:
+            if not self.line_spacing_value.is_integer() or not 1 <= self.line_spacing_value <= 500:
                 raise ValueError('a percent line spacing is a whole number from 1 to 500')
         elif self.line_spacing_type is not None and (not _in_tenths(self.line_spacing_value) or (self.line_spacing_type != 'between_lines' and self.line_spacing_value == 0)):
             raise ValueError('this line spacing is in points, in steps of 0.1')

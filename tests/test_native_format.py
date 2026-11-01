@@ -311,6 +311,25 @@ class Refusals(unittest.TestCase):
             with self.subTest(request=request), self.assertRaises(ValidationError):
                 Command.model_validate({'session_id': 'a' * 32, 'request': request})
 
+    def test_values_that_are_not_finite_numbers_are_refused_as_input(self) -> None:
+        from app import native_format
+        base = {'match': 'x', 'expected_page': 1, 'confirm_layout': True}
+        for value in (float('nan'), float('inf')):
+            for fields in ({'line_spacing_type': 'percent', 'line_spacing_value': value}, {'line_spacing_type': 'fixed', 'line_spacing_value': value}, {'left_indent_pt': value}):
+                with self.subTest(fields=fields), self.assertRaises(native_format.NativeNumberingInputError):
+                    native_format.validate_paragraph_step({**base, **fields})
+            with self.subTest(size=value), self.assertRaises(native_format.NativeNumberingInputError):
+                native_format.validate_character_step({**base, 'size_pt': value})
+            with self.subTest(schema=value), self.assertRaises(ValidationError):
+                Command.model_validate({'session_id': 'a' * 32, 'request': {'op': 'paragraph_format_exact', **base, 'line_spacing_type': 'percent', 'line_spacing_value': value}})
+
+    def test_a_model_read_declaring_entities_is_unusable(self) -> None:
+        from app import native_format
+        hwp = sample_document()
+        text = hwp.get_text_file('HWPML2X', '')
+        with self.assertRaises(native_format.CensusError):
+            native_format.parse_format_model('<!DOCTYPE x [<!ENTITY a "b">]>' + text[text.index('<HWPML'):])
+
     def test_the_backend_validates_independently_of_the_adapter(self) -> None:
         hwp = sample_document()
         with self.assertRaises(Exception):

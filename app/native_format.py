@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 from typing import Any, Callable, Mapping
 import xml.etree.ElementTree as ET
@@ -42,6 +43,8 @@ from app.native_numbering import (
 )
 from app.native_numbering_census import (
     CensusError,
+    MAX_HWPML_CHARS,
+    _DOCTYPE,
     _INLINE_CHARACTERS,
     _MAX_DEPTH,
     _attr,
@@ -76,8 +79,8 @@ class _ModelUnusable(CensusError):
 
 
 def _number(value: Any, name: str) -> float:
-    if isinstance(value, bool) or not isinstance(value, (int, float)) or value != value:
-        raise NativeNumberingInputError(f'{name} must be a number')
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+        raise NativeNumberingInputError(f'{name} must be a finite number')
     return float(value)
 
 
@@ -163,7 +166,7 @@ def validate_paragraph_step(step: Mapping[str, Any]) -> dict[str, Any]:
         if kind not in _SPACING_NATIVE:
             raise NativeNumberingInputError('line_spacing_type must be percent, fixed, between_lines or at_least')
         if kind == 'percent':
-            if isinstance(value, bool) or not isinstance(value, (int, float)) or value != int(value) or not 1 <= value <= 500:
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not float(value).is_integer() or not 1 <= value <= 500:
                 raise NativeNumberingInputError('a percent line spacing is a whole number from 1 to 500')
             wanted.update(line_spacing_type=kind, line_spacing_value=int(value))
         else:
@@ -301,6 +304,8 @@ def _atoms(paragraph: ET.Element, chars: Mapping[str, dict[str, Any]]) -> list[d
 
 def parse_format_model(text: str) -> dict[str, Any]:
     """The census's paragraphs, in the census's order, as characters with shapes, plus the words of headers and footers."""
+    if type(text) is not str or len(text) > MAX_HWPML_CHARS or _DOCTYPE.search(text):
+        raise _ModelUnusable('HWPML2X text is not usable as a document')
     try:
         root = ET.fromstring(text)
     except ET.ParseError as exc:

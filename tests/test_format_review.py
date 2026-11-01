@@ -152,6 +152,12 @@ class PersistedFormat(unittest.TestCase):
         self.path.write_bytes(b'not a package')
         self.assertEqual(rules.persisted_format(self.path, self.live())['state'], 'unverified')
 
+    def test_a_package_declaring_entities_is_not_parsed(self) -> None:
+        bomb = '<!DOCTYPE lolz [<!ENTITY a "aaaa">]>'
+        self.path.write_bytes(package(section=bomb + SECTION))
+        value = rules.persisted_format(self.path, self.live())
+        self.assertEqual((value['state'], value['reason']), ('unverified', 'package_format_unreadable'))
+
     def test_a_truncated_list_is_never_called_a_full_match(self) -> None:
         live = self.live()[:2]
         value = rules.persisted_format(self.path, live, truncated=True)

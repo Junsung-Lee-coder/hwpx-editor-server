@@ -442,15 +442,20 @@ def _hwpx_rows(paragraph: ET.Element, characters: dict[str, dict[str, Any]]) -> 
     return text, runs
 
 
+def _parsed_part(raw: bytes) -> ET.Element:
+    if re.search(rb'<!\s*(DOCTYPE|ENTITY)', raw, re.IGNORECASE):
+        raise ValueError('an XML part declares a DOCTYPE or ENTITY')
+    return ET.fromstring(raw)
+
+
 def package_format(path: Path) -> list[dict[str, Any]]:
     """Each paragraph's text and values, read from the HWPX file with no help from Hancom, in the live document's order."""
     with zipfile.ZipFile(path) as archive:
         infos = archive.infolist()
         if sum(info.file_size for info in infos if re.fullmatch(r'Contents/(section\d+|header)\.xml', info.filename)) > MAX_PACKAGE_TEXT_BYTES:
             raise PackageUnreadable('package_limit', 'The text of this HWPX package is larger than this inspection reads.')
-        header = ET.fromstring(archive.read('Contents/header.xml'))
         names = sorted((info.filename for info in infos if re.fullmatch(r'Contents/section\d+\.xml', info.filename)), key=lambda name: int(re.search(r'\d+', name).group()))
-        sections = [ET.fromstring(archive.read(name)) for name in names]
+        header, *sections = [_parsed_part(archive.read(name)) for name in ('Contents/header.xml', *names)]
     fonts: dict[tuple[str, str], str] = {}
     for face in header.iter():
         if _local(face) == 'fontface':
@@ -486,7 +491,7 @@ def persisted_format(path: Path, live: list[dict[str, Any]], *, truncated: bool 
         saved = package_format(path)
     except PackageUnreadable as exc:
         return unverified(exc.code)
-    except (zipfile.BadZipFile, ET.ParseError, zlib.error, KeyError, ValueError, OSError, RuntimeError, NotImplementedError, EOFError):
+    except (zipfile.BadZipFile, ET.ParseError, zlib.error, KeyError, ValueError, TypeError, AttributeError, OSError, RuntimeError, NotImplementedError, EOFError):
         return unverified('package_format_unreadable')
     if len(live) > len(saved) or (not truncated and len(live) != len(saved)):
         return unverified('paragraph_count_differs')
