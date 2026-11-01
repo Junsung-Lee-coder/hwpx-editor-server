@@ -8,6 +8,12 @@ paragraph is always reached through a block: its text, or for a paragraph withou
 paragraph's start, which leaves that next paragraph alone. Margins and non-percent line spacing in HParaShape are 200 units to
 the point, as the saved layout and the PDF confirm; HWPX stores half of that in its ``hp:case`` branch.
 
+A numbered paragraph's printed mark takes the character shape of the paragraph's last text run unless its definition names a
+shape, so a block reaching the paragraph end changes the mark as well. A sparse ``CharShape`` on the bare caret at the paragraph
+end writes a trailing empty run holding the old values without touching text; it prints, saves and reopens as the old mark and
+is one more Undo step. Formatting the end again changes that run too, so the old values are written back each time. The
+endpoints these commands accept for size, indents and line spacing were stored exactly, saved and reopened.
+
 Before each command the target is found again from the document text and reselected, and the block's own HWPML2X must hold
 exactly the requested text. After the action every character and paragraph is compared with what was requested; anything else
 is an unknown outcome that is never rolled back.
@@ -44,10 +50,16 @@ from app.native_numbering import (
 from app.native_numbering_census import (
     CensusError,
     MAX_HWPML_CHARS,
+    PAGE_NUMBER_ELEMENTS,
     _DOCTYPE,
     _INLINE_CHARACTERS,
     _MAX_DEPTH,
+    _Resolver,
+    _Unresolved,
     _attr,
+    _digest_tokens,
+    _element_digest,
+    _is_bare_page_restart,
     _lower_attrs,
     _name,
     parse_hwpml2x_census,
@@ -70,6 +82,11 @@ _READBACK_RUNS = 100
 _SECTION_CELL_CHAIN = frozenset({'body', 'section', 'p', 'text', 'table', 'row', 'cell', 'paralist'})
 _CONTROL_WIDTH = 8
 _CHARACTER_FIELDS = ('font_family', 'size_pt', 'bold', 'italic', 'underline', 'text_color')
+_MARK_KINDS = {'number': 'number', 'bullet': 'bullet', 'outline': 'outline'}
+_UNDERLINE_NATIVE = {'none': 0, 'bottom': 1, 'top': 3}
+_UNSET_CHAR_SHAPE = '4294967295'
+# The controls of a section's first paragraph, which a reader never sees as objects in its text.
+_SECTION_CONTROLS = frozenset({'secdef', 'coldef', 'header', 'footer'})
 _PARAGRAPH_FIELDS = ('align', 'left_indent_pt', 'right_indent_pt', 'first_line_indent_pt', 'line_spacing_type', 'line_spacing_value')
 _TARGET_FIELDS = ('match', 'through_match', 'paragraph_index', 'expected_text', 'expected_page')
 
@@ -79,9 +96,12 @@ class _ModelUnusable(CensusError):
 
 
 def _number(value: Any, name: str) -> float:
-    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
-        raise NativeNumberingInputError(f'{name} must be a finite number')
-    return float(value)
+    try:
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+            raise NativeNumberingInputError(f'{name} must be a finite number')
+        return float(value)
+    except OverflowError as exc:
+        raise NativeNumberingInputError(f'{name} must be a finite number') from exc
 
 
 def _tenths(value: Any, name: str, low: float, high: float, *, exclusive_low: bool = False) -> float:
@@ -121,8 +141,12 @@ def _validated_target(step: Mapping[str, Any], name: str) -> dict[str, Any]:
 
 
 def validate_character_step(step: Mapping[str, Any]) -> dict[str, Any]:
-    _reject_unknown_keys(step, _TARGET_FIELDS + _CHARACTER_FIELDS + _STEP_ENVELOPE_KEYS, 'character_format_exact step')
+    _reject_unknown_keys(step, _TARGET_FIELDS + _CHARACTER_FIELDS + ('number_mark',) + _STEP_ENVELOPE_KEYS, 'character_format_exact step')
     target = _validated_target(step, 'character_format_exact')
+    number_mark = step.get('number_mark', 'preserve')
+    if type(number_mark) is not str or number_mark not in {'preserve', 'follow'}:
+        raise NativeNumberingInputError('number_mark must be preserve or follow')
+    target['number_mark'] = number_mark
     wanted: dict[str, Any] = {}
     if step.get('font_family') is not None:
         face = step['font_family']
@@ -151,7 +175,7 @@ def validate_paragraph_step(step: Mapping[str, Any]) -> dict[str, Any]:
     target = _validated_target(step, 'paragraph_format_exact')
     wanted: dict[str, Any] = {}
     if step.get('align') is not None:
-        if step['align'] not in _ALIGN_NATIVE:
+        if type(step['align']) is not str or step['align'] not in _ALIGN_NATIVE:
             raise NativeNumberingInputError('align must be left, center, right or justify')
         wanted['align'] = step['align']
     for name in ('left_indent_pt', 'right_indent_pt'):
@@ -163,10 +187,10 @@ def validate_paragraph_step(step: Mapping[str, Any]) -> dict[str, Any]:
     if (kind is None) != (value is None):
         raise NativeNumberingInputError('line_spacing_type and line_spacing_value go together')
     if kind is not None:
-        if kind not in _SPACING_NATIVE:
+        if type(kind) is not str or kind not in _SPACING_NATIVE:
             raise NativeNumberingInputError('line_spacing_type must be percent, fixed, between_lines or at_least')
         if kind == 'percent':
-            if isinstance(value, bool) or not isinstance(value, (int, float)) or not float(value).is_integer() or not 1 <= value <= 500:
+            if not _number(value, 'line_spacing_value').is_integer() or not 1 <= value <= 500:
                 raise NativeNumberingInputError('a percent line spacing is a whole number from 1 to 500')
             wanted.update(line_spacing_type=kind, line_spacing_value=int(value))
         else:
@@ -219,8 +243,22 @@ def _element_facts(element: ET.Element) -> dict[str, str]:
     return {key: value for key, value in _lower_attrs(element).items() if key != 'id'}
 
 
-def _char_props(element: ET.Element, fonts: Mapping[tuple[str, str], tuple[str, str]]) -> dict[str, Any]:
+def _content_digest(element: ET.Element) -> str:
+    """A definition by its content, so a renumbered definition is not a changed one."""
+    plain = ET.Element(element.tag, {key: value for key, value in element.attrib.items() if key.rsplit('}', 1)[-1].lower() != 'id'})
+    plain.text = element.text
+    plain.extend(list(element))
+    return _element_digest(plain)
+
+
+def _by_content(facts: dict[str, str], name: str, definitions: Mapping[str, str]) -> None:
+    if name in facts:
+        facts[name] = definitions.get(facts[name].strip(), facts[name])
+
+
+def _char_props(element: ET.Element, fonts: Mapping[tuple[str, str], tuple[str, str]], fills: Mapping[str, str]) -> dict[str, Any]:
     props: dict[str, Any] = {'attrs': _element_facts(element), 'fonts': {}, 'font_types': {}, 'children': {}, 'bold': False, 'italic': False, 'underline': None}
+    _by_content(props['attrs'], 'borderfillid', fills)
     for child in element:
         name = _name(child)
         if name == 'fontid':
@@ -238,16 +276,27 @@ def _char_props(element: ET.Element, fonts: Mapping[tuple[str, str], tuple[str, 
     return props
 
 
-def _para_props(element: ET.Element) -> dict[str, Any]:
+def _para_props(element: ET.Element, fills: Mapping[str, str], tabs: Mapping[str, str], numbers: Mapping[str, str]) -> dict[str, Any]:
     props: dict[str, Any] = {'attrs': _element_facts(element), 'children': {}}
+    _by_content(props['attrs'], 'tabdef', tabs)
+    _by_content(props['attrs'], 'heading', numbers)
     for child in element:
         props['children'][_name(child)] = _element_facts(child)
     if 'paramargin' not in props['children']:
         raise _ModelUnusable('a paragraph shape has no margin definition')
+    if 'paraborder' in props['children']:
+        _by_content(props['children']['paraborder'], 'borderfill', fills)
     return props
 
 
-def _shape_tables(root: ET.Element) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]], set[str]]:
+def _definition_digests(root: ET.Element, kind: str) -> dict[str, str]:
+    return {_attr(element, 'id').strip(): _content_digest(element) for element in root.iter() if _name(element) == kind and _attr(element, 'id') is not None}
+
+
+def _shape_tables(root: ET.Element) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]], set[str], dict[str, tuple[str, str, str]]]:
+    fills, tabs = _definition_digests(root, 'borderfill'), _definition_digests(root, 'tabdef')
+    numbers, bullets = _definition_digests(root, 'numbering'), _definition_digests(root, 'bullet')
+    headings: dict[str, tuple[str, str, str]] = {}
     fonts: dict[tuple[str, str], tuple[str, str]] = {}
     names: set[str] = set()
     for face in root.iter():
@@ -265,13 +314,26 @@ def _shape_tables(root: ET.Element) -> tuple[dict[str, dict[str, Any]], dict[str
     for element in root.iter():
         kind = _name(element)
         if kind == 'charshape' and _attr(element, 'id') is not None:
-            chars[_attr(element, 'id').strip()] = _char_props(element, fonts)
+            chars[_attr(element, 'id').strip()] = _char_props(element, fonts, fills)
         elif kind == 'parashape' and _attr(element, 'id') is not None:
-            paras[_attr(element, 'id').strip()] = _para_props(element)
-    return chars, paras, names
+            heading = (_attr(element, 'headingtype') or '').strip().lower()
+            shape_id = _attr(element, 'id').strip()
+            paras[shape_id] = _para_props(element, fills, tabs, bullets if heading == 'bullet' else numbers)
+            headings[shape_id] = (heading, (_attr(element, 'level') or '0').strip(), (_attr(element, 'heading') or '').strip())
+    return chars, paras, names, headings
 
 
-def _atoms(paragraph: ET.Element, chars: Mapping[str, dict[str, Any]]) -> list[dict[str, Any]]:
+def _object_digest(element: ET.Element, resolver: _Resolver) -> str | None:
+    """An object by its resolved content, nested paragraphs apart, as the census sees it; a page number or bare restart is not one."""
+    if _name(element) in PAGE_NUMBER_ELEMENTS or _is_bare_page_restart(element):
+        return ''
+    try:
+        return resolver.digest(element, prune=True, strip=True, strip_restart=True)
+    except _Unresolved:
+        return None
+
+
+def _atoms(paragraph: ET.Element, chars: Mapping[str, dict[str, Any]], resolver: _Resolver) -> list[dict[str, Any]]:
     """Everything in a paragraph in native order: one item per character or control, with its width and character shape."""
     atoms: list[dict[str, Any]] = []
     for run in paragraph:
@@ -287,7 +349,7 @@ def _atoms(paragraph: ET.Element, chars: Mapping[str, dict[str, Any]]) -> list[d
 
         for child in run:
             if _name(child) != 'char':
-                atoms.append({'control': _name(child), 'width': _CONTROL_WIDTH, 'shape': shape})
+                atoms.append({'control': _name(child), 'width': _CONTROL_WIDTH, 'shape': shape, 'digest': _object_digest(child, resolver)})
                 add(child.tail)
                 continue
             add(child.text)
@@ -296,10 +358,50 @@ def _atoms(paragraph: ET.Element, chars: Mapping[str, dict[str, Any]]) -> list[d
                 if name in _INLINE_CHARACTERS:
                     atoms.append({'char': _INLINE_CHARACTERS[name], 'width': _CONTROL_WIDTH if name == 'tab' else 1, 'shape': shape})
                 else:
-                    atoms.append({'control': name, 'width': None, 'shape': shape})
+                    atoms.append({'control': name, 'width': None, 'shape': shape, 'digest': _object_digest(inner, resolver)})
                 add(inner.tail)
             add(child.tail)
     return atoms
+
+
+class _MarkDefinitions:
+    """Where each numbered paragraph's mark takes its look from, read from the document's own definitions."""
+
+    def __init__(self, root: ET.Element, chars: Mapping[str, dict[str, Any]]) -> None:
+        self.chars = chars
+        self.numberings: dict[str, dict[str, str | None]] = {}
+        self.bullets: dict[str, str | None] = {}
+        for element in root.iter():
+            kind, ident = _name(element), _attr(element, 'id')
+            if ident is None:
+                continue
+            heads = [item for item in element if _name(item) == 'parahead']
+            if kind == 'numbering':
+                self.numberings[ident.strip()] = {(_attr(item, 'level') or '').strip(): _attr(item, 'charshape') for item in heads}
+            elif kind == 'bullet':
+                self.bullets[ident.strip()] = _attr(heads[0], 'charshape') if heads else None
+
+    def of(self, heading: tuple[str, str, str] | None, outline: str | None) -> dict[str, Any] | None:
+        """None for a paragraph without a mark. A definition this code cannot find is 'unknown', never assumed to inherit."""
+        if heading is None or heading[0] not in _MARK_KINDS:
+            return None
+        kind, level, reference = heading
+        found = True
+        named: str | None = None
+        if kind == 'bullet':
+            found = reference in self.bullets
+            named = self.bullets.get(reference)
+        else:
+            levels = self.numberings.get(outline if kind == 'outline' else reference)
+            number = str(int(level) + 1) if level.isdigit() else None
+            found = levels is not None and number in levels
+            named = levels.get(number) if found else None
+        if not found:
+            return {'kind': kind, 'source': 'unknown', 'shape': None}
+        if named is None or named.strip() == _UNSET_CHAR_SHAPE:
+            return {'kind': kind, 'source': 'paragraph_end', 'shape': None}
+        shape = self.chars.get(named.strip())
+        return {'kind': kind, 'source': 'definition', 'shape': shape} if shape is not None else {'kind': kind, 'source': 'unknown', 'shape': None}
 
 
 def parse_format_model(text: str) -> dict[str, Any]:
@@ -313,7 +415,9 @@ def parse_format_model(text: str) -> dict[str, Any]:
     body = next((element for element in root.iter() if _name(element) == 'body'), None)
     if body is None:
         raise _ModelUnusable('HWPML2X text has no BODY')
-    chars, paras, fonts = _shape_tables(root)
+    chars, paras, fonts, headings = _shape_tables(root)
+    resolver = _Resolver(root, body)
+    marks = _MarkDefinitions(root, chars)
     paragraphs: list[dict[str, Any]] = []
     margins: list[str] = []
     body_count = [0]
@@ -323,11 +427,18 @@ def parse_format_model(text: str) -> dict[str, Any]:
             if _name(item) == 'char':
                 margins.append(''.join(item.itertext()))
 
+    current_outline: list[str | None] = [None]
+
+    def outline_of(_element: ET.Element, _chain: tuple[str, ...]) -> str | None:
+        return current_outline[0]
+
     def visit(element: ET.Element, chain: tuple[str, ...], depth: int) -> None:
         if depth > _MAX_DEPTH:
             raise _ModelUnusable('HWPML2X nesting is too deep')
         for child in element:
             name = _name(child)
+            if name == 'section':
+                current_outline[0] = next(((_attr(item, 'outlineshape') or '').strip() for item in child.iter() if _name(item) == 'secdef'), None)
             if name in {'header', 'footer'}:
                 outside(child)
             elif name == 'p':
@@ -337,9 +448,11 @@ def parse_format_model(text: str) -> dict[str, Any]:
                     raise _ModelUnusable('a paragraph has no resolvable paragraph shape')
                 in_body = _name(element) == 'section'
                 context = 'body' if in_body else 'table_cell' if 'cell' in chain and set(chain) <= _SECTION_CELL_CHAIN else 'other'
-                atoms = _atoms(child, chars)
+                atoms = _atoms(child, chars, resolver)
+                end = next((chars.get((_attr(run, 'charshape') or '').strip()) for run in reversed(list(child)) if _name(run) == 'text'), None)
                 paragraphs.append({'index': len(paragraphs), 'context': context, 'body_index': body_count[0] if in_body else None, 'shape': shape, 'atoms': atoms,
-                                   'text': ''.join(atom['char'] for atom in atoms if 'char' in atom)})
+                                   'text': ''.join(atom['char'] for atom in atoms if 'char' in atom), 'end_shape': end,
+                                   'mark': marks.of(headings.get(ref.strip()), outline_of(element, chain))})
                 if in_body:
                     body_count[0] += 1
                 visit(child, chain + (name,), depth + 1)
@@ -367,16 +480,23 @@ def _color_text(value: Any) -> str | None:
     return f'#{number & 0xFF:02X}{number >> 8 & 0xFF:02X}{number >> 16 & 0xFF:02X}'
 
 
+def _underline_type(props: Mapping[str, Any]) -> str:
+    return ((props['underline'] or {}).get('type') or 'none').lower()
+
+
 def public_character(props: Mapping[str, Any]) -> dict[str, Any]:
     fonts = props['fonts']
     distinct = set(fonts.values())
     height = props['attrs'].get('height')
+    underline = _underline_type(props)
     return {
         'font_family': next(iter(distinct)) if len(distinct) == 1 else dict(fonts),
         'size_pt': int(height) / 100 if height is not None and height.strip().lstrip('-').isdigit() else None,
         'bold': props['bold'], 'italic': props['italic'],
-        'underline': props['underline'] is not None and (props['underline'].get('type') or '').lower() not in {'', 'none'},
+        'underline': underline != 'none',
         'text_color': _color_text(props['attrs'].get('textcolor')),
+        # underline=true means a bottom underline; any other position is named so it cannot pass for one.
+        **({} if underline in {'none', 'bottom'} else {'underline_type': underline}),
     }
 
 
@@ -399,6 +519,41 @@ def public_paragraph(props: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def _short_digest(value: Any) -> str:
+    return hashlib.sha256(json.dumps(value, ensure_ascii=False, sort_keys=True).encode('utf-8', 'surrogatepass')).hexdigest()[:16]
+
+
+def _char_remainder(props: Mapping[str, Any]) -> str:
+    """Everything in a character shape that public_character does not name, by content."""
+    return _short_digest({'attrs': {key: value for key, value in props['attrs'].items() if key not in {'height', 'textcolor'}}, 'children': props['children']})
+
+
+def _underline_style(props: Mapping[str, Any]) -> dict[str, str]:
+    """An underline's shape and color exist only while it is on; turning it on or off is the named change."""
+    if _underline_type(props) == 'none':
+        return {}
+    return {'underline_style': _short_digest({key: value for key, value in props['underline'].items() if key != 'type'})}
+
+
+def _para_remainder(props: Mapping[str, Any]) -> str:
+    """Everything in a paragraph shape that public_paragraph does not name, by content."""
+    children = {name: {key: value for key, value in facts.items() if name != 'paramargin' or key not in {'left', 'right', 'indent', 'linespacing', 'linespacingtype'}} for name, facts in props['children'].items()}
+    return _short_digest({'attrs': {key: value for key, value in props['attrs'].items() if key != 'align'}, 'children': children})
+
+
+def _objects(atoms: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [atom for atom in atoms if 'control' in atom and atom['digest'] != '']
+
+
+def public_mark(paragraph: Mapping[str, Any]) -> dict[str, Any] | None:
+    """The look of the paragraph's printed mark as its definitions and last run determine it; not read from a rendering."""
+    mark = paragraph['mark']
+    if mark is None:
+        return None
+    shape = mark['shape'] if mark['source'] == 'definition' else paragraph['end_shape'] if mark['source'] == 'paragraph_end' else None
+    return {'kind': mark['kind'], 'source': mark['source'], **(public_character(shape) if shape is not None else {})}
+
+
 def _segments(atoms: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Adjacent characters with one shape, in the terms a caller asked in."""
     rows: list[dict[str, Any]] = []
@@ -408,7 +563,7 @@ def _segments(atoms: list[dict[str, Any]]) -> list[dict[str, Any]]:
             continue
         if current is not atom['shape']:
             current = atom['shape']
-            rows.append({'text': '', **public_character(current)})
+            rows.append({'text': '', **public_character(current), 'rest': _char_remainder(current), **_underline_style(current)})
         rows[-1]['text'] += atom['char']
     return rows
 
@@ -416,11 +571,19 @@ def _segments(atoms: list[dict[str, Any]]) -> list[dict[str, Any]]:
 def readback_format(paragraph: Mapping[str, Any]) -> dict[str, Any]:
     """One paragraph for a review: within a fixed size, saying when it is cut short."""
     runs = _segments(paragraph['atoms'])
-    return {
-        'runs': [{'text': row['text'][:_READBACK_RUN_TEXT], 'length': len(row['text']), **{key: row[key] for key in _CHARACTER_FIELDS}} for row in runs[:_READBACK_RUNS]],
+    objects = _objects(paragraph['atoms'])
+    fact = {
+        'runs': [{'text': row['text'][:_READBACK_RUN_TEXT], 'length': len(row['text']), **{key: value for key, value in row.items() if key != 'text'}} for row in runs[:_READBACK_RUNS]],
         'runs_truncated': len(runs) > _READBACK_RUNS,
         'paragraph': public_paragraph(paragraph['shape']),
+        'paragraph_rest': _para_remainder(paragraph['shape']),
+        'objects': [atom['control'] for atom in objects if atom['control'] not in _SECTION_CONTROLS],
+        'objects_sha256': _short_digest([atom['digest'] for atom in objects]),
     }
+    mark = public_mark(paragraph)
+    if mark is not None:
+        fact['mark'] = mark
+    return fact
 
 
 REPORT_ITEMS = 50
@@ -438,6 +601,8 @@ def public_report(step_result: Mapping[str, Any]) -> dict[str, Any]:
     target = dict(step_result['target'])
     target['paragraphs'] = _bounded_rows(target['paragraphs'], 'paragraphs', target)
     result = dict(step_result['result'])
+    if 'number_marks' in result:
+        result['number_marks'] = _bounded_rows(result['number_marks'], 'number_marks', result)
     for side in ('before', 'after'):
         items: list[dict[str, Any]] = []
         for item in _bounded_rows(result[side], side, result):
@@ -581,11 +746,16 @@ def _character_block(rows: list[dict[str, Any]], list_id: int, para: int) -> tup
 def _paragraph_block(rows: list[dict[str, Any]], list_id: int, para: int, model: Mapping[str, Any]) -> tuple[tuple[int, ...], list[str] | None]:
     """A block inside the target paragraph(s): text never crossing a control, or a paragraph's own end mark."""
     if len(rows) > 1:
-        for row in rows:
+        first_atoms = rows[0]['paragraph']['atoms']
+        lead = next((number for number, atom in enumerate(first_atoms) if 'char' in atom), len(first_atoms))
+        # A section's own controls come before the selected text and stay out of the block; anything a reader sees is refused.
+        if lead == len(first_atoms) and lead or any(atom['control'] not in _SECTION_CONTROLS for atom in first_atoms[:lead]) or any('char' not in atom for atom in first_atoms[lead:]):
+            raise NativeNumberingRefusal('a range of paragraphs holding a table, picture or other object is refused', code='target_has_controls')
+        for row in rows[1:]:
             if any('char' not in atom for atom in row['paragraph']['atoms']):
                 raise NativeNumberingRefusal('a range of paragraphs holding a table, picture or other object is refused', code='target_has_controls')
         end = _end_position(rows[-1]['paragraph'])
-        return (list_id, para, 0, list_id, para + len(rows) - 1, end), [row['paragraph']['text'] for row in rows]
+        return (list_id, para, _position_of(rows[0]['paragraph'], lead), list_id, para + len(rows) - 1, end), [row['paragraph']['text'] for row in rows]
     paragraph = rows[0]['paragraph']
     atoms = paragraph['atoms']
     first = next((number for number, atom in enumerate(atoms) if 'char' in atom), None)
@@ -709,13 +879,80 @@ def _already_character(rows: list[dict[str, Any]], wanted: Mapping[str, Any]) ->
     for row in rows:
         for atom in row['paragraph']['atoms'][row['first'] or 0:row['last'] or 0]:
             public = public_character(atom['shape'])
-            if any(public[key] != value for key, value in wanted.items()):
+            if any(public.get(key) != value for key, value in wanted.items() if key != 'underline'):
+                return False
+            if 'underline' in wanted and _underline_type(atom['shape']) != ('bottom' if wanted['underline'] else 'none'):
                 return False
     return True
 
 
 def _already_paragraph(rows: list[dict[str, Any]], wanted: Mapping[str, Any]) -> bool:
     return all(_para_after(row['paragraph']['shape'], wanted) == row['paragraph']['shape'] for row in rows)
+
+
+def _reaches_end(row: Mapping[str, Any], *, last: bool) -> bool:
+    """Whether the block runs through this paragraph's last run; only then does the paragraph end take the new values."""
+    return not last or (bool(row['paragraph']['atoms']) and row['last'] == len(row['paragraph']['atoms']))
+
+
+def _inherits_mark(paragraph: Mapping[str, Any]) -> bool:
+    return paragraph['mark'] is not None and paragraph['mark']['source'] != 'definition'
+
+
+def _restore_items(end: Mapping[str, Any], wanted: Mapping[str, Any]) -> dict[str, Any]:
+    """The native items that put the paragraph end's old values back, only for what the formatting will change there."""
+    items: dict[str, Any] = {}
+    after = _char_after(end, wanted)
+    if 'font_family' in wanted and after['fonts'] != end['fonts']:
+        if set(end['font_types'].values()) != {'ttf'}:
+            raise NativeNumberingRefusal('the number mark uses a font that cannot be written back; give number_mark=follow or end the range earlier', code='target_changes_number_mark')
+        for language in LANGUAGES:
+            items[f'FaceName{language}'] = end['fonts'][language.lower()]
+            items[f'FontType{language}'] = 1
+    if 'size_pt' in wanted and after['attrs'].get('height') != end['attrs'].get('height'):
+        items['Height'] = int(end['attrs']['height'])
+    if 'text_color' in wanted and after['attrs'].get('textcolor') != end['attrs'].get('textcolor'):
+        items['TextColor'] = int(end['attrs']['textcolor'])
+    for name, item in (('bold', 'Bold'), ('italic', 'Italic')):
+        if name in wanted and after[name] != end[name]:
+            items[item] = 1 if end[name] else 0
+    if 'underline' in wanted and _underline_type(end) != ('bottom' if wanted['underline'] else 'none'):
+        kind = _underline_type(end)
+        if kind not in _UNDERLINE_NATIVE:
+            raise NativeNumberingRefusal('the number mark has an underline that cannot be written back; give number_mark=follow or end the range earlier', code='target_changes_number_mark')
+        items['UnderlineType'] = _UNDERLINE_NATIVE[kind]
+    return items
+
+
+def _mark_restore(rows: list[dict[str, Any]], wanted: Mapping[str, Any], policy: str) -> dict[str, Any] | None:
+    """What must be written back at the paragraph end to keep the printed mark, or a refusal when one more action cannot do it."""
+    plans = []
+    for position, row in enumerate(rows):
+        paragraph = row['paragraph']
+        if _inherits_mark(paragraph) and paragraph['end_shape'] is not None and _reaches_end(row, last=position == len(rows) - 1):
+            items = _restore_items(paragraph['end_shape'], wanted) if policy == 'preserve' else {}
+            plans.append({'paragraph': paragraph, 'items': items})
+    if policy == 'follow':
+        return None
+    plans = [plan for plan in plans if plan['items']]
+    if len(rows) > 1 and plans:
+        raise NativeNumberingRefusal('this range would change the number mark of a paragraph it runs through; format the paragraphs one at a time or give number_mark=follow', code='target_changes_number_mark')
+    return plans[0] if plans else None
+
+
+def _mark_report(rows: list[dict[str, Any]], before: Mapping[str, Any], after: Mapping[str, Any], kept: bool) -> list[dict[str, Any]]:
+    """Each numbered target paragraph's mark before and after, from the document itself."""
+    report = []
+    for row in rows:
+        index = row['paragraph']['index']
+        old, new = public_mark(before['paragraphs'][index]), public_mark(after['paragraphs'][index])
+        if old is None:
+            continue
+        item = {'paragraph_index': index, 'kind': old['kind'], 'source': old['source'], 'before': old, 'after': new, 'changed': old != new}
+        if kept:
+            item['kept_by'] = 'paragraph_end_action'
+        report.append(item)
+    return report
 
 
 def _targeted_atoms(rows: list[dict[str, Any]]) -> dict[int, tuple[int, int]]:
@@ -739,16 +976,33 @@ def _document_problems(before: Mapping[str, Any], after: Mapping[str, Any], rows
     targets = {row['paragraph']['index'] for row in rows}
     for number, (left, right) in enumerate(zip(old, new)):
         fields = ('text', 'heading', 'level', 'section', 'numbering_ref_sha256', 'inline_controls', 'page_break', 'column_break')
-        if any(left.get(key) != right.get(key) for key in fields) or (number not in targets and left.get('content_sha256') != right.get('content_sha256')):
+        if any(left.get(key) != right.get(key) for key in fields) or (number not in targets and (
+                left.get('content_sha256') != right.get('content_sha256') or left.get('end_charshape_sha256') != right.get('end_charshape_sha256'))):
             problems.append(f'paragraph {number} outside the request changed')
     return problems
 
 
-def _character_problems(before: Mapping[str, Any], after: Mapping[str, Any], rows: list[dict[str, Any]], wanted: Mapping[str, Any]) -> list[str]:
+def _mark_problems(rows: list[dict[str, Any]], after: list[dict[str, Any]], wanted: Mapping[str, Any], policy: str) -> list[str]:
+    """A mark that inherits the paragraph end stays as it was, unless the caller asked it to follow a range reaching that end."""
+    problems: list[str] = []
+    for position, row in enumerate(rows):
+        paragraph = row['paragraph']
+        if not _inherits_mark(paragraph):
+            continue
+        reached = _reaches_end(row, last=position == len(rows) - 1)
+        expected = _char_after(paragraph['end_shape'], wanted) if policy == 'follow' and reached and paragraph['end_shape'] is not None else paragraph['end_shape']
+        end = after[paragraph['index']]['end_shape']
+        if end is None or expected is None or not _same_character(end, expected, wanted if policy == 'follow' and reached else {}):
+            problems.append(f"paragraph {paragraph['index']} has a number mark other than requested")
+    return problems
+
+
+def _character_problems(before: Mapping[str, Any], after: Mapping[str, Any], rows: list[dict[str, Any]], wanted: Mapping[str, Any], policy: str = 'preserve') -> list[str]:
     problems = _document_problems(before, after, rows, allowed_lists={'charshapelist', 'facenamelist'})
     old, new = before['model']['paragraphs'], after['model']['paragraphs']
     if len(old) != len(new):
         return problems
+    problems += _mark_problems(rows, new, wanted, policy)
     spans = _targeted_atoms(rows)
     for left, right in zip(old, new):
         if left['shape'] != right['shape']:
@@ -776,6 +1030,8 @@ def _paragraph_problems(before: Mapping[str, Any], after: Mapping[str, Any], row
         return problems
     targets = {row['paragraph']['index'] for row in rows}
     for left, right in zip(old, new):
+        if left['end_shape'] != right['end_shape']:
+            problems.append(f"paragraph {left['index']} changed its last run")
         expected = _para_after(left['shape'], wanted) if left['index'] in targets else left['shape']
         if right['shape'] != expected:
             problems.append(f"paragraph {left['index']} has a paragraph format other than requested")
@@ -807,7 +1063,8 @@ def _character_report(rows: list[dict[str, Any]], model: Mapping[str, Any]) -> l
     report = []
     for row in rows:
         index = row['paragraph']['index']
-        report.append({'paragraph_index': index, 'segments': _segments(model['paragraphs'][index]['atoms'][row['first'] or 0:row['last'] or 0])})
+        segments = _segments(model['paragraphs'][index]['atoms'][row['first'] or 0:row['last'] or 0])
+        report.append({'paragraph_index': index, 'segments': [{key: value for key, value in item.items() if key not in {'rest', 'underline_style'}} for item in segments]})
     return report
 
 
@@ -833,6 +1090,7 @@ def apply_format(
     character = kind == 'character'
     action_name = 'CharShape' if character else 'ParagraphShape'
     wanted = request['properties']
+    policy = request.get('number_mark', 'preserve')
     reach = _MutationReach(on_mutating)
 
     def body() -> dict[str, Any]:
@@ -845,8 +1103,10 @@ def apply_format(
             if 'font_family' in wanted:
                 _require_font(wanted['font_family'], before['model'])
             already = _already_character(rows, wanted)
+            restoring = None if already else _mark_restore(rows, wanted, policy)
         else:
             already = _already_paragraph(rows, wanted)
+            restoring = None
         list_id, para = _native_list(hwp, rows)
         block, words = _character_block(rows, list_id, para) if character else _paragraph_block(rows, list_id, para, before['model'])
         target = {
@@ -856,12 +1116,13 @@ def apply_format(
                             'text': row['paragraph']['text'][:120]} for row in rows],
         }
         report = _character_report if character else _paragraph_report
+        marks = (lambda later, kept=False: _mark_report(rows, before['model'], later, kept)) if character else (lambda later, kept=False: [])
         if already:
             # The caller gives back what it found, as it does after a refusal.
             _set_pos(hwp, (list_id, para, block[2]))
             _require_page(page_of(), request['expected_page'])
             return {'changed': False, 'status': 'already_set', 'target': target, 'requested': dict(wanted), 'before': report(rows, before['model']), 'after': report(rows, before['model']),
-                    'native_actions': [], 'pre_state_sha256': None, 'post_state_sha256': None}
+                    'number_marks': marks(before['model']), 'native_actions': [], 'pre_state_sha256': None, 'post_state_sha256': None}
         _select(hwp, block, words, page_of, request['expected_page'])
         creator = _native_method(hwp, 'CreateAction')
         action = creator(action_name)
@@ -872,15 +1133,30 @@ def apply_format(
         result = action.Execute(pset)
         if not _action_confirmed(result):
             raise NativeNumberingMutationError(f'native {action_name} returned {_status_text(result)}; nothing was rolled back')
+        native_actions = [f'Execute:{action_name}']
+        if restoring is not None:
+            # The block ends here. On the bare caret at the paragraph's end no text can take these values.
+            end_at = (list_id, para + len(rows) - 1, _end_position(restoring['paragraph']))
+            _set_pos(hwp, end_at)
+            if _read_target_state(hwp) != (end_at, ()):
+                raise NativeNumberingMutationError('the caret did not reach the paragraph end after the formatting; nothing was rolled back')
+            restore_action = creator('CharShape')
+            restore_set = restore_action.CreateSet()
+            for name, value in restoring['items'].items():
+                restore_set.SetItem(name, value)
+            restored = restore_action.Execute(restore_set)
+            native_actions.append('Execute:CharShape:paragraph-end')
+            if not _action_confirmed(restored):
+                raise NativeNumberingMutationError(f'native CharShape at the paragraph end returned {_status_text(restored)}; nothing was rolled back')
         after = _read(hwp, read)
-        problems = (_character_problems if character else _paragraph_problems)(before, after, rows, wanted)
+        problems = _character_problems(before, after, rows, wanted, policy) if character else _paragraph_problems(before, after, rows, wanted)
         if problems:
             raise NativeNumberingMutationError(f'{kind} formatting outcome is not as requested: ' + '; '.join(problems[:5]) + '; nothing was rolled back')
         _set_pos(hwp, restore)
         if _get_selection(hwp) != ():
             raise NativeNumberingMutationError('the selection did not end after the formatting; nothing was rolled back')
         return {'changed': True, 'status': 'formatted', 'target': target, 'requested': dict(wanted), 'before': report(rows, before['model']), 'after': report(rows, after['model']),
-                'native_actions': [f'Execute:{action_name}'], 'pre_state_sha256': _state_sha(before), 'post_state_sha256': _state_sha(after)}
+                'number_marks': marks(after['model'], restoring is not None), 'native_actions': native_actions, 'pre_state_sha256': _state_sha(before), 'post_state_sha256': _state_sha(after)}
 
     try:
         return body()

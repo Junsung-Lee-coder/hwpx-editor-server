@@ -254,7 +254,12 @@ class NumberMarkHistory(unittest.TestCase):
         outcome = self.history('undo')
         self.assertIs(outcome['ok'], False)
         self.assertEqual(outcome['confirmation']['expected_state'], {'compared': True, 'matches': False})
-        self.assertIn('number_mark_changed', [item['kind'] for item in outcome['confirmation']['changes']])
+
+    def test_the_reply_says_when_a_history_step_moved_a_mark(self) -> None:
+        self.assertTrue(self.step(**CHARACTER, match='번호 앞글 꼬리글', number_mark='follow', **RED)['ok'])
+        undone = self.history('undo')
+        self.assertEqual(undone['confirmation']['expected_state'], {'compared': True, 'matches': True})
+        self.assertEqual({item['kind'] for item in undone['confirmation']['changes']}, {'format_changed', 'number_mark_changed'})
 
 
 class Readback(unittest.TestCase):
@@ -368,6 +373,15 @@ class FullShapeFacts(unittest.TestCase):
         changed = self.rows(hwp)[1]
         self.assertEqual(same['runs'][0]['rest'], changed['runs'][0]['rest'])
         self.assertEqual(same['paragraph_rest'], changed['paragraph_rest'])
+
+    def test_an_underline_changed_while_it_stays_on_is_not_a_named_value(self) -> None:
+        hwp = FormatHwp([paragraph('제목'), paragraph(('본문', char(Underline='Bottom')))])
+        same = self.rows(hwp)[1]
+        for atom in hwp.lists[0][1]['atoms']:
+            atom['cs'] = char(Underline='Bottom', UnderlineColor=255)
+        changed = self.rows(hwp)[1]
+        self.assertNotEqual(same['runs'][0]['underline_style'], changed['runs'][0]['underline_style'])
+        self.assertNotIn('underline_style', self.rows(FormatHwp([paragraph('제목'), paragraph('본문')]))[1]['runs'][0])
 
     def test_a_renumbered_definition_with_the_same_content_does_not_move_it(self) -> None:
         hwp = FormatHwp([paragraph('제목'), paragraph('본문')])

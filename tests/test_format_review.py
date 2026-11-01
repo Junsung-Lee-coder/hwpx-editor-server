@@ -48,8 +48,8 @@ class FormatChanges(unittest.TestCase):
         self.assertEqual(review['coverage']['format']['state'], 'complete')
         markdown = rules.to_markdown(review)
         self.assertIn('## 서식 변경 상세', markdown)
-        self.assertIn('| 표적 | 크기 | 10pt | 14pt |', markdown)
-        self.assertIn('| 표적 | 굵게 | 아니요 | 예 |', markdown)
+        self.assertIn('| [3] 앞 표적 뒤 | 표적 | 크기 | 10pt | 14pt |', markdown)
+        self.assertIn('| [3] 앞 표적 뒤 | 표적 | 굵게 | 아니요 | 예 |', markdown)
 
     def test_a_paragraph_change_names_its_values_with_units(self) -> None:
         before = para('문단', index=1)
@@ -60,9 +60,9 @@ class FormatChanges(unittest.TestCase):
         self.assertEqual(change['paragraph'], {'align': {'before': 'justify', 'after': 'center'}, 'left_indent_pt': {'before': 0.0, 'after': 20.0},
                                                'line_spacing_type': {'before': 'percent', 'after': 'fixed'}, 'line_spacing_value': {'before': 160, 'after': 18.0}})
         markdown = rules.to_markdown(review)
-        self.assertIn('| (문단 전체) | 정렬 | 양쪽 | 가운데 |', markdown)
-        self.assertIn('| (문단 전체) | 왼쪽 여백 | 0pt | 20pt |', markdown)
-        self.assertIn('| (문단 전체) | 줄 간격 값 | 160 | 18 |', markdown)
+        self.assertIn('| [1] 문단 | 문단 전체 | 정렬 | 양쪽 | 가운데 |', markdown)
+        self.assertIn('| [1] 문단 | 문단 전체 | 왼쪽 여백 | 0pt | 20pt |', markdown)
+        self.assertIn('| [1] 문단 | 문단 전체 | 줄 간격 값 | 160 | 18 |', markdown)
 
     def test_a_change_only_in_unnamed_properties_says_so_and_is_partial(self) -> None:
         review = assembled([para('문단')], [para('문단', sha='changed')])

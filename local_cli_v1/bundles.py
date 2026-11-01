@@ -123,7 +123,7 @@ _STEP_KEYS: dict[str, frozenset[str]] = {
         {'op', 'operation', 'label', 'match', 'expected_page', 'text', 'position', 'confirm_layout'}
     ),
     'paragraph_remove_exact': frozenset({'op', 'operation', 'label', 'match', 'expected_page', 'expected_text', 'confirm_remove'}),
-    'character_format_exact': frozenset({'op', 'operation', 'label', 'match', 'through_match', 'paragraph_index', 'expected_text', 'expected_page', 'confirm_layout', 'font_family', 'size_pt', 'bold', 'italic', 'underline', 'text_color'}),
+    'character_format_exact': frozenset({'op', 'operation', 'label', 'match', 'through_match', 'paragraph_index', 'expected_text', 'expected_page', 'confirm_layout', 'number_mark', 'font_family', 'size_pt', 'bold', 'italic', 'underline', 'text_color'}),
     'paragraph_format_exact': frozenset({'op', 'operation', 'label', 'match', 'through_match', 'paragraph_index', 'expected_text', 'expected_page', 'confirm_layout', 'align', 'left_indent_pt', 'right_indent_pt', 'first_line_indent_pt', 'line_spacing_type', 'line_spacing_value'}),
     'paragraph_delete_exact': frozenset(
         {

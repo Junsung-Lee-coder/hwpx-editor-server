@@ -126,6 +126,8 @@ from app.media_guard import MediaGuardError, media_change_reasons, media_invento
 #   'refuse'             - never counted: `undo` refuses after the step.
 #   'single_native_edit' - one undo unit only when the step succeeded and its
 #                          result reports exactly one native edit.
+#   'counted_native_edit' - one tracked edit of the one or two native edits the
+#                          successful step reports.
 # Ops not listed count one undo unit per changed step.
 _BUNDLE_UNDO_POLICY: dict[str, str] = {
     'layout_exact': 'refuse',
@@ -137,7 +139,8 @@ _BUNDLE_UNDO_POLICY: dict[str, str] = {
     'paragraph_insert_exact': 'single_native_edit',
     'paragraph_remove_exact': 'single_native_edit',
     # A block is what keeps these from merging into an earlier edit of the same paragraph in the native history.
-    'character_format_exact': 'single_native_edit',
+    # Keeping a number mark at a range's end takes one more native action, so character formatting counts what it issued.
+    'character_format_exact': 'counted_native_edit',
     'paragraph_format_exact': 'single_native_edit',
 }
 _UNDO_UNVERIFIED_BUNDLE_OPS = frozenset(_BUNDLE_UNDO_POLICY)
@@ -172,11 +175,20 @@ def _bundle_step_single_undo(step: dict[str, Any]) -> bool:
     policy = _BUNDLE_UNDO_POLICY.get(str(step.get('op')))
     if policy is None:
         return True
-    if policy != 'single_native_edit':
+    if policy not in {'single_native_edit', 'counted_native_edit'}:
         return False
+    return step.get('ok') is True and _reported_native_edits(step) in ({1, 2} if policy == 'counted_native_edit' else {1})
+
+
+def _reported_native_edits(step: dict[str, Any]) -> Any:
     result = step.get('result') if isinstance(step.get('result'), dict) else {}
     undo = result.get('undo') if isinstance(result.get('undo'), dict) else {}
-    return step.get('ok') is True and undo.get('native_editing_actions') == 1
+    return undo.get('native_editing_actions')
+
+
+def _native_undo_steps(steps: list[dict[str, Any]]) -> int:
+    """How many native Undo calls reverse these steps: what a counted step reported, one for any other."""
+    return sum(_reported_native_edits(step) if _BUNDLE_UNDO_POLICY.get(str(step.get('op'))) == 'counted_native_edit' else 1 for step in steps)
 
 
 def _record_bundle_undo_state(binding: dict[str, Any], steps: list[Any], prior: dict[str, Any]) -> None:
@@ -198,11 +210,11 @@ def _record_bundle_undo_state(binding: dict[str, Any], steps: list[Any], prior: 
             f'{", ".join(unverified)} changed the document with native actions that cannot be undone as one counted step'
         )
     else:
-        binding['pending_logical_undo_count'] = len(dirty_steps)
+        binding['pending_logical_undo_count'] = _native_undo_steps(dirty_steps)
         # Drop this bundle's own start marker; an older unverified edit below
         # these steps still blocks undo once they are undone.
         binding['logical_undo_unverified'] = prior.get('logical_undo_unverified')
-    _track_history_edit(binding, None if unverified else len(dirty_steps), _recorded_states(dirty_steps))
+    _track_history_edit(binding, None if unverified else _native_undo_steps(dirty_steps), _recorded_states(dirty_steps))
 
 
 def _recorded_states(steps: list[dict[str, Any]]) -> dict[str, str] | None:
@@ -2830,7 +2842,7 @@ class LocalCliService(
             },
             'paragraph_insert_exact': {'op', 'operation', 'label', 'match', 'expected_page', 'text', 'position', 'confirm_layout'},
             'paragraph_remove_exact': {'op', 'operation', 'label', 'match', 'expected_page', 'expected_text', 'confirm_remove'},
-            'character_format_exact': {'op', 'operation', 'label', 'match', 'through_match', 'paragraph_index', 'expected_text', 'expected_page', 'confirm_layout', 'font_family', 'size_pt', 'bold', 'italic', 'underline', 'text_color'},
+            'character_format_exact': {'op', 'operation', 'label', 'match', 'through_match', 'paragraph_index', 'expected_text', 'expected_page', 'confirm_layout', 'number_mark', 'font_family', 'size_pt', 'bold', 'italic', 'underline', 'text_color'},
             'paragraph_format_exact': {'op', 'operation', 'label', 'match', 'through_match', 'paragraph_index', 'expected_text', 'expected_page', 'confirm_layout', 'align', 'left_indent_pt', 'right_indent_pt', 'first_line_indent_pt', 'line_spacing_type', 'line_spacing_value'},
             'paragraph_delete_exact': {
                 'op',

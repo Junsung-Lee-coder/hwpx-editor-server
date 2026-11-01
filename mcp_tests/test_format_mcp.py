@@ -12,7 +12,7 @@ from mcp.client.streamable_http import streamable_http_client
 
 from mcp_tests.test_repair_saved_output_and_review import Backend, Base, SID, VERSION, paragraph
 
-CHARACTER = {'op': 'character_format_exact', 'match': '표적', 'expected_page': 1, 'bold': True, 'size_pt': 14.0, 'text_color': '#C00000', 'font_family': '굴림', 'italic': False, 'underline': True, 'confirm_layout': True}
+CHARACTER = {'op': 'character_format_exact', 'match': '표적', 'expected_page': 1, 'number_mark': 'follow', 'bold': True, 'size_pt': 14.0, 'text_color': '#C00000', 'font_family': '굴림', 'italic': False, 'underline': True, 'confirm_layout': True}
 PARAGRAPH = {'op': 'paragraph_format_exact', 'paragraph_index': 2, 'expected_text': '', 'expected_page': 1, 'align': 'center', 'left_indent_pt': 10.0, 'right_indent_pt': 5.0, 'first_line_indent_pt': -2.5,
              'line_spacing_type': 'percent', 'line_spacing_value': 180, 'confirm_layout': True}
 FORMAT = {'runs': [], 'runs_truncated': False, 'paragraph': {'align': 'justify', 'left_indent_pt': 0.0, 'right_indent_pt': 0.0, 'first_line_indent_pt': 0.0, 'line_spacing_type': 'percent', 'line_spacing_value': 160}}
@@ -89,7 +89,7 @@ class FormattingReview(Base):
         self.assertEqual(value['comparison']['changes'][0]['ranges'], [{'text': 'Beta', 'changes': {'bold': {'before': False, 'after': True}, 'text_color': {'before': '#000000', 'after': '#C00000'}}}])
         self.assertIn('Beta', result.content[0].text)
         markdown = Path(value['summary_path']).read_text(encoding='utf-8')
-        self.assertIn('| Beta | 글자색 | #000000 | #C00000 |', markdown)
+        self.assertIn('| [0] Alpha Beta | Beta | 글자색 | #000000 | #C00000 |', markdown)
 
 
 if __name__ == '__main__':

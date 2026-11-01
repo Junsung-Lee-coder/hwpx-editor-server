@@ -175,7 +175,7 @@ def _native_diagnostic(site: object, error: BaseException) -> dict[str, str]:
                             'target_has_controls', 'target_is_last_paragraph', 'target_at_document_start', 'neighbor_has_break',
                             'target_text_mismatch', 'target_wrong_page', 'target_crosses_control', 'target_empty',
                             'target_unsupported_context', 'target_in_header_footer', 'target_range_unsupported', 'target_unselectable',
-                            'selection_unverified', 'font_not_available', 'font_availability_unknown',
+                            'selection_unverified', 'font_not_available', 'font_availability_unknown', 'target_changes_number_mark',
                             'target_not_found', 'target_not_in_body', 'target_unidentifiable', 'target_unlocatable',
                             'text_readback_unavailable',
                         ):

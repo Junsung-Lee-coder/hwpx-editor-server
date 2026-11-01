@@ -20,6 +20,7 @@
     "bold",
     "italic",
     "underline",
-    "text_color"
+    "text_color",
+    "number_mark"
   ]
 }

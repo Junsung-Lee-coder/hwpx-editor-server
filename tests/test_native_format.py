@@ -602,7 +602,8 @@ class ReadbackCarriesFormat(unittest.TestCase):
         self.assertEqual(rows.index(mixed), mixed['index'])
         self.assertEqual(mixed['context'], 'body')
         self.assertEqual([run['text'] for run in mixed['format']['runs']], ['혼합 앞 일반 ', '빨강구간 Bold ', '파랑구간 ', '뒤 일반'])
-        self.assertEqual(mixed['format']['runs'][1], {'text': '빨강구간 Bold ', 'length': 10, 'font_family': '함초롬바탕', 'size_pt': 14.0, 'bold': True, 'italic': False, 'underline': False, 'text_color': '#C00000'})
+        named = {key: value for key, value in mixed['format']['runs'][1].items() if key != 'rest'}
+        self.assertEqual(named, {'text': '빨강구간 Bold ', 'length': 10, 'font_family': '함초롬바탕', 'size_pt': 14.0, 'bold': True, 'italic': False, 'underline': False, 'text_color': '#C00000'})
         self.assertEqual(mixed['format']['paragraph']['align'], 'justify')
         self.assertEqual(next(row for row in rows if row['text'].startswith('셀 표적'))['context'], 'table_cell')
         self.assertEqual(next(row for row in rows if row['text'].startswith('글상자'))['context'], 'other')

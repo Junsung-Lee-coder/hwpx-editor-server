@@ -540,7 +540,7 @@ def _paragraph_structure(element: ET.Element) -> dict[str, Any]:
 
 def _paragraph_definitions(resolver: _Resolver, element: ET.Element, shape_ref: str | None, heading: str | None, number_ref: str | None) -> dict[str, Any]:
     """Which definitions this paragraph itself uses, so an edit can tell its own single-use definition from any other."""
-    facts: dict[str, Any] = {'parashape_sha256': None, 'charshape_sha256s': [], 'numbering_ref_sha256': None}
+    facts: dict[str, Any] = {'parashape_sha256': None, 'charshape_sha256s': [], 'numbering_ref_sha256': None, 'end_charshape_sha256': None}
     try:
         if shape_ref is not None:
             facts['parashape_sha256'] = resolver.definition('parashapelist', shape_ref)
@@ -548,6 +548,10 @@ def _paragraph_definitions(resolver: _Resolver, element: ET.Element, shape_ref: 
         facts['charshape_sha256s'] = sorted(resolver.definition('charshapelist', ref) for ref in references)
         if heading in {'NUMBER', 'BULLET'} and number_ref is not None:
             facts['numbering_ref_sha256'] = resolver.definition('numberinglist' if heading == 'NUMBER' else 'bulletlist', number_ref)
+        # A numbered paragraph's last run, even an empty one, is what its printed mark inherits (observed on Hancom 2024); the content digest drops empty runs.
+        last = next((ref for run in reversed(list(element)) if _name(run) == 'text' and (ref := _attr(run, 'charshape')) is not None), None)
+        if heading in {'NUMBER', 'BULLET', 'OUTLINE'} and last is not None:
+            facts['end_charshape_sha256'] = resolver.definition('charshapelist', last)
     except _Unresolved:
         pass
     return facts

@@ -373,6 +373,11 @@ class ReviewAtTheBoundary(Base):
         self.assertNotEqual(value['numbering_all_match'], False)
 
     async def test_complete_review_is_stated_as_complete(self):
+        mark = {'kind': 'outline', 'source': 'paragraph_end', 'bold': False}
+        Backend.readback_paragraphs = [{**paragraph(text), 'format': {'mark': mark}} for text in ('Alpha', 'Beta')]
+        first = (await self.review()).structured_content['result']
+        self.assertEqual(first['review_status'], 'partial')
+        self.assertIn('번호 모양은 비교하지 않았습니다', first['summary_text'].splitlines()[0])
         value = (await self.review()).structured_content['result']
         self.assertEqual(value['review_status'], 'complete')
         self.assertTrue(value['summary_text'].startswith('확인 결과: 전체 확인'))
