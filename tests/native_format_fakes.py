@@ -6,7 +6,9 @@ reads keep a block selection; SetPos ends one; a position inside a control clear
 only its items; CharShape needs a block; ParagraphShape on a block changes each touched paragraph and on a bare caret merges
 into the previous caret edit of the same paragraph in the Undo history; a blank paragraph is reachable through the block from
 its own start to the next paragraph's start, which leaves that next paragraph alone; Undo gives the selection back and Redo
-leaves a caret. Hancom drops definitions nothing uses. Not Hancom evidence.
+leaves a caret. Hancom drops definitions nothing uses. The paragraph's last text run decides its printed number mark: a block
+reaching the paragraph end also changes a trailing empty run, and a sparse CharShape on the bare caret at the paragraph end
+writes that run without touching text, as its own Undo step. Not Hancom evidence.
 """
 from __future__ import annotations
 
@@ -51,6 +53,13 @@ def paragraph(*runs: Any, para_shape: dict[str, Any] | None = None) -> dict[str,
         text, props = run
         atoms.extend({'c': c, 'cs': dict(props)} for c in text)
     return {'atoms': atoms, 'shape': dict(para_shape or shape())}
+
+
+def end_shape(para: dict[str, Any]) -> dict[str, Any]:
+    """The shape the paragraph's last text run holds, which an inherited number mark prints with."""
+    if para.get('end') is not None:
+        return para['end']
+    return para['atoms'][-1]['cs'] if para['atoms'] else char()
 
 
 def picture() -> dict[str, Any]:
@@ -128,6 +137,7 @@ class FormatHwp:
         self.after_execute = None
         self.collapse_on_block_read = False
         self.position_drift = 0
+        self.explicit_number_mark = False
         self.lists = {0: self.body}
         self._number_cells(self.body)
 
@@ -170,6 +180,11 @@ class FormatHwp:
                         fonts.append(atom['cs']['Font'])
                     for name in ('cells', 'drawtext'):
                         visit(atom.get(name, []))
+                if para.get('end') is not None:
+                    if para['end'] not in chars:
+                        chars.append(para['end'])
+                    if para['end']['Font'] not in fonts:
+                        fonts.append(para['end']['Font'])
 
         visit(self.body)
         return chars, paras, fonts
@@ -183,21 +198,23 @@ class FormatHwp:
         if props['Bold']:
             out += '<BOLD/>'
         if props['Underline']:
-            out += f'<UNDERLINE Color="0" Shape="Solid" Type="{props["Underline"]}"/>'
+            out += f'<UNDERLINE Color="{props.get("UnderlineColor", 0)}" Shape="Solid" Type="{props["Underline"]}"/>'
         return out + '</CHARSHAPE>'
 
     def _para_xml(self, index: int, props: dict[str, Any]) -> str:
-        heading = ' Heading="1"' if props['HeadingType'] != 'None' else ''
+        heading = ' Heading="1"' if props['HeadingType'] in {'Number', 'Bullet'} else ''
         return (f'<PARASHAPE Align="{props["Align"]}" AutoSpaceEAsianEng="false" AutoSpaceEAsianNum="false" BreakLatinWord="KeepWord" BreakNonLatinWord="false" Condense="0" FontLineHeight="false"{heading} '
                 f'HeadingType="{props["HeadingType"]}" Id="{index}" KeepLines="false" KeepWithNext="false" Level="{props["Level"]}" LineWrap="Break" PageBreakBefore="false" SnapToGrid="true" TabDef="0" VerAlign="Baseline" WidowOrphan="false">'
                 f'<PARAMARGIN Indent="{props["Indent"]}" Left="{props["Left"]}" LineSpacing="{props["LineSpacing"]}" LineSpacingType="{props["LineSpacingType"]}" Next="0" Prev="0" Right="{props["Right"]}"/>'
                 '<PARABORDER BorderFill="2" Connect="false" IgnoreMargin="false"/></PARASHAPE>')
 
     def _p(self, para: dict[str, Any], chars: list[dict[str, Any]], paras: list[dict[str, Any]], *, atoms: list[dict[str, Any]] | None = None) -> str:
+        whole = atoms is None
         atoms = para['atoms'] if atoms is None else atoms
         out = [f'<P ColumnBreak="false" PageBreak="false" ParaShape="{paras.index(para["shape"])}" Style="0">']
         if not atoms:
-            return out[0] + '<TEXT CharShape="0"/></P>'
+            ref = chars.index(para['end']) if para.get('end') is not None else 0
+            return out[0] + f'<TEXT CharShape="{ref}"/></P>'
         current, pending, raw_done = None, '', False
 
         def flush() -> None:
@@ -231,7 +248,10 @@ class FormatHwp:
             else:
                 out.append(atom['xml'])
         flush()
-        out.append('</TEXT></P>')
+        out.append('</TEXT>')
+        if whole and para.get('end') is not None and para['end'] != atoms[-1]['cs']:
+            out.append(f'<TEXT CharShape="{chars.index(para["end"])}"/>')
+        out.append('</P>')
         return ''.join(out)
 
     def _document(self, body: str) -> str:
@@ -241,6 +261,10 @@ class FormatHwp:
         head = _CAPTURED[:_BODY_START]
         head = re.sub(r'<FACENAMELIST>.*?</FACENAMELIST>', lambda _m: f'<FACENAMELIST>{faces}</FACENAMELIST>', head, flags=re.S)
         head = re.sub(r'<CHARSHAPELIST .*?</CHARSHAPELIST>', lambda _m: f'<CHARSHAPELIST Count="{len(chars)}">' + ''.join(self._char_xml(i, c, fonts) for i, c in enumerate(chars)) + '</CHARSHAPELIST>', head, flags=re.S)
+        bullet = '<BULLETLIST Count="1"><BULLET Char="●" Id="1"><PARAHEAD Alignment="Left" AutoIndent="true" TextOffset="50" TextOffsetType="percent" UseInstWidth="false" WidthAdjust="0"/></BULLET></BULLETLIST>'
+        head = head.replace('</NUMBERINGLIST>', '</NUMBERINGLIST>' + bullet, 1)
+        if self.explicit_number_mark:
+            head = head.replace('<PARAHEAD ', '<PARAHEAD CharShape="0" ')
         head = re.sub(r'<PARASHAPELIST .*?</PARASHAPELIST>', lambda _m: f'<PARASHAPELIST Count="{len(paras)}">' + ''.join(self._para_xml(i, p) for i, p in enumerate(paras)) + '</PARASHAPELIST>', head, flags=re.S)
         return head + f'<BODY><SECTION Id="0">{body}</SECTION>' + _CAPTURED[_BODY_END:]
 
@@ -372,26 +396,38 @@ class FormatHwp:
             self.after_execute(self)
         return True
 
+    @staticmethod
+    def _char_with(props: dict[str, Any], items: dict[str, Any]) -> dict[str, Any]:
+        changed = dict(props)
+        for key, value in items.items():
+            if key == 'Height':
+                changed['Height'] = value
+            elif key == 'TextColor':
+                changed['TextColor'] = value
+            elif key in {'Bold', 'Italic'}:
+                changed[key] = bool(value)
+            elif key == 'UnderlineType':
+                changed['Underline'] = {0: None, 1: 'Bottom', 3: 'Top'}[value]
+            elif key == 'FaceNameHangul':
+                changed['Font'] = value
+            elif not key.startswith(('FaceName', 'FontType')):
+                raise AssertionError(f'unexpected CharShape item {key}')
+        return changed
+
     def _apply_char(self, items: dict[str, Any]) -> None:
         if self.selection is None:
-            raise AssertionError('caret-wide character formatting is never issued')
-        for _para, atoms in self._selected_atoms():
+            para = self.lists[self.cursor[0]][self.cursor[1]]
+            if self.cursor[2] != para_length(para):
+                raise AssertionError('caret-wide character formatting is never issued')
+            para['end'] = self._char_with(end_shape(para), items)
+            return
+        slist, spara, _spos, _elist, epara, epos = self.selection
+        for number, (para, atoms) in enumerate(self._selected_atoms(), start=spara):
+            old_end = para.get('end')
             for atom in atoms:
-                props = dict(atom['cs'])
-                for key, value in items.items():
-                    if key == 'Height':
-                        props['Height'] = value
-                    elif key == 'TextColor':
-                        props['TextColor'] = value
-                    elif key in {'Bold', 'Italic'}:
-                        props[key] = bool(value)
-                    elif key == 'UnderlineType':
-                        props['Underline'] = 'Bottom' if value == 1 else None
-                    elif key == 'FaceNameHangul':
-                        props['Font'] = value
-                    elif not key.startswith(('FaceName', 'FontType')):
-                        raise AssertionError(f'unexpected CharShape item {key}')
-                atom['cs'] = props
+                atom['cs'] = self._char_with(atom['cs'], items)
+            if old_end is not None and (number < epara or epos == para_length(para)):
+                para['end'] = self._char_with(old_end, items)
 
     def _apply_para(self, items: dict[str, Any]) -> None:
         if self.selection is None:
@@ -471,5 +507,25 @@ def sample_document(**options: Any) -> FormatHwp:
         paragraph(textbox(paragraph('글상자 안 문구'))),
         paragraph(table(paragraph('전용표 A1'), paragraph('전용표 B1'), paragraph('전용표 A2'), paragraph('전용표 B2'))),
         paragraph('마지막 문단'),
+    ]
+    return FormatHwp(body, **options)
+
+
+def numbered_document(**options: Any) -> FormatHwp:
+    """Numbered paragraphs for what a range reaching the paragraph end does; the indexes are fixed for the tests."""
+    number, outline, bullet = shape(HeadingType='Number'), shape(HeadingType='Outline'), shape(HeadingType='Bullet')
+    body = [
+        paragraph('제목 문단'),                            # 0
+        paragraph('번호 앞글 꼬리글', para_shape=number),   # 1
+        paragraph('개요 앞글 꼬리글', para_shape=outline),  # 2
+        paragraph('글머 앞글 꼬리글', para_shape=bullet),   # 3
+        paragraph('일반 앞글 꼬리글'),                      # 4
+        paragraph('위쪽 앞글 ', ('꼬리글', char(Underline='Top')), para_shape=number),   # 5
+        paragraph('걸침 위글 꼬리글', para_shape=number),   # 6
+        paragraph('걸침 아래글 끝글', para_shape=number),   # 7
+        paragraph('굵끝 앞글 ', ('꼬리글', char(Bold=True)), para_shape=number),   # 8
+        paragraph('그림 앞글', picture(), para_shape=number),   # 9
+        paragraph(table(paragraph('셀번 앞글 꼬리글', para_shape=number), paragraph('칸둘'), paragraph('칸셋'), paragraph('칸넷'))),  # 10
+        paragraph('마지막 문단'),                           # 11
     ]
     return FormatHwp(body, **options)
