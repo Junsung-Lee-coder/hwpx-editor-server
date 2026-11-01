@@ -309,6 +309,9 @@ def _parse_selected_pos(value: Any) -> tuple[int, ...] | None:
     """() = no selection, six exact ints = (slist, spara, spos, elist, epara, epos), None = not canonical."""
     if (type(value) is not list and type(value) is not tuple) or len(value) != 7 or type(value[0]) is not bool:
         return None
+    # Native GetSelectedPosBySet leaves every ListParaPos item unset without a block: exact (False, None x 6).
+    if value[0] is False and all(item is None for item in value[1:]):
+        return ()
     if not all(_exact_index(item) for item in value[1:]):
         return None
     if not value[0]:
