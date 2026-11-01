@@ -1474,6 +1474,8 @@ class LocalCliService(
                         artifacts=result['artifacts'],
                         binding=binding,
                     )
+                if step.get('op') in {'character_format_exact', 'paragraph_format_exact'} and all(key in raw_result for key in ('target', 'requested', 'result')):
+                    result.update(native_format.public_report(raw_result))
                 step['result'] = result
             if 'error' in step:
                 step['error'] = 'native command step failed'

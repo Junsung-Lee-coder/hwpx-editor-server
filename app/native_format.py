@@ -418,6 +418,32 @@ def readback_format(paragraph: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+REPORT_ITEMS = 50
+REPORT_TEXT = 200
+
+
+def _bounded_rows(rows: list[dict[str, Any]], name: str, holder: dict[str, Any]) -> list[dict[str, Any]]:
+    if len(rows) > REPORT_ITEMS:
+        holder[f'{name}_cut'] = True
+    return [{**row, **({'text': row['text'][:REPORT_TEXT]} if isinstance(row.get('text'), str) else {})} for row in rows[:REPORT_ITEMS]]
+
+
+def public_report(step_result: Mapping[str, Any]) -> dict[str, Any]:
+    """The range and values of one command for its caller, within fixed sizes, saying when it is cut short."""
+    target = dict(step_result['target'])
+    target['paragraphs'] = _bounded_rows(target['paragraphs'], 'paragraphs', target)
+    result = dict(step_result['result'])
+    for side in ('before', 'after'):
+        items: list[dict[str, Any]] = []
+        for item in _bounded_rows(result[side], side, result):
+            row = dict(item)
+            if 'segments' in row:
+                row['segments'] = _bounded_rows(row['segments'], 'segments', row)
+            items.append(row)
+        result[side] = items
+    return {'target': target, 'requested': dict(step_result['requested']), 'result': result}
+
+
 # The target.
 
 def _hits(paragraphs: list[dict[str, Any]], phrase: str) -> list[tuple[int, int]]:

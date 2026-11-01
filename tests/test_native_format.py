@@ -570,6 +570,42 @@ class ReadbackCarriesFormat(unittest.TestCase):
         self.assertEqual(next(row for row in rows if row['text'].startswith('글상자'))['context'], 'other')
 
 
+class PublicResult(unittest.TestCase):
+    """A caller reads the range and values from the public step, which otherwise redacts text and cuts nesting."""
+
+    def public_step(self, **fields):
+        hwp = sample_document()
+        owned = owned_doc(self, hwp)
+        with patch('app.local_cli_service.snapshot_live_location', return_value={}), patch('app.local_cli_runtime.snapshot_live_location', return_value={}):
+            raw = owned.service._execute_live(binding=owned.store, command_name='command-bundle', task_label='x', handler=lambda handle: owned.service._execute_command_bundle_step(handle, {'label': 'x', **fields}, binding=owned.store)[0], timeout=5)
+        return owned.service._public_bundle_steps(session_id=owned.sid, steps=[{'op': fields['op'], 'ok': True, 'result': raw}])[0]['result']
+
+    def test_character_range_and_values_reach_the_caller(self) -> None:
+        value = self.public_step(**CHARACTER, match='English', bold=True, text_color='#C03020')
+        self.assertEqual(value['target']['paragraphs'][0]['text'], '한글과 English 혼합 target phrase 끝')
+        self.assertEqual(value['target']['paragraphs'][0]['context'], 'body')
+        self.assertEqual(value['requested'], {'bold': True, 'text_color': '#C03020'})
+        self.assertEqual(value['result']['before'][0]['segments'][0]['text'], 'English')
+        self.assertEqual(value['result']['after'][0]['segments'][0], {'text': 'English', 'font_family': '함초롬바탕', 'size_pt': 10.0, 'bold': True, 'italic': False, 'underline': False, 'text_color': '#C03020'})
+
+    def test_paragraph_values_reach_the_caller(self) -> None:
+        value = self.public_step(**PARAGRAPH, match='문단 대상', align='center', first_line_indent_pt=-5.0)
+        self.assertEqual(value['result']['after'][0]['paragraph']['align'], 'center')
+        self.assertEqual(value['result']['after'][0]['paragraph']['first_line_indent_pt'], -5.0)
+        self.assertEqual(value['result']['before'][0]['text'], '문단 대상')
+
+    def test_a_very_long_range_is_cut_and_says_so(self) -> None:
+        from app import native_format
+        step = {'target': {'kind': 'phrase', 'native_block': [0] * 6, 'paragraphs': [{'paragraph_index': n, 'context': 'body', 'text': 'x' * 500} for n in range(80)]},
+                'requested': {}, 'result': {'changed': True, 'status': 'formatted', 'native_actions': [], 'before': [], 'after': [{'paragraph_index': 0, 'segments': [{'text': 'y' * 500}] * 80}]}}
+        value = native_format.public_report(step)
+        self.assertEqual(len(value['target']['paragraphs']), native_format.REPORT_ITEMS)
+        self.assertTrue(value['target']['paragraphs_cut'])
+        self.assertEqual(len(value['result']['after'][0]['segments']), native_format.REPORT_ITEMS)
+        self.assertTrue(value['result']['after'][0]['segments_cut'])
+        self.assertEqual(len(value['result']['after'][0]['segments'][0]['text']), native_format.REPORT_TEXT)
+
+
 class StatusWording(unittest.TestCase):
     def test_a_held_session_is_not_attributed_to_a_numbering_command(self) -> None:
         import inspect
