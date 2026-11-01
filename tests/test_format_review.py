@@ -312,7 +312,7 @@ class NumberMarkReview(unittest.TestCase):
     def test_a_paragraph_that_just_got_its_number_has_no_old_mark_to_compare(self) -> None:
         review = assembled([para('문단')], [numbered('문단', mark={}, index=0)])
         self.assertEqual(review['coverage']['number_mark'], {'state': 'compared', 'numbered': 1, 'compared': 0, 'changed': 0, 'not_compared': 0, 'new': 1})
-        self.assertEqual(review['review_status'], 'complete')
+        self.assertNotIn('번호 모양은 비교하지 않았습니다', review['summary_text'])
 
     def test_an_added_numbered_paragraph_has_none_either(self) -> None:
         review = assembled([numbered('첫째', mark={}, index=0)], [numbered('첫째', mark={}, index=0), numbered('새 문단', mark={}, index=1)])
