@@ -68,6 +68,21 @@ $mcpProcess = Start-Process -FilePath '.mcp-venv\Scripts\python.exe' -ArgumentLi
 문서가 너무 커서 구조를 읽을 수 없으면(HWPML2X 3,200만 자 초과 등) `review_status`가 `unverified`가 되고 PDF와 미리보기는 그대로 돌려줍니다. 이 실패는 문서를 변경됨으로 표시하거나 세션을 보류시키지 않습니다.
 - `pdf`, `pages`, `summary_path`, `json_path`, `saved_output`: 산출물 폴더의 PDF, 쪽별 PNG, 읽기 쉬운 `summary.md`, 전체 기계 판독용 `review.json`, 마지막 저장 파일.
 
+## 쪽 번호
+
+`page_number_apply`의 `start_number`는 생략하면 1입니다. Hancom 13.0.0.3457은 시작 번호 1에 새 번호 조판을 만들지 않으므로, 첫 쪽이 1로 인쇄되는 근거는 문서 자체입니다. 그래서 변경 전에 문서의 시작 값을 확인합니다.
+
+| 문서 | 요청 | 처리 |
+|---|---|---|
+| 새 번호 조판이 없고 구역 시작이 0 또는 1 | 1 또는 생략 | 쪽 번호를 넣습니다. `readback.new_number_source`는 `implicit_first_page` |
+| 새 번호 조판이 없음 | 2 이상 | 쪽 번호와 새 번호 조판을 넣습니다. `new_number_source`는 `hwpml2x_page_restart` |
+| 구역 시작이 2 이상이고 새 번호 조판이 없음 | 1 또는 생략 | 변경 전에 `existing_section_page_start`로 거부합니다. 넣어도 그 구역의 시작 번호가 인쇄되기 때문입니다. 시작 번호를 명시하면 됩니다 |
+| 첫 문단에 요청과 같은 번호의 새 번호 조판이 있음 | 같은 번호 | 쪽 번호를 넣고 그 조판은 그대로 둡니다 |
+| 그 밖의 새 번호 조판이 있음(뒤쪽 문단의 조판 포함) | 모두 | 변경 전에 `existing_page_restart`로 거부합니다. Hancom이 첫 쪽의 조판을 요청 값으로 고쳐 쓰고 되돌리기로 돌아오지 않는데, 이 확인은 조판이 첫 쪽에 있는지 가리지 않기 때문입니다 |
+| 쪽 번호가 이미 있음 | 모두 | 변경 전에 `existing_page_number`로 거부합니다 |
+
+거부되면 세션은 보류되지 않고 저장하지 않은 이전 변경도 그대로 남습니다. 실제 인쇄된 번호는 `hwpx_proof`의 `review`가 PDF에서 확인합니다.
+
 ## 번호 문단 편집
 
 번호 체계 `1.` → `가.` → `1)` → `가)`는 `official_numbering_apply`로 지정합니다. 번호는 Hancom이 매기므로 문단을 넣거나 지우면 뒤따르는 번호가 자동으로 다시 매겨집니다.
@@ -77,6 +92,93 @@ $mcpProcess = Start-Process -FilePath '.mcp-venv\Scripts\python.exe' -ArgumentLi
 - 되돌리기와 다시 실행: `{"op": "undo"}`, `{"op": "redo"}`. 이 세션에서 추적한 편집 범위 안에서만 동작합니다. 되돌릴 편집이 없으면 네이티브 호출 없이 `no_undo_available`·`no_redo_available`로 거부하고 문서는 변경됨으로 표시되지 않습니다. 너무 커서 호출 전후를 비교할 수 없는 문서도 네이티브 호출 없이 `undo_evidence_unavailable`·`redo_evidence_unavailable`로 거부하며, 저장되지 않은 이전 변경은 그대로 남습니다. 결과의 `confirmation`에 호출 전후 문서를 비교한 실제 변화가 들어 있습니다. 개요 번호 정의를 바꾼 뒤 수준까지 따로 지정한 경우(네이티브 동작 두 번)는 Undo 한 번으로 되돌릴 수 없으므로 `undo_not_counted`로 거부합니다.
 
 네이티브 호출 전에 문서를 증거로 쓸 수 없다고 판단한 요청(너무 큰 문서, 불완전한 구조, 대상 없음, 여러 문단에 일치하는 `match`(`target_ambiguous`), 표 셀 안 문단(`target_not_in_body`), 컨트롤 수 한계(`control_enumeration_unavailable`), 공식과 다른 개요 번호 정의를 바꿔도 안전하다고 증명할 수 없는 문서(자동 번호 문단이 있거나 다른 구역과 정의가 얽힌 경우 `outline_usage_unprovable`, 같은 구역에 다른 개요 문단이 있으면 `foreign_outline_definition`) 등)은 캐럿과 문서가 그대로임을 확인한 뒤 `refusal_code`와 함께 거부되며 변경 가능으로 표시하거나 세션을 보류시키지 않습니다. 같은 세션에서 다른 대상으로 계속 작업하거나 닫을 수 있고, 그 전에 있던 저장되지 않은 변경은 그대로 남습니다. 네이티브 호출이 시작된 뒤 결과를 알 수 없으면 지금처럼 보류합니다. 네이티브 읽기 자체가 예외로 실패한 경우에도 거부로 바꾸지 않고, 다음 SDK 호출 없이 세션을 보류하되 편집이 있었던 것으로 표시하지 않습니다. 닫을 때 문서 변경 상태를 읽지 못한 경우도 같습니다. 보류된 세션의 오류는 `details.session_held=true`와 `reason=native_custody_held`로 알려 주며, 저장을 요구하는 `SAVE_REQUIRED`와 복사 실패인 `SAVED_OUTPUT_NOT_RETRIEVED`는 보류가 아니면 `session_held=false`이고 저장하거나 복사를 다시 시도하면 닫을 수 있습니다.
+
+## 글자·문단 서식
+
+GUI에서 범위를 직접 선택해 둘 필요가 없습니다. 명령마다 글자를 문서에서 다시 찾아 선택하고, 선택한 블록의 내용이 요청한 글자와 정확히 같은지 확인한 뒤 네이티브 동작 한 번을 실행합니다. 그래서 서식 → 확인(`review`, `context`, `find`, `where`, `readback`) → 서식을 같은 글자에 이어서 실행해도 그 글자에만 적용됩니다. 실행 후 문서 전체의 글자와 문단을 요청과 비교하며, 요청하지 않은 속성은 섞인 범위의 각 부분에서 그대로 유지됩니다.
+
+대상은 두 명령이 같습니다. `expected_page`(대상이 있는 쪽)와 `confirm_layout=true`는 항상 필요합니다.
+
+- `match`: 문서에서 한 곳에만 있는 글자. 앞뒤 공백을 포함해 그대로 비교합니다. 탭은 `\t`, 줄 바꿈은 `\n`, 묶음 빈칸은 U+00A0, 고정폭 빈칸은 U+2007로 적습니다.
+- `through_match`: 선택 항목. 범위가 끝나는 곳의 글자로, 이것도 한 곳에만 있어야 합니다. 여러 문단에 걸친 범위는 본문에서만 쓸 수 있습니다.
+- `paragraph_index`와 `expected_text`: `match` 대신 문단 하나를 지정합니다. 번호는 `review.json`의 문단 `index`이고 `expected_text`는 그 문단의 전체 글입니다(빈 문단은 빈 문자열). 전체 글이 같은 문단이 여러 개여도 본문 문단은 구별됩니다. `review.json`의 `text`는 문단당 300자까지이므로 더 긴 문단은 `match`를 쓰세요.
+
+글자 서식: `{"op": "character_format_exact", "match": "고유한 문구", "expected_page": 1, "font_family": "맑은 고딕", "size_pt": 13.5, "bold": true, "italic": false, "underline": true, "text_color": "#C03020", "confirm_layout": true}`. 항목은 하나 이상 지정하며 지정한 항목만 바뀝니다. `size_pt`는 포인트(0.1~4096, 0.1 단위), `text_color`는 `#RRGGBB`입니다. `font_family`는 문서에 이미 있는 TTF 글꼴이나 이 Windows 세션의 글꼴 목록에 있는 글꼴만 받습니다. Hancom은 없는 글꼴 이름도 받아 렌더링할 때 다른 글꼴로 바꾸므로 변경 전에 `font_not_available`로 거부합니다. 글꼴 목록을 읽지 못하면 `font_availability_unknown`입니다. Hancom 내장 HFT 글꼴은 같은 이름이 이 목록에 없으면 문서에서 쓰고 있어도 거부됩니다. `underline=true`는 아래쪽 밑줄이며, 위쪽 밑줄이 있는 범위에 주면 아래쪽 밑줄로 바뀝니다.
+
+문단 서식: `{"op": "paragraph_format_exact", "match": "문단 안의 고유한 문구", "expected_page": 1, "align": "center", "left_indent_pt": 20, "right_indent_pt": 10, "first_line_indent_pt": 5, "line_spacing_type": "percent", "line_spacing_value": 180, "confirm_layout": true}`. 
+
+- `align`: `left`, `center`, `right`, `justify`
+- `left_indent_pt`, `right_indent_pt`: 왼쪽·오른쪽 여백(포인트, 0~570.2, 0.1 단위)
+- `first_line_indent_pt`: 포인트(±570.2, 0.1 단위). 양수는 첫 줄을 그만큼 들여 쓰고, 음수(내어쓰기)는 첫 줄을 왼쪽 여백에 두고 다음 줄부터 그만큼 들여 씁니다.
+- `line_spacing_type`과 `line_spacing_value`는 함께 지정합니다. `percent`는 글자에 따른 비율(1~500의 정수), `fixed`는 고정 값, `at_least`는 최소, `between_lines`는 여백만 지정이며 이 셋의 값은 포인트(0.1 단위)입니다.
+
+받는 범위의 양 끝 값(크기 0.1·4096pt, 여백·첫 줄 570.2pt, 줄 간격 1·500%와 0.1·841.8pt, 여백만 지정 0pt)은 Hancom 2024 13.0.0.3457에서 값이 그대로 저장되고 다시 열어도 유지되는 것을 확인했습니다. 페이지보다 큰 값도 그대로 저장되며 쪽 수가 늘어납니다.
+
+**번호와 글머리표의 모양.** 번호 문단의 인쇄된 번호나 글머리표는 번호 정의가 모양을 지정하지 않으면 문단 마지막 글자 묶음의 글자 모양을 따릅니다(자동 번호, 개요 번호, 글머리표에서 측정). 그래서 범위가 문단 끝에 닿으면 번호 모양도 함께 바뀌려 합니다. 범위가 그 전에 끝나면 영향이 없습니다.
+
+- 기본값 `number_mark: "preserve"`: 번호 모양을 그대로 둡니다. 범위가 문단 끝에 닿으면 문단 끝 캐럿에서 네이티브 동작을 한 번 더 실행해 이전 값을 돌려놓습니다. 글자는 바뀌지 않으며 결과의 `native_actions`에 `Execute:CharShape:paragraph-end`가 추가됩니다. 번호 정의가 모양을 지정한 문단은 영향이 없어 추가 동작이 없습니다.
+- `number_mark: "follow"`: 번호 모양도 같은 변경을 따르게 합니다. Hancom이 물려주는 그대로이며, 번호 모양만 따로 지정하는 기능은 아닙니다.
+- 여러 문단에 걸친 범위가 번호 문단의 끝에 닿으면 기본값에서는 변경 전에 `target_changes_number_mark`로 거부합니다. 범위의 마지막 문단 끝에서 정확히 끝나는 경우도 같습니다. 그 끝 앞에서 범위를 마치거나, 문단마다 따로 지정하거나, `follow`를 주세요. 번호가 쓰는 글꼴이 TTF가 아니어서 돌려놓을 수 없을 때도 같은 코드로 거부합니다.
+- 결과의 `result.number_marks`에 번호 문단별 `before`, `after`, `changed`, 모양의 출처 `source`(`paragraph_end`, `definition`, `unknown`)가 있습니다.
+
+`match`로 지정하면 그 글자가 든 문단 전체에 적용되고 이웃 문단은 바뀌지 않습니다. 요청한 값이 이미 모두 적용되어 있으면 네이티브 호출 없이 `status`가 `already_set`, `dirty=false`이고 Undo 단계도 늘지 않습니다.
+
+결과의 `steps[0].result`에는 `target`(문단 번호, 위치 종류, 네이티브 범위), `requested`, `result.before`, `result.after`가 있어 범위별 글꼴·크기·굵기·기울임·밑줄·글자색이나 문단 값을 실행 전후로 볼 수 있습니다. `result.native_actions`는 실행한 네이티브 동작이고, `result.joined_controls`는 범위와 함께 글자 값을 받은 보이지 않는 컨트롤입니다.
+
+**범위 옆의 보이지 않는 컨트롤.** Hancom 13.0.0.3457에서 측정한 대로 처리합니다.
+
+| 범위와 컨트롤의 관계 | 컨트롤 | 처리 |
+|---|---|---|
+| 문단의 첫 글자에서 시작하고 그 앞에 이 컨트롤만 있음 | 구역 설정, 단 설정, 머리말, 꼬리말, 쪽 번호, 새 번호, 책갈피, 감추기, 숨은 설명, 찾아보기 표시 | 컨트롤도 범위의 글자 값을 받습니다. 컨트롤의 데이터와 인쇄된 쪽 번호는 그대로이며, 실행 후 이를 비교합니다 |
+| 범위가 컨트롤 바로 앞에서 끝남 | 머리말, 꼬리말, 쪽 번호, 새 번호, 책갈피, 감추기, 찾아보기 표시 | 위와 같습니다. 문단 끝의 책갈피까지 닿으면 번호 모양 규칙도 문단 끝에 닿은 범위와 같습니다 |
+| 앞에 다른 글자가 있고 범위가 컨트롤 바로 뒤에서 시작함 | 위의 컨트롤 | 컨트롤은 그대로입니다 |
+| 범위에 닿음 | 그림, 표, 사각형, 수식, 각주, 미주, 자동 번호 | 개체는 자기 값을 유지합니다 |
+| 범위에 닿음 | 측정하지 않은 컨트롤(타원 등), 범위 바로 뒤의 숨은 설명, 여러 문단 범위 앞의 숨은 설명 | 변경 전에 `target_beside_unproven_control`로 거부합니다 |
+
+페이지 번호를 넣은 문서의 제목 전체나 앞부분을 지정해도 세션이 보류되지 않으며, 제목과 본문을 한 문단 범위로 지정할 수 있습니다. 여러 문단에 걸친 문단 서식은 첫 문단의 첫 글자 앞에 있는 위 컨트롤만 건너뜁니다(숨은 설명 제외).
+
+지원하는 위치는 본문과 표 셀의 글자, 인라인 그림이나 표 옆의 글자, 표만 든 문단, 빈 문단, 번호·글머리표 문단입니다. 다음은 변경 전에 거부하며 `refusal_code`로, 거부 응답의 `message`에는 문장으로 이유를 알려 줍니다. 캐럿과 그 전의 선택은 되돌리고, 세션은 보류되지 않으며, 저장되지 않은 이전 변경도 그대로 남습니다.
+
+| `refusal_code` | 뜻 |
+|---|---|
+| `target_not_found`, `target_ambiguous` | 글자나 문단 번호가 없거나, 글자가 두 곳 이상에 있음 |
+| `target_text_mismatch` | `paragraph_index`의 문단이 `expected_text`와 다름 |
+| `target_wrong_page` | 대상이 `expected_page`에 없음. 결과의 `found_page`가 실제 쪽 |
+| `target_crosses_control` | 글자 범위가 표·그림 같은 개체를 가로지름 |
+| `target_crosses_invisible_control` | 글자 범위가 책갈피·쪽 번호·구역 설정 같은 보이지 않는 컨트롤이나 필드 표시를 가로지름 |
+| `target_has_controls` | 여러 문단 범위에 표·그림 같은 개체가 든 문단이 있음. 문단마다 따로 지정하면 됩니다 |
+| `target_has_invisible_controls` | 여러 문단 범위에서 첫 문단의 첫 글자 앞이 아닌 곳에 보이지 않는 컨트롤이 있거나, 첫 글자 앞에 숨은 설명이 있음. 문단마다 따로 지정하면 됩니다 |
+| `target_beside_unproven_control` | 이 편집이 건드리지 않았다고 증명할 수 없는 컨트롤이 범위에 닿음. 위 표 참고. 범위와 컨트롤 사이에 글자를 한 자 이상 두면 됩니다 |
+| `control_enumeration_unavailable` | 문서의 컨트롤 목록을 끝까지 읽지 못함. 하이퍼링크 같은 필드가 있는 문서가 여기에 해당합니다(Hancom이 필드 끝의 식별자를 빈 값으로 돌려줌) |
+| `target_changes_number_mark` | 여러 문단 범위가 번호 문단의 끝에 닿거나(마지막 문단의 끝 포함) 번호 모양을 돌려놓을 수 없음. 위 번호 설명 참고 |
+| `target_in_header_footer` | 글자가 머리말이나 꼬리말에 있음 |
+| `target_unsupported_context` | 표 셀이 아닌 개체 안의 글자(글상자, 각주, 캡션 등) |
+| `target_range_unsupported` | `through_match`가 `match`보다 앞에 있거나, 표 셀과 여러 문단에 걸침 |
+| `target_empty` | 글자 서식의 대상에 글자가 없음 |
+| `target_unselectable` | 글자가 없고 뒤따르는 문단도 없는 본문 문단 |
+| `target_unlocatable` | 네이티브 문서에서 찾지 못한 위치. 글자가 없는 표 셀 문단이 여기에 해당 |
+| `selection_unverified` | 선택한 블록이 요청한 글자와 같다고 확인되지 않음 |
+| `font_not_available`, `font_availability_unknown` | 위 글꼴 설명 참고 |
+| `preservation_unprovable` | 문서가 너무 커서 비교 근거를 읽지 못함 |
+
+네이티브 동작이 시작된 뒤 결과가 요청과 다르거나 알 수 없으면(요청 밖의 글자·문단 변경, 저장되지 않은 값, 읽기 실패) 되돌리거나 다시 시도하지 않고 위 번호 문단 편집과 같이 세션을 보류합니다.
+
+되돌리기와 다시 실행은 받아들인 서식 명령 하나당 한 번씩이며, 번호 모양을 돌려놓은 명령은 네이티브 두 단계를 한 번에 되돌립니다(`native_undo_steps: 2`). 결과의 `confirmation.expected_state`가 `{"compared": true, "matches": true}`이면 문서가 그 명령 전(되돌리기) 또는 후(다시 실행) 상태와 같다는 뜻입니다. `matches`가 `false`이면 `undo_state_mismatch`·`redo_state_mismatch`로 실패하고 이후 되돌리기는 `undo_not_counted`로 거부됩니다. 책갈피 같은 컨트롤 양쪽의 글자에 같은 값을 준 뒤 렌더링하면 Hancom이 두 글자 묶음을 합치므로, 그 뒤 다른 명령을 되돌릴 때 이렇게 알립니다.
+
+확인은 `hwpx_proof`의 `review`로 합니다. `summary.md`의 "서식 변경 상세"는 행마다 문단(대괄호 안 숫자는 `review.json`의 `index`, 그 뒤에 글 일부, 글이 없으면 `(빈 문단)`, `(표만 있는 문단)`처럼 표시하고, 개체 정보를 읽지 못했으면 `(글 없음, 내용 확인 못함)`으로 표시), 범위, 항목, 이전 값, 이후 값을 보여 줍니다. 긴 글은 `…`로 줄였다고 표시하고, 응답에 글이 없는 범위는 `(앞부분 밖 글자 20개)`, 공백뿐인 범위는 `(공백 1개)`처럼 적습니다. 밑줄 위치는 `위쪽`, `아래쪽`, `없음`으로 비교합니다. 이 표는 200행까지이고 넘으면 그렇게 알리며, 전체는 `comparison.changes`에 있습니다. `coverage.format.state`는 바뀐 서식을 값으로 모두 설명하면 `complete`, 이 항목들이 아닌 다른 서식이 바뀌었거나(이름 있는 값과 함께 바뀐 경우 포함) 목록이 잘렸으면 `partial`, 값을 읽지 못했으면 `unverified`이며 뒤의 두 경우 `review_status`도 `partial`이 됩니다. 정의의 번호가 달라졌을 뿐 내용이 같으면 변경으로 보지 않습니다. 같은 확인이 번호 변경으로 보고한 문단의 번호 종류·수준 차이는 설명된 것으로 보며, 번호 정의가 바뀌었거나 다른 값도 함께 바뀌었으면 `partial`로 남습니다. "표 셀 등 본문 밖 문단"의 "글 동일"은 글만 비교한 결과이며, 서식이 바뀐 셀 문단은 그 수를 함께 적습니다.
+
+번호 모양은 `coverage.number_mark`에 있습니다. `numbered`, `compared`, `changed`, `new`, `not_compared`가 개수이고 `state`는 다음과 같습니다.
+
+| `state` | 뜻 | `review_status`에 미치는 영향 |
+|---|---|---|
+| `none` | 번호 문단이 없음 | 없음 |
+| `compared` | 모든 번호 문단을 비교했고 바뀌지 않음 | 없음 |
+| `changed` | 모든 번호 문단을 비교했고 바뀐 것이 있음(`comparison.changes`에 `number_mark_changed`로 표시) | 없음 |
+| `new_only` | 모든 번호 문단이 기준 시점에 번호가 없었거나 새로 추가되어 비교할 이전 모양이 없음 | `partial` |
+| `mixed` | 일부는 비교했고(`changed`에 바뀐 수) 일부는 새 번호임 | `partial` |
+| `not_compared` | 비교할 기준이나 값이 없는 번호 문단이 있음. 세션의 첫 확인과 정의를 읽지 못한 번호가 여기에 해당 | `partial` |
+
+새 번호의 모양은 비교되지 않았으므로 `compared`로 세지 않으며, 요약과 `summary.md`에 새 번호 개수를 적습니다. 인쇄된 번호 글자·종류·수준 확인은 별개이며 `numbering`에 있습니다. 번호를 붙인 뒤의 확인을 기준으로 다시 확인하면 그 번호는 `compared`가 됩니다. 이 비교는 서식 값으로 계산한 것이며 인쇄된 모양은 미리보기로 확인합니다. 저장되지 않은 변경이 없고 저장본이 있으면 `persisted_format`이 Hancom을 거치지 않고 HWPX 파일을 직접 읽어 비교한 결과를 줍니다(`match`, `partial`, `mismatch`, `unverified`). `mismatch`이면 `review_status`도 `mismatch`입니다. 저장본 비교에는 번호 모양도 포함됩니다. `review.json`의 각 문단에는 `index`, `context`(`body`, `table_cell`, `other`)와 `format`(글자 묶음별 값, 문단 값, 번호 모양, 개체 목록)이 있습니다. 글자 묶음 값이 아주 많은 문서는 응답 크기 안에서 뒤쪽 문단의 묶음을 생략하고 `runs_truncated`로 알립니다.
 
 ## 크기 제한
 
@@ -91,7 +193,7 @@ $mcpProcess = Start-Process -FilePath '.mcp-venv\Scripts\python.exe' -ArgumentLi
 
 다운로드 경로는 관리 세션 바인딩과 해당 산출물의 크기·SHA-256 기록이 모두 있고, 산출물이 같은 관리 루트의 일반 파일임을 확인한 경우에만 상태에 표시됩니다. 서버의 절대 파일 경로는 응답에 포함하지 않습니다. 전송 직전에 경로를 다시 여는 대신 관리 루트와 파일을 안전하게 확인한 파일 스트림을 먼저 열고 custody hash를 재검증하므로, 검증 뒤 파일을 바꾸거나 경로를 심은 경우에는 전송하지 않습니다. Windows에서는 응답이 끝날 때까지 열린 파일에 대한 교체도 운영체제가 막습니다.
 
-`hwpx_command`는 `context`, `selection_proof`, `readback`, `cell_format_exact`, `page_number_apply`, `official_numbering_apply`, `paragraph_insert_exact`, `paragraph_remove_exact`, `undo`, `redo`, `command_reconcile`만 받습니다. `page_number_apply`는 `position`(`top-left`, `top-center`, `top-right`, `bottom-left`, `bottom-center`, `bottom-right`)과 `confirm_layout=true`를 요구하고, 선택 항목으로 `start_number`(1~65535, 기본 1), `side_char`(`none` 또는 `dash`, 기본 `none`)를 받습니다. 앞·뒤 문구는 네이티브 대시(`-`) 장식(`dash`)만 지원하고 임의의 앞·뒤 문구와 머리말·꼬리말 확인 우회 항목은 받지 않습니다. 실행 중인 문서의 메모리 상 HWPML2X 구조 스냅샷(본문, 글자·문단·표·그림 서식, 머리말·꼬리말, 스타일, 번호 정의, 바이너리 데이터 참조)을 읽을 수 있을 때만 변경하고, 읽을 수 없으면 변경 전에 거부하며, 실행 후 새 쪽 번호 컨트롤과 그 설정 외의 구조가 달라지거나 스냅샷을 읽을 수 없으면 정리(되돌리기) 없이 결과 불명으로 보고합니다(inserted로 보고하지 않음). `official_numbering_apply`는 `match`, `expected_page`, `level`(1~4), `confirm_layout=true`를 모두 요구하며 일치하는 문단 하나에 네이티브 개요 번호 수준을 적용합니다. 현재 구역의 개요 번호 정의가 `1.` → `가.` → `1)` → `가)` 4수준과 일치하는지 읽어서 확인하고, 일치하지 않으면 그 구역에 다른 개요 문단이 없다는 것을 증명할 수 있을 때만 4수준을 정의하며, 확인하지 못한 형식은 성공으로 보고하지 않습니다. 이미 확인된 정의가 있으면 네이티브 ParagraphShape 동작 한 번(HeadingType, Level)으로 적용하고, 같은 구조 스냅샷을 변경 전에 읽을 수 없거나 대상 문단을 하나로 식별할 수 없으면 변경 전에 거부하며, 변경 후 대상 문단의 번호 외 구조가 달라지면 결과 불명으로 보고합니다. 두 명령 모두 자동 저장하지 않으며, 저장 전에 렌더링 증명이 필요합니다. 두 동작은 보호된 대화형 `command_bundle`(CLI/MCP)과 호출자가 SDK 수명을 소유하는 라이브러리에서만 지원합니다. 대기열 편집 작업(`/edit-and-convert`, `/edit-and-convert-from-path`, 작업자 `edit_and_convert_with_pyhwpx`)은 실패 시 SDK를 종료하고 COM을 해제하므로 결과 불명 상태에서 문서를 유지할 수 없어, `page_number`/`official_numbering` 작업 연산이 하나라도 있으면 `edit_and_convert_with_pyhwpx`가 자신의 COM 초기화·SDK 생성·열기·편집 이전에 작업 전체를 거부합니다(`/capabilities`의 `queued_job_unsupported_ops`). 다만 이를 감싸는 `process_one_command`는 그 전에 네이티브 내보내기 사전 점검을 수행하며, 이 점검이 빈 탐침 인스턴스를 생성하고 종료하므로 자식 프로세스 전체가 SDK 작업을 전혀 하지 않는다는 뜻은 아닙니다. 그러므로 API·CLI·MCP 동일 입력 동등성은 충족되지 않습니다. 또한 결과 불명이 된 뒤에는 캐럿을 이동하지 않으며, 자동 Undo·닫기·종료를 하지 않습니다. `page_number_apply`와 `official_numbering_apply`에서 네이티브 변경 호출(`PageNumPos`, `OutlineNumber`, `ParagraphShape`)이 시작된 뒤 발생한 일반 예외(읽기·집계·비교 오류 포함)는 원인을 유지한 채 결과 불명(`mutation_may_have_persisted=true`)으로 보고합니다. `KeyboardInterrupt`·`SystemExit` 같은 종료 신호는 호출자가 소유한 라이브러리에서는 삼키지 않고 그대로 전파합니다. 정확한 내장 종료 신호에만 호환용 결과 불명 표시를 붙이고 사용자 하위 클래스의 속성은 읽거나 변경하지 않습니다. 소유 런타임의 trusted producer intent가 결과 불명과 STA 보존을 별도로 결정합니다. 보호된 라이브러리 소유 실행 경계(실시간 세션의 소유 스레드에서 실행되는 `command_bundle`)에서는 이런 결과 불명(반환된 결과든 종료 신호든)이 해당 세션을 보류 상태로 만듭니다. 명령은 `failed`(`may_have_mutated=true`, 원래 신호 종류는 원인 체인에 보존)로 기록되고, 호출자는 `ok=false`, `dirty=true`, `native_custody_held=true`인 미완료 결과를 받으며, 같은 소유 스레드와 세션 등록은 유지됩니다. 이 경로에서는 Clear·Quit·CoUninitialize, 캐럿 이동, Undo, 저장·내보내기, 재시도, 새 네이티브 호출을 하지 않고, 시간 초과로 표시하지도 않으며, 이후의 실행·닫기(강제 포함)·정리·증거 없는 reconcile/acknowledge는 보류를 해제하지 못합니다. 상태 조회는 읽기 전용으로 남습니다. 운영자 승인에 의한 해제 절차는 이 저장소에 구현되어 있지 않으므로 보류된 세션은 해당 프로세스가 끝날 때까지 유지됩니다. Linux 어댑터 테스트는 어댑터 계약만 확인합니다. `cell_format_exact`는 기존 대상 ID, 해시, 페이지, 구역 앵커와 `confirm_layout=true`를 요구하며, 형식 선택자는 `vertical_align`, `cell_margin_mm`, `cell_margin_hu` 중 하나만 지정합니다. 셀 여백 변경은 선언된 단위로 네 변(left/right/top/bottom)을 모두 명시한 단일 네이티브 호출을 사용하고, 요청에서 독립적으로 계산한 네 변의 값과 네이티브 전후 getter가 정확히 일치해야 성공으로 기록됩니다. 유효하지 않거나 신선하지 않은 네이티브 getter, 같은 값을 다시 요청한 no-op, 요청값과 다른 여백은 거부되며, 동작 후 판정 실패는 변경 가능성을 보존합니다. 셀 정렬은 별도의 네이티브 전후 readback을 확보하지 못하면 성공으로 기록하지 않습니다. `pyhwpx_call`, `hwp_action`, 임의 Python·셸·명령 이름은 허용하지 않습니다. 이 어댑터는 기존 비변경용 `safe-schema` 자체를 확장하거나 쓰기 권한으로 해석하지 않습니다.
+`hwpx_command`는 `context`, `selection_proof`, `readback`, `cell_format_exact`, `page_number_apply`, `official_numbering_apply`, `paragraph_insert_exact`, `paragraph_remove_exact`, `character_format_exact`, `paragraph_format_exact`, `undo`, `redo`, `command_reconcile`만 받습니다. `page_number_apply`는 `position`(`top-left`, `top-center`, `top-right`, `bottom-left`, `bottom-center`, `bottom-right`)과 `confirm_layout=true`를 요구하고, 선택 항목으로 `start_number`(1~65535, 기본 1), `side_char`(`none` 또는 `dash`, 기본 `none`)를 받습니다. 앞·뒤 문구는 네이티브 대시(`-`) 장식(`dash`)만 지원하고 임의의 앞·뒤 문구와 머리말·꼬리말 확인 우회 항목은 받지 않습니다. 실행 중인 문서의 메모리 상 HWPML2X 구조 스냅샷(본문, 글자·문단·표·그림 서식, 머리말·꼬리말, 스타일, 번호 정의, 바이너리 데이터 참조)을 읽을 수 있을 때만 변경하고, 읽을 수 없으면 변경 전에 거부하며, 실행 후 새 쪽 번호 컨트롤과 그 설정 외의 구조가 달라지거나 스냅샷을 읽을 수 없으면 정리(되돌리기) 없이 결과 불명으로 보고합니다(inserted로 보고하지 않음). `official_numbering_apply`는 `match`, `expected_page`, `level`(1~4), `confirm_layout=true`를 모두 요구하며 일치하는 문단 하나에 네이티브 개요 번호 수준을 적용합니다. 현재 구역의 개요 번호 정의가 `1.` → `가.` → `1)` → `가)` 4수준과 일치하는지 읽어서 확인하고, 일치하지 않으면 그 구역에 다른 개요 문단이 없다는 것을 증명할 수 있을 때만 4수준을 정의하며, 확인하지 못한 형식은 성공으로 보고하지 않습니다. 이미 확인된 정의가 있으면 네이티브 ParagraphShape 동작 한 번(HeadingType, Level)으로 적용하고, 같은 구조 스냅샷을 변경 전에 읽을 수 없거나 대상 문단을 하나로 식별할 수 없으면 변경 전에 거부하며, 변경 후 대상 문단의 번호 외 구조가 달라지면 결과 불명으로 보고합니다. 두 명령 모두 자동 저장하지 않으며, 저장 전에 렌더링 증명이 필요합니다. 두 동작은 보호된 대화형 `command_bundle`(CLI/MCP)과 호출자가 SDK 수명을 소유하는 라이브러리에서만 지원합니다. 대기열 편집 작업(`/edit-and-convert`, `/edit-and-convert-from-path`, 작업자 `edit_and_convert_with_pyhwpx`)은 실패 시 SDK를 종료하고 COM을 해제하므로 결과 불명 상태에서 문서를 유지할 수 없어, `page_number`/`official_numbering` 작업 연산이 하나라도 있으면 `edit_and_convert_with_pyhwpx`가 자신의 COM 초기화·SDK 생성·열기·편집 이전에 작업 전체를 거부합니다(`/capabilities`의 `queued_job_unsupported_ops`). 다만 이를 감싸는 `process_one_command`는 그 전에 네이티브 내보내기 사전 점검을 수행하며, 이 점검이 빈 탐침 인스턴스를 생성하고 종료하므로 자식 프로세스 전체가 SDK 작업을 전혀 하지 않는다는 뜻은 아닙니다. 그러므로 API·CLI·MCP 동일 입력 동등성은 충족되지 않습니다. 또한 결과 불명이 된 뒤에는 캐럿을 이동하지 않으며, 자동 Undo·닫기·종료를 하지 않습니다. `page_number_apply`와 `official_numbering_apply`에서 네이티브 변경 호출(`PageNumPos`, `OutlineNumber`, `ParagraphShape`)이 시작된 뒤 발생한 일반 예외(읽기·집계·비교 오류 포함)는 원인을 유지한 채 결과 불명(`mutation_may_have_persisted=true`)으로 보고합니다. `KeyboardInterrupt`·`SystemExit` 같은 종료 신호는 호출자가 소유한 라이브러리에서는 삼키지 않고 그대로 전파합니다. 정확한 내장 종료 신호에만 호환용 결과 불명 표시를 붙이고 사용자 하위 클래스의 속성은 읽거나 변경하지 않습니다. 소유 런타임의 trusted producer intent가 결과 불명과 STA 보존을 별도로 결정합니다. 보호된 라이브러리 소유 실행 경계(실시간 세션의 소유 스레드에서 실행되는 `command_bundle`)에서는 이런 결과 불명(반환된 결과든 종료 신호든)이 해당 세션을 보류 상태로 만듭니다. 명령은 `failed`(`may_have_mutated=true`, 원래 신호 종류는 원인 체인에 보존)로 기록되고, 호출자는 `ok=false`, `dirty=true`, `native_custody_held=true`인 미완료 결과를 받으며, 같은 소유 스레드와 세션 등록은 유지됩니다. 이 경로에서는 Clear·Quit·CoUninitialize, 캐럿 이동, Undo, 저장·내보내기, 재시도, 새 네이티브 호출을 하지 않고, 시간 초과로 표시하지도 않으며, 이후의 실행·닫기(강제 포함)·정리·증거 없는 reconcile/acknowledge는 보류를 해제하지 못합니다. 상태 조회는 읽기 전용으로 남습니다. 운영자 승인에 의한 해제 절차는 이 저장소에 구현되어 있지 않으므로 보류된 세션은 해당 프로세스가 끝날 때까지 유지됩니다. Linux 어댑터 테스트는 어댑터 계약만 확인합니다. `cell_format_exact`는 기존 대상 ID, 해시, 페이지, 구역 앵커와 `confirm_layout=true`를 요구하며, 형식 선택자는 `vertical_align`, `cell_margin_mm`, `cell_margin_hu` 중 하나만 지정합니다. 셀 여백 변경은 선언된 단위로 네 변(left/right/top/bottom)을 모두 명시한 단일 네이티브 호출을 사용하고, 요청에서 독립적으로 계산한 네 변의 값과 네이티브 전후 getter가 정확히 일치해야 성공으로 기록됩니다. 유효하지 않거나 신선하지 않은 네이티브 getter, 같은 값을 다시 요청한 no-op, 요청값과 다른 여백은 거부되며, 동작 후 판정 실패는 변경 가능성을 보존합니다. 셀 정렬은 별도의 네이티브 전후 readback을 확보하지 못하면 성공으로 기록하지 않습니다. `pyhwpx_call`, `hwp_action`, 임의 Python·셸·명령 이름은 허용하지 않습니다. 이 어댑터는 기존 비변경용 `safe-schema` 자체를 확장하거나 쓰기 권한으로 해석하지 않습니다.
 
 `hwpx_cell_margins_get`는 셀 서식을 바꾸지 않고 표 셀 네 변의 여백을 읽는 독립 도구입니다. `hwpx_find`가 돌려준 문서 생성 값, `hwpx_command`의 `readback`이 돌려준 컨트롤 목록의 대상 ID·해시·앵커 페이지, 그리고 같은 세션에서 새로 확인한 셀 위치를 `request`에 모두 담아야 합니다. 요청 필드는 `document_id`(세션 ID와 같은 32자리 소문자 16진수), `expected_document_generation`, `target_id`, `expected_hash`, `expected_page`, `expected_cell_page`, `page_from`, `page_to`, `cell_pos`, `cell_addr`, `section_anchor`이며 `max_controls`(기본 100)만 선택 항목입니다. 값은 JSON 배열로 직접 전달합니다. `cell_pos`는 네이티브 위치 3개 값, `cell_addr`는 0부터 시작하는 `[열, 행]`이고 A1이 `[0, 0]`입니다. A1 표기 문자열, 숫자 문자열, 다른 필드, 기본값 대체는 모두 거부합니다. `section_anchor`는 요청한 셀 문단에 문자 그대로 한 번만 나타나는 문장 조각이어야 합니다. 찾기 결과의 `section` 표시(`live-text`)는 메타데이터일 뿐 앵커 문구가 아니므로 그대로 쓰면 거부됩니다.
 

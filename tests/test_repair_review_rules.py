@@ -32,7 +32,12 @@ OUTLINE = [para('Alpha', 'OUTLINE', 0), para('Beta', 'OUTLINE', 0)]
 
 class Coverage(unittest.TestCase):
     def test_complete_only_when_everything_was_seen_and_matches(self):
-        result = built(OUTLINE, ['1. Alpha\n2. Beta\n'])
+        mark = {'kind': 'outline', 'source': 'paragraph_end', 'bold': False}
+        marked = [{**item, 'format': {'mark': mark}} for item in OUTLINE]
+        first = built(marked, ['1. Alpha\n2. Beta\n'])
+        self.assertEqual(first['review_status'], 'partial', 'the labels match, but the look of the numbers has nothing to be compared with')
+        self.assertIs(first['numbering_all_match'], True)
+        result = built(marked, ['1. Alpha\n2. Beta\n'], baseline=first)
         self.assertEqual(result['review_status'], 'complete')
         self.assertIs(result['numbering_all_match'], True)
         self.assertIn('모두 기대와 일치', result['summary_text'])

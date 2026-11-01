@@ -157,6 +157,78 @@ class ParagraphRemoveStep(_ParagraphTarget):
     confirm_remove: Literal[True]
 
 
+def _in_tenths(value: float | None) -> bool:
+    return value is None or abs(value * 10 - round(value * 10)) <= 1e-9
+
+
+class _FormatTarget(Closed):
+    """An exact range: unique text, optionally through a second unique text, or one paragraph by its review index and full text."""
+    match: Annotated[str, Field(min_length=1, max_length=500)] | None = None
+    through_match: Annotated[str, Field(min_length=1, max_length=500)] | None = None
+    paragraph_index: int | None = Field(default=None, ge=0)
+    expected_text: Annotated[str, Field(max_length=4000)] | None = None
+    expected_page: int = Field(ge=1, le=10000)
+    confirm_layout: Literal[True]
+
+    @model_validator(mode='after')
+    def require_one_target(self):
+        if self.match is not None:
+            if self.paragraph_index is not None or self.expected_text is not None:
+                raise ValueError('give match or paragraph_index with expected_text, not both')
+            for value in (self.match, self.through_match):
+                if value is not None and (not value.strip(' \t\n\u00a0\u2007') or any(ord(char) < 32 and char not in '\t\n' for char in value)):
+                    raise ValueError('match must be text without control characters other than tab and line break')
+        elif self.through_match is not None or self.paragraph_index is None or self.expected_text is None:
+            raise ValueError('give match, or paragraph_index with expected_text')
+        return self
+
+
+class CharacterFormatStep(_FormatTarget):
+    op: Literal['character_format_exact']
+    label: Label = 'mcp:character-format-exact'
+    font_family: Annotated[str, Field(min_length=1, max_length=64, pattern=r'^[^@\s](.*\S)?$')] | None = None
+    size_pt: float | None = Field(default=None, ge=0.1, le=4096.0, description='Points, in steps of 0.1.')
+    bold: bool | None = None
+    italic: bool | None = None
+    underline: bool | None = None
+    text_color: Annotated[str, Field(pattern=r'^#[0-9A-Fa-f]{6}$')] | None = Field(default=None, description='#RRGGBB.')
+    number_mark: Literal['preserve', 'follow'] = Field(default='preserve', description="A range reaching the end of a numbered paragraph: preserve keeps its printed number or bullet as it was; follow lets it take the same changes, as Hancom's own inheritance does. Under preserve, a range of several paragraphs that reaches a numbered paragraph's end, the last paragraph's end included, is refused before any edit.")
+
+    @model_validator(mode='after')
+    def require_a_property(self):
+        if all(value is None for value in (self.font_family, self.size_pt, self.bold, self.italic, self.underline, self.text_color)):
+            raise ValueError('character_format_exact needs at least one property')
+        if not _in_tenths(self.size_pt):
+            raise ValueError('size_pt goes in steps of 0.1')
+        return self
+
+
+class ParagraphFormatStep(_FormatTarget):
+    op: Literal['paragraph_format_exact']
+    label: Label = 'mcp:paragraph-format-exact'
+    align: Literal['left', 'center', 'right', 'justify'] | None = None
+    left_indent_pt: float | None = Field(default=None, ge=0.0, le=570.2, description='Left margin in points, in steps of 0.1.')
+    right_indent_pt: float | None = Field(default=None, ge=0.0, le=570.2, description='Right margin in points, in steps of 0.1.')
+    first_line_indent_pt: float | None = Field(default=None, ge=-570.2, le=570.2, description='First line in points, in steps of 0.1: positive indents it, negative hangs it.')
+    line_spacing_type: Literal['percent', 'fixed', 'between_lines', 'at_least'] | None = None
+    line_spacing_value: float | None = Field(default=None, ge=0.0, le=841.8, description='A whole percent 1..500 for percent; otherwise points in steps of 0.1.')
+
+    @model_validator(mode='after')
+    def require_a_property(self):
+        if all(value is None for value in (self.align, self.left_indent_pt, self.right_indent_pt, self.first_line_indent_pt, self.line_spacing_type)):
+            raise ValueError('paragraph_format_exact needs at least one property')
+        if (self.line_spacing_type is None) != (self.line_spacing_value is None):
+            raise ValueError('line_spacing_type and line_spacing_value go together')
+        if not all(_in_tenths(value) for value in (self.left_indent_pt, self.right_indent_pt, self.first_line_indent_pt)):
+            raise ValueError('indents go in steps of 0.1 points')
+        if self.line_spacing_type == 'percent':
+            if not self.line_spacing_value.is_integer() or not 1 <= self.line_spacing_value <= 500:
+                raise ValueError('a percent line spacing is a whole number from 1 to 500')
+        elif self.line_spacing_type is not None and (not _in_tenths(self.line_spacing_value) or (self.line_spacing_type != 'between_lines' and self.line_spacing_value == 0)):
+            raise ValueError('this line spacing is in points, in steps of 0.1')
+        return self
+
+
 class UndoStep(Closed):
     op: Literal['undo']
 
@@ -171,7 +243,7 @@ class Reconcile(Closed):
 
 
 class Command(Session):
-    request: Annotated[ContextStep | SelectionStep | ReadbackStep | CellFormatStep | PageNumberStep | OfficialNumberingStep | ParagraphInsertStep | ParagraphRemoveStep | UndoStep | RedoStep | Reconcile,
+    request: Annotated[ContextStep | SelectionStep | ReadbackStep | CellFormatStep | PageNumberStep | OfficialNumberingStep | ParagraphInsertStep | ParagraphRemoveStep | CharacterFormatStep | ParagraphFormatStep | UndoStep | RedoStep | Reconcile,
                        Field(discriminator='op')]
 
 

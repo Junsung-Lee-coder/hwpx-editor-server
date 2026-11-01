@@ -103,6 +103,16 @@ def _vanishing_elements(root: ET.Element) -> set[int]:
     return vanishing
 
 
+def _section_page_starts(body: ET.Element) -> list[int | None]:
+    """Each section definition's own page start in document order; 0 continues from 1, and None is a value this cannot read."""
+    starts: list[int | None] = []
+    for element in body.iter():
+        if _name(element) == 'startnumber':
+            value = (_lower_attrs(element).get('page') or '').strip()
+            starts.append(int(value) if value.isascii() and value.isdigit() else None)
+    return starts
+
+
 def _page_restarts(
     root: ET.Element, body: ET.Element, paragraph_index: dict[int, int]
 ) -> tuple[list[dict[str, Any]], list[list[int]]]:
@@ -262,6 +272,17 @@ def _lists_digest(root: ET.Element, names: set[str]) -> str | None:
     if not found:
         return None
     return _digest_tokens([_element_digest(element) for element in found])
+
+
+def _numberings_digest(root: ET.Element, resolver: '_Resolver') -> str | None:
+    """Definitions by content: a mark shape a definition names is renumbered when Hancom adds a character shape, and that is no change (observed on Hancom 2024)."""
+    found = [element for element in root.iter() if _name(element) in {'numberinglist', 'bulletlist'}]
+    if not found:
+        return None
+    try:
+        return _digest_tokens([resolver.digest(element) for element in found])
+    except _Unresolved:
+        return _lists_digest(root, {'numberinglist', 'bulletlist'})
 
 
 def _run_is_empty(run: ET.Element) -> bool:
@@ -540,7 +561,7 @@ def _paragraph_structure(element: ET.Element) -> dict[str, Any]:
 
 def _paragraph_definitions(resolver: _Resolver, element: ET.Element, shape_ref: str | None, heading: str | None, number_ref: str | None) -> dict[str, Any]:
     """Which definitions this paragraph itself uses, so an edit can tell its own single-use definition from any other."""
-    facts: dict[str, Any] = {'parashape_sha256': None, 'charshape_sha256s': [], 'numbering_ref_sha256': None}
+    facts: dict[str, Any] = {'parashape_sha256': None, 'charshape_sha256s': [], 'numbering_ref_sha256': None, 'end_charshape_sha256': None}
     try:
         if shape_ref is not None:
             facts['parashape_sha256'] = resolver.definition('parashapelist', shape_ref)
@@ -548,6 +569,10 @@ def _paragraph_definitions(resolver: _Resolver, element: ET.Element, shape_ref: 
         facts['charshape_sha256s'] = sorted(resolver.definition('charshapelist', ref) for ref in references)
         if heading in {'NUMBER', 'BULLET'} and number_ref is not None:
             facts['numbering_ref_sha256'] = resolver.definition('numberinglist' if heading == 'NUMBER' else 'bulletlist', number_ref)
+        # A numbered paragraph's last run, even an empty one, is what its printed mark inherits (observed on Hancom 2024); the content digest drops empty runs.
+        last = next((ref for run in reversed(list(element)) if _name(run) == 'text' and (ref := _attr(run, 'charshape')) is not None), None)
+        if heading in {'NUMBER', 'BULLET', 'OUTLINE'} and last is not None:
+            facts['end_charshape_sha256'] = resolver.definition('charshapelist', last)
     except _Unresolved:
         pass
     return facts
@@ -670,7 +695,7 @@ def parse_hwpml2x_census(text: Any) -> dict[str, Any]:
         'header_footer': header_footer,
         'body_sha256': _digest_tokens([text_value for _section, text_value, _shape, _element in raw_paragraphs]),
         'styles_sha256': _styles_digest(root, resolver),
-        'numberings_sha256': _lists_digest(root, {'numberinglist', 'bulletlist'}),
+        'numberings_sha256': _numberings_digest(root, resolver),
         'bindata_sha256': _lists_digest(root, {'bindatalist'}),
         # Explicitly fingerprint both media metadata and payload storage, including
         # observed absence. Unlike bindata_sha256=None, this is usable evidence
@@ -686,4 +711,5 @@ def parse_hwpml2x_census(text: Any) -> dict[str, Any]:
         'outline_shapes': _outline_shapes(resolver, body),
         'page_restarts': page_restarts,
         'page_restart_positions': page_restart_positions,
+        'section_page_starts': _section_page_starts(body),
     }

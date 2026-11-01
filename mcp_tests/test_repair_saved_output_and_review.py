@@ -75,6 +75,7 @@ class Backend(BaseHTTPRequestHandler):
     readback_mode = 'ok'
     close_mode = 'ok'
     printed = [['1. Alpha', '2. Beta'], ['second page']]
+    bundle_reply = {'ok': True, 'steps': []}
 
     def log_message(self, format, *args):
         pass
@@ -125,6 +126,8 @@ class Backend(BaseHTTPRequestHandler):
             return self.reply({'ok': True, 'session_id': SID, 'available': True, 'source_filename': 'fixture.hwpx', 'page_count': 2, 'document_is_modified': False,
                                'paragraphs': type(self).readback_paragraphs or [paragraph('Alpha'), paragraph('Beta')], 'paragraph_total': 2500 if type(self).readback_truncated else len(type(self).readback_paragraphs or 'ab'), 'paragraphs_truncated': type(self).readback_truncated, 'controls': {'tbl': 1}, 'page_numbers': [], 'page_restarts': [], 'caret_unchanged': True,
                                'evidence': {'header_footer': [], 'styles_sha256': 's', 'media_sha256': 'm', 'numberings_sha256': 'n', 'bindata_sha256': 'b', **(type(self).readback_evidence or {})}})
+        if self.path == '/local-cli/command-bundle':
+            return self.reply(type(self).bundle_reply)
         if self.path == '/local-cli/export':
             return self.reply({'ok': True, 'session_id': SID, 'download_path': f'/local-cli/session/{SID}/artifact/export'})
         if self.path == '/local-cli/save':
@@ -194,6 +197,7 @@ class Base(unittest.IsolatedAsyncioTestCase):
         Backend.held = False
         Backend.close_mode = 'ok'
         Backend.printed = [['1. Alpha', '2. Beta'], ['second page']]
+        Backend.bundle_reply = {'ok': True, 'steps': []}
         shutil.rmtree(self.root / 'artifacts', ignore_errors=True)
         self.saved_dir = self.root / 'artifacts' / SID / 'saved'
 
@@ -369,6 +373,11 @@ class ReviewAtTheBoundary(Base):
         self.assertNotEqual(value['numbering_all_match'], False)
 
     async def test_complete_review_is_stated_as_complete(self):
+        mark = {'kind': 'outline', 'source': 'paragraph_end', 'bold': False}
+        Backend.readback_paragraphs = [{**paragraph(text), 'format': {'mark': mark}} for text in ('Alpha', 'Beta')]
+        first = (await self.review()).structured_content['result']
+        self.assertEqual(first['review_status'], 'partial')
+        self.assertIn('번호 모양은 비교하지 않았습니다', first['summary_text'].splitlines()[0])
         value = (await self.review()).structured_content['result']
         self.assertEqual(value['review_status'], 'complete')
         self.assertTrue(value['summary_text'].startswith('확인 결과: 전체 확인'))

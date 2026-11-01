@@ -69,7 +69,7 @@ from app.local_cli_runtime import (
     save_document,
     snapshot_live_location,
 )
-from app import native_paragraph_edit
+from app import native_format, native_numbering, native_paragraph_edit
 from app.local_cli_type_guard import type_insert_guard_reason
 from app.command_packages.runtime import get_command_package_registry
 from app.raw_readback import RawReadbackMismatch, build_raw_target_readback
@@ -126,6 +126,8 @@ from app.media_guard import MediaGuardError, media_change_reasons, media_invento
 #   'refuse'             - never counted: `undo` refuses after the step.
 #   'single_native_edit' - one undo unit only when the step succeeded and its
 #                          result reports exactly one native edit.
+#   'counted_native_edit' - one tracked edit of the one or two native edits the
+#                          successful step reports.
 # Ops not listed count one undo unit per changed step.
 _BUNDLE_UNDO_POLICY: dict[str, str] = {
     'layout_exact': 'refuse',
@@ -136,6 +138,10 @@ _BUNDLE_UNDO_POLICY: dict[str, str] = {
     'page_number_apply': 'single_native_edit',
     'paragraph_insert_exact': 'single_native_edit',
     'paragraph_remove_exact': 'single_native_edit',
+    # A block is what keeps these from merging into an earlier edit of the same paragraph in the native history.
+    # Keeping a number mark at a range's end takes one more native action, so character formatting counts what it issued.
+    'character_format_exact': 'counted_native_edit',
+    'paragraph_format_exact': 'single_native_edit',
 }
 _UNDO_UNVERIFIED_BUNDLE_OPS = frozenset(_BUNDLE_UNDO_POLICY)
 
@@ -169,11 +175,20 @@ def _bundle_step_single_undo(step: dict[str, Any]) -> bool:
     policy = _BUNDLE_UNDO_POLICY.get(str(step.get('op')))
     if policy is None:
         return True
-    if policy != 'single_native_edit':
+    if policy not in {'single_native_edit', 'counted_native_edit'}:
         return False
+    return step.get('ok') is True and _reported_native_edits(step) in ({1, 2} if policy == 'counted_native_edit' else {1})
+
+
+def _reported_native_edits(step: dict[str, Any]) -> Any:
     result = step.get('result') if isinstance(step.get('result'), dict) else {}
     undo = result.get('undo') if isinstance(result.get('undo'), dict) else {}
-    return step.get('ok') is True and undo.get('native_editing_actions') == 1
+    return undo.get('native_editing_actions')
+
+
+def _native_undo_steps(steps: list[dict[str, Any]]) -> int:
+    """How many native Undo calls reverse these steps: what a counted step reported, one for any other."""
+    return sum(_reported_native_edits(step) if _BUNDLE_UNDO_POLICY.get(str(step.get('op'))) == 'counted_native_edit' else 1 for step in steps)
 
 
 def _record_bundle_undo_state(binding: dict[str, Any], steps: list[Any], prior: dict[str, Any]) -> None:
@@ -195,18 +210,36 @@ def _record_bundle_undo_state(binding: dict[str, Any], steps: list[Any], prior: 
             f'{", ".join(unverified)} changed the document with native actions that cannot be undone as one counted step'
         )
     else:
-        binding['pending_logical_undo_count'] = len(dirty_steps)
+        binding['pending_logical_undo_count'] = _native_undo_steps(dirty_steps)
         # Drop this bundle's own start marker; an older unverified edit below
         # these steps still blocks undo once they are undone.
         binding['logical_undo_unverified'] = prior.get('logical_undo_unverified')
-    _track_history_edit(binding, None if unverified else len(dirty_steps))
+    _track_history_edit(binding, None if unverified else _native_undo_steps(dirty_steps), _recorded_states(dirty_steps))
 
 
-def _track_history_edit(binding: dict[str, Any], native_steps: Any) -> None:
+def _recorded_states(steps: list[dict[str, Any]]) -> dict[str, str] | None:
+    """The document state a lone step started from and ended in, when it recorded them."""
+    if len(steps) != 1 or not isinstance(steps[0].get('result'), dict) or not isinstance(steps[0]['result'].get('undo'), dict):
+        return None
+    undo = steps[0]['result']['undo']
+    return {'pre': undo['pre_state_sha256'], 'post': undo['post_state_sha256']} if undo.get('pre_state_sha256') and undo.get('post_state_sha256') else None
+
+
+def _track_history_edit(binding: dict[str, Any], native_steps: Any, states: dict[str, str] | None = None) -> None:
     """The edits this session can undo, newest last: native step counts, or None for an edit that cannot be counted."""
     if isinstance(binding.get('undo_stack'), list):
         binding['undo_stack'].append(native_steps)
         binding['redo_stack'] = []
+        binding.setdefault('undo_states', []).append(states)
+        binding['redo_states'] = []
+
+
+def _expected_state(states: Any, name: str, reached: Any) -> dict[str, Any]:
+    """Whether a history step reached the state its edit recorded; an edit that recorded none cannot be compared."""
+    recorded = states.get(name) if isinstance(states, dict) else None
+    if recorded is None or reached is None:
+        return {'compared': False, 'matches': None}
+    return {'compared': True, 'matches': recorded == reached}
 
 
 _STYLE_SELECTION_CONSUMED_WARNING = (
@@ -1453,6 +1486,8 @@ class LocalCliService(
                         artifacts=result['artifacts'],
                         binding=binding,
                     )
+                if step.get('op') in {'character_format_exact', 'paragraph_format_exact'} and all(key in raw_result for key in ('target', 'requested', 'result')):
+                    result.update(native_format.public_report(raw_result))
                 step['result'] = result
             if 'error' in step:
                 step['error'] = 'native command step failed'
@@ -2807,6 +2842,8 @@ class LocalCliService(
             },
             'paragraph_insert_exact': {'op', 'operation', 'label', 'match', 'expected_page', 'text', 'position', 'confirm_layout'},
             'paragraph_remove_exact': {'op', 'operation', 'label', 'match', 'expected_page', 'expected_text', 'confirm_remove'},
+            'character_format_exact': {'op', 'operation', 'label', 'match', 'through_match', 'paragraph_index', 'expected_text', 'expected_page', 'confirm_layout', 'number_mark', 'font_family', 'size_pt', 'bold', 'italic', 'underline', 'text_color'},
+            'paragraph_format_exact': {'op', 'operation', 'label', 'match', 'through_match', 'paragraph_index', 'expected_text', 'expected_page', 'confirm_layout', 'align', 'left_indent_pt', 'right_indent_pt', 'first_line_indent_pt', 'line_spacing_type', 'line_spacing_value'},
             'paragraph_delete_exact': {
                 'op',
                 'operation',
@@ -3693,7 +3730,7 @@ class LocalCliService(
 
         # Numbering publishes intent at actual Execute boundaries. Other
         # packages are conservative before invocation, never error callbacks.
-        if op not in {'page_number_apply', 'official_numbering_apply', 'paragraph_insert_exact', 'paragraph_remove_exact',
+        if op not in {'page_number_apply', 'official_numbering_apply', 'paragraph_insert_exact', 'paragraph_remove_exact', 'character_format_exact', 'paragraph_format_exact',
                       'control_inventory', 'table_frame_inventory', 'style_inspect', 'where'}:
             if handle.mark_mutating_intent is not None:
                 handle.mark_mutating_intent()
@@ -4912,7 +4949,7 @@ class LocalCliService(
                 f'reconcile command {pending_reconciliation.get("command_id")}'
                 if pending_reconciliation is not None
                 else
-                f'session {session_id} is held after a numbering command with an unknown native outcome; '
+                f'session {session_id} is held after a command with an unknown native outcome; '
                 'it is retained and needs operator release'
                 if isinstance(active_binding, dict) and active_binding.get('native_custody_held') is True
                 else
@@ -7157,7 +7194,7 @@ class LocalCliService(
                     # Producer invocation intent is independent of error tags.
                     from app.native_numbering import NativeNumberingRefusal
                     from app.local_cli_bundle_numbering import _NumberingCleanRefusal, _NumberingSemanticRefusal
-                    numbering = step.get('op') in {'official_numbering_apply', 'page_number_apply', 'paragraph_insert_exact', 'paragraph_remove_exact'}
+                    numbering = step.get('op') in {'official_numbering_apply', 'page_number_apply', 'paragraph_insert_exact', 'paragraph_remove_exact', 'character_format_exact', 'paragraph_format_exact'}
                     target_refused = numbering and (type(exc) is NativeNumberingRefusal or type(exc) is _NumberingSemanticRefusal or type(exc) is _NumberingCleanRefusal)
                     # Paragraph edits publish intent exactly when the native call is issued; numbering keeps its stricter projection.
                     mutation_may_have_persisted = handle.mutation_intent or (step.get('op') == 'official_numbering_apply' and not target_refused)
@@ -7177,7 +7214,8 @@ class LocalCliService(
                     # descriptors, metadata, metaclass name or representation.
                     error_text = 'Native command failed; outcome is unproven.'
                     if target_refused:
-                        error_text = 'Numbering preflight refused; original state and preservation verified.'
+                        error_text = ('Formatting refused before any edit; original state and preservation verified.' if step.get('op') in {'character_format_exact', 'paragraph_format_exact'}
+                                      else 'Numbering preflight refused; original state and preservation verified.')
                     rollback = {}
                     if type(exc) is LocalCliMutationError or type(exc) is LocalCliRuntimeError:
                         args = BaseException.__dict__['args'].__get__(exc)
@@ -7211,6 +7249,13 @@ class LocalCliService(
                         from app.local_cli_runtime import _native_diagnostic
                         status['refusal_code'] = (exc.code if type(exc) is _NumberingSemanticRefusal or type(exc) is _NumberingCleanRefusal
                                                   else _native_diagnostic('bundle_step', exc)['refusal_code'])
+                        args = BaseException.__dict__['args'].__get__(exc)
+                        if step.get('op') in {'character_format_exact', 'paragraph_format_exact', 'page_number_apply'} and type(args) is tuple and len(args) == 1 and type(args[0]) is str:
+                            status['refusal_message'] = args[0][:400]
+                        if type(exc) is NativeNumberingRefusal:
+                            found_page = BaseException.__dict__['__dict__'].__get__(exc).get('found_page')
+                            if type(found_page) is int:
+                                status['found_page'] = found_page
                     if numbering:
                         # Fixed labels only, so a caller can see the stopping phase without opening the journal.
                         from app.local_cli_runtime import _native_diagnostic
@@ -7537,7 +7582,11 @@ class LocalCliService(
                 return {'not_applied': True}
             raise LocalCliRuntimeError(f'Native {name} did not return True; its outcome is unknown.')
         after = native_paragraph_edit.history_evidence(hwp, protection)
+        # Native history gives a block back; it must not linger for whatever command comes next.
+        if callable(getattr(hwp, 'get_selected_pos', None)) and native_numbering._get_selection(hwp):  # noqa: SLF001
+            native_numbering._set_pos(hwp, native_numbering._get_pos(hwp))  # noqa: SLF001
         return {
+            'state_sha256': native_format.state_digest(after) if after is not None else None,
             'confirmation': native_paragraph_edit.history_confirmation(before, after),
             'snapshot': _snapshot_cursor_context(hwp),
             'context': _capture_nearby_text_context(hwp),
@@ -7549,7 +7598,10 @@ class LocalCliService(
         binding = self._load_active_binding(session_id=session_id)
 
         def _handler(handle: LocalCliRuntimeHandle) -> dict[str, Any]:
-            return native_paragraph_edit.numbering_readback(handle.hwp, protection=self._numbering_protection_reader(handle))
+            return native_paragraph_edit.numbering_readback(
+                handle.hwp, protection=self._numbering_protection_reader(handle),
+                format_model=native_format.live_model_reader(handle.hwp), format_rows=native_format.readback_format,
+            )
 
         result = self._execute_live(binding=binding, command_name='numbering-readback', task_label='local_cli.numbering_readback', handler=_handler)
         result.pop('_local_cli_command', None)
@@ -7626,17 +7678,24 @@ class LocalCliService(
         location = result.get('location') if isinstance(result.get('location'), dict) else {}
         binding = self._update_live_binding(binding, location=location, dirty=True, clear_last_find=True, clear_selection_cache=True)
         binding['pending_logical_undo_count'] = None
+        states = binding['undo_states'].pop() if isinstance(binding.get('undo_states'), list) and binding['undo_states'] else None
         if isinstance(binding.get('undo_stack'), list) and binding['undo_stack']:
             binding.setdefault('redo_stack', []).append(binding['undo_stack'].pop())
+            binding.setdefault('redo_states', []).append(states)
+        expected = _expected_state(states, 'pre', result.get('state_sha256'))
+        confirmation = {**result['confirmation'], 'expected_state': expected} if expected['compared'] else result.get('confirmation')
+        if expected['matches'] is False:
+            self._stop_history(binding)
         binding = self._save_binding(binding)
         self._record_local_cli_command('undo', binding=binding, summary=f'applied undo to the live document ({undo_count} native step(s))', payload={'cursor': snapshot.get('pos'), 'native_undo_steps': undo_count})
         return {
-            'ok': True,
+            'ok': expected['matches'] is not False,
+            **self._history_mismatch('undo', expected),
             'summary': 'undo applied',
             'native_undo_steps': undo_count,
             'caret_pos': snapshot.get('pos'),
             'context': context,
-            'confirmation': result.get('confirmation'),
+            'confirmation': confirmation,
         }
 
     def redo(self, *, session_id: str | None = None) -> dict[str, Any]:
@@ -7655,17 +7714,40 @@ class LocalCliService(
         context = result.get('context') if isinstance(result.get('context'), dict) else {}
         location = result.get('location') if isinstance(result.get('location'), dict) else {}
         binding = self._update_live_binding(binding, location=location, dirty=True, clear_last_find=True, clear_selection_cache=True)
+        states = binding['redo_states'].pop() if isinstance(binding.get('redo_states'), list) and binding['redo_states'] else None
         if isinstance(binding.get('redo_stack'), list) and binding['redo_stack']:
             binding.setdefault('undo_stack', []).append(binding['redo_stack'].pop())
+            binding.setdefault('undo_states', []).append(states)
+            binding = self._save_binding(binding)
+        expected = _expected_state(states, 'post', result.get('state_sha256'))
+        confirmation = {**result['confirmation'], 'expected_state': expected} if expected['compared'] else result.get('confirmation')
+        if expected['matches'] is False:
+            self._stop_history(binding)
             binding = self._save_binding(binding)
         self._record_local_cli_command('redo', binding=binding, summary='applied redo to the live document', payload={'cursor': snapshot.get('pos')})
         return {
-            'ok': True,
+            'ok': expected['matches'] is not False,
+            **self._history_mismatch('redo', expected),
             'summary': 'redo applied',
             'caret_pos': snapshot.get('pos'),
             'context': context,
-            'confirmation': result.get('confirmation'),
+            'confirmation': confirmation,
         }
+
+    @staticmethod
+    def _stop_history(binding: dict[str, Any]) -> None:
+        """The document is not in the state this history recorded, so no further step can be counted on it."""
+        if isinstance(binding.get('undo_stack'), list):
+            binding['undo_stack'].append(None)
+            binding.setdefault('undo_states', []).append(None)
+        binding['redo_stack'] = []
+        binding['redo_states'] = []
+
+    @staticmethod
+    def _history_mismatch(name: str, expected: dict[str, Any]) -> dict[str, Any]:
+        if expected['matches'] is not False:
+            return {}
+        return {'detail': f'{name}_state_mismatch: {name} ran, but the document is not in the state recorded for this edit; review it before saving.'}
 
     def artifact(self, *, kind: str, session_id: str | None = None) -> tuple[Path, str]:
         binding, path = self._resolve_artifact(kind=kind, session_id=session_id)

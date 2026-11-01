@@ -12,9 +12,10 @@ requested paragraph after the call is an unknown outcome that is never rolled ba
 from __future__ import annotations
 
 import difflib
+import json
 from typing import Any, Callable, Mapping
 
-from app.native_numbering_census import CensusTextUnusable, _digest_tokens
+from app.native_numbering_census import CensusError, CensusTextUnusable, _digest_tokens
 from app.native_numbering import (
     ControlEnumerationLimit,
     ControlEnumerationUnproven,
@@ -280,12 +281,14 @@ def remove_paragraph(
 
 
 _PARAGRAPH_LIMIT = 2000
+# What a review may spend on run-by-run values; the adapter reads at most 4 MiB of response.
+_FORMAT_READBACK_BYTES = 1536 * 1024
 # In a review, a definition list the fully resolved document does not have: an inventory that was read and is empty.
 EMPTY_INVENTORY = 'absent'
 _READBACK_TEXT_LIMIT = 300
 
 
-def numbering_readback(hwp: Any, *, protection: Callable[[], Any]) -> dict[str, Any]:
+def numbering_readback(hwp: Any, *, protection: Callable[[], Any], format_model: Callable[[], Mapping[str, Any]] | None = None, format_rows: Callable[[Mapping[str, Any]], dict[str, Any]] | None = None) -> dict[str, Any]:
     """Facts for a readable review; only in-memory reads run, and the caret is compared before and after.
 
     A document this code cannot use as evidence (too large, unresolved references, too many controls) is reported as
@@ -329,6 +332,7 @@ def numbering_readback(hwp: Any, *, protection: Callable[[], Any]) -> dict[str, 
                 }
                 for item in census['paragraphs'][:_PARAGRAPH_LIMIT]
             ]
+            _add_format(result, census['paragraphs'], format_model, format_rows)
     try:
         chain = _control_ids(hwp)
     except ControlEnumerationUnproven:
@@ -344,6 +348,29 @@ def numbering_readback(hwp: Any, *, protection: Callable[[], Any]) -> dict[str, 
         result.update(controls=controls, page_numbers=page_numbers)
     result.update(page_count=hwp.PageCount, document_is_modified=hwp.IsModified, caret_unchanged=state is not None and _read_target_state(hwp) == state)
     return result
+
+
+def _add_format(result: dict[str, Any], paragraphs: list[dict[str, Any]], format_model: Callable[[], Mapping[str, Any]] | None, format_rows: Callable[[Mapping[str, Any]], dict[str, Any]] | None) -> None:
+    """Each paragraph's position and its character and paragraph values; a document that cannot show them says so and stays readable."""
+    for index, row in enumerate(result['paragraphs']):
+        row['index'] = index
+    if format_model is None or format_rows is None:
+        return
+    try:
+        rows = format_model()['paragraphs']
+    except CensusError:  # A returned text this reader cannot use; a raising native read is not this.
+        rows = None
+    if rows is None or [item['text'] for item in rows] != [item['text'] for item in paragraphs]:
+        result['format_reason'] = 'format_unavailable'
+        return
+    spent = 0
+    for row, item in zip(result['paragraphs'], rows):
+        fact = format_rows(item)
+        spent += len(json.dumps(fact['runs'], ensure_ascii=False).encode('utf-8', 'surrogatepass'))
+        if spent > _FORMAT_READBACK_BYTES:
+            fact = {**fact, 'runs': [], 'runs_truncated': True}
+        row['context'] = item['context']
+        row['format'] = fact
 
 
 class _CensusUnusable(Exception):
@@ -372,8 +399,12 @@ def history_evidence(hwp: Any, protection: Callable[[], Any]) -> dict[str, Any] 
         controls = [name for _control, name in _control_ids(hwp)]
     except ControlEnumerationLimit:
         return None
+    return evidence_of(census, controls)
+
+
+def evidence_of(census: Mapping[str, Any], controls: list[str]) -> dict[str, Any]:
     return {
-        'paragraphs': [{key: item[key] for key in ('text', 'heading', 'level', 'content_sha256')} for item in census['paragraphs']],
+        'paragraphs': [{**{key: item[key] for key in ('text', 'heading', 'level', 'content_sha256')}, 'end_charshape_sha256': item.get('end_charshape_sha256')} for item in census['paragraphs']],
         'controls': controls,
         'digests': {name: census[name] for name in ('header_footer', 'styles_sha256', 'numberings_sha256', 'media_sha256', 'page_restarts')},
     }
@@ -397,6 +428,8 @@ def history_confirmation(before: Mapping[str, Any] | None, after: Mapping[str, A
                                 'after': {'heading': right['heading'], 'level': right['level']}})
             elif left['content_sha256'] != right['content_sha256']:
                 changes.append({'kind': 'format_changed', 'text': right['text'][:120]})
+            if (left['heading'], left['level']) == (right['heading'], right['level']) and left.get('end_charshape_sha256') != right.get('end_charshape_sha256'):
+                changes.append({'kind': 'number_mark_changed', 'text': right['text'][:120]})
     digests = sorted(name for name in before['digests'] if before['digests'][name] != after['digests'][name])
     controls_changed = before['controls'] != after['controls']
     result: dict[str, Any] = {

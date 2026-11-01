@@ -1,0 +1,26 @@
+{
+  "op": "character_format_exact",
+  "version": "local-cli/character-format-exact/v1-package",
+  "summary": "Command-bundle package for character_format_exact: one exact range of text with one native CharShape: any of font family, size, bold, italic, underline and text color.",
+  "module": "app.command_packages.commands.character_format_exact.run",
+  "read_only": false,
+  "dirty_default": true,
+  "allowed_keys": [
+    "op",
+    "operation",
+    "label",
+    "match",
+    "through_match",
+    "paragraph_index",
+    "expected_text",
+    "expected_page",
+    "confirm_layout",
+    "font_family",
+    "size_pt",
+    "bold",
+    "italic",
+    "underline",
+    "text_color",
+    "number_mark"
+  ]
+}

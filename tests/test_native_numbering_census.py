@@ -57,7 +57,7 @@ def hwpml(
     for index, (text, heading, level) in enumerate(paragraphs):
         controls = ''
         if index == 0:
-            controls = '<SECDEF OutlineShape="1"/>'
+            controls = '<SECDEF OutlineShape="1"><STARTNUMBER Equation="0" Figure="0" Page="0" PageStartsOn="Both" Table="0"/></SECDEF>'
             controls += ''.join(
                 f'<{tag} ApplyPageType="Both"><PARALIST><P ParaShape="0"><TEXT><CHAR>{content}</CHAR></TEXT></P></PARALIST></{tag}>'
                 for tag, group in (('HEADER', headers), ('FOOTER', footers))
