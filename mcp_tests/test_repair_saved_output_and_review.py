@@ -66,7 +66,9 @@ def paragraph(text, heading='OUTLINE', level=0):
 class Backend(BaseHTTPRequestHandler):
     calls = []
     saved = hwpx_bytes(b'edited')
-    copy_mode = 'ok'  # ok, status500, truncated, corrupt, oversize, no_artifact
+    copy_mode = 'ok'  # ok, status500, truncated, corrupt, oversize, no_artifact, custody_mismatch
+    readback_paragraphs = None
+    readback_evidence = None
     dirty = False
     readback_mode = 'ok'
     close_mode = 'ok'
@@ -97,6 +99,8 @@ class Backend(BaseHTTPRequestHandler):
                 return self.reply({'detail': 'x'}, 500)
             if mode == 'no_artifact':
                 return self.reply({'detail': 'none'}, 404)
+            if mode == 'custody_mismatch':
+                return self.reply({'detail': 'Local CLI artifact custody is not available; refusing download.'}, 409)
             if mode == 'truncated':
                 self.reply(type(self).saved[:40], length=len(type(self).saved))
                 self.close_connection = True
@@ -117,8 +121,8 @@ class Backend(BaseHTTPRequestHandler):
                 return self.reply({'ok': True, 'session_id': SID, 'available': False, 'reason': 'census_unavailable', 'source_filename': 'fixture.hwpx', 'page_count': 2, 'document_is_modified': False,
                                    'paragraphs': None, 'controls': {'tbl': 1}, 'page_numbers': [], 'page_restarts': [], 'evidence': None, 'caret_unchanged': True})
             return self.reply({'ok': True, 'session_id': SID, 'available': True, 'source_filename': 'fixture.hwpx', 'page_count': 2, 'document_is_modified': False,
-                               'paragraphs': [paragraph('Alpha'), paragraph('Beta')], 'paragraph_total': 2, 'controls': {'tbl': 1}, 'page_numbers': [], 'page_restarts': [], 'caret_unchanged': True,
-                               'evidence': {'header_footer': [], 'styles_sha256': 's', 'media_sha256': 'm', 'numberings_sha256': 'n', 'bindata_sha256': 'b'}})
+                               'paragraphs': type(self).readback_paragraphs or [paragraph('Alpha'), paragraph('Beta')], 'paragraph_total': len(type(self).readback_paragraphs or 'ab'), 'controls': {'tbl': 1}, 'page_numbers': [], 'page_restarts': [], 'caret_unchanged': True,
+                               'evidence': {'header_footer': [], 'styles_sha256': 's', 'media_sha256': 'm', 'numberings_sha256': 'n', 'bindata_sha256': 'b', **(type(self).readback_evidence or {})}})
         if self.path == '/local-cli/export':
             return self.reply({'ok': True, 'session_id': SID, 'download_path': f'/local-cli/session/{SID}/artifact/export'})
         if self.path == '/local-cli/save':
@@ -180,6 +184,8 @@ class Base(unittest.IsolatedAsyncioTestCase):
         Backend.copy_mode = 'ok'
         Backend.dirty = False
         Backend.readback_mode = 'ok'
+        Backend.readback_paragraphs = None
+        Backend.readback_evidence = None
         Backend.close_mode = 'ok'
         Backend.printed = [['1. Alpha', '2. Beta'], ['second page']]
         shutil.rmtree(self.root / 'artifacts', ignore_errors=True)

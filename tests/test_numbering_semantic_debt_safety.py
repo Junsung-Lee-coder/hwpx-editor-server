@@ -211,7 +211,8 @@ class SemanticDebtSafety(unittest.TestCase):
                 hwp.hwpml_text = hwp.get_text_file('HWPML2X', '').replace('STYLELIST', 'XSTYLELIST')
                 persist = owned.session._persist_command
                 def fail(command):
-                    if command.name == 'command-bundle':
+                    # The command's own terminal report; the fault at admission never reaches the refusal.
+                    if command.name == 'command-bundle' and command.state != 'queued':
                         raise OSError('synthetic report failure')
                     return persist(command)
                 with patch.object(owned.session, '_persist_command', fail):
@@ -219,6 +220,8 @@ class SemanticDebtSafety(unittest.TestCase):
                 # A failed report never reads as success, never clears earlier debt and never reads as a new edit.
                 self.assertIsNone(result)
                 self.assertIsNotNone(error)
+                self.assertTrue(owned.session._native_custody_held)
+                self.assertEqual(owned.saved_bindings[-1]['working_copy_dirty'], prior_dirty)
                 self.assertIs(owned.session._normal_close_requires_save, prior_dirty)
                 self.assertEqual(owned.cleanup_events(), [])
 
