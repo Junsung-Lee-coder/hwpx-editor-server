@@ -192,7 +192,7 @@ class CharacterFormatStep(_FormatTarget):
     italic: bool | None = None
     underline: bool | None = None
     text_color: Annotated[str, Field(pattern=r'^#[0-9A-Fa-f]{6}$')] | None = Field(default=None, description='#RRGGBB.')
-    number_mark: Literal['preserve', 'follow'] = Field(default='preserve', description="A range reaching the end of a numbered paragraph: preserve keeps its printed number or bullet as it was; follow lets it take the same changes, as Hancom's own inheritance does.")
+    number_mark: Literal['preserve', 'follow'] = Field(default='preserve', description="A range reaching the end of a numbered paragraph: preserve keeps its printed number or bullet as it was; follow lets it take the same changes, as Hancom's own inheritance does. Under preserve, a range of several paragraphs that reaches a numbered paragraph's end, the last paragraph's end included, is refused before any edit.")
 
     @model_validator(mode='after')
     def require_a_property(self):
