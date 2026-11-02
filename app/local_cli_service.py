@@ -153,6 +153,15 @@ _BUNDLE_UNDO_POLICY: dict[str, str] = {
     'table_width_exact': 'counted_any_native_edit',
 }
 _UNDO_UNVERIFIED_BUNDLE_OPS = frozenset(_BUNDLE_UNDO_POLICY)
+# These packages own strict target/preservation proofs. The bundle must not
+# surround them (or sibling steps in the same request) with best-effort SDK reads.
+_GUARDED_BUNDLE_OPS = frozenset({
+    'page_number_apply', 'official_numbering_apply',
+    'paragraph_insert_exact', 'paragraph_remove_exact',
+    'character_format_exact', 'paragraph_format_exact',
+    'table_inventory', 'table_read', 'table_edit_exact', 'table_style_exact',
+    'table_width_exact', 'table_create_exact',
+})
 
 
 class LocalCliUndoRefused(LocalCliRuntimeError):
@@ -3765,8 +3774,7 @@ class LocalCliService(
 
         # Numbering publishes intent at actual Execute boundaries. Other
         # packages are conservative before invocation, never error callbacks.
-        if op not in {'page_number_apply', 'official_numbering_apply', 'paragraph_insert_exact', 'paragraph_remove_exact', 'character_format_exact', 'paragraph_format_exact', 'table_inventory', 'table_read', 'table_edit_exact', 'table_style_exact', 'table_width_exact', 'table_create_exact',
-                      'control_inventory', 'table_frame_inventory', 'style_inspect', 'where'}:
+        if op not in _GUARDED_BUNDLE_OPS | {'control_inventory', 'table_frame_inventory', 'style_inspect', 'where'}:
             if handle.mark_mutating_intent is not None:
                 handle.mark_mutating_intent()
         package = self.command_packages.get(op)
@@ -7187,12 +7195,15 @@ class LocalCliService(
     def command_bundle(self, *, steps: list[dict[str, Any]], session_id: str | None = None) -> dict[str, Any]:
         cleaned_steps = self._validate_command_bundle_steps(steps)
         binding = self._load_active_binding(session_id=session_id)
+        guarded = any(step['op'] in _GUARDED_BUNDLE_OPS for step in cleaned_steps)
+        omitted = {'observation_status': 'omitted_guarded_envelope'}
 
         def _handler(handle: LocalCliRuntimeHandle) -> dict[str, Any]:
+            handle.guarded_bundle = guarded
             # Bundle wrapper snapshots must not disturb live selection. Commands
             # that need rich nearby text/context should request it explicitly in
             # their own package; the wrapper is only envelope proof.
-            before_location = snapshot_live_location(
+            before_location = dict(omitted) if guarded else snapshot_live_location(
                 hwp=handle.hwp,
                 source_filename=handle.source_filename,
                 working_copy_id=handle.session_id,
@@ -7206,7 +7217,7 @@ class LocalCliService(
             custody_held = False
 
             for index, step in enumerate(cleaned_steps, start=1):
-                step_before = self._bundle_compact_snapshot(handle.hwp)
+                step_before = dict(omitted) if guarded else self._bundle_compact_snapshot(handle.hwp)
                 try:
                     result, step_dirty, step_warnings = self._execute_command_bundle_step(handle, step, binding=binding)
                     dirty = dirty or bool(step_dirty)
@@ -7219,7 +7230,7 @@ class LocalCliService(
                         'ok': True,
                         'dirty': bool(step_dirty),
                         'before': step_before,
-                        'after': self._bundle_compact_snapshot(handle.hwp),
+                        'after': dict(omitted) if guarded else self._bundle_compact_snapshot(handle.hwp),
                         'result': result,
                         'warnings': step_warnings,
                     }
@@ -7229,12 +7240,12 @@ class LocalCliService(
                     # Producer invocation intent is independent of error tags.
                     from app.native_numbering import NativeNumberingRefusal
                     from app.local_cli_bundle_numbering import _NumberingCleanRefusal, _NumberingSemanticRefusal
-                    numbering = step.get('op') in {'official_numbering_apply', 'page_number_apply', 'paragraph_insert_exact', 'paragraph_remove_exact', 'character_format_exact', 'paragraph_format_exact', 'table_inventory', 'table_read', 'table_edit_exact', 'table_style_exact', 'table_width_exact', 'table_create_exact'}
+                    numbering = step.get('op') in _GUARDED_BUNDLE_OPS
                     target_refused = numbering and (type(exc) is NativeNumberingRefusal or type(exc) is _NumberingSemanticRefusal or type(exc) is _NumberingCleanRefusal)
                     # Paragraph edits publish intent exactly when the native call is issued; numbering keeps its stricter projection.
                     mutation_may_have_persisted = handle.mutation_intent or (step.get('op') == 'official_numbering_apply' and not target_refused)
                     held = False
-                    if (mutation_may_have_persisted or (numbering and not target_refused)) and handle.hold_native_custody is not None:
+                    if (mutation_may_have_persisted or (guarded and not target_refused)) and handle.hold_native_custody is not None:
                         if mutation_may_have_persisted:
                             handle.hold_native_custody('Bundle mutator outcome unknown; session retained.', exc)
                         else:
@@ -7271,7 +7282,7 @@ class LocalCliService(
                         'ok': False,
                         'dirty': mutation_may_have_persisted,
                         'before': step_before,
-                        'after': {} if held else self._bundle_compact_snapshot(handle.hwp),
+                        'after': {} if held else (dict(omitted) if guarded else self._bundle_compact_snapshot(handle.hwp)),
                         'error': ('LocalCliMutationError' if type(exc) is LocalCliMutationError else _exception_label(exc)) + ': ' + error_text,
                         'mutation_may_have_persisted': mutation_may_have_persisted,
                         'rollback': rollback,
@@ -7305,7 +7316,7 @@ class LocalCliService(
                     break
                 step_results.append(status)
 
-            after_location = {} if custody_held else snapshot_live_location(
+            after_location = {} if custody_held else dict(omitted) if guarded else snapshot_live_location(
                 hwp=handle.hwp,
                 source_filename=handle.source_filename,
                 working_copy_id=handle.session_id,

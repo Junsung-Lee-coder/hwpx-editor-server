@@ -110,6 +110,7 @@ class LocalCliBundleControlsMixin:
         if not isinstance(location, dict):
             return {}
         return {
+            **({'observation_status': location['observation_status']} if 'observation_status' in location else {}),
             'cursor_summary': location.get('cursor_summary'),
             'selection_summary': location.get('selection_summary'),
             'current_paragraph_preview': None,

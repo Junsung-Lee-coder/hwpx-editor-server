@@ -1258,6 +1258,7 @@ class LocalCliRuntimeHandle:
     diagnostic_site: str = 'command_handler'
     mark_mutating_intent: Callable[[], None] | None = None
     mutation_intent: bool = False
+    guarded_bundle: bool = False
     observe_pre_save: Callable[[], dict[str, Any]] | None = None
 
 
@@ -2544,7 +2545,9 @@ class LocalCliLiveSession:
             )
             watchdog_stop, watchdog_thread = start_runtime_watchdog(
                 self.log_path,
-                lambda: hwp,
+                # Observers run off the owning STA. Never give them the SDK
+                # wrapper, including while a command is running or held.
+                lambda: None,
                 lambda: {
                     'job_id': self.session_id,
                     'execution_run_id': f'local-cli-open-{self.session_id}',
