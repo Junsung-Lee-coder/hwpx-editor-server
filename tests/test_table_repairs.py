@@ -676,3 +676,70 @@ class ReplyAndValidation(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class Identities(unittest.TestCase):
+    """A picture is known by the data it shows, the same digest the saved package's member has (measured: base64 in the live text, raw in the file)."""
+
+    def test_a_picture_is_known_by_the_digest_of_its_decoded_data(self) -> None:
+        import base64
+        import hashlib
+        import re
+        hwp = sample_document()
+        text = hwp.get_text_file('HWPML2X', '')
+        data = base64.b64decode(''.join(re.search(r'<BINDATA [^>]*>([^<]*)</BINDATA>', text).group(1).split()))
+        self.assertTrue(data.startswith(b'\x89PNG'))
+        model = nt.parse_table_model(text)
+        self.assertEqual(model['pictures'], [hashlib.sha256(data).hexdigest()])
+
+    def test_data_that_is_not_base64_has_no_identity(self) -> None:
+        hwp = sample_document()
+        hwp.media_payload_override = '%%%not base64%%%'
+        self.assertEqual(nt.parse_table_model(hwp.get_text_file('HWPML2X', ''))['pictures'], [None])
+
+    def test_the_review_readback_carries_every_picture_identity(self) -> None:
+        hwp = sample_document()
+        owned = owned_doc(self, hwp)
+        facts = owned.service.numbering_readback()
+        self.assertEqual(facts['picture_payloads'], nt.parse_table_model(hwp.get_text_file('HWPML2X', ''))['pictures'])
+
+
+class StoredSizeRead(unittest.TestCase):
+    def test_inventory_read_and_review_rows_give_the_stored_width_and_height(self) -> None:
+        hwp = sample_document()
+        hwp.by_inst('1012').size_height = 10530
+        self.assertEqual(inventory(hwp)['tbl:1012']['stored_size'], {'width_hu': 36000, 'height_hu': 10530})
+        read = ok_result(self, Flow(hwp).step(op='table_read', table_id='tbl:1012'))
+        self.assertEqual(read['stored_size'], {'width_hu': 36000, 'height_hu': 10530})
+        owned = owned_doc(self, hwp)
+        row = {item['table_id']: item for item in owned.service.numbering_readback()['tables']}['tbl:1012']
+        self.assertEqual((row['width_hu'], row['height_hu']), (36000, 10530))
+
+
+class GroupedInteriorEdges(unittest.TestCase):
+    """An interior edge named outright is a request; all and inner are shorthand for the lines a target has."""
+
+    def test_a_named_interior_edge_the_target_lacks_is_refused_even_beside_an_outer_edge(self) -> None:
+        cases = (({'scope': 'range', 'cell': 'A1', 'end_cell': 'D1'}, ['top', 'inner_horizontal']),
+                 ({'scope': 'range', 'cell': 'B1', 'end_cell': 'B5'}, ['outline', 'inner_vertical']),
+                 ({'scope': 'cell', 'cell': 'B2'}, ['left', 'inner_horizontal', 'inner_vertical']))
+        for target, edges in cases:
+            with self.subTest(target=target, edges=edges):
+                hwp = sample_document()
+                outcome = style(hwp, '1012', **target, borders=[{'edges': edges, **THICK_RED}])
+                refused(self, outcome, 'edge_not_in_target', hwp)
+                self.assertIn('inner_', outcome['steps'][0]['refusal_message'])
+
+    def test_shorthand_beside_an_outer_edge_keeps_meaning_the_lines_there_are(self) -> None:
+        hwp = sample_document()
+        ok_result(self, style(hwp, '1012', scope='range', cell='A1', end_cell='D1', borders=[{'edges': ['top', 'inner'], **THICK_RED}]))
+        items = hwp.native_calls()[0][2]
+        self.assertIn('TypeVert', items)
+        self.assertNotIn('TypeHorz', items)
+        hwp = sample_document()
+        ok_result(self, style(hwp, '1012', scope='range', cell='B1', end_cell='B5', borders=[{'edges': ['all'], **THICK_RED}]))
+
+    def test_a_named_interior_edge_the_target_has_still_works_beside_an_outer_edge(self) -> None:
+        hwp = sample_document()
+        ok_result(self, style(hwp, '1012', scope='range', cell='A1', end_cell='D1', borders=[{'edges': ['top', 'inner_vertical'], **THICK_RED}]))
+        self.assertIn('TypeVert', hwp.native_calls()[0][2])

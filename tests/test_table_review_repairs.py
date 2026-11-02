@@ -5,6 +5,7 @@ On synthetic readbacks and parts Hancom wrote. Not a native run.
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 from pathlib import Path
 import tempfile
@@ -13,6 +14,9 @@ import zipfile
 
 from hwpx_mcp import review as rules
 from tests.test_table_review import FIXTURES, assemble, base_grid, cell, readback, table
+
+
+A, B = 'a' * 64, 'b' * 64
 
 
 def frame(**values):
@@ -522,7 +526,7 @@ class Media(SavedParts):
         self.assertEqual(self.compare(self.hwpx('a'), self.hwpx('b', referenced=['image9']))['media']['dangling_saved'], 1)
 
     def saved(self, **media):
-        return {'retrieved': True, 'path': 'x.hwpx', 'compared_with_source': {'bindata_identical': media.get('all_bindata_identical', True), 'media': {'referenced_source': 0, 'referenced_saved': 0, 'referenced_lost': 0, 'unreferenced_lost': 0, 'dangling_saved': 0, 'all_bindata_identical': True, **media}}}
+        return {'retrieved': True, 'path': 'x.hwpx', 'compared_with_source': {'bindata_identical': media.get('all_bindata_identical', True), 'media': {'referenced_source': 0, 'referenced_saved': 0, 'referenced_lost': 0, 'referenced_lost_payloads': [], 'unreferenced_lost': 0, 'dangling_saved': 0, 'all_bindata_identical': True, **media}}}
 
     def review_with(self, saved, first=None, second=None):
         row = named_table('1', grid_with_properties())
@@ -544,7 +548,7 @@ class Media(SavedParts):
         self.assertIn('열린 문서 기준', review['summary_text'])
 
     def test_a_lost_picture_no_edit_explains_is_a_mismatch(self) -> None:
-        review = self.review_with(self.saved(referenced_source=1, referenced_lost=1, all_bindata_identical=False))
+        review = self.identified(self.saved(referenced_source=1, referenced_lost=1, referenced_lost_payloads=[A], all_bindata_identical=False), [A], [A])
         self.assertEqual(review['coverage']['package_media']['state'], 'mismatch')
         self.assertEqual(review['review_status'], 'mismatch')
 
@@ -559,10 +563,65 @@ class Media(SavedParts):
         first_cells[2]['objects'] = ['table', 'picture']
         first_cells[2]['all_objects'] = ['table', 'picture']
         second_cells = grid_with_properties()[:2]
-        review = self.review_with(self.saved(referenced_source=1, referenced_lost=1, all_bindata_identical=False), [named_table('1', first_cells)], [changed_hash(named_table('1', second_cells, rows=1))])
+        review = self.identified(self.saved(referenced_source=1, referenced_lost=1, referenced_lost_payloads=[A], all_bindata_identical=False), [A], [], [named_table('1', first_cells)], [changed_hash(named_table('1', second_cells, rows=1))])
         self.assertEqual(review['coverage']['package_media']['state'], 'removed_by_edit')
+        self.assertEqual(review['coverage']['package_media']['removed_by_edit'], 1)
         self.assertNotEqual(review['review_status'], 'mismatch')
         self.assertIn('삭제한 셀의 그림', review['summary_text'])
+
+    def identified(self, saved, before, after, first_tables=None, second_tables=None):
+        row = named_table('1', grid_with_properties())
+        first = rules.assemble(session_id='s', review_id='s/review-1', readback=readback(first_tables or [row], picture_payloads=before), pdf=None, pages=[{'page': 1, 'path': 'p'}], texts=['글'], baseline=None, saved_output=None, render_error=None)
+        return rules.assemble(session_id='s', review_id='s/review-2', readback=readback(second_tables or [row], picture_payloads=after), pdf=None, pages=[{'page': 1, 'path': 'p'}], texts=['글'], baseline=first, saved_output=saved, render_error=None)
+
+    def test_removing_one_image_does_not_explain_losing_another(self) -> None:
+        review = self.identified(self.saved(referenced_source=2, referenced_saved=1, referenced_lost=1, referenced_lost_payloads=[B], all_bindata_identical=False), [A, B], [B])
+        self.assertEqual(review['coverage']['package_media']['state'], 'mismatch')
+        self.assertEqual(review['coverage']['package_media']['unexplained_lost'], [B])
+        self.assertEqual(review['review_status'], 'mismatch')
+
+    def test_a_nested_picture_counts_once(self) -> None:
+        # The removed outer cell names the picture of the nested table it held, and the removed nested table names it too.
+        outer = grid_with_properties()
+        outer[2]['objects'] = ['table']
+        outer[2]['all_objects'] = ['table', 'picture']
+        nested = named_table('2', [properties(cell('A1', 1, 1, '속', objects=['picture']))], rows=1, cols=1, index=1)
+        nested['cells'][0]['all_objects'] = ['picture']
+        nested['nested_in'] = 'tbl:1'
+        first = [named_table('1', outer), nested]
+        second = [changed_hash(named_table('1', grid_with_properties()[:2], rows=1))]
+        review = self.identified(self.saved(referenced_source=2, referenced_lost=2, referenced_lost_payloads=[A, B], all_bindata_identical=False), [A, B], [B], first, second)
+        self.assertEqual(review['coverage']['package_media']['state'], 'mismatch')
+        self.assertEqual(review['coverage']['package_media']['unexplained_lost'], [B])
+
+    def test_a_shared_payload_whose_survivor_lost_its_data_is_a_mismatch(self) -> None:
+        review = self.identified(self.saved(referenced_source=1, referenced_lost=1, referenced_lost_payloads=[A], all_bindata_identical=False), [A, A], [A])
+        self.assertEqual(review['coverage']['package_media']['state'], 'mismatch')
+        kept = self.identified(self.saved(referenced_source=1, referenced_saved=1), [A, A], [A])
+        self.assertEqual(kept['coverage']['package_media']['state'], 'complete')
+
+    def test_an_unrelated_loss_with_no_edit_is_a_mismatch(self) -> None:
+        review = self.identified(self.saved(referenced_source=1, referenced_lost=1, referenced_lost_payloads=[A], all_bindata_identical=False), [A], [A])
+        self.assertEqual(review['coverage']['package_media']['state'], 'mismatch')
+
+    def test_an_unknown_identity_is_never_removed_by_edit(self) -> None:
+        lost = self.saved(referenced_source=1, referenced_lost=1, referenced_lost_payloads=[A], all_bindata_identical=False)
+        for before, after in (([None, B], [B]), (None, [B]), ([A, B], None)):
+            with self.subTest(before=before, after=after):
+                state = self.identified(lost, before, after)['coverage']['package_media']['state']
+                self.assertEqual(state, 'unverified')
+        older = self.saved(referenced_source=1, referenced_lost=1, all_bindata_identical=False)
+        older['compared_with_source']['media'].pop('referenced_lost_payloads')
+        self.assertEqual(self.identified(older, [A, B], [B])['coverage']['package_media']['state'], 'unverified')
+
+    def test_a_loss_from_before_the_earlier_review_cannot_be_traced(self) -> None:
+        review = self.identified(self.saved(referenced_source=2, referenced_lost=1, referenced_lost_payloads=[A], all_bindata_identical=False), [B], [B])
+        self.assertEqual(review['coverage']['package_media']['state'], 'unverified')
+
+    def test_the_package_comparison_names_what_was_lost_by_payload(self) -> None:
+        source = self.hwpx('a', referenced=['image1', 'image2'], files={'BinData/image1.png': self.PNG, 'BinData/image2.png': b'second'})
+        media = self.compare(source, self.hwpx('b', referenced=['image2'], files={'BinData/image2.png': b'second'}))['media']
+        self.assertEqual(media['referenced_lost_payloads'], [hashlib.sha256(self.PNG).hexdigest()])
 
     def test_a_dangling_reference_is_a_mismatch(self) -> None:
         self.assertEqual(self.review_with(self.saved(dangling_saved=1))['review_status'], 'mismatch')
@@ -578,3 +637,51 @@ class Media(SavedParts):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class StoredSize(SavedParts):
+    """A table's stored size: what history may name, the review shows; a size only layout moved is named and never equal by fiat."""
+
+    def sized(self, inst, width, height, **fields):
+        row = named_table(inst, grid_with_properties(), **fields)
+        row['width_hu'], row['height_hu'] = width, height
+        return row
+
+    def test_a_size_that_moved_under_the_same_hash_is_named(self) -> None:
+        before = self.sized('1', 18000, 2600)
+        after = self.sized('1', 18000, 10530)
+        review = reviewed([before], [after])
+        self.assertEqual(review['comparison']['tables']['unchanged'], ['tbl:1'])
+        self.assertEqual(review['comparison']['tables']['stored_sizes'], [{'table_id': 'tbl:1', 'page': 1, 'scope': 'body', 'height': {'before_hu': 2600, 'after_hu': 10530}}])
+        self.assertIn('tbl:1', review['summary_text'])
+        self.assertIn('저장 높이', rules.to_markdown(review))
+        self.assertIn('| tbl:1 (1쪽) | 표 전체 | 저장된 높이 | 2600 | 10530 |', rules.to_markdown(review))
+
+    def test_a_changed_table_names_its_stored_height_too(self) -> None:
+        before = self.sized('1', 18000, 2600)
+        cells = grid_with_properties()
+        cells[0]['fill'] = {'kind': 'solid', 'color': '#FFF2CC'}
+        after = changed_hash(named_table('1', cells))
+        after['width_hu'], after['height_hu'] = 18000, 3000
+        row = reviewed([before], [after])['comparison']['tables']['changed'][0]
+        self.assertEqual(row['stored_height'], {'before_hu': 2600, 'after_hu': 3000})
+
+    def test_the_holder_of_a_table_whose_size_alone_moved_is_explained_by_it(self) -> None:
+        review = reviewed([self.sized('1', 18000, 2600)], [self.sized('1', 18000, 10530)], [holder('tbl:1')], [holder('tbl:1', 'after')])
+        self.assertEqual(review['comparison']['changes'], [])
+
+    def test_the_saved_file_gives_both_stored_size_values(self) -> None:
+        tables = {item['table_id']: item for item in rules.package_tables(self.package())}
+        self.assertEqual((tables['tbl:1011']['width_hu'], tables['tbl:1011']['height_hu']), (18000, 1282))
+
+    def test_a_saved_height_that_differs_is_a_separate_observation(self) -> None:
+        path = self.package()
+        live = self.live(path)
+        self.assertEqual(rules.persisted_tables(path, live)['state'], 'match')
+        live[0]['height_hu'] = 999
+        result = rules.persisted_tables(path, live)
+        self.assertEqual(result['state'], 'partial')
+        self.assertEqual(result['mismatches'], [])
+        self.assertEqual(result['stored_size_differences'], [{'table_id': live[0]['table_id'], 'field': 'height_hu', 'live': 999, 'saved': 1282}])
+        live[0].pop('height_hu')
+        self.assertEqual(rules.persisted_tables(path, live)['stored_size_not_compared'], 1)
