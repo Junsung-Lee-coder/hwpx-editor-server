@@ -7223,7 +7223,7 @@ class LocalCliService(
                 # Comparing the cumulative bool before/after loses a second
                 # invocation when an earlier step already set it True.
                 step_mutation_issued = False
-                mark_mutating_intent = handle.mark_mutating_intent
+                mark_mutating_intent = getattr(handle, 'mark_mutating_intent', None)
 
                 def mark_step_mutating_intent() -> None:
                     nonlocal step_mutation_issued
