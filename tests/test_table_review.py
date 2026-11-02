@@ -157,6 +157,15 @@ class SavedTables(unittest.TestCase):
         self.assertEqual(merged['B2']['border']['top'], {'line': 'solid', 'width_mm': 2.0, 'color': '#FF0000'})
         self.assertEqual(merged['C2']['fill'], {'kind': 'solid', 'color': '#FFF2CC'})
 
+    def test_the_file_names_dash_and_dot_the_other_way_round_than_hancom_prints_them(self) -> None:
+        # Measured: native line 2 prints as dashes and is DOT in the file, native line 3 prints as dots and is DASH there, and both reopen as they were.
+        tables = {item['table_id']: item for item in rules.package_tables(FIXTURES / 'saved_lines.hwpx')}
+        lines = {cell_['address']: cell_ for cell_ in tables['tbl:1012']['cells']}
+        self.assertEqual(lines['B2']['border']['top'], {'line': 'dash', 'width_mm': 0.4, 'color': '#00AA00'})
+        self.assertEqual(lines['C3']['border']['top'], {'line': 'dot', 'width_mm': 0.4, 'color': '#0000FF'})
+        for address, line in (('A1', 'solid'), ('D4', 'dash_dot'), ('A5', 'dash_dot_dot'), ('B1', 'long_dash'), ('C2', 'circle'), ('D3', 'double'), ('A4', 'slim_thick'), ('B5', 'thick_slim'), ('C1', 'slim_thick_slim')):
+            self.assertEqual(lines[address]['border']['top']['line'], line, address)
+
     def test_white_and_no_fill_stay_apart_in_the_file(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
             target = Path(folder) / 'white.hwpx'

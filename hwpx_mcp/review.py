@@ -554,7 +554,8 @@ def _table_lines(tables: dict[str, Any]) -> list[str]:
     return lines
 
 
-_HWPX_LINES = {'NONE': 'none', 'SOLID': 'solid', 'DASH': 'dash', 'DOT': 'dot', 'DASH_DOT': 'dash_dot', 'DASH_DOT_DOT': 'dash_dot_dot', 'LONG_DASH': 'long_dash', 'CIRCLE': 'circle', 'DOUBLE_SLIM': 'double', 'SLIM_THICK': 'slim_thick', 'THICK_SLIM': 'thick_slim', 'SLIM_THICK_SLIM': 'slim_thick_slim'}
+# Measured on Hancom 13.0.0.3457: native line 2 prints as dashes and native line 3 as dots, and the file calls them DOT and DASH.
+_HWPX_LINES = {'NONE': 'none', 'SOLID': 'solid', 'DOT': 'dash', 'DASH': 'dot', 'DASH_DOT': 'dash_dot', 'DASH_DOT_DOT': 'dash_dot_dot', 'LONG_DASH': 'long_dash', 'CIRCLE': 'circle', 'DOUBLE_SLIM': 'double', 'SLIM_THICK': 'slim_thick', 'THICK_SLIM': 'thick_slim', 'SLIM_THICK_SLIM': 'slim_thick_slim'}
 
 
 def _hwpx_border_fill(element: ET.Element) -> dict[str, Any]:
