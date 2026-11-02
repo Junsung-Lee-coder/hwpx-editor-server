@@ -72,6 +72,33 @@ def is_prohibited_member(raw_name: str) -> bool:
     return False
 
 
+# Tracked synthetic inputs that exported tests read. Only the ``fixtures``
+# directory directly under ``tests/`` is such an input; every other directory
+# named ``fixtures`` stays excluded by RUNTIME_DIR_NAMES above.
+PUBLIC_TEST_FIXTURE_ROOT = ('tests', 'fixtures')
+
+
+def public_test_fixture_policy_name(raw_name: str) -> str | None:
+    """Return the name a test fixture is checked under, or None outside the root.
+
+    ``tests/fixtures/a/b.xml`` is checked as ``tests/a/b.xml``: lifting the one
+    ``fixtures`` component is the only exemption, so runtime directories,
+    document/archive suffixes and private names inside the root still apply.
+    """
+
+    parts = PurePosixPath(str(raw_name).replace('\\', '/')).parts
+    if len(parts) < 3 or tuple(parts[:2]) != PUBLIC_TEST_FIXTURE_ROOT:
+        return None
+    return '/'.join((parts[0], *parts[2:]))
+
+
+def is_public_test_fixture_member(raw_name: str) -> bool:
+    """Return whether a member is a test fixture a source bundle may carry."""
+
+    policy_name = public_test_fixture_policy_name(raw_name)
+    return policy_name is not None and not is_prohibited_member(policy_name)
+
+
 def find_python_source_hygiene_violations(
     source_root: Path,
     relative_paths: list[Path] | tuple[Path, ...] | None = None,

@@ -103,7 +103,7 @@ The MCP adapter tests verify that `opened_via` is retained as the managed-sessio
 
 ## Source-bundle checks
 
-The builder uses Git-tracked paths when Git is present and a safe Git-less walk otherwise. A Git-backed build requires a clean worktree and verifies each staged member against the named commit tree; Git-less manifests explicitly record `identity_verified=false`. It rejects symlinks, unsafe members, duplicate case-folded paths, runtime output, and oversized source/archive resources. The archive and manifest are deterministic for the same source tree:
+The builder uses Git-tracked paths when Git is present and a safe Git-less walk otherwise. A Git-backed build requires a clean worktree and verifies each staged member against the named commit tree; Git-less manifests explicitly record `identity_verified=false`. It rejects symlinks, unsafe members, duplicate case-folded paths, runtime output, and oversized source/archive resources. Tracked files under `tests/fixtures/` travel in the archive because the exported tests read them; the manifest lists them in `test_fixture_files`, apart from the runtime `files`, and each must pass every other member rule. Other directories named `fixtures` stay excluded. The archive and manifest are deterministic for the same source tree:
 
 ```bash
 python scripts/build_source_bundle.py \
