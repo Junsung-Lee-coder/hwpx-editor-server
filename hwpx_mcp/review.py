@@ -328,6 +328,12 @@ def _explained_tables(tables: dict[str, Any] | None, current: list[dict[str, Any
             while at and at not in explained:
                 explained.add(at)
                 at = parents.get(at)
+    # Only the height moved in a table of the same hash: that is what its holder's object digest changed with.
+    for item in tables.get('stored_heights', []):
+        at = item['table_id']
+        while at and at not in explained:
+            explained.add(at)
+            at = parents.get(at)
     return explained
 
 
@@ -551,6 +557,12 @@ def _table_width(table: dict[str, Any]) -> int | None:
     return value if value is not None else table.get('width_hu')
 
 
+def _height_changes(before: dict[str, Any], after: dict[str, Any]) -> list[dict[str, Any]]:
+    """A table's hash leaves heights out, as layout moves them. A height moving is still a difference, told by name."""
+    old = {cell['address']: cell.get('height') for cell in before['cells']}
+    return [{'cell': cell['address'], 'before': old[cell['address']], 'after': cell.get('height')} for cell in after['cells'] if cell['address'] in old and cell.get('height') is not None and old[cell['address']] is not None and old[cell['address']] != cell.get('height')]
+
+
 def compare_tables(baseline: list[dict[str, Any]] | None, current: list[dict[str, Any]] | None) -> dict[str, Any] | None:
     """Each table by identity: what changed, with values, and which tables did not. A table is never called unchanged unless its hash agrees."""
     if baseline is None or current is None:
@@ -563,6 +575,9 @@ def compare_tables(baseline: list[dict[str, Any]] | None, current: list[dict[str
             result['added'].append({'table_id': table_id, 'page': table.get('page'), 'rows': table['rows'], 'cols': table['cols'], 'before_text': table.get('before_text'), 'scope': table.get('scope', 'body')})
         elif old.get('state_sha256') == table.get('state_sha256'):
             result['unchanged'].append(table_id)
+            heights = _height_changes(old, table)
+            if heights:
+                result.setdefault('stored_heights', []).append({'table_id': table_id, 'page': table.get('page'), 'scope': table.get('scope', 'body'), 'cells': heights})
         else:
             result['changed'].append(_compare_table(old, table))
     result['removed'] = [{'table_id': table_id, 'page': table.get('page'), 'rows': table['rows'], 'cols': table['cols'], 'scope': table.get('scope', 'body'),
@@ -709,6 +724,8 @@ def _table_rows(tables: dict[str, Any]) -> list[str]:
         rows += [f"| {name} | {change['cell']} | {_CELL_WORDS.get(change['field'], change['field'])} | {_property_word(change['before'])} | {_property_word(change['after'])} |" for change in item.get('cell_properties', [])]
         if item.get('other_properties'):
             rows.append(f'| {name} | 표 안 | 이름 없는 다른 값 | 확인 못함 | 바뀜 |')
+    for item in tables.get('stored_heights', []):
+        rows += [f"| {_table_name(item)} | {cell['cell']} | 저장된 높이 | {cell['before']} | {cell['after']} |" for cell in item['cells']]
     return rows
 
 
@@ -743,6 +760,8 @@ def _table_lines(tables: dict[str, Any]) -> list[str]:
         lines.append(f"표 변경: {_table_name(item)} " + ', '.join(parts))
     if tables['unchanged']:
         lines.append(f"변경 없는 표 {len(tables['unchanged'])}개: {', '.join(tables['unchanged'][:6])}" + (' 외' if len(tables['unchanged']) > 6 else ''))
+    for item in tables.get('stored_heights', []):
+        lines.append(f"표 저장 높이: {_table_name(item)} " + ', '.join(f"{cell['cell']} {cell['before']} → {cell['after']}" for cell in item['cells'][:4]) + ' (다른 값은 같습니다)')
     return lines
 
 

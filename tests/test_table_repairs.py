@@ -470,6 +470,29 @@ class HistoryDifferences(unittest.TestCase):
         owned.service.undo()
         self.assertEqual(len([call for call in hwp.calls if call[0] == 'get_text_file']) - without, 2)  # Before and after the Undo, and no more.
 
+    def test_a_difference_only_in_the_compared_evidence_is_named_too(self) -> None:
+        evidence = {'paragraphs': [{'text': '비밀글', 'heading': 'NONE', 'level': 0, 'content_sha256': 'aaaa', 'end_charshape_sha256': 'bbbb'}], 'controls': ['tbl'], 'digests': {'styles_sha256': 's', 'media_sha256': 'm'}}
+        table = {'tables': {}, 'paragraphs': []}
+        def changed(**fields):
+            value = {'paragraphs': [dict(evidence['paragraphs'][0])], 'controls': list(evidence['controls']), 'digests': dict(evidence['digests'])}
+            if 'content' in fields:
+                value['paragraphs'][0]['content_sha256'] = fields['content']
+            if 'end' in fields:
+                value['paragraphs'][0]['end_charshape_sha256'] = fields['end']
+            if 'styles' in fields:
+                value['digests']['styles_sha256'] = fields['styles']
+            if 'controls' in fields:
+                value['controls'] = fields['controls']
+            return value
+        old = nt.evidence_detail(evidence)
+        self.assertEqual(nt.detail_differences({**table, 'evidence': old}, {**table, 'evidence': old}), [])
+        rows = nt.detail_differences({**table, 'evidence': old}, {**table, 'evidence': nt.evidence_detail(changed(content='cccc'))})
+        self.assertEqual(rows, [{'table_id': None, 'cell': None, 'field': 'body paragraph[0] content', 'recorded': 'aaaa', 'now': 'cccc'}])
+        self.assertEqual(nt.detail_differences({**table, 'evidence': old}, {**table, 'evidence': nt.evidence_detail(changed(end='dddd'))})[0]['field'], 'body paragraph[0] end_charshape')
+        self.assertEqual(nt.detail_differences({**table, 'evidence': old}, {**table, 'evidence': nt.evidence_detail(changed(styles='t'))})[0]['field'], 'styles_sha256')
+        self.assertEqual(nt.detail_differences({**table, 'evidence': old}, {**table, 'evidence': nt.evidence_detail(changed(controls=[]))})[0]['field'], 'controls')
+        self.assertNotIn('비밀글', str(rows))
+
     def test_a_match_carries_no_difference_rows(self) -> None:
         hwp = sample_document()
         owned, _result = self.run_edit(hwp, scope='cell', cell='B2', fill='#FFF2CC')

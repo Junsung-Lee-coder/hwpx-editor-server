@@ -672,7 +672,7 @@ def review_rows(model: Mapping[str, Any], pages: Mapping[str, int | None]) -> tu
     truncated = False
     for table in (*model['tables'], *model['margin_tables']):
         cells = [{'address': cell['address'], 'row': cell['row'], 'col': cell['col'], 'row_span': cell['row_span'], 'col_span': cell['col_span'], 'width': cell['width'],
-                  'text': cell['text'][:REVIEW_TEXT], 'text_truncated': len(cell['text']) > REVIEW_TEXT, 'objects': cell['objects'], 'all_objects': cell['all_objects'], 'content': cell['content'], 'border': cell['border'], 'fill': cell['fill'], 'rest': cell['rest'],
+                  'height': cell['height'], 'text': cell['text'][:REVIEW_TEXT], 'text_truncated': len(cell['text']) > REVIEW_TEXT, 'objects': cell['objects'], 'all_objects': cell['all_objects'], 'content': cell['content'], 'border': cell['border'], 'fill': cell['fill'], 'rest': cell['rest'],
                   'attrs': cell['attrs'], 'attr_values': cell['attr_values']} for cell in table['cells']]
         row = {'table_id': table['table_id'], 'index': table['index'], 'scope': table['scope'], 'page': pages.get(table['inst_id']), 'rows': table['rows'], 'cols': table['cols'], 'state_sha256': table['state_sha256'], 'width_hu': table['size_width'],
                'before_text': table['before_text'][:120], 'nested_in': table['nested_in'], 'frame': table['frame'], 'frame_values': table['frame_values'], 'layout': table.get('layout'), 'cells': cells}
@@ -1668,16 +1668,26 @@ def _state_sha(side: Mapping[str, Any]) -> str:
     return nf.state_digest(evidence_of(side['census'], side['controls']))
 
 
+def _detail_of(side: Mapping[str, Any]) -> dict[str, Any] | None:
+    return state_detail(side['model'], evidence_of(side['census'], side['controls']))
+
+
 def _line_text(line: Mapping[str, Any]) -> str:
     return f"{line['line']} {line['width_mm']} {line['color']}"
 
 
-def state_detail(model: Mapping[str, Any]) -> dict[str, Any] | None:
-    """What a later Undo or Redo mismatch can name without asking Hancom anything: every table's values and every paragraph's digest. No document text."""
+def evidence_detail(evidence: Mapping[str, Any]) -> dict[str, Any]:
+    """The very values Undo and Redo are compared by, with each paragraph's text left out."""
+    return {'paragraphs': [{key: item.get(key) for key in ('heading', 'level', 'content_sha256', 'end_charshape_sha256')} for item in evidence['paragraphs']], 'controls': list(evidence['controls']), 'digests': dict(evidence['digests'])}
+
+
+def state_detail(model: Mapping[str, Any], evidence: Mapping[str, Any] | None = None) -> dict[str, Any] | None:
+    """What a later Undo or Redo mismatch can name without asking Hancom anything: every table's values, every paragraph's digest and what the state digest is over. No document text."""
     tables = (*model['tables'], *model.get('margin_tables', ()))
     if sum(len(table['cells']) for table in tables) > _MAX_STATE_DETAIL_CELLS:
         return None
     return {
+        'evidence': evidence_detail(evidence) if evidence is not None else None,
         'tables': {table['table_id']: {
             'rows': table['rows'], 'cols': table['cols'], 'width_hu': table['size_width'], 'frame': table['frame'], 'frame_values': table['frame_values'],
             'cells': {cell['address']: {'row_span': cell['row_span'], 'col_span': cell['col_span'], 'width': cell['width'], 'height': cell['height'], 'fill': cell['fill'].get('color') or cell['fill'].get('family') or cell['fill']['kind'], 'attrs': cell['attrs'], 'rest': cell['rest'], 'content': cell['content'],
@@ -1721,6 +1731,20 @@ def detail_differences(recorded: Mapping[str, Any], now: Mapping[str, Any]) -> l
         for index, (left, right) in enumerate(zip(recorded['paragraphs'], now['paragraphs'])):
             if left != right:
                 row(None, None, f'paragraph[{index}]', left, right)
+    old_evidence, new_evidence = recorded.get('evidence'), now.get('evidence')
+    if old_evidence and new_evidence:
+        for name in sorted(set(old_evidence['digests']) | set(new_evidence['digests'])):
+            if old_evidence['digests'].get(name) != new_evidence['digests'].get(name):
+                row(None, None, name, old_evidence['digests'].get(name), new_evidence['digests'].get(name))
+        if old_evidence['controls'] != new_evidence['controls']:
+            row(None, None, 'controls', old_evidence['controls'], new_evidence['controls'])
+        if len(old_evidence['paragraphs']) != len(new_evidence['paragraphs']):
+            row(None, None, 'body paragraph count', len(old_evidence['paragraphs']), len(new_evidence['paragraphs']))
+        else:
+            for index, (left, right) in enumerate(zip(old_evidence['paragraphs'], new_evidence['paragraphs'])):
+                for key, word in (('heading', 'heading'), ('level', 'level'), ('content_sha256', 'content'), ('end_charshape_sha256', 'end_charshape')):
+                    if left.get(key) != right.get(key):
+                        row(None, None, f'body paragraph[{index}] {word}', left.get(key), right.get(key))
     return rows
 
 
@@ -1762,7 +1786,7 @@ def apply_edit(hwp: Any, *, request: Mapping[str, Any], read: Callable[[], Mappi
             'before': _report_table(table, page), 'after': _report_table(new_table, page), 'changes': plan['changes'],
             'result': {'changed': True, 'status': 'edited', 'native_actions': native_actions},
             'undo': {'native_editing_actions': len(native_actions), 'pre_state_sha256': _state_sha(before), 'post_state_sha256': _state_sha(after)},
-            '_details': (state_detail(before['model']), state_detail(after['model'])),
+            '_details': (_detail_of(before), _detail_of(after)),
         }
 
     return _guarded(reach, body, 'table edit')
@@ -1814,7 +1838,7 @@ def apply_style(hwp: Any, *, request: Mapping[str, Any], read: Callable[[], Mapp
         return {'target': target, 'requested': requested, 'before': _report_table(table, page), 'after': _report_table(new_table, page), 'changes': plan['changes'],
                 'result': {'changed': True, 'status': 'styled', 'native_actions': native_actions},
                 'undo': {'native_editing_actions': len(native_actions), 'pre_state_sha256': _state_sha(before), 'post_state_sha256': _state_sha(after)},
-                '_details': (state_detail(before['model']), state_detail(after['model']))}
+                '_details': (_detail_of(before), _detail_of(after))}
 
     return _guarded(reach, body, 'table style')
 
@@ -1928,7 +1952,7 @@ def apply_width(hwp: Any, *, request: Mapping[str, Any], read: Callable[[], Mapp
         return {'target': target, 'requested': requested, 'before': _report_table(table, page), 'after': _report_table(new_table, page), 'changes': plan['changes'],
                 'result': {'changed': True, 'status': 'width_set', 'native_actions': ['Execute:TablePropertyDialog'] * len(plan['rects'])},
                 'undo': {'native_editing_actions': len(plan['rects']), 'pre_state_sha256': _state_sha(before), 'post_state_sha256': _state_sha(after)},
-                '_details': (state_detail(before['model']), state_detail(after['model']))}
+                '_details': (_detail_of(before), _detail_of(after))}
 
     return _guarded(reach, body, 'table width')
 
@@ -1982,7 +2006,7 @@ def apply_create(hwp: Any, *, request: Mapping[str, Any], read: Callable[[], Map
         new_inst = new_tables[0]['inst_id']
         new_page = table_pages(hwp, page_of, only=new_inst).get(new_inst)
         hwp.set_pos(*at)
-        details = (state_detail(before['model']), state_detail(after['model'])) if not filled else None
+        details = (_detail_of(before), _detail_of(after)) if not filled else None
         return {'target': {'kind': 'after_paragraph', 'paragraph': anchor['text'][:120], 'body_index': anchor['body_index'], 'page': page}, 'requested': {key: request.get(key) for key in ('rows', 'cols')},
                 'table': public_summary(new_tables[0], new_page), 'result': {'changed': True, 'status': 'created', 'native_actions': native_actions},
                 'changes': {'new_table': new_tables[0]['table_id'], 'cell_text_filled': filled},
@@ -2053,5 +2077,5 @@ def _guarded(reach: _MutationReach, body: Callable[[], dict[str, Any]], what: st
 
 __all__ = [
     'CensusError', 'EDIT_ACTIONS', 'LINE_TYPES', 'LINE_WIDTHS', 'apply_create', 'apply_edit', 'apply_style', 'apply_width', 'detail_differences', 'layout_warnings', 'parse_table_model', 'public_summary', 'public_table', 'resolve_table',
-    'review_rows', 'state_detail', 'table_layout', 'tag_readback', 'table_pages', 'validate_create_step', 'validate_edit_step', 'validate_inventory_step', 'validate_read_step', 'validate_style_step', 'validate_width_step',
+    'evidence_detail', 'review_rows', 'state_detail', 'table_layout', 'tag_readback', 'table_pages', 'validate_create_step', 'validate_edit_step', 'validate_inventory_step', 'validate_read_step', 'validate_style_step', 'validate_width_step',
 ]

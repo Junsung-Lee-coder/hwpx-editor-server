@@ -166,6 +166,24 @@ class Holder(unittest.TestCase):
         review = reviewed(before, after, [holder('tbl:1')], [holder('tbl:1', 'after')])
         self.assertEqual(review['comparison']['changes'], [])
 
+    def test_a_height_moving_alone_is_named_and_explains_only_its_own_holder(self) -> None:
+        cells = grid_with_properties()
+        for item in cells:
+            item['height'] = 1800
+        moved = copy.deepcopy(cells)
+        moved[2]['height'] = 3600
+        same = named_table('1', cells)
+        after = named_table('1', moved)
+        after['state_sha256'] = same['state_sha256']  # A table's hash leaves heights out.
+        review = reviewed([same], [after], [holder('tbl:1')], [holder('tbl:1', 'after')])
+        self.assertEqual(review['comparison']['changes'], [])
+        self.assertEqual(review['comparison']['tables']['stored_heights'][0]['cells'], [{'cell': 'A2', 'before': 1800, 'after': 3600}])
+        self.assertIn('A2 1800 → 3600', review['summary_text'])
+        self.assertIn('저장된 높이', rules.to_markdown(review))
+        other = [same, named_table('2', grid_with_properties('x'), index=1)]
+        review = reviewed(other, [after, other[1]], [holder('tbl:2')], [holder('tbl:2', 'after')])
+        self.assertEqual([item['kind'] for item in review['comparison']['changes']], ['format_changed'])
+
     def test_a_holder_row_that_does_not_say_what_it_holds_is_not_suppressed(self) -> None:
         old, new = holder('tbl:1'), holder('tbl:1', 'after')
         old.pop('holds_tables'), new.pop('holds_tables')

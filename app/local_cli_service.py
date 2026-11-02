@@ -7598,13 +7598,13 @@ class LocalCliService(
             'download_path': self._artifact_download_path(session_id=resolved_session_id, kind='export'),
         }
 
-    def _history_differences(self, expected_sha: Any, reached: Any, text: Any) -> list[dict[str, Any]] | None:
+    def _history_differences(self, expected_sha: Any, reached: Any, text: Any, evidence: Any) -> list[dict[str, Any]] | None:
         """What differs from the state an edit recorded, from the text the history comparison already read. No native call."""
         recorded = self.__dict__.get('_table_state_details', {}).get(expected_sha) if expected_sha else None
         if recorded is None or reached == expected_sha or type(text) is not str:
             return None
         try:
-            now = native_table.state_detail(native_table.parse_table_model(text))
+            now = native_table.state_detail(native_table.parse_table_model(text), evidence)
         except native_numbering_census.CensusError:
             return None
         return native_table.detail_differences(recorded, now) if now is not None else None
@@ -7632,7 +7632,7 @@ class LocalCliService(
             raise LocalCliRuntimeError(f'Native {name} did not return True; its outcome is unknown.')
         after = native_paragraph_edit.history_evidence(hwp, protection)
         reached = native_format.state_digest(after) if after is not None else None
-        differences = self._history_differences(expected_sha, reached, getattr(protection, 'last_text', None))
+        differences = self._history_differences(expected_sha, reached, getattr(protection, 'last_text', None), after)
         # Native history gives a block back; it must not linger for whatever command comes next.
         if callable(getattr(hwp, 'get_selected_pos', None)) and native_numbering._get_selection(hwp):  # noqa: SLF001
             native_numbering._set_pos(hwp, native_numbering._get_pos(hwp))  # noqa: SLF001
