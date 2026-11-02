@@ -130,6 +130,19 @@ class OptionalEnvelope(unittest.TestCase):
                         self.assertFalse(fault.fired, 'an optional envelope still entered the SDK')
                         self.assertEqual(fault.optional, 0)
 
+    def test_watchdog_has_no_native_wrapper_even_after_a_hold(self):
+        from tests.test_native_numbering_runtime_custody import Owned
+        getters = []
+        def watch(log, getter, marker):
+            getters.append(getter)
+            return None, None
+        hwp = sample_document()
+        owner = Owned(self, hwp, real_execute_live=True, watchdog=watch)
+        self.assertEqual(len(getters), 1)
+        self.assertIsNone(getters[0](), 'the off-STA observer must not enter SDK snapshots')
+        owner.manager.execute(session_id=owner.sid, command_name='command-bundle', handler=lambda h: h.hold_native_custody('synthetic hold', None, may_have_mutated=False) or {'ok': False, 'dirty': False, 'steps': []}, timeout=2)
+        self.assertIsNone(getters[0]())
+
     def test_legacy_unguarded_snapshot_compatibility_is_retained(self):
         hwp = sample_document()
         owner = real_owned(self, hwp)

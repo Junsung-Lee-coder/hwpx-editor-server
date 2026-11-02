@@ -100,7 +100,7 @@ class Owned:
 
     native_baseline = staticmethod(lambda: None)
 
-    def __init__(self, case, hwp, *, protection=None, session_id='custody-session-0001', real_execute_live=False):
+    def __init__(self, case, hwp, *, protection=None, session_id='custody-session-0001', real_execute_live=False, watchdog=None):
         self.case = case
         self.hwp = hwp
         hwp.cursor = (0, 2, 0)
@@ -126,7 +126,7 @@ class Owned:
         for name, value in (
             ('create_hwp_instance_with_recovery', lambda Hwp, **kw: Hwp()),
             ('open_document_with_recovery', lambda *, Hwp, hwp, **kw: hwp),
-            ('start_runtime_watchdog', lambda *a, **k: (None, None)),
+            ('start_runtime_watchdog', watchdog or (lambda *a, **k: (None, None))),
             ('update_runtime_status', lambda *a, **k: None),
             ('current_windows_session_snapshot', lambda: {'interactive': True, 'session_id': 1, 'session_name': 'fake'}),
             ('_native_close_processes', type(self).native_baseline),
