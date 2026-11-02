@@ -1,0 +1,19 @@
+{
+  "op": "table_create_exact",
+  "version": "local-cli/table-create-exact/v1-package",
+  "summary": "Create a table after one exact body paragraph, empty or holding given text.",
+  "module": "app.command_packages.commands.table_create_exact.run",
+  "read_only": false,
+  "dirty_default": true,
+  "allowed_keys": [
+    "op",
+    "operation",
+    "label",
+    "match",
+    "expected_page",
+    "rows",
+    "cols",
+    "cells",
+    "confirm_layout"
+  ]
+}

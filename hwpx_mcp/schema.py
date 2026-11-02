@@ -229,6 +229,140 @@ class ParagraphFormatStep(_FormatTarget):
         return self
 
 
+TableId = Annotated[str, Field(pattern=r'^tbl:[0-9]{1,20}$', description='A table identity from table_inventory, such as tbl:1011.')]
+CellAddress = Annotated[str, Field(pattern=r'^[A-Z]{1,3}[1-9][0-9]{0,3}$', description='A1-style address; a merged cell is named by its first cell.')]
+LineWidthMm = Literal[0.1, 0.12, 0.15, 0.2, 0.25, 0.3, 0.4, 0.5, 0.6, 0.7, 1.0, 1.5, 2.0, 3.0, 4.0, 5.0]
+_EDGE_PARTS = {
+    'top': ('top',), 'bottom': ('bottom',), 'left': ('left',), 'right': ('right',), 'outline': ('top', 'bottom', 'left', 'right'),
+    'inner_horizontal': ('inner_horizontal',), 'inner_vertical': ('inner_vertical',), 'inner': ('inner_horizontal', 'inner_vertical'),
+    'all': ('top', 'bottom', 'left', 'right', 'inner_horizontal', 'inner_vertical'),
+}
+
+
+class TableInventoryStep(Closed):
+    op: Literal['table_inventory']
+    label: Label = 'mcp:table-inventory'
+
+
+class TableReadStep(Closed):
+    op: Literal['table_read']
+    label: Label = 'mcp:table-read'
+    table_id: TableId
+    max_cells: int | None = Field(default=None, ge=1, le=2000)
+
+
+class _TableBinding(Closed):
+    """What was read: the table's identity, its current hash and grid, and its page. All from table_inventory or table_read in this session."""
+    table_id: TableId
+    expected_hash: Annotated[str, Field(pattern=r'^sha256:[a-f0-9]{24}$')]
+    expected_page: int = Field(ge=1, le=10000)
+    expected_rows: int = Field(ge=1, le=500)
+    expected_cols: int = Field(ge=1, le=500)
+    confirm_layout: Literal[True]
+
+
+class RemovedCell(Closed):
+    address: CellAddress
+    text: Annotated[str, Field(max_length=8000)]
+    objects: list[Annotated[str, Field(max_length=40)]] | None = Field(default=None, max_length=64)
+
+
+class TableEditStep(_TableBinding):
+    op: Literal['table_edit_exact']
+    label: Label = 'mcp:table-edit-exact'
+    action: Literal['insert_row_above', 'insert_row_below', 'insert_col_left', 'insert_col_right', 'delete_row', 'delete_col', 'merge_cells', 'split_cell', 'unmerge_cell']
+    row: int | None = Field(default=None, ge=1, le=500, description='1-based row for row actions.')
+    col: int | None = Field(default=None, ge=1, le=500, description='1-based column for column actions.')
+    count: int | None = Field(default=None, ge=1, le=50, description='How many lines; one native action and one Undo whatever the number.')
+    cell: CellAddress | None = None
+    end_cell: CellAddress | None = None
+    split_rows: int | None = Field(default=None, ge=1, le=20)
+    split_cols: int | None = Field(default=None, ge=1, le=20)
+    expected_removed_cells: list[RemovedCell] | None = Field(default=None, max_length=2000, description='For a delete: every removed cell that holds content, with its full text and objects as table_read gives them.')
+
+    @model_validator(mode='after')
+    def require_the_fields_of_the_action(self):
+        given = {name for name in ('row', 'col', 'count', 'cell', 'end_cell', 'split_rows', 'split_cols', 'expected_removed_cells') if getattr(self, name) is not None}
+        action = self.action
+        if action.startswith('insert_row'):
+            required, allowed = {'row'}, {'row', 'count'}
+        elif action.startswith('insert_col'):
+            required, allowed = {'col'}, {'col', 'count'}
+        elif action == 'delete_row':
+            required, allowed = {'row'}, {'row', 'count', 'expected_removed_cells'}
+        elif action == 'delete_col':
+            required, allowed = {'col'}, {'col', 'count', 'expected_removed_cells'}
+        elif action == 'merge_cells':
+            required, allowed = {'cell', 'end_cell'}, {'cell', 'end_cell'}
+        elif action == 'split_cell':
+            required, allowed = {'cell'}, {'cell', 'split_rows', 'split_cols'}
+            if (self.split_rows or 1) * (self.split_cols or 1) < 2:
+                raise ValueError('split_cell needs split_rows or split_cols of at least 2')
+        else:
+            required, allowed = {'cell'}, {'cell'}
+        if required - given or given - allowed:
+            raise ValueError(f'{action} takes {sorted(allowed)} and requires {sorted(required)}')
+        return self
+
+
+class BorderGroup(Closed):
+    edges: Annotated[list[Literal['top', 'bottom', 'left', 'right', 'outline', 'inner_horizontal', 'inner_vertical', 'inner', 'all']], Field(min_length=1, max_length=6)]
+    line: Literal['none', 'solid', 'dash', 'dot', 'dash_dot', 'dash_dot_dot', 'long_dash', 'circle', 'double', 'slim_thick', 'thick_slim', 'slim_thick_slim']
+    width_mm: LineWidthMm | None = None
+    color: Annotated[str, Field(pattern=r'^#[0-9A-Fa-f]{6}$')] | None = None
+
+    @model_validator(mode='after')
+    def require_values_of_a_visible_line(self):
+        if self.line == 'none':
+            if self.width_mm is not None or self.color is not None:
+                raise ValueError('removing a line takes no width_mm or color')
+        elif self.width_mm is None or self.color is None:
+            raise ValueError('a line needs width_mm and color')
+        return self
+
+
+class TableStyleStep(_TableBinding):
+    op: Literal['table_style_exact']
+    label: Label = 'mcp:table-style-exact'
+    scope: Literal['cell', 'range', 'table']
+    cell: CellAddress | None = None
+    end_cell: CellAddress | None = None
+    borders: Annotated[list[BorderGroup], Field(min_length=1, max_length=7)] | None = Field(default=None, description='Each edge at most once. top, bottom, left, right and outline are the outer edges of the target; the facing side of a neighbouring cell is written with them when its whole side lies on that edge.')
+    fill: Annotated[str, Field(pattern=r'^(none|#[0-9A-Fa-f]{6})$')] | None = Field(default=None, description='#RRGGBB, white included, or none for no fill.')
+
+    @model_validator(mode='after')
+    def require_a_target_and_a_change(self):
+        if self.scope == 'table' and (self.cell is not None or self.end_cell is not None):
+            raise ValueError('a table scope takes no cell address')
+        if self.scope == 'cell' and (self.cell is None or self.end_cell is not None):
+            raise ValueError('a cell scope takes cell and no end_cell')
+        if self.scope == 'range' and (self.cell is None or self.end_cell is None):
+            raise ValueError('a range scope takes cell and end_cell')
+        if self.borders is None and self.fill is None:
+            raise ValueError('table_style_exact needs borders, fill or both')
+        parts = [part for group in self.borders or [] for edge in group.edges for part in _EDGE_PARTS[edge]]
+        if len(parts) != len(set(parts)):
+            raise ValueError('an edge may be named once')
+        return self
+
+
+class TableCreateStep(Closed):
+    op: Literal['table_create_exact']
+    label: Label = 'mcp:table-create-exact'
+    match: Annotated[str, Field(min_length=1, max_length=500)]
+    expected_page: int = Field(ge=1, le=10000)
+    rows: int = Field(ge=1, le=50)
+    cols: int = Field(ge=1, le=50)
+    cells: list[list[Annotated[str, Field(max_length=4000)]]] | None = Field(default=None, description='Text for every cell, row by row. A table created with text cannot be undone as one step; leave this out for an empty table.')
+    confirm_layout: Literal[True]
+
+    @model_validator(mode='after')
+    def require_single_line_match(self):
+        if not self.match.strip() or any(ord(char) < 32 for char in self.match):
+            raise ValueError('match must be a non-blank single line')
+        return self
+
+
 class UndoStep(Closed):
     op: Literal['undo']
 
@@ -243,7 +377,7 @@ class Reconcile(Closed):
 
 
 class Command(Session):
-    request: Annotated[ContextStep | SelectionStep | ReadbackStep | CellFormatStep | PageNumberStep | OfficialNumberingStep | ParagraphInsertStep | ParagraphRemoveStep | CharacterFormatStep | ParagraphFormatStep | UndoStep | RedoStep | Reconcile,
+    request: Annotated[ContextStep | SelectionStep | ReadbackStep | CellFormatStep | PageNumberStep | OfficialNumberingStep | ParagraphInsertStep | ParagraphRemoveStep | CharacterFormatStep | ParagraphFormatStep | TableInventoryStep | TableReadStep | TableEditStep | TableStyleStep | TableCreateStep | UndoStep | RedoStep | Reconcile,
                        Field(discriminator='op')]
 
 

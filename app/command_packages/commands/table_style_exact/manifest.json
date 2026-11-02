@@ -1,0 +1,24 @@
+{
+  "op": "table_style_exact",
+  "version": "local-cli/table-style-exact/v1-package",
+  "summary": "Set line type, width and colour on edges and set or clear the fill of one cell, range or whole table.",
+  "module": "app.command_packages.commands.table_style_exact.run",
+  "read_only": false,
+  "dirty_default": true,
+  "allowed_keys": [
+    "op",
+    "operation",
+    "label",
+    "table_id",
+    "expected_hash",
+    "expected_page",
+    "expected_rows",
+    "expected_cols",
+    "scope",
+    "cell",
+    "end_cell",
+    "borders",
+    "fill",
+    "confirm_layout"
+  ]
+}

@@ -1,0 +1,15 @@
+{
+  "op": "table_read",
+  "version": "local-cli/table-read/v1-package",
+  "summary": "Read one table: each cell with its address, spans, text, styles, border and fill.",
+  "module": "app.command_packages.commands.table_read.run",
+  "read_only": true,
+  "dirty_default": false,
+  "allowed_keys": [
+    "op",
+    "operation",
+    "label",
+    "table_id",
+    "max_cells"
+  ]
+}

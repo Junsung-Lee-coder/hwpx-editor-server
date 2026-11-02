@@ -180,6 +180,10 @@ def _native_diagnostic(site: object, error: BaseException) -> dict[str, str]:
                             'target_has_invisible_controls', 'target_crosses_invisible_control', 'target_beside_unproven_control',
                             'target_not_found', 'target_not_in_body', 'target_unidentifiable', 'target_unlocatable',
                             'text_readback_unavailable',
+                            'table_not_found', 'table_identity_ambiguous', 'table_grid_mismatch', 'table_state_stale', 'table_too_large', 'table_would_be_empty', 'table_geometry_unknown',
+                            'cell_out_of_range', 'cell_covered_by_merge', 'cell_not_merged', 'range_cuts_merged_cell', 'range_too_small', 'merged_cell_crosses_lines', 'merged_split_rows_unsupported',
+                            'line_inside_merged_cell', 'removed_content_mismatch', 'edge_not_in_target', 'fill_kind_unsupported', 'target_table_not_entered', 'target_cell_unreachable',
+                            'cells_shape_mismatch', 'target_numbered', 'preservation_unprovable', 'control_enumeration_unavailable',
                         ):
                             diagnostic['refusal_code'] = value
             if field == 'cause2_class':

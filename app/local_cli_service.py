@@ -113,6 +113,7 @@ from app.local_cli_service_support import (  # noqa: F401
 from app.local_cli_bundle_controls import LocalCliBundleControlsMixin
 from app.local_cli_bundle_numbering import LocalCliBundleNumberingMixin
 from app.local_cli_bundle_paragraphs import LocalCliBundleParagraphsMixin
+from app.local_cli_bundle_tables import LocalCliBundleTablesMixin
 from app.local_cli_cell_margins import LocalCliCellMarginsMixin
 from app.local_cli_table_structure import LocalCliTableStructureMixin
 from app.local_cli_layout import LocalCliLayoutMixin
@@ -142,6 +143,10 @@ _BUNDLE_UNDO_POLICY: dict[str, str] = {
     # Keeping a number mark at a range's end takes one more native action, so character formatting counts what it issued.
     'character_format_exact': 'counted_native_edit',
     'paragraph_format_exact': 'single_native_edit',
+    # One command is one native action whatever its count; a command also writing fill is two, and a table created with text cannot be counted.
+    'table_edit_exact': 'single_native_edit',
+    'table_style_exact': 'counted_native_edit',
+    'table_create_exact': 'single_native_edit',
 }
 _UNDO_UNVERIFIED_BUNDLE_OPS = frozenset(_BUNDLE_UNDO_POLICY)
 
@@ -252,6 +257,7 @@ class LocalCliService(
     LocalCliBundleControlsMixin,
     LocalCliBundleNumberingMixin,
     LocalCliBundleParagraphsMixin,
+    LocalCliBundleTablesMixin,
     LocalCliCellMarginsMixin,
     LocalCliTableStructureMixin,
     LocalCliObjectInsertMixin,
@@ -1488,6 +1494,9 @@ class LocalCliService(
                     )
                 if step.get('op') in {'character_format_exact', 'paragraph_format_exact'} and all(key in raw_result for key in ('target', 'requested', 'result')):
                     result.update(native_format.public_report(raw_result))
+                if step.get('op') in {'table_inventory', 'table_read', 'table_edit_exact', 'table_style_exact', 'table_create_exact'}:
+                    # The caller asked for these values and they are bounded where they are built; the journal copy stays bounded and redacted.
+                    result.update(raw_result)
                 step['result'] = result
             if 'error' in step:
                 step['error'] = 'native command step failed'
@@ -2842,6 +2851,11 @@ class LocalCliService(
             },
             'paragraph_insert_exact': {'op', 'operation', 'label', 'match', 'expected_page', 'text', 'position', 'confirm_layout'},
             'paragraph_remove_exact': {'op', 'operation', 'label', 'match', 'expected_page', 'expected_text', 'confirm_remove'},
+            'table_inventory': {'op', 'label', 'operation'},
+            'table_read': {'max_cells', 'table_id', 'op', 'label', 'operation'},
+            'table_edit_exact': {'expected_cols', 'count', 'row', 'expected_rows', 'confirm_layout', 'end_cell', 'expected_removed_cells', 'expected_hash', 'table_id', 'action', 'cell', 'split_rows', 'split_cols', 'col', 'op', 'expected_page', 'label', 'operation'},
+            'table_style_exact': {'expected_cols', 'borders', 'expected_rows', 'confirm_layout', 'end_cell', 'expected_hash', 'table_id', 'cell', 'scope', 'fill', 'op', 'expected_page', 'label', 'operation'},
+            'table_create_exact': {'cells', 'cols', 'confirm_layout', 'operation', 'rows', 'op', 'expected_page', 'label', 'match'},
             'character_format_exact': {'op', 'operation', 'label', 'match', 'through_match', 'paragraph_index', 'expected_text', 'expected_page', 'confirm_layout', 'number_mark', 'font_family', 'size_pt', 'bold', 'italic', 'underline', 'text_color'},
             'paragraph_format_exact': {'op', 'operation', 'label', 'match', 'through_match', 'paragraph_index', 'expected_text', 'expected_page', 'confirm_layout', 'align', 'left_indent_pt', 'right_indent_pt', 'first_line_indent_pt', 'line_spacing_type', 'line_spacing_value'},
             'paragraph_delete_exact': {
@@ -3730,7 +3744,7 @@ class LocalCliService(
 
         # Numbering publishes intent at actual Execute boundaries. Other
         # packages are conservative before invocation, never error callbacks.
-        if op not in {'page_number_apply', 'official_numbering_apply', 'paragraph_insert_exact', 'paragraph_remove_exact', 'character_format_exact', 'paragraph_format_exact',
+        if op not in {'page_number_apply', 'official_numbering_apply', 'paragraph_insert_exact', 'paragraph_remove_exact', 'character_format_exact', 'paragraph_format_exact', 'table_inventory', 'table_read', 'table_edit_exact', 'table_style_exact', 'table_create_exact',
                       'control_inventory', 'table_frame_inventory', 'style_inspect', 'where'}:
             if handle.mark_mutating_intent is not None:
                 handle.mark_mutating_intent()
@@ -7194,7 +7208,7 @@ class LocalCliService(
                     # Producer invocation intent is independent of error tags.
                     from app.native_numbering import NativeNumberingRefusal
                     from app.local_cli_bundle_numbering import _NumberingCleanRefusal, _NumberingSemanticRefusal
-                    numbering = step.get('op') in {'official_numbering_apply', 'page_number_apply', 'paragraph_insert_exact', 'paragraph_remove_exact', 'character_format_exact', 'paragraph_format_exact'}
+                    numbering = step.get('op') in {'official_numbering_apply', 'page_number_apply', 'paragraph_insert_exact', 'paragraph_remove_exact', 'character_format_exact', 'paragraph_format_exact', 'table_inventory', 'table_read', 'table_edit_exact', 'table_style_exact', 'table_create_exact'}
                     target_refused = numbering and (type(exc) is NativeNumberingRefusal or type(exc) is _NumberingSemanticRefusal or type(exc) is _NumberingCleanRefusal)
                     # Paragraph edits publish intent exactly when the native call is issued; numbering keeps its stricter projection.
                     mutation_may_have_persisted = handle.mutation_intent or (step.get('op') == 'official_numbering_apply' and not target_refused)
@@ -7214,7 +7228,7 @@ class LocalCliService(
                     # descriptors, metadata, metaclass name or representation.
                     error_text = 'Native command failed; outcome is unproven.'
                     if target_refused:
-                        error_text = ('Formatting refused before any edit; original state and preservation verified.' if step.get('op') in {'character_format_exact', 'paragraph_format_exact'}
+                        error_text = ('Formatting refused before any edit; original state and preservation verified.' if step.get('op') in {'character_format_exact', 'paragraph_format_exact', 'table_inventory', 'table_read', 'table_edit_exact', 'table_style_exact', 'table_create_exact'}
                                       else 'Numbering preflight refused; original state and preservation verified.')
                     rollback = {}
                     if type(exc) is LocalCliMutationError or type(exc) is LocalCliRuntimeError:
@@ -7250,7 +7264,7 @@ class LocalCliService(
                         status['refusal_code'] = (exc.code if type(exc) is _NumberingSemanticRefusal or type(exc) is _NumberingCleanRefusal
                                                   else _native_diagnostic('bundle_step', exc)['refusal_code'])
                         args = BaseException.__dict__['args'].__get__(exc)
-                        if step.get('op') in {'character_format_exact', 'paragraph_format_exact', 'page_number_apply'} and type(args) is tuple and len(args) == 1 and type(args[0]) is str:
+                        if step.get('op') in {'character_format_exact', 'paragraph_format_exact', 'page_number_apply', 'table_inventory', 'table_read', 'table_edit_exact', 'table_style_exact', 'table_create_exact'} and type(args) is tuple and len(args) == 1 and type(args[0]) is str:
                             status['refusal_message'] = args[0][:400]
                         if type(exc) is NativeNumberingRefusal:
                             found_page = BaseException.__dict__['__dict__'].__get__(exc).get('found_page')
@@ -7598,10 +7612,11 @@ class LocalCliService(
         binding = self._load_active_binding(session_id=session_id)
 
         def _handler(handle: LocalCliRuntimeHandle) -> dict[str, Any]:
-            return native_paragraph_edit.numbering_readback(
+            facts = native_paragraph_edit.numbering_readback(
                 handle.hwp, protection=self._numbering_protection_reader(handle),
                 format_model=native_format.live_model_reader(handle.hwp), format_rows=native_format.readback_format,
             )
+            return {**facts, **self._table_review_facts(handle.hwp)}
 
         result = self._execute_live(binding=binding, command_name='numbering-readback', task_label='local_cli.numbering_readback', handler=_handler)
         result.pop('_local_cli_command', None)

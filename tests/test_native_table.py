@@ -12,8 +12,14 @@ from pydantic import ValidationError
 from app import local_cli_runtime as rt
 from hwpx_mcp.schema import Command
 from tests.native_table_fakes import SOLID, Cell, FakeTableCtrl, TableHwp, grid, para, sample_document
-from tests.test_native_paragraph_edit import Flow
+from tests.test_native_paragraph_edit import Flow as _Flow
 from tests.test_repair_runtime_safety import owned_doc
+
+
+class Flow(_Flow):
+    def __init__(self, hwp: TableHwp) -> None:
+        super().__init__(hwp)
+        self.service._bundle_page_evidence = lambda native, **kwargs: {'page': native.current_page}
 
 
 def ok_result(test: unittest.TestCase, outcome: dict) -> dict:
@@ -417,12 +423,12 @@ class Borders(unittest.TestCase):
         for name, number in (('solid', 1), ('dash', 2), ('dot', 3), ('dash_dot', 4), ('dash_dot_dot', 5), ('long_dash', 6), ('circle', 7), ('double', 8), ('slim_thick', 9), ('thick_slim', 10), ('slim_thick_slim', 11)):
             with self.subTest(line=name):
                 hwp = sample_document()
-                ok_result(self, style(hwp, '1012', scope='cell', cell='A1', borders=[{'edges': ['top'], 'line': name, 'width_mm': 0.12, 'color': '#000000'}]))
-                self.assertEqual(hwp.native_calls()[0][2], {'BorderTypeTop': number, 'BorderWidthTop': 1, 'BorderColorTop': 0})
+                ok_result(self, style(hwp, '1012', scope='cell', cell='A1', borders=[{'edges': ['top'], 'line': name, 'width_mm': 0.12, 'color': '#010203'}]))
+                self.assertEqual(hwp.native_calls()[0][2], {'BorderTypeTop': number, 'BorderWidthTop': 1, 'BorderColorTop': 0x030201})
         for width, number in ((0.1, 0), (0.12, 1), (0.15, 2), (0.2, 3), (0.25, 4), (0.3, 5), (0.4, 6), (0.5, 7), (0.6, 8), (0.7, 9), (1.0, 10), (1.5, 11), (2.0, 12), (3.0, 13), (4.0, 14), (5.0, 15)):
             with self.subTest(width=width):
                 hwp = sample_document()
-                ok_result(self, style(hwp, '1012', scope='cell', cell='A1', borders=[{'edges': ['top'], 'line': 'solid', 'width_mm': width, 'color': '#000000'}]))
+                ok_result(self, style(hwp, '1012', scope='cell', cell='A1', borders=[{'edges': ['top'], 'line': 'solid', 'width_mm': width, 'color': '#010203'}]))
                 self.assertEqual(hwp.native_calls()[0][2]['BorderWidthTop'], number)
 
     def test_a_value_already_there_is_no_native_call_and_no_new_dirty(self) -> None:
@@ -543,7 +549,7 @@ class Unknown(unittest.TestCase):
 class History(unittest.TestCase):
     def test_each_command_is_one_undo_and_redo_back_to_its_recorded_state(self) -> None:
         hwp = sample_document()
-        owned = owned_doc(self, hwp)
+        owned = owned_doc(self, hwp, undo_stack=[], redo_stack=[])
         target = {item['table_id']: item for item in owned.service.command_bundle(steps=[{'op': 'table_inventory', 'label': 't'}])['steps'][0]['result']['tables']}['tbl:1012']
         fields = {'table_id': target['table_id'], 'expected_hash': target['expected_hash'], 'expected_page': target['page'], 'expected_rows': 5, 'expected_cols': 4, 'confirm_layout': True}
         self.assertTrue(owned.service.command_bundle(steps=[{'op': 'table_style_exact', 'label': 'a', **fields, 'scope': 'cell', 'cell': 'B2', 'borders': [{'edges': ['top'], **LINE}], 'fill': RED}])['ok'])
@@ -558,7 +564,7 @@ class History(unittest.TestCase):
 
     def test_a_structure_edit_undoes_with_one_step_whatever_its_count(self) -> None:
         hwp = sample_document()
-        owned = owned_doc(self, hwp)
+        owned = owned_doc(self, hwp, undo_stack=[], redo_stack=[])
         target = {item['table_id']: item for item in owned.service.command_bundle(steps=[{'op': 'table_inventory', 'label': 't'}])['steps'][0]['result']['tables']}['tbl:1012']
         fields = {'table_id': target['table_id'], 'expected_hash': target['expected_hash'], 'expected_page': target['page'], 'expected_rows': 5, 'expected_cols': 4, 'confirm_layout': True}
         self.assertTrue(owned.service.command_bundle(steps=[{'op': 'table_edit_exact', 'label': 'a', 'action': 'insert_row_below', 'row': 1, 'count': 3, **fields}])['ok'])
@@ -568,7 +574,7 @@ class History(unittest.TestCase):
 
     def test_an_edit_reaching_no_native_call_leaves_the_history_alone(self) -> None:
         hwp = sample_document()
-        owned = owned_doc(self, hwp)
+        owned = owned_doc(self, hwp, undo_stack=[], redo_stack=[])
         target = {item['table_id']: item for item in owned.service.command_bundle(steps=[{'op': 'table_inventory', 'label': 't'}])['steps'][0]['result']['tables']}['tbl:1012']
         fields = {'table_id': target['table_id'], 'expected_hash': target['expected_hash'], 'expected_page': target['page'], 'expected_rows': 5, 'expected_cols': 4, 'confirm_layout': True}
         self.assertTrue(owned.service.command_bundle(steps=[{'op': 'table_style_exact', 'label': 'a', 'scope': 'cell', 'cell': 'B2', 'fill': 'none', **fields}])['ok'])

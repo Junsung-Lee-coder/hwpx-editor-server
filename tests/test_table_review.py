@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import copy
+import json
 from pathlib import Path
 import shutil
 import tempfile
@@ -20,7 +21,7 @@ def cell(address, row, col, text='', *, rs=1, cs=1, width=9000, fill=None, borde
 
 
 def table(inst, rows, cols, cells, *, page=1, before='앞 문단', index=0):
-    return {'table_id': f'tbl:{inst}', 'index': index, 'page': page, 'rows': rows, 'cols': cols, 'cells': cells, 'before_text': before, 'state_sha256': f's{len(cells)}{sum(len(c["text"]) for c in cells)}', 'nested_in': None}
+    return {'table_id': f'tbl:{inst}', 'index': index, 'page': page, 'rows': rows, 'cols': cols, 'cells': cells, 'before_text': before, 'state_sha256': json.dumps(cells, sort_keys=True, ensure_ascii=False), 'nested_in': None}
 
 
 def base_grid(prefix=''):

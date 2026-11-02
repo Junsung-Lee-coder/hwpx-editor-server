@@ -1,0 +1,28 @@
+{
+  "op": "table_edit_exact",
+  "version": "local-cli/table-edit-exact/v1-package",
+  "summary": "Insert or delete rows and columns, merge, split or unmerge cells of one exact table, checked against its read grid before and after.",
+  "module": "app.command_packages.commands.table_edit_exact.run",
+  "read_only": false,
+  "dirty_default": true,
+  "allowed_keys": [
+    "op",
+    "operation",
+    "label",
+    "table_id",
+    "expected_hash",
+    "expected_page",
+    "expected_rows",
+    "expected_cols",
+    "action",
+    "row",
+    "col",
+    "count",
+    "cell",
+    "end_cell",
+    "split_rows",
+    "split_cols",
+    "expected_removed_cells",
+    "confirm_layout"
+  ]
+}

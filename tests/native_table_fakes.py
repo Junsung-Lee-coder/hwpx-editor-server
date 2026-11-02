@@ -380,7 +380,7 @@ class TableHwp:
         return [call for call in self.calls if call[0] == 'native']
 
     def native(self, name: str, items: dict[str, Any], *, sparse: bool) -> Any:
-        where = [cell.address for cell in self._block_cells()] if self.block else self.cell.address
+        where = [cell.address for cell in self._block_cells()] if self.block else self.cell.address if self.cell is not None else self.body_caret
         self.calls.append(('native', name, items, where))
         if self.execute_raises is not None:
             raise self.execute_raises
