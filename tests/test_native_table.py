@@ -371,6 +371,19 @@ class MergeAndSplit(unittest.TestCase):
         self.assertEqual(table.named('C2').border, {'left': last, 'top': first, 'right': last, 'bottom': last})
         self.assertEqual(table.named('B3').border, {'left': first, 'top': last, 'right': last, 'bottom': last})
 
+    def test_at_the_table_edge_the_lines_between_parts_come_from_the_near_side_and_the_frame_stays_out(self) -> None:
+        near, far, top, bottom = ('Dash', '0.3mm', 1), ('Dot', '0.5mm', 2), ('Solid', '0.2mm', 3), ('Solid', '0.3mm', 4)
+        hwp = sample_document()
+        hwp.by_inst('1012').named('D5').border = {'left': near, 'right': far, 'top': top, 'bottom': bottom}
+        hwp.by_inst('1012').named('C5').border['right'] = near
+        hwp.by_inst('1012').named('D4').border['bottom'] = top
+        ok_result(self, edit(hwp, '1012', 'split_cell', cell='D5', split_rows=2, split_cols=2))
+        table = hwp.by_inst('1012')
+        self.assertEqual(table.named('D5').border, {'left': near, 'right': near, 'top': top, 'bottom': top})
+        self.assertEqual(table.named('E5').border, {'left': near, 'right': far, 'top': top, 'bottom': top})
+        self.assertEqual(table.named('D6').border, {'left': near, 'right': near, 'top': top, 'bottom': bottom})
+        self.assertEqual(table.named('E6').border, {'left': near, 'right': far, 'top': top, 'bottom': bottom})
+
     def test_a_split_part_with_other_lines_than_measured_is_not_a_success(self) -> None:
         def stray(hwp: TableHwp) -> None:
             hwp.by_inst('1012').named('C1').border['top'] = ('Dash', '0.5mm', 0)

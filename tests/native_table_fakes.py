@@ -10,7 +10,8 @@ past the table's edge takes the frame, and the old line's side there takes the v
 edge hands its frame to the line that becomes the edge; TableDeleteRow on a block does nothing while TableDeleteCell on a whole-line block removes the lines; a merge joins
 the paragraphs in reading order, drops a cell that is one blank paragraph, takes its left and top lines and fill from the first cell
 and its right and bottom lines from the far corner cell, and collapses a line no cell starts on; a split leaves everything in the first
-part and divides width equally, and a later part's left line is the right line and its top line the bottom line of the split cell. One native edit is one Undo.
+part and divides width equally. A line between parts takes the split cell's right or bottom line, or, when that side is the table's own
+edge, its left or top line. One native edit is one Undo.
 Not Hancom evidence.
 """
 from __future__ import annotations
@@ -602,6 +603,9 @@ class TableHwp:
     def _split(self, rows: int, cols: int) -> None:
         table, source = self.table, self.cell
         rows, cols = rows or 1, cols or 1
+        original = dict(source.border)
+        between_cols = original['left'] if source.col + source.cs - 1 == table.cols else original['right']
+        between_rows = original['top'] if source.row + source.rs - 1 == table.rows else original['bottom']
         edges = self._col_edges(table)
         x0, x1 = edges[source.col - 1], edges[source.col - 1 + source.cs]
         cuts = [x0 + (x1 - x0) * k // cols for k in range(cols + 1)]
@@ -625,15 +629,14 @@ class TableHwp:
         for r in range(rows):
             for c in range(cols):
                 a, b = merged.index(cuts[c]), merged.index(cuts[c + 1])
+                lines = {'left': original['left'] if c == 0 else between_cols, 'right': original['right'] if c == cols - 1 else between_cols,
+                         'top': original['top'] if r == 0 else between_rows, 'bottom': original['bottom'] if r == rows - 1 else between_rows}
                 if r == 0 and c == 0:
                     source.col, source.cs, source.rs, source.width = a + 1, b - a, 1, cuts[1] - cuts[0]
+                    source.border = lines
                     continue
                 piece = Cell(top + r, a + 1, para(), cs=b - a, width=cuts[c + 1] - cuts[c], height=source.height)
-                piece.border, piece.fill = dict(source.border), copy.deepcopy(source.fill)
-                if c:
-                    piece.border['left'] = source.border['right']
-                if r:
-                    piece.border['top'] = source.border['bottom']
+                piece.border, piece.fill = lines, copy.deepcopy(source.fill)
                 pieces.append(piece)
         table.cells.extend(pieces)
 
