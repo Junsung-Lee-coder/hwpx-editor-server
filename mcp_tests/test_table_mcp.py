@@ -24,6 +24,10 @@ REQUESTS = [
     {'op': 'table_style_exact', 'scope': 'range', 'cell': 'B2', 'end_cell': 'C3', 'fill': '#FFF2CC', 'borders': [{'edges': ['outline'], 'line': 'double', 'width_mm': 0.5, 'color': '#112233'}, {'edges': ['inner_horizontal'], 'line': 'none'}], **BOUND},
     {'op': 'table_style_exact', 'scope': 'table', 'fill': 'none', **BOUND},
     {'op': 'table_create_exact', 'match': '기준 문단', 'expected_page': 1, 'rows': 2, 'cols': 3, 'cells': [['a', 'b', 'c'], ['d', 'e', 'f']], 'confirm_layout': True},
+    {'op': 'table_width_exact', 'fit': 'text_width', **BOUND},
+    {'op': 'table_width_exact', 'column_widths_mm': [20, 30.5, 40, 25], **BOUND},
+    {'op': 'table_edit_exact', 'action': 'delete_row', 'row': 2, 'expected_removed_cells': [{'address': 'A2', 'content_sha256': 'a' * 24}, {'address': 'B2', 'text': '옆'}], **BOUND},
+    {'op': 'table_style_exact', 'scope': 'cell', 'cell': 'B2', 'over_wider_neighbour': True, 'borders': [{'edges': ['top'], 'line': 'solid', 'width_mm': 0.12, 'color': '#FF0000'}], **BOUND},
 ]
 
 
@@ -47,9 +51,9 @@ class TableCommands(Base):
                 tools = await client.list_tools()
         tool = next(item for item in tools.tools if item.name == 'hwpx_command')
         rendered = json.dumps(tool.input_schema)
-        for name in ('table_inventory', 'table_read', 'table_edit_exact', 'table_style_exact', 'table_create_exact', 'unmerge_cell', 'inner_horizontal', 'width_mm', 'expected_removed_cells'):
+        for name in ('table_inventory', 'table_read', 'table_edit_exact', 'table_style_exact', 'table_create_exact', 'table_width_exact', 'column_widths_mm', 'text_width', 'over_wider_neighbour', 'content_sha256', 'unmerge_cell', 'inner_horizontal', 'width_mm', 'expected_removed_cells'):
             self.assertIn(name, rendered)
-        for word in ('border', 'fill', 'merge', 'split'):
+        for word in ('border', 'fill', 'merge', 'split', 'width'):
             self.assertIn(word, tool.description.casefold())
 
     async def test_each_command_reaches_the_backend_as_one_exact_step(self):
@@ -108,6 +112,18 @@ class TableReview(Base):
         self.assertIn('#FFF2CC', markdown)
         stored = json.loads(Path(value['json_path']).read_text(encoding='utf-8'))
         self.assertEqual(stored['tables'][0]['table_id'], 'tbl:1011')
+
+    async def test_a_table_off_the_page_reaches_the_caller_by_name(self):
+        Backend.printed = [['A1 B1'], ['second page']]
+        row = live_table([live_cell('A1', 1, 1, 'A1'), live_cell('B1', 1, 2, 'B1')])
+        row['layout'] = {'status': 'off_page', 'width_hu': 54000, 'width_mm': 190.5, 'text_width_hu': 42520, 'left_hu': 8787, 'right_edge_hu': 62787, 'page_width_hu': 59528, 'overflow_hu': 11763, 'overflow_mm': 41.5, 'off_page_mm': 11.5}
+        Backend.readback_tables = [row]
+        result = await self.call('hwpx_proof', {'session_id': SID, 'request': {'kind': 'review', 'inline_images': 0}})
+        value = result.structured_content['result']
+        self.assertEqual(value['review_status'], 'partial')
+        self.assertEqual(value['coverage']['layout']['overflow'][0]['table_id'], 'tbl:1011')
+        self.assertIn('tbl:1011', result.content[0].text)
+        self.assertIn('쪽 밖으로', result.content[0].text)
 
 
 if __name__ == '__main__':

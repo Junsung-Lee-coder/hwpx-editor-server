@@ -11,7 +11,9 @@ edge hands its frame to the line that becomes the edge; TableDeleteRow on a bloc
 the paragraphs in reading order, drops a cell that is one blank paragraph, takes its left and top lines and fill from the first cell
 and its right and bottom lines from the far corner cell, and collapses a line no cell starts on; a split leaves everything in the first
 part and divides width equally. A line between parts takes the split cell's right or bottom line, or, when that side is the table's own
-edge, its left or top line. One native edit is one Undo.
+edge, its left or top line. One native edit is one Undo. A cell width set through TablePropertyDialog with ShapeType 3 and ShapeCellSize 1 writes every
+cell of the block, a merged one included, and the frame's SIZE follows the cells; without those two items it returns True and changes nothing. Field text
+takes CR LF as a paragraph break and silently drops a lone LF. A table in a header or footer is in the control walk but is no body table, and its anchor is not visited.
 Not Hancom evidence.
 """
 from __future__ import annotations
@@ -54,6 +56,8 @@ class Cell:
         self.paragraphs = list(paragraphs) or [para()]
         self.border = {side: SOLID for side in SIDES}
         self.fill: Any = None
+        self.margin = (141, 510, 510, 141)  # bottom, left, right, top
+        self.vert_align = 'Center'
 
     @property
     def address(self) -> str:
@@ -69,6 +73,7 @@ class Cell:
 class Table:
     def __init__(self, inst: str, rows: int, cols: int, cells: list[Cell]) -> None:
         self.inst, self.rows, self.cols, self.cells = inst, rows, cols, cells
+        self.treat_as_char, self.cell_spacing, self.zorder, self.page_break, self.width_rel = True, 0, 1, 'Cell', 'Absolute'
 
     def at(self, row: int, col: int) -> Cell | None:
         return next((cell for cell in self.cells if cell.covers(row, col)), None)
@@ -137,9 +142,21 @@ class _LineSet:
         self.Side, self.Count = 0, 1
 
 
+class _ShapeCell:
+    def __init__(self) -> None:
+        self.Width = 0
+
+
+class _ShapeSet:
+    def __init__(self) -> None:
+        self.HSet = _Set()
+        self.ShapeTableCell = _ShapeCell()
+
+
 class _Params:
     def __init__(self) -> None:
         self.HCellBorderFill, self.HTableInsertLine = _CellSet(), _LineSet()
+        self.HShapeObject = _ShapeSet()
 
 
 class _HAction:
@@ -156,6 +173,9 @@ class _HAction:
             return self.hwp.native(name, {'type': attr.type, 'face': attr.WinBrushFaceColor, 'hatch': attr.WinBrushHatchColor}, sparse=False)
         if name == 'TableInsertRowColumn':
             return self.hwp.native(name, {'Side': hset.Side, 'Count': hset.Count}, sparse=False)
+        if name == 'TablePropertyDialog':
+            shape = self.hwp.HParameterSet.HShapeObject
+            return self.hwp.native(name, {**shape.HSet.items, 'Width': shape.ShapeTableCell.Width}, sparse=False)
         raise AssertionError(f'unexpected HAction.Execute({name})')
 
     def Run(self, name: str) -> Any:  # noqa: N802
@@ -203,6 +223,14 @@ class TableHwp:
         self.selection_off_by_one = False
         self.fail_action: tuple[str, int] | None = None
         self.message_box: list[int] = []
+        self.header_table: Table | None = None
+        self.footer_table: Table | None = None
+        self.page_def: dict[str, Any] = {}
+        self.column_count = 1
+        self.head_ctrl_error: BaseException | None = None
+        self.control_id_override: Any = None
+        self.history_damage: Any = None
+        self.media_payload_override: Any = None
 
     # What the document is.
     def tables(self) -> list[Table]:
@@ -242,7 +270,14 @@ class TableHwp:
     # Reads.
     @property
     def HeadCtrl(self) -> Any:  # noqa: N802
-        controls = [FakeTableCtrl(table) for table in self.tables()]
+        self.calls.append(('HeadCtrl',))
+        if self.head_ctrl_error is not None:
+            raise self.head_ctrl_error
+        margins = [table for table in (self.header_table, self.footer_table) if table is not None]
+        controls = [FakeTableCtrl(table) for table in [*margins, *self.tables()]]
+        if self.control_id_override is not None:
+            for control in controls:
+                control.CtrlID = self.control_id_override
         for left, right in zip(controls, controls[1:]):
             left.Next = right
         return controls[0] if controls else None
@@ -308,6 +343,8 @@ class TableHwp:
         return True
 
     def set_pos_by_set(self, anchor: FakeAnchor) -> bool:
+        if anchor.table in (self.header_table, self.footer_table):
+            raise AssertionError('a table in a header or footer is not visited')
         self.calls.append(('set_pos_by_set', anchor.table.inst))
         self.block = None
         self.cell, self.table = None, None
@@ -345,7 +382,7 @@ class TableHwp:
         if name == 'TableCellBlock':
             self.block = (self.cell, self.cell)
             return True
-        if name == 'TableCellBlockExtend':
+        if name in {'TableCellBlockExtend', 'TableCellBlockExtendAbs'}:
             return True
         if name in {'TableMergeCell', 'TableDeleteRow', 'TableDeleteColumn'}:
             return self.native(name, {}, sparse=False)
@@ -375,6 +412,8 @@ class TableHwp:
         target.append(copy.deepcopy(self.body))
         self.body = source.pop()
         self.block = None
+        if self.history_damage is not None:
+            self.history_damage(self)
         if inst is not None:
             self.table = next((table for table in self.tables() if table.inst == inst), None)
             self.cell = next((cell for cell in self.table.cells if cell.address == address), self.table.ordered()[0]) if self.table else None
@@ -426,6 +465,8 @@ class TableHwp:
             self._split(items['Rows'], items['Cols'])
         elif name == 'TableCreate':
             self._create(items)
+        elif name == 'TablePropertyDialog':
+            self._cell_width(items)
         else:
             raise AssertionError(f'unexpected native {name}')
         self.undo_stack.append(snapshot)
@@ -443,6 +484,16 @@ class TableHwp:
 
     def create_table(self, rows: int = 1, cols: int = 1, treat_as_char: bool = True, width_type: int = 0, height_type: int = 0, header: bool = True, height: int = 0) -> Any:
         return self.native('TableCreate', {'Rows': rows, 'Cols': cols, 'header': header}, sparse=False)
+
+    def set_cur_field_name(self, name: str) -> None:
+        self.calls.append(('set_cur_field_name', name))
+        self._field_name = name
+
+    def put_field_text(self, name: str, values: list[str]) -> None:
+        self.calls.append(('put_field_text', name, list(values)))
+        for cell, value in zip(self.table.ordered(), values):
+            parts = value.split('\r\n')
+            cell.paragraphs = [para(part.replace('\n', '')) if part.replace('\n', '') else para() for part in parts]
 
     def CreateAction(self, name: str) -> _Action:  # noqa: N802
         return _Action(self, name)
@@ -640,6 +691,12 @@ class TableHwp:
                 pieces.append(piece)
         table.cells.extend(pieces)
 
+    def _cell_width(self, items: dict[str, Any]) -> None:
+        if items.get('ShapeType') != 3 or items.get('ShapeCellSize') != 1:
+            return  # Measured: a table-level width returns True and changes nothing.
+        for cell in self._block_cells():
+            cell.width = items['Width']
+
     def _create(self, items: dict[str, Any]) -> None:
         number = len(self.tables()) + 500
         cols = items['Cols']
@@ -652,7 +709,7 @@ class TableHwp:
     def _fills(self) -> list[tuple]:
         fills = [(SOLID, SOLID, SOLID, SOLID, None)]
 
-        for table in self.tables():
+        for table in [*self.tables(), *[item for item in (self.header_table, self.footer_table) if item is not None]]:
             for cell in table.cells:
                 key = (*[cell.border[side] for side in SIDES], self._fill_key(cell.fill))
                 if key not in fills:
@@ -672,7 +729,9 @@ class TableHwp:
         if key[4]:
             values = dict(key[4])
             if values.get('kind') == 'gradation':
-                fill = '<FILLBRUSH><GRADATION Angle="0" Type="Linear"/></FILLBRUSH>'
+                fill = '<FILLBRUSH><GRADATION Alpha="0" Angle="90" CenterX="0" CenterY="0" ColorNum="2" Step="255" StepCenter="50" Type="Linear"><COLOR Value="255"/><COLOR Value="16711680"/></GRADATION></FILLBRUSH>'
+            elif values.get('kind') == 'pattern':
+                fill = f'<FILLBRUSH><WINDOWBRUSH Alpha="0" FaceColor="{values["face"]}" HatchColor="{values["hatch"]}" HatchStyle="{values["style"]}"/></FILLBRUSH>'
             else:
                 fill = f'<FILLBRUSH><WINDOWBRUSH Alpha="0" FaceColor="{values["face"]}" HatchColor="{values["hatch"]}"/></FILLBRUSH>'
         return (f'<BORDERFILL BackSlash="0" BreakCellSeparateLine="0" CenterLine="0" CounterBackSlash="0" CounterSlash="0" CrookedSlash="0" Id="{number}" Shadow="false" Slash="0" ThreeD="false">'
@@ -707,11 +766,24 @@ class TableHwp:
                 key = (*[cell.border[side] for side in SIDES], self._fill_key(cell.fill))
                 body = ''.join(self._para_xml(item, fills) for item in cell.paragraphs)
                 cells += (f'<CELL BorderFill="{fills.index(key) + 1}" ColAddr="{cell.col - 1}" ColSpan="{cell.cs}" Dirty="false" Editable="false" HasMargin="false" Header="false" Height="{cell.height}" Protect="false" '
-                          f'RowAddr="{cell.row - 1}" RowSpan="{cell.rs}" Width="{cell.width}"><CELLMARGIN Bottom="141" Left="510" Right="510" Top="141"/><PARALIST LineWrap="Break" LinkListID="0" LinkListIDNext="0" TextDirection="0" VertAlign="Center">{body}</PARALIST></CELL>')
+                          f'RowAddr="{cell.row - 1}" RowSpan="{cell.rs}" Width="{cell.width}"><CELLMARGIN Bottom="{cell.margin[0]}" Left="{cell.margin[1]}" Right="{cell.margin[2]}" Top="{cell.margin[3]}"/><PARALIST LineWrap="Break" LinkListID="0" LinkListIDNext="0" TextDirection="0" VertAlign="{cell.vert_align}">{body}</PARALIST></CELL>')
             rows.append(f'<ROW>{cells}</ROW>')
-        return (f'<TABLE BorderFill="1" CellSpacing="0" ColCount="{table.cols}" PageBreak="Cell" RepeatHeader="true" RowCount="{table.rows}"><SHAPEOBJECT InstId="{table.inst}" Lock="false" NumberingType="Table" TextWrap="TopAndBottom" ZOrder="1">'
-                '<SIZE Height="9000" HeightRelTo="Absolute" Protect="false" Width="36000" WidthRelTo="Absolute"/><POSITION AffectLSpacing="false" AllowOverlap="false" FlowWithText="true" HoldAnchorAndSO="false" HorzAlign="Left" HorzOffset="0" HorzRelTo="Column" TreatAsChar="true" VertAlign="Top" VertOffset="0" VertRelTo="Para"/>'
+        size = max(sum(cell.width for cell in table.cells if cell.row == row) for row in range(1, table.rows + 1))
+        return (f'<TABLE BorderFill="1" CellSpacing="{table.cell_spacing}" ColCount="{table.cols}" PageBreak="{table.page_break}" RepeatHeader="true" RowCount="{table.rows}"><SHAPEOBJECT InstId="{table.inst}" Lock="false" NumberingType="Table" TextWrap="TopAndBottom" ZOrder="{table.zorder}">'
+                f'<SIZE Height="9000" HeightRelTo="Absolute" Protect="false" Width="{size}" WidthRelTo="{table.width_rel}"/><POSITION AffectLSpacing="false" AllowOverlap="false" FlowWithText="true" HoldAnchorAndSO="false" HorzAlign="Left" HorzOffset="0" HorzRelTo="Column" TreatAsChar="{"true" if table.treat_as_char else "false"}" VertAlign="Top" VertOffset="0" VertRelTo="Para"/>'
                 '<OUTSIDEMARGIN Bottom="283" Left="283" Right="283" Top="283"/></SHAPEOBJECT><INSIDEMARGIN Bottom="141" Left="510" Right="510" Top="141"/>' + ''.join(rows) + '</TABLE>')
+
+    def _section_head(self, fills: list[tuple]) -> str:
+        head = _SECTION_HEAD
+        for key, value in self.page_def.items():
+            head = re.sub(rf'(<PAGEDEF[^>]*\b{key}=")[^"]*"', rf'\g<1>{value}"', head)
+        if self.column_count != 1:
+            head = head.replace('<COLDEF Count="1"', f'<COLDEF Count="{self.column_count}"')
+        for table, closing in ((self.header_table, '</HEADER>'), (self.footer_table, '</FOOTER>')):
+            if table is not None:
+                end = '</TEXT></P></PARALIST>' + closing
+                head = head.replace(end, self._table_xml(table, fills) + '<CHAR/>' + end, 1)
+        return head
 
     def get_text_file(self, fmt: str = 'UNICODE', option: str = '') -> str:
         self.calls.append(('get_text_file', fmt, option))
@@ -720,7 +792,7 @@ class TableHwp:
         fills = self._fills()
         parts = []
         for number, item in enumerate(self.body):
-            head = _SECTION_HEAD if number == 0 else ''
+            head = self._section_head(fills) if number == 0 else ''
             if isinstance(item, Table):
                 parts.append(self._para_xml({'runs': [item]}, fills, head=head))
             elif isinstance(item, str):
@@ -732,7 +804,10 @@ class TableHwp:
         head_xml = re.sub(r'<BORDERFILLLIST .*?</BORDERFILLLIST>', lambda _m: listed, head_xml, flags=re.S)
         head_xml = re.sub(r'BorderFillId="\d+"', 'BorderFillId="1"', head_xml)
         head_xml = re.sub(r'BorderFill="\d+"', 'BorderFill="1"', head_xml)
-        return head_xml + f'<BODY><SECTION Id="0">{"".join(parts)}</SECTION>' + _CAPTURED[_BODY_END:]
+        tail = _CAPTURED[_BODY_END:]
+        if self.media_payload_override is not None:
+            tail = re.sub(r'(<BINDATA [^>]*>)[^<]*', rf'\g<1>{self.media_payload_override}', tail)
+        return head_xml + f'<BODY><SECTION Id="0">{"".join(parts)}</SECTION>' + tail
 
 
 def sample_document() -> TableHwp:
