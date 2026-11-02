@@ -643,7 +643,7 @@ def _media_line(media: dict[str, Any]) -> str | None:
     state = media.get('state')
     if state in {None, 'not_saved', 'not_compared'}:
         return None
-    parts = [f"저장 파일의 그림: 참조 그림 {media.get('referenced_saved')}개의 데이터가 저장본에 있습니다"]
+    parts = [f"저장 파일의 그림: 저장본에 참조 그림 {media.get('referenced_saved')}개가 있습니다"]
     if state == 'complete':
         parts = [f"저장 파일의 그림: 참조 그림 {media.get('referenced_source')}개의 데이터가 보존됐습니다"]
         if media.get('all_bindata_identical'):
