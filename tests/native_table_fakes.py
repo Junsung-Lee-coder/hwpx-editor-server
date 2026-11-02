@@ -238,6 +238,7 @@ class TableHwp:
         self.control_id_override: Any = None
         self.history_damage: Any = None
         self.media_payload_override: Any = None
+        self.had_pictures = self._picture_count() > 0  # Measured: the data goes with the last picture that refers to it.
 
     # What the document is.
     def tables(self) -> list[Table]:
@@ -811,11 +812,16 @@ class TableHwp:
             else:
                 parts.append(self._para_xml(item, fills, head=head))
         head_xml = _CAPTURED[:_BODY_START]
+        no_media = self.had_pictures and self._picture_count() == 0
+        if no_media:
+            head_xml = re.sub(r'<BINDATALIST .*?</BINDATALIST>', '', head_xml, flags=re.S)
         listed = f'<BORDERFILLLIST Count="{len(fills)}">' + ''.join(self._fill_xml(number + 1, key) for number, key in enumerate(fills)) + '</BORDERFILLLIST>'
         head_xml = re.sub(r'<BORDERFILLLIST .*?</BORDERFILLLIST>', lambda _m: listed, head_xml, flags=re.S)
         head_xml = re.sub(r'BorderFillId="\d+"', 'BorderFillId="1"', head_xml)
         head_xml = re.sub(r'BorderFill="\d+"', 'BorderFill="1"', head_xml)
         tail = _CAPTURED[_BODY_END:]
+        if no_media:
+            tail = re.sub(r'<BINDATASTORAGE.*?</BINDATASTORAGE>', '', tail, flags=re.S)
         if self.media_payload_override is not None:
             tail = re.sub(r'(<BINDATA [^>]*>)[^<]*', rf'\g<1>{self.media_payload_override}', tail)
         return head_xml + f'<BODY><SECTION Id="0">{"".join(parts)}</SECTION>' + tail

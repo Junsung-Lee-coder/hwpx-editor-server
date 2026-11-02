@@ -1748,7 +1748,10 @@ def apply_edit(hwp: Any, *, request: Mapping[str, Any], read: Callable[[], Mappi
         after = read()
         new_table = next((item for item in after['model']['tables'] if item['table_id'] == table['table_id']), None)
         problems = edit_problems(table, plan, new_table)
-        problems += document_problems(before, after, table, allowed_lists=_STRUCTURE_LISTS, removed_objects=tuple(plan.get('removed_objects', ())), removed_tables=tuple(plan.get('removed_tables', ())))
+        removed_objects = tuple(plan.get('removed_objects', ()))
+        # The last picture takes its data with it, as measured; what is left is checked picture by picture.
+        allowed = _STRUCTURE_LISTS | {'bindatalist'} if 'picture' in removed_objects else _STRUCTURE_LISTS
+        problems += document_problems(before, after, table, allowed_lists=allowed, removed_objects=removed_objects, removed_tables=tuple(plan.get('removed_tables', ())))
         if plan['kind'] == 'insert' and caret_address != cell_address(*plan['caret_after']):
             problems.append(f"the caret ended on {caret_address}, so the new lines are not where they were asked for")
         if problems:
