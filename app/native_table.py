@@ -9,8 +9,8 @@ of the block, covered slots excepted, so it is the proof of a selection.
 A sparse CellBorder set changes only its items. On a block BorderType* are the outer edges of the block and TypeHorz and TypeVert its
 inner lines; an inner item on a block with no such line does nothing. The side of a cell outside the block that faces an edge is written
 too, but only when that cell's whole side lies on the edge; a merged neighbour wider than the edge keeps its value. Both sides then print,
-one over the other: none leaves the neighbour's line showing, a dashed line shows it in its gaps, a solid line of the same width prints
-half and half, and only a solid line wider than the neighbour's hides it. NoNeighborCell=1 leaves the neighbour alone, and the PDF then does not
+the target's over the neighbour's: none leaves the neighbour's line showing, a dashed line shows it in its gaps, a thinner solid line shows it
+along its sides, and a solid line at least as wide hides it. NoNeighborCell=1 leaves the neighbour alone, and the PDF then does not
 always show the line, so it is not offered. The left colour item is spelled BorderCorlorLeft, as the official table prints it, and
 BorderColorLeft is ignored. A line of type 0 keeps its stored width and colour. Colours are 0x00BBGGRR. Black is left out of HWPML2X.
 
@@ -42,7 +42,8 @@ Hancom drops an image no paragraph refers to when it opens a document, so the li
 picture refers to it, and removes the data with the last reference.
 
 Cell heights in HWPML2X follow layout and change when a document is rendered, so a table's hash leaves them out and no check rests on
-them. Undo of an insert through a merged cell leaves that cell's stored width or height different; the history reports this.
+them. Undo of an insert through a merged cell leaves that cell's stored width or height different; the history reports this. Undo or Redo of a line can leave
+the table's stored SIZE behind its cells now and then (seen once as Width 45000 against 54000 on a Redo), and the history reports that too.
 """
 from __future__ import annotations
 
@@ -1309,10 +1310,10 @@ def _border_items(groups: list[dict[str, Any]]) -> dict[str, int]:
 
 
 def _shows_through(line: Mapping[str, Any], group: Mapping[str, Any]) -> bool:
-    """As measured: both sides print, so a wider neighbour's line shows unless it has none or a wider solid line covers it."""
+    """As measured: both sides print, so a wider neighbour's line shows unless it has none or a solid line at least as wide covers it."""
     if line['line'] == 'none':
         return False
-    return not (group['line'] == 'solid' and group['width_mm'] > (line['width_mm'] or 0))
+    return not (group['line'] == 'solid' and group['width_mm'] >= (line['width_mm'] or 0))
 
 
 def _faces(cell: Mapping[str, Any], other: Mapping[str, Any], side: str) -> bool:
@@ -1381,7 +1382,7 @@ def plan_style(table: Mapping[str, Any], request: Mapping[str, Any]) -> dict[str
                     under = [cell['address'] for cell in cells if on_outer(cell, side) and _faces(cell, other, side)]
                     if by_edge[side]['line'] == 'none' or request.get('over_wider_neighbour') is not True:
                         raise NativeNumberingRefusal(f"the {_OPPOSITE[side]} line of {other['address']} runs past this edge and prints along it too, so {', '.join(under)} would not show what is asked. "
-                                                     f"Style that side of {other['address']} to change the whole line" + ('.' if by_edge[side]['line'] == 'none' else ", use a solid line wider than it, or set over_wider_neighbour to draw over it."), code='edge_held_by_wider_neighbour')
+                                                     f"Style that side of {other['address']} to change the whole line" + ('.' if by_edge[side]['line'] == 'none' else ", use a solid line at least as wide as it, or set over_wider_neighbour to draw over it."), code='edge_held_by_wider_neighbour')
                     prints_over.append({'cell': other['address'], 'side': _OPPOSITE[side], 'under': ', '.join(under), 'line': line})
     fill_rows: list[dict[str, Any]] = []
     fill = request.get('fill')

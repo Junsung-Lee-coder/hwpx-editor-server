@@ -241,9 +241,9 @@ Hancom 13.0.0.3457에서 측정한 결과이며, 결과의 `changes`와 `after`�
 | 요청한 선 (이웃은 0.12mm 실선) | 인쇄 결과 | 처리 |
 |---|---|---|
 | `none` | 이웃의 선이 그대로 보임 | `edge_held_by_wider_neighbour`로 거부 |
-| 이웃과 같은 굵기의 실선 | 절반씩 겹쳐 두 색이 함께 보임 | 거부, `over_wider_neighbour: true`면 실행 |
+| 이웃보다 가는 실선 (0.1mm) | 요청한 선 옆으로 이웃의 선이 보임 | 거부, `over_wider_neighbour: true`면 실행 |
 | 점선 계열 | 끊긴 곳으로 이웃의 선이 보임 | 거부, `over_wider_neighbour: true`면 실행 |
-| 이웃보다 굵은 실선 | 요청한 선만 보임 | 실행 |
+| 이웃과 같거나 더 굵은 실선 | 요청한 선만 보임 | 실행 |
 
 선을 지우려면 넓은 셀의 그 변을 대상으로 합니다. 그러면 그 변을 마주 보는 셀 전체의 선이 함께 지워지며, 일부 구간만 지우는 방법은 없습니다. 이웃의 선이 `none`이면 거부하지 않습니다. `over_wider_neighbour`로 실행하면 결과의 `changes.prints_over`에 함께 인쇄되는 이웃과 그 선이 나옵니다.
 
@@ -276,6 +276,7 @@ Hancom 13.0.0.3457에서 측정한 결과이며, 결과의 `changes`와 `after`�
 
 - 병합 셀을 가로지르는 삽입을 되돌리면 격자, 글, 선, 표 해시와 인쇄 결과는 돌아오지만 그 병합 셀에 저장된 높이가 달라 `undo_state_mismatch`로 알립니다.
 - 빈 새 표의 Redo는 표가 돌아오지만 Hancom이 겹침 순서 값을 새로 주어 `redo_state_mismatch`로 알립니다.
+- 줄을 넣거나 지운 뒤의 Undo·Redo에서 표의 저장 크기 값이 셀보다 뒤처지는 일이 간혹 있습니다. 한 번은 Redo 뒤 `width_hu`가 54000이 아니라 45000이었습니다. 언제 일어나는지는 밝히지 못했고, 일어나면 `redo_state_mismatch`로 알립니다.
 - 이렇게 알릴 때 `confirmation.expected_state.differences`에 표, 셀, 항목, 기록된 값, 현재 값이 나옵니다. 비교에 이미 읽은 내용으로 만들며 네이티브 호출을 더하지 않습니다. 기록된 값이 없는 편집(문서가 아주 크거나 오래전 편집)에는 `differences`가 없습니다.
 - 이렇게 알린 뒤에는 그 지점 너머로 되돌리지 않습니다(`undo_not_counted`). 문서와 세션은 그대로 쓸 수 있습니다.
 - `cells`를 준 새 표는 Undo 단위를 셀 수 없어 `undo_not_counted`로 거부합니다.

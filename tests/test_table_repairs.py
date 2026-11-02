@@ -18,6 +18,7 @@ SESSION = 'a' * 32
 FULL = [10488, 10488, 10488, 10486]  # A table as wide as Hancom makes it on an A4 page with its usual margins.
 THIN_RED = {'line': 'solid', 'width_mm': 0.12, 'color': '#FF0000'}
 THICK_RED = {'line': 'solid', 'width_mm': 1.0, 'color': '#FF0000'}
+THINNER_RED = {'line': 'solid', 'width_mm': 0.1, 'color': '#FF0000'}
 DASH_RED = {'line': 'dash', 'width_mm': 1.0, 'color': '#FF0000'}
 NONE = {'line': 'none'}
 
@@ -208,7 +209,7 @@ class WiderNeighbour(unittest.TestCase):
         self.assertIn('A1', outcome['steps'][0]['refusal_message'])
 
     def test_a_line_the_wider_one_would_show_through_is_refused_unless_asked_for(self) -> None:
-        for line in (THIN_RED, DASH_RED):
+        for line in (THINNER_RED, DASH_RED):
             with self.subTest(line=line):
                 hwp = sample_document()
                 refused(self, style(hwp, '1015', scope='cell', cell='B2', borders=[{'edges': ['top'], **line}]), 'edge_held_by_wider_neighbour', hwp)
@@ -220,11 +221,13 @@ class WiderNeighbour(unittest.TestCase):
         hwp = sample_document()
         refused(self, style(hwp, '1015', scope='cell', cell='B2', over_wider_neighbour=True, borders=[{'edges': ['top'], **NONE}]), 'edge_held_by_wider_neighbour', hwp)
 
-    def test_a_solid_line_wider_than_the_neighbours_covers_it(self) -> None:
-        hwp = sample_document()
-        value = ok_result(self, style(hwp, '1015', scope='cell', cell='B2', borders=[{'edges': ['top'], **THICK_RED}]))
-        self.assertEqual(value['changes']['neighbours_not_written'], [{'cell': 'A1', 'side': 'bottom', 'reason': 'wider_than_edge'}])
-        self.assertEqual(value['changes']['prints_over'], [])
+    def test_a_solid_line_at_least_as_wide_as_the_neighbours_covers_it(self) -> None:
+        for line in (THIN_RED, THICK_RED):
+            with self.subTest(line=line):
+                hwp = sample_document()
+                value = ok_result(self, style(hwp, '1015', scope='cell', cell='B2', borders=[{'edges': ['top'], **line}]))
+                self.assertEqual(value['changes']['neighbours_not_written'], [{'cell': 'A1', 'side': 'bottom', 'reason': 'wider_than_edge'}])
+                self.assertEqual(value['changes']['prints_over'], [])
 
     def test_a_wider_neighbour_with_no_line_holds_nothing_back(self) -> None:
         hwp = sample_document()
