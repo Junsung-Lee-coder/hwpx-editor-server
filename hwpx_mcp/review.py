@@ -1630,7 +1630,8 @@ def assemble(*, session_id: str, review_id: str, readback: dict[str, Any], pdf: 
           or current['coverage']['number_mark']['state'] in _MARKS_NOT_ALL_COMPARED
           or current['coverage']['tables']['state'] in {'unverified', 'partial'}
           or current['coverage']['layout']['state'] in {'problem', 'unverified'}
-          or current['coverage']['package_media']['state'] in {'partial', 'unverified'}):
+          or current['coverage']['package_media']['state'] in {'partial', 'unverified'}
+          or (persisted_tables or {}).get('state') in {'partial', 'unverified'}):
         coverage_status = 'partial'
     else:
         coverage_status = 'complete'

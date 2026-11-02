@@ -694,6 +694,29 @@ class StoredSize(SavedParts):
         tables = {item['table_id']: item for item in rules.package_tables(self.package())}
         self.assertEqual((tables['tbl:1011']['width_hu'], tables['tbl:1011']['height_hu']), (18000, 1282))
 
+    def test_an_incomplete_saved_size_check_lowers_the_whole_review(self) -> None:
+        path = self.package()
+        for missing in (False, True):
+            with self.subTest(missing=missing):
+                live = self.live(path)
+                for row in live:
+                    if row.get('scope', 'body') == 'body':
+                        row['page'] = 1
+                matching = rules.persisted_tables(path, live)
+                self.assertEqual(matching['state'], 'match')
+                self.assertEqual(reviewed(live, live, persisted_tables=matching)['review_status'], 'complete')
+                if missing:
+                    live[0].pop('height_hu')
+                else:
+                    live[0]['height_hu'] = 999
+                persisted = rules.persisted_tables(path, live)
+                self.assertEqual(persisted['state'], 'partial')
+                review = reviewed(live, live, persisted_tables=persisted)
+                self.assertEqual(review['review_status'], 'partial')
+                self.assertEqual(review['coverage']['status'], 'partial')
+                self.assertNotIn('전체 확인 완료', review['summary_text'])
+                self.assertIn('일부만 확인', rules.to_markdown(review))
+
     def test_a_saved_height_that_differs_is_a_separate_observation(self) -> None:
         path = self.package()
         live = self.live(path)
