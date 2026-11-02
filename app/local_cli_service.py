@@ -7218,8 +7218,25 @@ class LocalCliService(
 
             for index, step in enumerate(cleaned_steps, start=1):
                 step_before = dict(omitted) if guarded else self._bundle_compact_snapshot(handle.hwp)
+                # Invocation is step-local; the owning worker's intent remains
+                # request-cumulative for escaped/report failures and save debt.
+                # Comparing the cumulative bool before/after loses a second
+                # invocation when an earlier step already set it True.
+                step_mutation_issued = False
+                mark_mutating_intent = handle.mark_mutating_intent
+
+                def mark_step_mutating_intent() -> None:
+                    nonlocal step_mutation_issued
+                    step_mutation_issued = True
+                    if mark_mutating_intent is not None:
+                        mark_mutating_intent()
+
                 try:
-                    result, step_dirty, step_warnings = self._execute_command_bundle_step(handle, step, binding=binding)
+                    handle.mark_mutating_intent = mark_step_mutating_intent
+                    try:
+                        result, step_dirty, step_warnings = self._execute_command_bundle_step(handle, step, binding=binding)
+                    finally:
+                        handle.mark_mutating_intent = mark_mutating_intent
                     dirty = dirty or bool(step_dirty)
                     if isinstance(result, dict) and result.get('artifact_kind') and result.get('artifact_path'):
                         artifacts[f"latest_{result.get('artifact_kind')}_path"] = str(result.get('artifact_path'))
@@ -7242,8 +7259,10 @@ class LocalCliService(
                     from app.local_cli_bundle_numbering import _NumberingCleanRefusal, _NumberingSemanticRefusal
                     numbering = step.get('op') in _GUARDED_BUNDLE_OPS
                     target_refused = numbering and (type(exc) is NativeNumberingRefusal or type(exc) is _NumberingSemanticRefusal or type(exc) is _NumberingCleanRefusal)
-                    # Paragraph edits publish intent exactly when the native call is issued; numbering keeps its stricter projection.
-                    mutation_may_have_persisted = handle.mutation_intent or (step.get('op') == 'official_numbering_apply' and not target_refused)
+                    # Only an existing proved semantic refusal may disregard
+                    # confirmed earlier steps. Technical/unknown outcomes keep
+                    # the conservative cumulative projection and custody debt.
+                    mutation_may_have_persisted = (step_mutation_issued if target_refused else handle.mutation_intent) or (step.get('op') == 'official_numbering_apply' and not target_refused)
                     held = False
                     if (mutation_may_have_persisted or (guarded and not target_refused)) and handle.hold_native_custody is not None:
                         if mutation_may_have_persisted:

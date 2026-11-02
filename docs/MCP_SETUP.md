@@ -83,6 +83,8 @@ $mcpProcess = Start-Process -FilePath '.mcp-venv\Scripts\python.exe' -ArgumentLi
 
 거부되면 세션은 보류되지 않고 저장하지 않은 이전 변경도 그대로 남습니다. 실제 인쇄된 번호는 `hwpx_proof`의 `review`가 PDF에서 확인합니다.
 
+공개 REST `/local-cli/command-bundle`과 CLI `bundle-run`의 한 요청 안에서도 같습니다. 앞 단계의 편집이 성공하고 뒤 단계가 변경 전의 정상 의미상 거부(예: `table_read`의 `table_not_found`)이면, 앞 단계와 전체 `dirty`는 유지하고 거부된 단계만 `mutation_may_have_persisted=false` 및 정확한 `refusal_code`로 반환합니다. 뒤 단계는 실행하지 않으며 이후 편집·저장·저장본 재열기가 가능합니다. 이 구분은 이미 성공한 편집을 취소하거나 미저장 문서 닫기를 허용하지 않습니다. 현재 단계가 mutator를 발행했거나 기술적 읽기/반환/보고 결과가 불명확한 경우의 보류와 저장 보호는 그대로입니다. MCP `hwpx_command`는 한 단계씩 보내므로 같은 요청의 이 경계를 검증하려면 REST/CLI 다단계 묶음을 사용해야 합니다.
+
 ## 보호된 편집 묶음의 보조 관찰
 
 표 읽기·편집·생성, 정확한 글자·문단 서식, 문단 삽입·삭제와 번호 명령이 있는 묶음은 보조 커서/문서 snapshot을 추가로 읽지 않습니다. 응답의 `before`/`after`에 `observation_status=omitted_guarded_envelope`가 표시되며, 생략된 문서 변경 상태는 `null`이지 깨끗하다는 증거가 아닙니다. 명령 자체의 대상·변경 전후·문서 보존 증거는 그대로 제공됩니다. 이전 저장 전 변경도 유지합니다.
