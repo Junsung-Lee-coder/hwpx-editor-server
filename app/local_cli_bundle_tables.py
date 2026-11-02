@@ -5,7 +5,7 @@ from collections import OrderedDict
 from typing import Any, Callable
 
 from app import native_numbering, native_numbering_census, native_table
-from app.local_cli_bundle_numbering import _give_back, _guard_protection, _mutation_error, _no_change_proof, _runtime_error
+from app.local_cli_bundle_numbering import _give_back, _guard_protection, _mutation_error, _no_change_proof, _runtime_error, _strict_target_state
 from app.local_cli_runtime import LocalCliRuntimeError
 
 
@@ -42,10 +42,7 @@ class LocalCliBundleTablesMixin:
         return read
 
     def _table_caret(self, hwp: Any) -> tuple[Any, Any]:
-        original = native_numbering._read_target_state(hwp)  # noqa: SLF001
-        if original is None:
-            raise native_numbering.NativeNumberingRefusal('The caret or selection could not be read as exact positions.', code='target_unlocatable')
-        return original
+        return _strict_target_state(hwp)
 
     def _table_give_back(self, hwp: Any, original: tuple[Any, Any]) -> None:
         _give_back(hwp, original, 'The caret could not be given back after reading a table.')

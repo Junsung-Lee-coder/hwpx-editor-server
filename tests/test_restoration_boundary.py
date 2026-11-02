@@ -212,7 +212,7 @@ class SetPos(unittest.TestCase):
 
 
 class FirstRead(unittest.TestCase):
-    """Before anything moved: a raising read is unknown, a non-canonical one refuses with nothing to give back."""
+    """Required guarded reads stay unknown; legacy optional review may omit pages."""
 
     def test_a_raising_first_read_is_unknown(self) -> None:
         for path in PATHS:
@@ -234,7 +234,11 @@ class FirstRead(unittest.TestCase):
                 hwp = sample_document()
                 owned = owned_doc(self, hwp)
                 fault = ReadFault(hwp, at=(-1, -1, -1), occurrence=1, kind='noncanonical', armed=True)
-                clean_refusal(self, owned, PATHS[path](owned), 'target_unlocatable')
+                # A malformed required read is not positive semantic refusal
+                # proof. Keep the old no-movement oracle and strengthen it to
+                # hold/no-next-SDK, without changing optional review below.
+                held(self, owned, PATHS[path](owned))
+                self.assertTrue(fault.nothing_followed(), fault.after)
                 self.assertNotIn('set_pos_by_set', fault.after)
                 self.assertNotIn('set_pos', fault.after)
         hwp = sample_document()

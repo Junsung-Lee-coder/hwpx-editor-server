@@ -314,7 +314,7 @@ def _get_pos(hwp: Any) -> tuple[int, int, int]:
         raise NativeNumberingReadFailure('native caret read failed', code='target_unlocatable') from exc
     if (type(value) is list or type(value) is tuple) and len(value) == 3 and all(_exact_index(item) for item in value):
         return (value[0], value[1], value[2])
-    raise NativeNumberingReadFailure('native caret read is not canonical', code='target_unlocatable')
+    raise NativeNumberingRefusal('native caret read is not canonical', code='target_unlocatable')
 
 
 def _parse_selected_pos(value: Any) -> tuple[int, ...] | None:
@@ -340,10 +340,7 @@ def _get_selection(hwp: Any) -> tuple[int, ...] | None:
         value = getter()
     except Exception as exc:
         raise NativeNumberingReadFailure('native selection read failed', code='target_unlocatable') from exc
-    selection = _parse_selected_pos(value)
-    if selection is None:
-        raise NativeNumberingReadFailure('native selection read is not canonical', code='target_unlocatable')
-    return selection
+    return _parse_selected_pos(value)
 
 
 _TargetState = tuple[tuple[int, int, int], tuple[int, ...]]

@@ -20,6 +20,19 @@ def _runtime_error(exc: Exception) -> LocalCliRuntimeError:
     return LocalCliRuntimeError(str(exc))
 
 
+def _strict_target_state(hwp: Any) -> Any:
+    """Required guarded entry reads, not legacy optional review/give-back policy."""
+    try:
+        original = native_numbering._read_target_state(hwp)  # noqa: SLF001
+    except native_numbering.NativeNumberingReadFailure:
+        raise
+    except native_numbering.NativeNumberingRefusal as exc:
+        raise native_numbering.NativeNumberingReadFailure('Required target state read is unproven.', code='target_unlocatable') from exc
+    if original is None:
+        raise native_numbering.NativeNumberingReadFailure('Required target state read is unproven.', code='target_unlocatable')
+    return original
+
+
 def _give_back(hwp: Any, original: Any, what: str) -> None:
     """Set the caret and selection found before back, and prove it. A read that raises stays unknown, with no next call. A read
     that returns but is not an exact position, a refused native API or another place means the restoration failed: never a refusal."""
@@ -208,9 +221,7 @@ class LocalCliBundleNumberingMixin:
             validated = validate(step)
         except native_numbering.NativeNumberingInputError as exc:
             raise _runtime_error(exc) from exc
-        original = native_numbering._read_target_state(hwp)  # noqa: SLF001
-        if original is None:
-            raise native_numbering.NativeNumberingRefusal('The caret or selection could not be read as exact positions.', code='target_unlocatable')
+        original = _strict_target_state(hwp)
         before = evidence()
         try:
             target = self._find_text_on_expected_page(hwp, match=validated['match'], expected_page=validated['expected_page'], numbering_guard=True)
@@ -267,9 +278,7 @@ class LocalCliBundleNumberingMixin:
             request = (native_format.validate_character_step if kind == 'character' else native_format.validate_paragraph_step)(step)
         except native_numbering.NativeNumberingInputError as exc:
             raise _runtime_error(exc) from exc
-        original = native_numbering._read_target_state(hwp)  # noqa: SLF001
-        if original is None:
-            raise native_numbering.NativeNumberingRefusal('The caret or selection could not be read as exact positions.', code='target_unlocatable')
+        original = _strict_target_state(hwp)
 
         def read() -> dict[str, Any]:
             try:
