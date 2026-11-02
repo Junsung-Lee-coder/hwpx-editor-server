@@ -1291,6 +1291,11 @@ def _execute_edit(hwp: Any, inst: str, table: Mapping[str, Any], plan: Mapping[s
     return ['Execute:TableSplitCell']
 
 
+def _public_request(request: Mapping[str, Any], names: set[str] | None = None) -> dict[str, Any]:
+    """What was asked for, in the caller's terms: a parsed cell goes back to its address."""
+    return {key: cell_address(*value) if key in {'cell', 'end_cell'} else value for key, value in request.items() if key not in _BOUND_FIELDS and (names is None or key in names)}
+
+
 def _report_table(table: Mapping[str, Any], page: int | None) -> dict[str, Any]:
     return {'table_id': table['table_id'], 'page': page, 'rows': table['rows'], 'cols': table['cols'], 'cell_count': len(table['cells']), 'expected_hash': table['expected_hash']}
 
@@ -1330,7 +1335,7 @@ def apply_edit(hwp: Any, *, request: Mapping[str, Any], read: Callable[[], Mappi
             raise NativeNumberingMutationError('table edit outcome is not as requested: ' + '; '.join(problems[:6]) + '; nothing was rolled back')
         _finish(hwp, restore)
         return {
-            'target': {'table_id': table['table_id'], 'page': page, 'cells': len(table['cells'])}, 'requested': {key: value for key, value in request.items() if key not in _BOUND_FIELDS},
+            'target': {'table_id': table['table_id'], 'page': page, 'cells': len(table['cells'])}, 'requested': _public_request(request),
             'before': _report_table(table, page), 'after': _report_table(new_table, page), 'changes': plan['changes'],
             'result': {'changed': True, 'status': 'edited', 'native_actions': native_actions},
             'undo': {'native_editing_actions': len(native_actions), 'pre_state_sha256': _state_sha(before), 'post_state_sha256': _state_sha(after)},
@@ -1350,7 +1355,7 @@ def apply_style(hwp: Any, *, request: Mapping[str, Any], read: Callable[[], Mapp
         require_binding(table, request, page)
         plan = plan_style(table, request)
         target = {'table_id': table['table_id'], 'page': page, 'scope': request['scope'], 'cells': len(plan['cells']), 'addresses': [cell['address'] for cell in plan['cells']][:MAX_REPORT_ROWS]}
-        requested = {key: value for key, value in request.items() if key in {'scope', 'borders', 'fill'}}
+        requested = _public_request(request, {'scope', 'cell', 'end_cell', 'borders', 'fill'})
         if not plan['border_items'] and plan['fill'] is None:
             return {'target': target, 'requested': requested, 'before': _report_table(table, page), 'after': _report_table(table, page), 'changes': plan['changes'],
                     'result': {'changed': False, 'status': 'already_set', 'native_actions': []}, 'undo': {'native_editing_actions': 0, 'pre_state_sha256': None, 'post_state_sha256': None}}

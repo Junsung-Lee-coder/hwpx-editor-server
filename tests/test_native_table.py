@@ -168,6 +168,16 @@ class Targeting(unittest.TestCase):
         self.assertIs(type(hwp).ParentCtrl, original_parent)
 
 
+class Reporting(unittest.TestCase):
+    def test_the_reply_names_cells_by_their_addresses_as_they_were_asked_for(self) -> None:
+        hwp = sample_document()
+        self.assertEqual(ok_result(self, edit(hwp, '1011', 'merge_cells', cell='A1', end_cell='B1'))['requested'], {'action': 'merge_cells', 'cell': 'A1', 'end_cell': 'B1'})
+        self.assertEqual(ok_result(self, edit(hwp, '1012', 'split_cell', cell='B1', split_cols=2))['requested']['cell'], 'B1')
+        value = ok_result(self, style(hwp, '1013', scope='range', cell='A1', end_cell='B2', fill=RED))
+        self.assertEqual(value['requested']['cell'], 'A1')
+        self.assertEqual(value['requested']['end_cell'], 'B2')
+
+
 class Lines(unittest.TestCase):
     def test_each_insert_is_one_native_action_with_the_right_side_and_count(self) -> None:
         cases = [('insert_row_above', {'row': 2}, 2, 2, (7, 4)), ('insert_row_below', {'row': 2}, 3, 2, (7, 4)), ('insert_col_left', {'col': 2}, 0, 2, (5, 6)), ('insert_col_right', {'col': 2}, 1, 2, (5, 6))]
