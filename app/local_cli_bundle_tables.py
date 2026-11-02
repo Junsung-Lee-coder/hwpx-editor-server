@@ -20,12 +20,7 @@ class LocalCliBundleTablesMixin:
         def read() -> dict[str, Any]:
             try:
                 # One native read for each: the model is taken from the very text the census proved usable.
-                try:
-                    source = hwp.get_text_file('HWPML2X', '')
-                except native_numbering.NativeNumberingRefusal as exc:
-                    # SDK exception identity is not a pure model refusal.
-                    # Stop before parsing/restoration or another SDK call.
-                    raise native_numbering.NativeNumberingReadFailure('Native table evidence read failed.', code='preservation_unprovable') from exc
+                source = native_numbering._sdk_read(lambda: hwp.get_text_file('HWPML2X', ''))  # noqa: SLF001
                 raw = _guard_protection(lambda: native_numbering_census.parse_hwpml2x_census(source))
                 model = native_table.parse_table_model(source)
             except (LocalCliRuntimeError, native_numbering_census.CensusError) as exc:
@@ -99,7 +94,8 @@ class LocalCliBundleTablesMixin:
     def _table_review_facts(self, hwp: Any, paragraphs: list[dict[str, Any]] | None = None) -> dict[str, Any]:
         """Every table's values for a review, and each paragraph row's table. What this cannot read it says it could not; a read that raises goes on raising, with no next call."""
         try:
-            model = native_table.parse_table_model(hwp.get_text_file('HWPML2X', ''))
+            source = native_numbering._sdk_read(lambda: hwp.get_text_file('HWPML2X', ''))  # noqa: SLF001
+            model = native_table.parse_table_model(source)
         except native_numbering_census.CensusError:
             return {'tables': None, 'tables_truncated': False, 'picture_payloads': None}
         native_table.tag_readback(paragraphs, model)
@@ -150,7 +146,7 @@ class LocalCliBundleTablesMixin:
                 return
             control = native_table.table_controls(hwp).get(request['table_id'].removeprefix('tbl:')) if 'table_id' in request else None
             if control is not None:
-                hwp.set_pos_by_set(control.GetAnchorPos(0))
+                native_numbering._sdk_read(lambda: hwp.set_pos_by_set(control.GetAnchorPos(0)))  # noqa: SLF001
 
         try:
             before = read()['census']

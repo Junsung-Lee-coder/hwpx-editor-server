@@ -39,6 +39,7 @@ from app.native_numbering import (
     _read_page_number_props,
     _read_protection,
     _read_target_state,
+    _sdk_read,
     _reject_unknown_keys,
     _require_complete,
     _require_confirm_layout,
@@ -185,11 +186,12 @@ def insert_paragraph(
         caret = _get_pos(hwp)
         if caret[:2] != (list_id, para) or _get_selection(hwp) != ():
             raise NativeNumberingRefusal('the caret is not at the requested paragraph edge', code='target_unlocatable')
-        hset = hwp.HParameterSet.HInsertText
-        default = haction.GetDefault('InsertText', hset.HSet)
+        hset = _sdk_read(lambda: hwp.HParameterSet.HInsertText)
+        default = _sdk_read(lambda: haction.GetDefault('InsertText', hset.HSet))
         if not _action_confirmed(default):
             raise NativeNumberingRefusal(f'native InsertText defaults returned {_status_text(default)}', code='native_defaults_unavailable')
-        hset.Text = ('\r\n' + text) if position == 'after' else (text + '\r\n')
+        inserted = ('\r\n' + text) if position == 'after' else (text + '\r\n')
+        _sdk_read(lambda: setattr(hset, 'Text', inserted))
         if _read_target_state(hwp) != (caret, ()):
             raise NativeNumberingRefusal('the caret moved while the insertion was prepared', code='target_moved')
         reach.issue()

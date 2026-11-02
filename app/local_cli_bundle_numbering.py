@@ -283,10 +283,7 @@ class LocalCliBundleNumberingMixin:
         def read() -> dict[str, Any]:
             try:
                 # One native read for each: the model is taken from the very text the census proved usable.
-                try:
-                    source = hwp.get_text_file('HWPML2X', '')
-                except native_numbering.NativeNumberingRefusal as exc:
-                    raise native_numbering.NativeNumberingReadFailure('Native formatting evidence read failed.', code='preservation_unprovable') from exc
+                source = native_numbering._sdk_read(lambda: hwp.get_text_file('HWPML2X', ''))  # noqa: SLF001
                 raw = _guard_protection(lambda: native_numbering_census.parse_hwpml2x_census(source))
                 model = native_format.parse_format_model(source)
             except (LocalCliRuntimeError, native_numbering_census.CensusError) as exc:

@@ -55,6 +55,7 @@ from typing import Any, Callable, Mapping
 import xml.etree.ElementTree as ET
 
 from app import native_format as nf, native_numbering_census
+from app.native_numbering import _sdk_read
 from app.native_numbering import (
     ControlEnumerationUnproven,
     NativeNumberingInputError,
@@ -1507,8 +1508,8 @@ def new_table_paragraph_problems(before: Mapping[str, Any], after: Mapping[str, 
 
 
 def _inst_of(control: Any) -> str | None:
-    getter = getattr(control, 'GetCtrlInstID', None)
-    value = getter() if callable(getter) else None
+    getter = _sdk_read(lambda: getattr(control, 'GetCtrlInstID', None))
+    value = _sdk_read(getter) if callable(getter) else None
     return str(value) if value not in (None, '') else None
 
 
@@ -1530,30 +1531,31 @@ def table_controls(hwp: Any) -> dict[str, Any]:
 def table_pages(hwp: Any, page_of: Callable[[], int], *, only: str | None = None, skip: frozenset[str] = frozenset()) -> dict[str, int | None]:
     """The page each table starts on, by visiting its anchor; the caller gives the caret back. A table in a header or footer is on every page and is not visited."""
     pages: dict[str, int | None] = {}
-    setter = getattr(hwp, 'set_pos_by_set', None)
+    setter = _sdk_read(lambda: getattr(hwp, 'set_pos_by_set', None))
     for inst, control in table_controls(hwp).items():
         if (only is not None and inst != only) or inst in skip:
             continue
-        anchor = getattr(control, 'GetAnchorPos', None)
+        anchor = _sdk_read(lambda: getattr(control, 'GetAnchorPos', None))
         if not callable(anchor) or not callable(setter):
             pages[inst] = None
             continue
-        setter(anchor(0))
+        position = _sdk_read(lambda: anchor(0))
+        _sdk_read(lambda: setter(position))
         pages[inst] = page_of()
     return pages
 
 
 def _run(hwp: Any, name: str) -> Any:
-    return hwp.HAction.Run(name)
+    return _sdk_read(lambda: hwp.HAction.Run(name))
 
 
 def _parent_inst(hwp: Any) -> str | None:
-    parent = hwp.ParentCtrl
+    parent = _sdk_read(lambda: hwp.ParentCtrl)
     return _inst_of(parent) if parent is not None else None
 
 
 def _in_table(hwp: Any, inst: str) -> bool:
-    return hwp.is_cell() is True and _parent_inst(hwp) == inst
+    return _sdk_read(lambda: hwp.is_cell()) is True and _parent_inst(hwp) == inst
 
 
 def enter_table(hwp: Any, inst: str) -> None:
@@ -1562,10 +1564,10 @@ def enter_table(hwp: Any, inst: str) -> None:
     control = table_controls(hwp).get(inst)
     if control is None:
         raise NativeNumberingRefusal('this table was not found among the document controls', code='target_table_not_entered')
-    hwp.set_pos_by_set(control.GetAnchorPos(0))
-    hwp.FindCtrl()
+    _sdk_read(lambda: hwp.set_pos_by_set(control.GetAnchorPos(0)))
+    _sdk_read(lambda: hwp.FindCtrl())
     _run(hwp, 'ShapeObjTextBoxEdit')
-    if not _in_table(hwp, inst) or hwp.SelectionMode != 0:
+    if not _in_table(hwp, inst) or _sdk_read(lambda: hwp.SelectionMode) != 0:
         _run(hwp, 'Cancel')
         raise NativeNumberingRefusal('the caret did not enter this table in a plain state', code='target_table_not_entered')
 
@@ -1576,13 +1578,13 @@ def goto_cell(hwp: Any, inst: str, address: str, cell_count: int) -> None:
     _run(hwp, 'TableColPageUp')
     # A walk meets a tall cell once per row it covers, so this bound holds for any shape of table.
     for _ in range(cell_count * 2 + MAX_GRID + 2):
-        if hwp.get_cell_addr() == address:
+        if _sdk_read(lambda: hwp.get_cell_addr()) == address:
             break
         if _run(hwp, 'TableRightCell') is not True:
             raise NativeNumberingRefusal(f'the caret could not reach {address}', code='target_cell_unreachable')
     else:
         raise NativeNumberingRefusal(f'the caret could not reach {address}', code='target_cell_unreachable')
-    if not _in_table(hwp, inst) or hwp.get_cell_addr() != address or hwp.SelectionMode != 0:
+    if not _in_table(hwp, inst) or _sdk_read(lambda: hwp.get_cell_addr()) != address or _sdk_read(lambda: hwp.SelectionMode) != 0:
         raise NativeNumberingRefusal(f'the caret is not provably on {address} of this table', code='target_cell_unreachable')
 
 
@@ -1610,8 +1612,8 @@ def select_block(hwp: Any, inst: str, table: Mapping[str, Any], rect: Mapping[st
     _run(hwp, 'TableCellBlockExtend')
     for move in _block_moves(table, first, rect):
         _run(hwp, move)
-    selected = hwp.get_selected_range()
-    if not isinstance(selected, list) or sorted(selected) != sorted(cell['address'] for cell in cells) or hwp.SelectionMode == 0 or _parent_inst(hwp) != inst:
+    selected = _sdk_read(lambda: hwp.get_selected_range())
+    if not isinstance(selected, list) or sorted(selected) != sorted(cell['address'] for cell in cells) or _sdk_read(lambda: hwp.SelectionMode) == 0 or _parent_inst(hwp) != inst:
         _run(hwp, 'Cancel')
         raise NativeNumberingRefusal('the block on screen is not exactly the requested cells', code='selection_unverified')
 
@@ -1624,27 +1626,28 @@ def _issue(reach: _MutationReach, call: Callable[[], Any], name: str) -> None:
 
 
 def _execute_border(hwp: Any, items: Mapping[str, int], reach: _MutationReach) -> None:
-    action = hwp.CreateAction('CellBorder')
-    pset = action.CreateSet()
+    action = _sdk_read(lambda: hwp.CreateAction('CellBorder'))
+    pset = _sdk_read(lambda: action.CreateSet())
     for name, value in items.items():
-        pset.SetItem(name, value)
+        _sdk_read(lambda: pset.SetItem(name, value))
     _issue(reach, lambda: action.Execute(pset), 'CellBorder')
 
 
 def _execute_fill(hwp: Any, fill: str, reach: _MutationReach) -> None:
-    pset = hwp.HParameterSet.HCellBorderFill
-    if not _action_confirmed(hwp.HAction.GetDefault('CellFill', pset.HSet)):
+    pset = _sdk_read(lambda: hwp.HParameterSet.HCellBorderFill)
+    if not _action_confirmed(_sdk_read(lambda: hwp.HAction.GetDefault('CellFill', pset.HSet))):
         _run(hwp, 'Cancel')
         raise NativeNumberingRefusal('the current cell fill could not be read', code='selection_unverified')
-    attr = pset.FillAttr
+    attr = _sdk_read(lambda: pset.FillAttr)
     if fill == 'none':
-        attr.type = 0
+        _sdk_read(lambda: setattr(attr, 'type', 0))
     else:
-        attr.type = 1
-        attr.WinBrushFaceColor = native_color(fill)
-        attr.WinBrushHatchColor = HATCH_DEFAULT
-        attr.WinBrushFaceStyle = -1
-        attr.WindowsBrush = 1
+        color = native_color(fill)
+        _sdk_read(lambda: setattr(attr, 'type', 1))
+        _sdk_read(lambda: setattr(attr, 'WinBrushFaceColor', color))
+        _sdk_read(lambda: setattr(attr, 'WinBrushHatchColor', HATCH_DEFAULT))
+        _sdk_read(lambda: setattr(attr, 'WinBrushFaceStyle', -1))
+        _sdk_read(lambda: setattr(attr, 'WindowsBrush', 1))
     _issue(reach, lambda: hwp.HAction.Execute('CellFill', pset.HSet), 'CellFill')
 
 
@@ -1664,10 +1667,11 @@ def _execute_edit(hwp: Any, inst: str, table: Mapping[str, Any], plan: Mapping[s
         _issue(reach, lambda: _run(hwp, native[1]), native[1])
         return [f'Run:{native[1]}']
     if kind == 'insert':
-        pset = hwp.HParameterSet.HTableInsertLine
-        if not _action_confirmed(hwp.HAction.GetDefault('TableInsertRowColumn', pset.HSet)):
+        pset = _sdk_read(lambda: hwp.HParameterSet.HTableInsertLine)
+        if not _action_confirmed(_sdk_read(lambda: hwp.HAction.GetDefault('TableInsertRowColumn', pset.HSet))):
             raise NativeNumberingRefusal('the table insert settings could not be read', code='selection_unverified')
-        pset.Side, pset.Count = native[1], native[2]
+        _sdk_read(lambda: setattr(pset, 'Side', native[1]))
+        _sdk_read(lambda: setattr(pset, 'Count', native[2]))
         _issue(reach, lambda: hwp.HAction.Execute('TableInsertRowColumn', pset.HSet), 'TableInsertRowColumn')
         return ['Execute:TableInsertRowColumn']
     _issue(reach, lambda: hwp.TableSplitCell(Rows=native[1], Cols=native[2], DistributeHeight=0, Merge=0), 'TableSplitCell')
@@ -1776,7 +1780,7 @@ def detail_differences(recorded: Mapping[str, Any], now: Mapping[str, Any]) -> l
 def _finish(hwp: Any, restore: Callable[[], None]) -> None:
     _run(hwp, 'Cancel')
     restore()
-    if hwp.SelectionMode != 0:
+    if _sdk_read(lambda: hwp.SelectionMode) != 0:
         raise NativeNumberingMutationError('a block was left on screen after the table edit; nothing was rolled back')
 
 
@@ -1792,7 +1796,7 @@ def apply_edit(hwp: Any, *, request: Mapping[str, Any], read: Callable[[], Mappi
         plan = plan_edit(table, request)
         enter_table(hwp, inst)
         native_actions = _execute_edit(hwp, inst, table, plan, reach)
-        caret_address = hwp.get_cell_addr() if plan['kind'] == 'insert' else None
+        caret_address = _sdk_read(lambda: hwp.get_cell_addr()) if plan['kind'] == 'insert' else None
         _run(hwp, 'Cancel')
         after = read()
         new_table = next((item for item in after['model']['tables'] if item['table_id'] == table['table_id']), None)
@@ -1932,14 +1936,15 @@ def width_problems(table: Mapping[str, Any], plan: Mapping[str, Any], after: Map
 
 
 def _execute_width(hwp: Any, width: int, reach: _MutationReach) -> None:
-    pset = hwp.HParameterSet.HShapeObject
-    if not _action_confirmed(hwp.HAction.GetDefault('TablePropertyDialog', pset.HSet)):
+    pset = _sdk_read(lambda: hwp.HParameterSet.HShapeObject)
+    if not _action_confirmed(_sdk_read(lambda: hwp.HAction.GetDefault('TablePropertyDialog', pset.HSet))):
         _run(hwp, 'Cancel')
         raise NativeNumberingRefusal('the current table properties could not be read', code='selection_unverified')
     # Without these two the set reaches the table, whose width native ignores while returning True.
-    pset.HSet.SetItem('ShapeType', 3)
-    pset.HSet.SetItem('ShapeCellSize', 1)
-    pset.ShapeTableCell.Width = width
+    _sdk_read(lambda: pset.HSet.SetItem('ShapeType', 3))
+    _sdk_read(lambda: pset.HSet.SetItem('ShapeCellSize', 1))
+    cell = _sdk_read(lambda: pset.ShapeTableCell)
+    _sdk_read(lambda: setattr(cell, 'Width', width))
     _issue(reach, lambda: hwp.HAction.Execute('TablePropertyDialog', pset.HSet), 'TablePropertyDialog')
 
 

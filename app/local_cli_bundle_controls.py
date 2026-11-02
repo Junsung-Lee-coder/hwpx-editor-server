@@ -131,7 +131,7 @@ class LocalCliBundleControlsMixin:
                 else:
                     if not callable(member):
                         raise LocalCliRuntimeError('Numbering page API is unproven.')
-                    value = member()  # An entered getter failure is never a fallback.
+                    value = native_numbering._sdk_read(member)  # noqa: SLF001 — never a fallback after entry
                 if name == 'KeyIndicator':
                     if (type(value) is not list and type(value) is not tuple) or len(value) <= 3:
                         raise LocalCliRuntimeError('Numbering page tuple is unproven.')

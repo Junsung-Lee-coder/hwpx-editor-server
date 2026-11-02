@@ -514,18 +514,11 @@ def live_protection_reader(hwp: Any) -> Callable[[], dict[str, Any]]:
     """Zero-argument reader of the live document's in-memory HWPML2X census; it never saves or rebinds the document."""
 
     def read() -> dict[str, Any]:
-        getter = getattr(hwp, 'get_text_file', None)
+        from app.native_numbering import _sdk_read
+        getter = _sdk_read(lambda: getattr(hwp, 'get_text_file', None))
         if not callable(getter):
             raise CensusError('get_text_file is unavailable on this machine')
-        try:
-            text = getter('HWPML2X', '')
-        except Exception as exc:
-            # Keep SDK-thrown semantic-looking classes technical. Import here
-            # because native_numbering itself consumes this census module.
-            from app.native_numbering import NativeNumberingReadFailure, NativeNumberingRefusal
-            if isinstance(exc, NativeNumberingRefusal):
-                raise NativeNumberingReadFailure('Native preservation evidence read failed.', code='preservation_unprovable') from exc
-            raise
+        text = _sdk_read(lambda: getter('HWPML2X', ''))
         read.last_text = text  # What was read can be looked at again with no other native call.
         return parse_hwpml2x_census(text)
 

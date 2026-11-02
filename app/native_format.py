@@ -41,6 +41,7 @@ from app.native_numbering import (
     _multiset_delta,
     _native_method,
     _read_target_state,
+    _sdk_read,
     _reject_unknown_keys,
     _require_confirm_layout,
     _require_motion_result,
@@ -479,7 +480,8 @@ def parse_format_model(text: str) -> dict[str, Any]:
 
 def live_model_reader(hwp: Any) -> Callable[[], dict[str, Any]]:
     def read() -> dict[str, Any]:
-        return parse_format_model(hwp.get_text_file('HWPML2X', ''))
+        source = _sdk_read(lambda: hwp.get_text_file('HWPML2X', ''))
+        return parse_format_model(source)
 
     return read
 
@@ -844,7 +846,8 @@ def _paragraph_block(rows: list[dict[str, Any]], list_id: int, para: int, model:
 def _block_words(hwp: Any) -> list[str] | None:
     """What the active block holds, in the notation of the census; None when the block cannot be read as a document."""
     try:
-        census = parse_hwpml2x_census(hwp.get_text_file('HWPML2X', 'saveblock:true'))
+        source = _sdk_read(lambda: hwp.get_text_file('HWPML2X', 'saveblock:true'))
+        census = parse_hwpml2x_census(source)
     except CensusError:
         return None
     paragraphs = census['paragraphs']
@@ -862,7 +865,7 @@ def _select(hwp: Any, block: tuple[int, ...], words: list[str] | None, page_of: 
     list_id, start_para, start_pos, _end_list, end_para, end_pos = block
     _set_pos(hwp, (list_id, start_para, start_pos))
     _require_page(page_of(), expected_page)
-    selected = hwp.select_text(start_para, start_pos, end_para, end_pos, list_id)
+    selected = _sdk_read(lambda: hwp.select_text(start_para, start_pos, end_para, end_pos, list_id))
     if selected is not True or _get_selection(hwp) != block:
         raise NativeNumberingRefusal('the requested range could not be selected exactly', code='selection_unverified')
     if words is not None and _block_words(hwp) != words:
@@ -1207,9 +1210,9 @@ def apply_format(
         _select(hwp, block, words, page_of, request['expected_page'])
         creator = _native_method(hwp, 'CreateAction')
         action = creator(action_name)
-        pset = action.CreateSet()
+        pset = _sdk_read(lambda: action.CreateSet())
         for name, value in (_character_items(wanted) if character else _paragraph_items(wanted)).items():
-            pset.SetItem(name, value)
+            _sdk_read(lambda: pset.SetItem(name, value))
         reach.issue()
         result = action.Execute(pset)
         if not _action_confirmed(result):
@@ -1222,9 +1225,9 @@ def apply_format(
             if _read_target_state(hwp) != (end_at, ()):
                 raise NativeNumberingMutationError('the caret did not reach the paragraph end after the formatting; nothing was rolled back')
             restore_action = creator('CharShape')
-            restore_set = restore_action.CreateSet()
+            restore_set = _sdk_read(lambda: restore_action.CreateSet())
             for name, value in restoring['items'].items():
-                restore_set.SetItem(name, value)
+                _sdk_read(lambda: restore_set.SetItem(name, value))
             restored = restore_action.Execute(restore_set)
             native_actions.append('Execute:CharShape:paragraph-end')
             if not _action_confirmed(restored):
