@@ -10,7 +10,7 @@ from pydantic import ValidationError
 
 from app import native_table as nt
 from hwpx_mcp.schema import Command
-from tests.native_table_fakes import SOLID, Cell, TableHwp, grid, para, sample_document
+from tests.native_table_fakes import SOLID, Cell, Pic, TableHwp, grid, para, sample_document
 from tests.test_native_table import Flow, binding, edit, inventory, ok_result, refused, style
 from tests.test_repair_runtime_safety import owned_doc
 
@@ -743,3 +743,45 @@ class GroupedInteriorEdges(unittest.TestCase):
         hwp = sample_document()
         ok_result(self, style(hwp, '1012', scope='range', cell='A1', end_cell='D1', borders=[{'edges': ['top', 'inner_vertical'], **THICK_RED}]))
         self.assertIn('TypeVert', hwp.native_calls()[0][2])
+
+
+class Renumbered(unittest.TestCase):
+    """Measured: deleting the last picture of an image drops its data and renumbers the references of the pictures left (3 to 2, 2 to 1)."""
+
+    def document(self):
+        inner = grid('2002', [[{'paragraphs': [para(Pic('b'), '속그림')]}, '속글']], widths=[3000, 3000])
+        outer = grid('2003', [[{'paragraphs': [para('바깥앞', inner)]}, '오른쪽'], ['아래왼쪽', '아래오른쪽']])
+        return TableHwp(['앞', outer, para(Pic('a'), '본문그림하나'), para(Pic('c'), '본문그림셋'), '끝'])
+
+    def test_the_fake_renumbers_as_measured(self) -> None:
+        import re
+        hwp = self.document()
+        self.assertEqual(re.findall(r'BinItem="(\d)"', hwp.get_text_file('HWPML2X', '')), ['1', '2', '3'])
+        hwp.body[1].named('A1').paragraphs = [para('바깥앞')]
+        self.assertEqual(re.findall(r'BinItem="(\d)"', hwp.get_text_file('HWPML2X', '')), ['1', '2'])
+
+    def test_a_picture_left_keeps_its_paragraph_digest_when_only_its_reference_number_moved(self) -> None:
+        from app import native_numbering_census as census
+        hwp = self.document()
+        before = {row['text']: row['content_sha256'] for row in census.parse_hwpml2x_census(hwp.get_text_file('HWPML2X', ''))['paragraphs']}
+        model_before = {row['text']: row['digest'] for row in nt.parse_table_model(hwp.get_text_file('HWPML2X', ''))['paragraphs']}
+        hwp.body[1].named('A1').paragraphs = [para('바깥앞')]
+        after = {row['text']: row['content_sha256'] for row in census.parse_hwpml2x_census(hwp.get_text_file('HWPML2X', ''))['paragraphs']}
+        model_after = {row['text']: row['digest'] for row in nt.parse_table_model(hwp.get_text_file('HWPML2X', ''))['paragraphs']}
+        for text in ('본문그림하나', '본문그림셋'):
+            self.assertEqual(before[text], after[text], text)
+            self.assertEqual(model_before[text], model_after[text], text)
+
+    def test_another_image_behind_the_same_number_is_still_a_change(self) -> None:
+        from app import native_numbering_census as census
+        hwp = self.document()
+        before = {row['text']: row['content_sha256'] for row in census.parse_hwpml2x_census(hwp.get_text_file('HWPML2X', ''))['paragraphs']}
+        hwp.body[2]['runs'][0] = Pic('d')
+        after = {row['text']: row['content_sha256'] for row in census.parse_hwpml2x_census(hwp.get_text_file('HWPML2X', ''))['paragraphs']}
+        self.assertNotEqual(before['본문그림하나'], after['본문그림하나'])
+
+    def test_deleting_the_last_picture_of_an_image_is_no_hold(self) -> None:
+        hwp = self.document()
+        value = ok_result(self, edit(hwp, '2003', 'delete_row', row=1, expected_removed_cells=[{'address': 'A1', 'text': '바깥앞', 'objects': ['table', 'picture']}, {'address': 'B1', 'text': '오른쪽'}]))
+        self.assertEqual(value['after']['rows'], 1)
+        self.assertEqual(hwp._bin_items(), ['a', 'c'])

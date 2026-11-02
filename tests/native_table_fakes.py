@@ -18,6 +18,7 @@ Not Hancom evidence.
 """
 from __future__ import annotations
 
+import base64
 import copy
 from pathlib import Path
 import re
@@ -45,9 +46,20 @@ def letters(col: int) -> str:
     return out
 
 
+class Pic:
+    """A picture of the named image; 'picture' alone is the captured image."""
+
+    def __init__(self, name: str = 'base') -> None:
+        self.name = name
+
+
+def _picture_name(run: Any) -> str | None:
+    return 'base' if run == 'picture' else run.name if isinstance(run, Pic) else None
+
+
 def para(*runs: Any) -> dict[str, Any]:
-    """Runs are text, (text, char shape index) pairs, or a nested table / 'picture' object."""
-    return {'runs': [run if isinstance(run, (tuple, Table)) or run == 'picture' else (run, 0) for run in runs]}
+    """Runs are text, (text, char shape index) pairs, or a nested table / picture object."""
+    return {'runs': [run if isinstance(run, (tuple, Table, Pic)) or run == 'picture' else (run, 0) for run in runs]}
 
 
 class Cell:
@@ -69,7 +81,7 @@ class Cell:
         return self.row <= row < self.row + self.rs and self.col <= col < self.col + self.cs
 
     def blank(self) -> bool:
-        return len(self.paragraphs) == 1 and not any(item == 'picture' or isinstance(item, Table) or item[0] for item in self.paragraphs[0]['runs'])
+        return len(self.paragraphs) == 1 and not any(_picture_name(item) or isinstance(item, Table) or item[0] for item in self.paragraphs[0]['runs'])
 
 
 class Table:
@@ -242,6 +254,7 @@ class TableHwp:
         self.history_damage: Any = None
         self.media_payload_override: Any = None
         self.had_pictures = self._picture_count() > 0  # Measured: the data goes with the last picture that refers to it.
+        self.bin_order = list(dict.fromkeys(self._picture_names()))
 
     # What the document is.
     def tables(self) -> list[Table]:
@@ -294,8 +307,32 @@ class TableHwp:
         return controls[0] if controls else None
 
     def _picture_count(self) -> int:
-        count = sum(run == 'picture' for table in self.tables() for cell in table.cells for item in cell.paragraphs for run in item['runs'])
-        return count + sum(run == 'picture' for item in self.body if isinstance(item, dict) for run in item['runs'])
+        return len(self._picture_names())
+
+    def _picture_names(self) -> list[str]:
+        """Every picture's image in document order, nested tables at their place."""
+        names: list[str] = []
+
+        def visit(item: dict[str, Any]) -> None:
+            for run in item['runs']:
+                if _picture_name(run):
+                    names.append(_picture_name(run))
+                elif isinstance(run, Table):
+                    for cell in run.ordered():
+                        for inner in cell.paragraphs:
+                            visit(inner)
+        for item in self.body:
+            if isinstance(item, Table):
+                visit({'runs': [item]})
+            elif isinstance(item, dict):
+                visit(item)
+        return names
+
+    def _bin_items(self) -> list[str]:
+        """Measured: items are numbered by first use, and removing the last picture of one drops it and closes the gap."""
+        names = self._picture_names()
+        self.bin_order += [name for name in dict.fromkeys(names) if name not in self.bin_order]  # A new image is numbered after the others.
+        return [name for name in self.bin_order if name in set(names)]
 
     @property
     def ParentCtrl(self) -> Any:  # noqa: N802
@@ -760,8 +797,9 @@ class TableHwp:
         if head:
             out.append(f'<TEXT CharShape="0">{head}</TEXT>')
         for run in runs:
-            if run == 'picture':
-                out.append(f'<TEXT CharShape="0">{_PICTURE}</TEXT>')
+            if _picture_name(run):
+                number = self._bin_items().index(_picture_name(run)) + 1
+                out.append('<TEXT CharShape="0">' + _PICTURE.replace('BinItem="1"', f'BinItem="{number}"') + '</TEXT>')
             elif isinstance(run, Table):
                 out.append(f'<TEXT CharShape="0">{self._table_xml(run, fills)}<CHAR/></TEXT>')
             else:
@@ -825,6 +863,12 @@ class TableHwp:
         tail = _CAPTURED[_BODY_END:]
         if no_media:
             tail = re.sub(r'<BINDATASTORAGE.*?</BINDATASTORAGE>', '', tail, flags=re.S)
+        elif self.had_pictures:
+            items = self._bin_items()
+            head_xml = re.sub(r'<BINDATALIST .*?</BINDATALIST>', lambda _m: f'<BINDATALIST Count="{len(items)}">' + ''.join(f'<BINITEM BinData="{number}" Format="PNG" Type="Embedding"/>' for number in range(1, len(items) + 1)) + '</BINDATALIST>', head_xml, flags=re.S)
+            captured = re.search(r'<BINDATA [^>]*>([^<]*)</BINDATA>', tail).group(1)
+            storage = ''.join(f'<BINDATA Encoding="Base64" Id="{number}" Size="645">' + (captured if name == 'base' else base64.b64encode(b'\x89PNG\r\n\x1a\n' + name.encode()).decode()) + '</BINDATA>' for number, name in enumerate(items, start=1))
+            tail = re.sub(r'<BINDATASTORAGE>.*?</BINDATASTORAGE>', lambda _m: f'<BINDATASTORAGE>{storage}</BINDATASTORAGE>', tail, flags=re.S)
         if self.media_payload_override is not None:
             tail = re.sub(r'(<BINDATA [^>]*>)[^<]*', rf'\g<1>{self.media_payload_override}', tail)
         return head_xml + f'<BODY><SECTION Id="0">{"".join(parts)}</SECTION>' + tail
