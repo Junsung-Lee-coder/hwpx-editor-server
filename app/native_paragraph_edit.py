@@ -252,7 +252,7 @@ def remove_paragraph(
             raise NativeNumberingRefusal('removing this paragraph would move a page or column break', code='neighbor_has_break')
         controls = _control_sequence(hwp)
         list_id, para = _located(hwp, match, paragraph)
-        selected = hwp.select_text(para, 0, para + 1, 0, list_id)
+        selected = _sdk_read(lambda: hwp.select_text(para, 0, para + 1, 0, list_id))
         expected = (list_id, para, 0, list_id, para + 1, 0)
         if selected is not True or _get_selection(hwp) != expected:
             raise NativeNumberingRefusal('the paragraph could not be selected exactly', code='target_unlocatable')
@@ -375,7 +375,7 @@ def _add_format(result: dict[str, Any], paragraphs: list[dict[str, Any]], format
         row['format'] = fact
 
 
-class _CensusUnusable(Exception):
+class _CensusUnusable(CensusError):
     """The native read returned, but the result does not have the shape of a document census."""
 
 

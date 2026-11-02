@@ -399,9 +399,13 @@ class LocalCliBundleNumberingMixin:
             native_numbering._require_complete(before)  # noqa: SLF001
             try:
                 text_before, controls_before = native_numbering._preflight_census(hwp)  # noqa: SLF001
+            except native_numbering.NativeNumberingReadFailure:
+                raise  # Technical classification wins over a familiar original cause.
             except native_numbering.NativeNumberingRefusal as refusal:
                 # Only a chain of exact identifiers longer than the limit; a raising or inexact read stays unknown.
-                if type(refusal.__cause__) is not native_numbering.ControlEnumerationLimit:
+                if (type(refusal) is not native_numbering.NativeNumberingRefusal
+                        or refusal.code != 'control_enumeration_unavailable'
+                        or type(refusal.__cause__) is not native_numbering.ControlEnumerationLimit):
                     raise
                 if (native_numbering._read_target_state(hwp) != original  # noqa: SLF001
                         or native_numbering._read_protection(checked_protection) != before):  # noqa: SLF001

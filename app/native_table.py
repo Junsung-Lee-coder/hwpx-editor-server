@@ -2005,7 +2005,7 @@ def apply_create(hwp: Any, *, request: Mapping[str, Any], read: Callable[[], Map
                 raise NativeNumberingRefusal(f'the text for {bad} holds a control character; only line breaks and tabs can be given', code='cells_text_unsupported')
         anchor = _create_anchor(before['model'], request['match'])
         at = (0, anchor['body_index'], _anchor_end(anchor))
-        hwp.set_pos(*at)
+        _sdk_read(lambda: hwp.set_pos(*at))
         page = page_of()
         if page != request['expected_page']:
             refusal = NativeNumberingRefusal('the paragraph is not on expected_page', code='target_wrong_page')

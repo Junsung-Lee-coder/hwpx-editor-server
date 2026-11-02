@@ -1219,7 +1219,7 @@ def _apply_page_number(hwp: Any, request: Any, *, protection: Callable[[], Any] 
     else:
         first_number = 'new_restart'
 
-    mover = getattr(hwp, 'MoveDocBegin', None)
+    mover = _sdk_read(lambda: getattr(hwp, 'MoveDocBegin', None))
     if not callable(mover):
         raise NativeNumberingRefusal('MoveDocBegin is unavailable on this machine', code='native_unavailable')
 
@@ -1255,7 +1255,7 @@ def _apply_page_number(hwp: Any, request: Any, *, protection: Callable[[], Any] 
             code='native_parameters_unavailable',
         ) from exc
 
-    _require_motion_result(mover())
+    _require_motion_result(_sdk_read(lambda: mover()))
     # From here the outcome may be unknown, so no failure path below moves the caret.
     reach.issue()
     try:
