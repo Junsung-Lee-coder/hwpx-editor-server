@@ -276,7 +276,7 @@ Hancom 13.0.0.3457에서 측정한 결과이며, 결과의 `changes`와 `after`�
 
 - 병합 셀을 가로지르는 삽입을 되돌리면 격자, 글, 선, 표 해시와 인쇄 결과는 돌아오지만 그 병합 셀에 저장된 높이가 달라 `undo_state_mismatch`로 알립니다.
 - 빈 새 표의 Redo는 표가 돌아오지만 Hancom이 겹침 순서 값을 새로 주어 `redo_state_mismatch`로 알립니다.
-- 이렇게 알릴 때 `confirmation.expected_state.differences`에 표, 셀, 항목, 기록된 값, 현재 값이 나옵니다. 비교에 이미 읽은 내용으로 만들며 네이티브 호출을 더하지 않습니다. 편집이 값을 남기지 못한 경우(문서가 아주 크거나 오래전 편집)에는 `differences_unavailable`입니다.
+- 이렇게 알릴 때 `confirmation.expected_state.differences`에 표, 셀, 항목, 기록된 값, 현재 값이 나옵니다. 비교에 이미 읽은 내용으로 만들며 네이티브 호출을 더하지 않습니다. 기록된 값이 없는 편집(문서가 아주 크거나 오래전 편집)에는 `differences`가 없습니다.
 - 이렇게 알린 뒤에는 그 지점 너머로 되돌리지 않습니다(`undo_not_counted`). 문서와 세션은 그대로 쓸 수 있습니다.
 - `cells`를 준 새 표는 Undo 단위를 셀 수 없어 `undo_not_counted`로 거부합니다.
 

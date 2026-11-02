@@ -257,7 +257,7 @@ def _expected_state(states: Any, name: str, reached: Any, differences: list[dict
     if recorded == reached:
         return {'compared': True, 'matches': True}
     if differences is None:
-        return {'compared': True, 'matches': False, 'differences_unavailable': True}
+        return {'compared': True, 'matches': False}
     return {'compared': True, 'matches': False, 'differences': differences[:_MAX_HISTORY_DIFFERENCES], 'differences_total': len(differences)}
 
 
