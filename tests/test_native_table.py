@@ -340,6 +340,47 @@ class MergeAndSplit(unittest.TestCase):
         self.assertEqual([call[1] for call in hwp.native_calls()], ['TableMergeCell'])
         self.assertEqual(hwp.native_calls()[0][3], ['C3', 'D3', 'C4', 'D4'])
 
+    def lined(self, hwp: TableHwp) -> tuple:
+        first, last = ('Dash', '0.3mm', 0x0000FF), ('Dot', '0.5mm', 0xFF0000)
+        table = hwp.by_inst('1012')
+        table.named('B2').border = {'left': first, 'top': first, 'right': ('Solid', '0.2mm', 1), 'bottom': ('Solid', '0.2mm', 2)}
+        table.named('C2').border = {'left': ('Solid', '0.2mm', 1), 'top': ('Solid', '0.2mm', 3), 'right': ('Solid', '0.2mm', 4), 'bottom': ('Solid', '0.2mm', 5)}
+        table.named('B3').border = {'left': ('Solid', '0.2mm', 6), 'top': ('Solid', '0.2mm', 2), 'right': ('Solid', '0.2mm', 7), 'bottom': ('Solid', '0.2mm', 8)}
+        table.named('C3').border = {'left': ('Solid', '0.2mm', 7), 'top': ('Solid', '0.2mm', 5), 'right': last, 'bottom': last}
+        return first, last
+
+    def test_a_merged_cell_takes_its_lines_from_the_two_corners_and_its_fill_from_the_first(self) -> None:
+        hwp = sample_document()
+        first, last = self.lined(hwp)
+        hwp.by_inst('1012').named('B2').fill = {'face': 0xAAAAAA, 'hatch': 0x999999}
+        hwp.by_inst('1012').named('C3').fill = {'face': 0xBBBBBB, 'hatch': 0x999999}
+        ok_result(self, edit(hwp, '1012', 'merge_cells', cell='B2', end_cell='C3'))
+        merged = hwp.by_inst('1012').named('B2')
+        self.assertEqual(merged.border, {'left': first, 'top': first, 'right': last, 'bottom': last})
+        self.assertEqual(merged.fill['face'], 0xAAAAAA)
+        self.assertEqual(hwp.by_inst('1012').named('A2').border['right'], SOLID)
+
+    def test_split_parts_take_the_lines_of_the_split_cell_on_their_far_sides(self) -> None:
+        hwp = sample_document()
+        first, last = self.lined(hwp)
+        ok_result(self, edit(hwp, '1012', 'merge_cells', cell='B2', end_cell='C3'))
+        ok_result(self, edit(hwp, '1012', 'unmerge_cell', cell='B2'))
+        table = hwp.by_inst('1012')
+        self.assertEqual(table.named('B2').border, {'left': first, 'top': first, 'right': last, 'bottom': last})
+        self.assertEqual(table.named('C3').border, {'left': last, 'top': last, 'right': last, 'bottom': last})
+        self.assertEqual(table.named('C2').border, {'left': last, 'top': first, 'right': last, 'bottom': last})
+        self.assertEqual(table.named('B3').border, {'left': first, 'top': last, 'right': last, 'bottom': last})
+
+    def test_a_split_part_with_other_lines_than_measured_is_not_a_success(self) -> None:
+        def stray(hwp: TableHwp) -> None:
+            hwp.by_inst('1012').named('C1').border['top'] = ('Dash', '0.5mm', 0)
+
+        hwp = sample_document()
+        hwp.corrupt_after_execute = stray
+        outcome = edit(hwp, '1012', 'split_cell', cell='B1', split_cols=2)
+        self.assertFalse(outcome['ok'], outcome)
+        self.assertTrue(outcome['steps'][0]['mutation_may_have_persisted'])
+
     def test_a_blank_cell_adds_no_paragraph_and_a_blank_paragraph_of_a_fuller_cell_stays(self) -> None:
         hwp = sample_document()
         value = ok_result(self, edit(hwp, '1017', 'merge_cells', cell='A1', end_cell='B1'))

@@ -8,8 +8,9 @@ lies on the edge, and ignores BorderColorLeft because the item is spelled Border
 GetDefault set writes the fill alone; TableInsertRowColumn makes all its lines in one action, mirroring the source line; a new line
 past the table's edge takes the frame, and the old line's side there takes the value of its other side; a deleted line at the table's
 edge hands its frame to the line that becomes the edge; TableDeleteRow on a block does nothing while TableDeleteCell on a whole-line block removes the lines; a merge joins
-the paragraphs in reading order, drops a cell that is one blank paragraph, takes the first cell's border and fill and collapses a
-line no cell starts on; a split leaves everything in the first part and divides width equally. One native edit is one Undo.
+the paragraphs in reading order, drops a cell that is one blank paragraph, takes its left and top lines and fill from the first cell
+and its right and bottom lines from the far corner cell, and collapses a line no cell starts on; a split leaves everything in the first
+part and divides width equally, and a later part's left line is the right line and its top line the bottom line of the split cell. One native edit is one Undo.
 Not Hancom evidence.
 """
 from __future__ import annotations
@@ -515,6 +516,8 @@ class TableHwp:
         for cell in table.cells:
             if cell.cs == 1:
                 widths[cell.col] = cell.width
+        corner = table.at(bottom - 1, right - 1)
+        first.border = {'left': first.border['left'], 'top': first.border['top'], 'right': corner.border['right'], 'bottom': corner.border['bottom']}
         first.paragraphs, first.rs, first.cs = kept, bottom - top, right - left
         first.width = sum(widths.get(col, 0) for col in range(left, right)) or first.width
         table.cells = [cell for cell in table.cells if cell is first or cell not in cells]
@@ -627,6 +630,10 @@ class TableHwp:
                     continue
                 piece = Cell(top + r, a + 1, para(), cs=b - a, width=cuts[c + 1] - cuts[c], height=source.height)
                 piece.border, piece.fill = dict(source.border), copy.deepcopy(source.fill)
+                if c:
+                    piece.border['left'] = source.border['right']
+                if r:
+                    piece.border['top'] = source.border['bottom']
                 pieces.append(piece)
         table.cells.extend(pieces)
 

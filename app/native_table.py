@@ -24,8 +24,9 @@ it where it was. A deleted line at the table's edge hands that edge's values to 
 cannot be deleted.
 
 TableMergeCell joins the paragraphs of its cells in reading order with their styles. A cell holding one blank paragraph adds nothing.
-The merged cell takes the first cell's border and fill, and a grid line no cell starts on any more disappears, so a merge can reduce
-the table's rows or columns. TableSplitCell leaves all content in the first part. It divides width equally, so unmerging columns of
+The merged cell takes its left and top lines and its fill from the first cell and its right and bottom lines from the far corner cell.
+A grid line no cell starts on any more disappears, so a merge can reduce the table's rows or columns. TableSplitCell leaves all content
+in the first part, and a later part's left line is the split cell's right line and its top line the split cell's bottom line. It divides width equally, so unmerging columns of
 different widths adds a grid line rather than restoring the old ones. A merged cell split into as many rows as it spans keeps the row
 lines. Into another number of rows the result follows rendered heights, which this code cannot predict, so that is refused.
 
@@ -835,6 +836,8 @@ def _plan_merge(table: Mapping[str, Any], request: Mapping[str, Any]) -> dict[st
     merged = _new(rect['top'], rect['left'], rect['bottom'] - rect['top'] + 1, rect['right'] - rect['left'] + 1, first, kind='merged')
     kept_paragraphs = [item for cell in cells if not cell['blank'] for item in cell['paragraphs']]
     merged['paragraph_digests'] = [item['digest'] for item in kept_paragraphs] or [cells[0]['paragraphs'][0]['digest']]
+    corner = _covering(table, rect['bottom'], rect['right'])
+    merged['border'] = {'left': first['border']['left'], 'top': first['border']['top'], 'right': corner['border']['right'], 'bottom': corner['border']['bottom']}
     entries.append(merged)
     entries, rows, cols = _collapsed(entries, table['rows'], table['cols'])
     return {'action': request['action'], 'kind': 'merge', 'rows': rows, 'cols': cols, 'entries': entries, 'caret': first, 'native': ('merge',), 'rect': rect,
@@ -903,6 +906,8 @@ def _plan_split(table: Mapping[str, Any], request: Mapping[str, Any]) -> dict[st
         for col_part in range(cols_wanted):
             low, high = grid.index(snapped[col_part]), grid.index(snapped[col_part + 1])
             entry = _new(target_top + row_part * (1 if part_rows == 1 else part_rows), low + 1, part_rows, high - low, cell, kind='first_part' if not parts else 'part')
+            entry['border'] = {'left': cell['border']['left'] if col_part == 0 else cell['border']['right'], 'right': cell['border']['right'],
+                               'top': cell['border']['top'] if row_part == 0 else cell['border']['bottom'], 'bottom': cell['border']['bottom']}
             entries.append(entry)
             parts.append(cell_address(entry['row'], entry['col']))
     rows, cols = table['rows'] + extra_rows, len(grid) - 1
@@ -964,17 +969,24 @@ def _entry_problems(where: str, want: Mapping[str, Any], got: Mapping[str, Any])
     elif kind == 'merged':
         if [item['digest'] for item in got['paragraphs']] != want['paragraph_digests']:
             problems.append(f'{where} does not hold exactly the merged paragraphs in order')
-        for name in ('border', 'fill', 'rest', 'attrs'):
+        if got['border'] != want['border']:
+            problems.append(f'{where} did not take the lines of the corners of the merged range')
+        for name in ('fill', 'rest', 'attrs'):
             if got[name] != source[name]:
                 problems.append(f"{where} did not take the {name} of {source['address']}")
     elif kind == 'first_part':
         if got['content'] != source['content']:
             problems.append(f'{where} does not hold the content of the split cell')
+        for name in ('border', 'fill', 'rest'):
+            if got[name] != source[name]:
+                problems.append(f'{where} changed the {name} of the split cell')
     else:
         if not got['blank']:
             problems.append(f'{where} should be a new empty cell')
         if got['fill'] != source['fill']:
             problems.append(f'{where} did not take the fill of {source["address"]}')
+        if kind == 'part' and got['border'] != want['border']:
+            problems.append(f'{where} has other lines than a part of the split cell')
     return problems
 
 
