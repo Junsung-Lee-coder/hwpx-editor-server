@@ -19,6 +19,7 @@
     "end_cell",
     "borders",
     "fill",
+    "over_wider_neighbour",
     "confirm_layout"
   ]
 }

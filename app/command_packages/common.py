@@ -506,11 +506,11 @@ def validate_step_for_op(op: str, *, service: Any, index: int, step: dict[str, A
                         else native_paragraph_edit.validate_remove_step(step))
         except native_paragraph_edit.NativeNumberingInputError as exc:
             _raise(error_type, f'command-bundle step {index} {op}: {exc}')
-    elif op in {'table_inventory', 'table_read', 'table_edit_exact', 'table_style_exact', 'table_create_exact'}:
+    elif op in {'table_inventory', 'table_read', 'table_edit_exact', 'table_style_exact', 'table_width_exact', 'table_create_exact'}:
         from app import native_table
 
         validate = {'table_inventory': native_table.validate_inventory_step, 'table_read': native_table.validate_read_step, 'table_edit_exact': native_table.validate_edit_step,
-                    'table_style_exact': native_table.validate_style_step, 'table_create_exact': native_table.validate_create_step}[op]
+                    'table_style_exact': native_table.validate_style_step, 'table_width_exact': native_table.validate_width_step, 'table_create_exact': native_table.validate_create_step}[op]
         try:
             validate(step)
         except native_table.NativeNumberingInputError as exc:
@@ -626,8 +626,8 @@ def run_step_for_op(op: str, *, service: Any, handle: Any, step: dict[str, Any],
     if op == 'table_read':
         result = service._bundle_table_read(handle.hwp, step)  # noqa: SLF001
         return result, False, list(result.get('warnings') or [])
-    if op in {'table_edit_exact', 'table_style_exact', 'table_create_exact'}:
-        run = {'table_edit_exact': service._bundle_table_edit_exact, 'table_style_exact': service._bundle_table_style_exact, 'table_create_exact': service._bundle_table_create_exact}[op]  # noqa: SLF001
+    if op in {'table_edit_exact', 'table_style_exact', 'table_width_exact', 'table_create_exact'}:
+        run = {'table_edit_exact': service._bundle_table_edit_exact, 'table_style_exact': service._bundle_table_style_exact, 'table_width_exact': service._bundle_table_width_exact, 'table_create_exact': service._bundle_table_create_exact}[op]  # noqa: SLF001
         result = run(handle.hwp, step, on_mutating=handle.mark_mutating_intent)
         # A value already present is a proven no-op, not a new dirty delta.
         return result, result['result']['changed'] is not False, list(result.get('warnings') or [])

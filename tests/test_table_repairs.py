@@ -14,6 +14,7 @@ from tests.native_table_fakes import SOLID, Cell, TableHwp, grid, para, sample_d
 from tests.test_native_table import Flow, binding, edit, inventory, ok_result, refused, style
 from tests.test_repair_runtime_safety import owned_doc
 
+SESSION = 'a' * 32
 FULL = [10488, 10488, 10488, 10486]  # A table as wide as Hancom makes it on an A4 page with its usual margins.
 THIN_RED = {'line': 'solid', 'width_mm': 0.12, 'color': '#FF0000'}
 THICK_RED = {'line': 'solid', 'width_mm': 1.0, 'color': '#FF0000'}
@@ -30,7 +31,7 @@ def full_table(inst='2001'):
 
 
 def widen(hwp, inst='2001', **fields):
-    return ok_result(unittest.TestCase(), edit(hwp, inst, 'insert_col_right', col=4, **fields))
+    return ok_result(unittest.TestCase(), edit(hwp, inst, 'insert_col_right', **{'col': 4, **fields}))
 
 
 class Layout(unittest.TestCase):
@@ -42,16 +43,16 @@ class Layout(unittest.TestCase):
         self.assertEqual(layout['overflow_hu'], 0)
 
     def test_a_column_added_to_a_full_width_table_is_named_past_the_margin_and_off_the_page(self) -> None:
-        hwp = width_doc(full_table())
+        hwp = width_doc(grid('2001', [[f'{letter}{row}' for letter in 'ABCD'] for row in (1, 2)], widths=[13650, 13650, 13650, 1000]))
         value = widen(hwp)
         layout = value['after']['layout']
-        self.assertEqual(layout['width_hu'], 41950 + 10486)
+        self.assertEqual(layout['width_hu'], 41950 + 1000)
         self.assertEqual(layout['status'], 'past_margin')
         self.assertEqual(value['before']['layout']['status'], 'fits')
         self.assertTrue(any('tbl:2001' in text and '여백' in text for text in value['warnings']))
-        value = widen(hwp, count=3)
+        value = widen(hwp, col=5, count=10)
         self.assertEqual(value['after']['layout']['status'], 'off_page')
-        self.assertEqual(value['after']['layout']['overflow_hu'], 8787 + 41950 + 10486 * 4 - 51024)
+        self.assertEqual(value['after']['layout']['overflow_hu'], 8787 + 41950 + 1000 * 11 - 51024)
         self.assertTrue(any('쪽 밖' in text for text in value['warnings']))
 
     def test_landscape_paper_is_as_wide_as_its_stored_height(self) -> None:
@@ -159,7 +160,7 @@ class Width(unittest.TestCase):
     def test_a_stale_table_stops_before_any_edit(self) -> None:
         hwp = width_doc(full_table())
         fields = binding(hwp, '2001')
-        widen(hwp)
+        ok_result(self, style(hwp, '2001', scope='cell', cell='A1', fill='#FFF2CC'))
         refused(self, Flow(hwp).step(op='table_width_exact', **fields, fit='text_width'), 'table_state_stale', hwp, baseline=1)
 
     def test_an_unexpected_result_after_the_action_is_unknown_and_not_retried(self) -> None:
@@ -190,11 +191,11 @@ class Width(unittest.TestCase):
 
     def test_the_schema_takes_exactly_one_way_of_giving_widths(self) -> None:
         bound = {'table_id': 'tbl:1', 'expected_hash': 'sha256:' + 'a' * 24, 'expected_page': 1, 'expected_rows': 1, 'expected_cols': 2, 'confirm_layout': True}
-        Command.model_validate({'request': {'op': 'table_width_exact', **bound, 'fit': 'text_width'}})
-        Command.model_validate({'request': {'op': 'table_width_exact', **bound, 'column_widths_mm': [20, 30]}})
+        Command.model_validate({'session_id': SESSION, 'request': {'op': 'table_width_exact', **bound, 'fit': 'text_width'}})
+        Command.model_validate({'session_id': SESSION, 'request': {'op': 'table_width_exact', **bound, 'column_widths_mm': [20, 30]}})
         for bad in ({}, {'fit': 'text_width', 'column_widths_mm': [20, 30]}, {'fit': 'page'}, {'column_widths_mm': []}, {'column_widths_mm': [0, 30]}):
             with self.subTest(bad=bad), self.assertRaises(ValidationError):
-                Command.model_validate({'request': {'op': 'table_width_exact', **bound, **bad}})
+                Command.model_validate({'session_id': SESSION, 'request': {'op': 'table_width_exact', **bound, **bad}})
 
 
 class WiderNeighbour(unittest.TestCase):
@@ -274,7 +275,7 @@ class WiderNeighbour(unittest.TestCase):
 class EffectiveEdges(unittest.TestCase):
     def test_all_and_inner_mean_the_lines_the_target_has(self) -> None:
         cases = (
-            ({'scope': 'cell', 'cell': 'B2'}, ['all'], 4, {'BorderTypeTop', 'BorderTypeLeft'}, {'TypeHorz', 'TypeVert'}),
+            ({'scope': 'cell', 'cell': 'B2'}, ['all'], 1, {'BorderTypeTop', 'BorderTypeLeft'}, {'TypeHorz', 'TypeVert'}),
             ({'scope': 'range', 'cell': 'A1', 'end_cell': 'D1'}, ['all'], 4, {'TypeVert'}, {'TypeHorz'}),
             ({'scope': 'range', 'cell': 'A1', 'end_cell': 'D1'}, ['inner'], 3, {'TypeVert'}, {'TypeHorz', 'BorderTypeTop'}),
             ({'scope': 'range', 'cell': 'B1', 'end_cell': 'B5'}, ['all'], 5, {'TypeHorz'}, {'TypeVert'}),
@@ -351,9 +352,9 @@ class DeleteByHash(unittest.TestCase):
                 nt._validated_removed([bad])  # noqa: SLF001
         bound = {'table_id': 'tbl:1', 'expected_hash': 'sha256:' + 'a' * 24, 'expected_page': 1, 'expected_rows': 1, 'expected_cols': 2, 'confirm_layout': True}
         request = {'op': 'table_edit_exact', **bound, 'action': 'delete_row', 'row': 1}
-        Command.model_validate({'request': {**request, 'expected_removed_cells': [{'address': 'A1', 'content_sha256': 'a' * 24}]}})
+        Command.model_validate({'session_id': SESSION, 'request': {**request, 'expected_removed_cells': [{'address': 'A1', 'content_sha256': 'a' * 24}]}})
         with self.assertRaises(ValidationError):
-            Command.model_validate({'request': {**request, 'expected_removed_cells': [{'address': 'A1'}]}})
+            Command.model_validate({'session_id': SESSION, 'request': {**request, 'expected_removed_cells': [{'address': 'A1'}]}})
 
 
 class NestedDelete(unittest.TestCase):
@@ -633,8 +634,8 @@ class ReplyAndValidation(unittest.TestCase):
         bound = {'table_id': 'tbl:1', 'expected_hash': 'sha256:' + 'a' * 24, 'expected_page': 1, 'expected_rows': 1, 'expected_cols': 2, 'confirm_layout': True}
         request = {'op': 'table_style_exact', **bound, 'scope': 'cell', 'cell': 'A1', 'over_wider_neighbour': True}
         with self.assertRaises(ValidationError):
-            Command.model_validate({'request': {**request, 'fill': 'none'}})
-        Command.model_validate({'request': {**request, 'borders': [{'edges': ['top'], 'line': 'solid', 'width_mm': 0.12, 'color': '#000000'}]}})
+            Command.model_validate({'session_id': SESSION, 'request': {**request, 'fill': 'none'}})
+        Command.model_validate({'session_id': SESSION, 'request': {**request, 'borders': [{'edges': ['top'], 'line': 'solid', 'width_mm': 0.12, 'color': '#000000'}]}})
 
 
 if __name__ == '__main__':

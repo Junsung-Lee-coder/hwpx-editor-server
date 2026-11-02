@@ -263,8 +263,15 @@ class _TableBinding(Closed):
 
 class RemovedCell(Closed):
     address: CellAddress
-    text: Annotated[str, Field(max_length=8000)]
+    text: Annotated[str, Field(max_length=8000)] | None = Field(default=None, description="The cell's full text, as table_read gives it when text_truncated is false.")
+    content_sha256: Annotated[str, Field(pattern=r'^[a-f0-9]{24}$')] | None = Field(default=None, description="The cell's content_sha256 from table_read, for a cell whose text_truncated is true or whose text is awkward to repeat. Give this or text.")
     objects: list[Annotated[str, Field(max_length=40)]] | None = Field(default=None, max_length=64)
+
+    @model_validator(mode='after')
+    def require_text_or_hash(self):
+        if (self.text is None) == (self.content_sha256 is None):
+            raise ValueError('a removed cell gives its full text or its content_sha256')
+        return self
 
 
 class TableEditStep(_TableBinding):
@@ -278,7 +285,7 @@ class TableEditStep(_TableBinding):
     end_cell: CellAddress | None = None
     split_rows: int | None = Field(default=None, ge=1, le=20)
     split_cols: int | None = Field(default=None, ge=1, le=20)
-    expected_removed_cells: list[RemovedCell] | None = Field(default=None, max_length=2000, description='For a delete: every removed cell that holds content, with its full text and objects as table_read gives them.')
+    expected_removed_cells: list[RemovedCell] | None = Field(default=None, max_length=2000, description='For a delete: every removed cell that holds content, with its full text or content_sha256 and its objects (those in nested tables too) as table_read gives them.')
 
     @model_validator(mode='after')
     def require_the_fields_of_the_action(self):
@@ -329,6 +336,7 @@ class TableStyleStep(_TableBinding):
     end_cell: CellAddress | None = None
     borders: Annotated[list[BorderGroup], Field(min_length=1, max_length=7)] | None = Field(default=None, description='Each edge at most once. top, bottom, left, right and outline are the outer edges of the target; the facing side of a neighbouring cell is written with them when its whole side lies on that edge.')
     fill: Annotated[str, Field(pattern=r'^(none|#[0-9A-Fa-f]{6})$')] | None = Field(default=None, description='#RRGGBB, white included, or none for no fill.')
+    over_wider_neighbour: Literal[True] | None = Field(default=None, description="Where a merged neighbour runs past the edge, both cells' lines print one over the other. A line it would show through is refused unless this is true; the reply then names what prints under it. Removing a line there is always refused: style the neighbour's side instead.")
 
     @model_validator(mode='after')
     def require_a_target_and_a_change(self):
@@ -340,9 +348,24 @@ class TableStyleStep(_TableBinding):
             raise ValueError('a range scope takes cell and end_cell')
         if self.borders is None and self.fill is None:
             raise ValueError('table_style_exact needs borders, fill or both')
+        if self.over_wider_neighbour and self.borders is None:
+            raise ValueError('over_wider_neighbour goes with borders')
         parts = [part for group in self.borders or [] for edge in group.edges for part in _EDGE_PARTS[edge]]
         if len(parts) != len(set(parts)):
             raise ValueError('an edge may be named once')
+        return self
+
+
+class TableWidthStep(_TableBinding):
+    op: Literal['table_width_exact']
+    label: Label = 'mcp:table-width-exact'
+    fit: Literal['text_width'] | None = Field(default=None, description="Scale every column in proportion so the table is exactly as wide as the text. Refused when where the table sits cannot be proved. Nothing changes a table's width unless asked.")
+    column_widths_mm: Annotated[list[Annotated[float, Field(gt=0, le=2000)]], Field(min_length=1, max_length=500)] | None = Field(default=None, description='The width of every grid column in millimetres, left to right. A merged cell takes the sum of its columns.')
+
+    @model_validator(mode='after')
+    def require_one_way_of_giving_widths(self):
+        if (self.fit is None) == (self.column_widths_mm is None):
+            raise ValueError('table_width_exact takes fit or column_widths_mm')
         return self
 
 
@@ -353,7 +376,7 @@ class TableCreateStep(Closed):
     expected_page: int = Field(ge=1, le=10000)
     rows: int = Field(ge=1, le=50)
     cols: int = Field(ge=1, le=50)
-    cells: list[list[Annotated[str, Field(max_length=4000)]]] | None = Field(default=None, description='Text for every cell, row by row. A table created with text cannot be undone as one step; leave this out for an empty table.')
+    cells: list[list[Annotated[str, Field(max_length=4000)]]] | None = Field(default=None, description='Text for every cell, row by row; empty text leaves a cell blank, a line break makes a new paragraph, and a tab stays. Other control characters are refused. A table created with text cannot be undone as one step; leave this out for an empty table.')
     confirm_layout: Literal[True]
 
     @model_validator(mode='after')
@@ -377,7 +400,7 @@ class Reconcile(Closed):
 
 
 class Command(Session):
-    request: Annotated[ContextStep | SelectionStep | ReadbackStep | CellFormatStep | PageNumberStep | OfficialNumberingStep | ParagraphInsertStep | ParagraphRemoveStep | CharacterFormatStep | ParagraphFormatStep | TableInventoryStep | TableReadStep | TableEditStep | TableStyleStep | TableCreateStep | UndoStep | RedoStep | Reconcile,
+    request: Annotated[ContextStep | SelectionStep | ReadbackStep | CellFormatStep | PageNumberStep | OfficialNumberingStep | ParagraphInsertStep | ParagraphRemoveStep | CharacterFormatStep | ParagraphFormatStep | TableInventoryStep | TableReadStep | TableEditStep | TableStyleStep | TableWidthStep | TableCreateStep | UndoStep | RedoStep | Reconcile,
                        Field(discriminator='op')]
 
 

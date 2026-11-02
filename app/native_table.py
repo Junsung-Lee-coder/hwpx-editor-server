@@ -7,8 +7,10 @@ to the cell in the next slot. A cell the block touches is taken whole. SetPos en
 of the block, covered slots excepted, so it is the proof of a selection.
 
 A sparse CellBorder set changes only its items. On a block BorderType* are the outer edges of the block and TypeHorz and TypeVert its
-inner lines. The side of a cell outside the block that faces an edge is written too, but only when that cell's whole side lies on the
-edge; a merged neighbour wider than the edge keeps its value. NoNeighborCell=1 leaves the neighbour alone, and the PDF then does not
+inner lines; an inner item on a block with no such line does nothing. The side of a cell outside the block that faces an edge is written
+too, but only when that cell's whole side lies on the edge; a merged neighbour wider than the edge keeps its value. Both sides then print,
+one over the other: none leaves the neighbour's line showing, a dashed line shows it in its gaps, a solid line of the same width prints
+half and half, and only a solid line wider than the neighbour's hides it. NoNeighborCell=1 leaves the neighbour alone, and the PDF then does not
 always show the line, so it is not offered. The left colour item is spelled BorderCorlorLeft, as the official table prints it, and
 BorderColorLeft is ignored. A line of type 0 keeps its stored width and colour. Colours are 0x00BBGGRR. Black is left out of HWPML2X.
 
@@ -30,6 +32,14 @@ in the first part. A line between parts takes the split cell's right or bottom l
 left or top line, and the frame stays on the far parts. It divides width equally, so unmerging columns of
 different widths adds a grid line rather than restoring the old ones. A merged cell split into as many rows as it spans keeps the row
 lines. Into another number of rows the result follows rendered heights, which this code cannot predict, so that is refused.
+
+A table's SIZE follows its cells. TablePropertyDialog with ShapeType 3 and ShapeCellSize 1 sets the width of every cell of the block in one action and one
+Undo, a merged cell included: on a column block it leaves a merged cell's stored width stale and pulls every column it covers to the value, so across a merge
+each cell gets its own action and a merged cell its sum. Without those two items it returns True and changes nothing, so the table's own width cannot be set.
+Native accepts any value, 100 and 200000 included, so this code bounds it. A table in line with the text starts after the page's left margin and its own outside
+margin; on landscape paper the page is as wide as its stored Height, and past the page's edge a table is clipped in print.
+Hancom drops an image no paragraph refers to when it opens a document, so the live document never holds it. Deleting a picture keeps its data while another
+picture refers to it, and removes the data with the last reference.
 
 Cell heights in HWPML2X follow layout and change when a document is rendered, so a table's hash leaves them out and no check rests on
 them. Undo of an insert through a merged cell leaves that cell's stored width or height different; the history reports this.
@@ -85,6 +95,7 @@ HATCH_DEFAULT = 0x999999
 NO_COLOR = 4294967295
 _TABLE_ID = re.compile(r'tbl:([0-9]{1,20})')
 _HASH = re.compile(r'sha256:[a-f0-9]{24}')
+_CONTENT_HASH = re.compile(r'[a-f0-9]{24}')
 _COLOR = re.compile(r'#[0-9A-Fa-f]{6}')
 _ADDRESS = re.compile(r'[A-Z]{1,3}[1-9][0-9]{0,3}')
 
@@ -107,11 +118,17 @@ COL_ACTIONS = {'insert_col_left': 0, 'insert_col_right': 1}
 EDIT_ACTIONS = frozenset({*ROW_ACTIONS, *COL_ACTIONS, 'delete_row', 'delete_col', 'merge_cells', 'split_cell', 'unmerge_cell'})
 _BOUND_FIELDS = ('table_id', 'expected_hash', 'expected_page', 'expected_rows', 'expected_cols')
 _EDIT_FIELDS = ('action', 'row', 'col', 'count', 'cell', 'end_cell', 'split_rows', 'split_cols', 'expected_removed_cells')
-_STYLE_FIELDS = ('scope', 'cell', 'end_cell', 'borders', 'fill')
+_STYLE_FIELDS = ('scope', 'cell', 'end_cell', 'borders', 'fill', 'over_wider_neighbour')
+_WIDTH_FIELDS = ('fit', 'column_widths_mm')
 _CREATE_FIELDS = ('match', 'expected_page', 'rows', 'cols', 'cells')
 _CELL_VOLATILE = frozenset({'rowaddr', 'coladdr', 'rowspan', 'colspan', 'width', 'height', 'dirty', 'borderfill'})
 _LIST_VOLATILE = frozenset({'linklistid', 'linklistidnext'})
 RENDER_PROOF_WARNING = 'Render every affected page and review the saved file before accepting this edit.'
+HU_PER_MM = 7200 / 25.4
+MIN_COLUMN_HU = 1418  # 5 mm: below this a cell's own margins leave no room for text.
+MAX_WIDTH_ACTIONS = 300
+_MAX_STATE_DETAIL_CELLS = 5000
+_MARGIN_SIDES = ('left', 'right', 'top', 'bottom')
 
 
 def _digest(value: Any) -> str:
@@ -144,6 +161,31 @@ def _width_mm(value: Any) -> float | None:
 
 # The model.
 
+def _hu_mm(value: int) -> float:
+    return round(value / HU_PER_MM, 2)
+
+
+def _style_word(value: Any) -> str:
+    return str(value or '').replace('_', '').strip().lower()
+
+
+def _other_fill(brushes: list[ET.Element], resolver: _Resolver) -> dict[str, Any]:
+    """A fill this code does not edit: its family and, where the saved file can say the same, its meaning, so the two can be compared."""
+    fill: dict[str, Any] = {'kind': 'other', 'digest': _digest([resolver.digest(item) for item in brushes])[:16]}
+    names = sorted(_name(item) for item in brushes)
+    if names == ['windowbrush']:
+        brush = brushes[0]
+        face = _int(_attr(brush, 'facecolor'))
+        fill.update(family='pattern', meaning={'style': _style_word(_attr(brush, 'hatchstyle')), 'face': 'none' if face == NO_COLOR else _color_text(face), 'hatch': _color_text(_attr(brush, 'hatchcolor')), 'alpha': _int(_attr(brush, 'alpha'))})
+    elif names == ['gradation']:
+        brush = brushes[0]
+        fill.update(family='gradation', meaning={'type': _style_word(_attr(brush, 'type')), 'angle': _int(_attr(brush, 'angle')), 'center_x': _int(_attr(brush, 'centerx')), 'center_y': _int(_attr(brush, 'centery')), 'step': _int(_attr(brush, 'step')),
+                                                 'step_center': _int(_attr(brush, 'stepcenter')), 'colors': [_color_text(_attr(item, 'value')) for item in brush if _name(item) == 'color'], 'alpha': _int(_attr(brush, 'alpha'))})
+    else:
+        fill['family'] = 'image' if names == ['imagebrush'] else 'mixed'
+    return fill
+
+
 def _border_facts(element: ET.Element, resolver: _Resolver) -> dict[str, Any]:
     border: dict[str, Any] = {}
     fill: dict[str, Any] = {'kind': 'none'}
@@ -160,7 +202,7 @@ def _border_facts(element: ET.Element, resolver: _Resolver) -> dict[str, Any]:
                 face = _int(_attr(brushes[0], 'facecolor'))
                 fill = {'kind': 'none'} if face == NO_COLOR else {'kind': 'solid', 'color': _color_text(face)}
             else:
-                fill = {'kind': 'other', 'digest': _digest([resolver.digest(item) for item in brushes])[:16]}
+                fill = _other_fill(brushes, resolver)
         else:
             rest.append(resolver.digest(child))
     missing = [side for side in SIDES if side not in border]
@@ -244,8 +286,63 @@ def _frame_digest(table: ET.Element, resolver: _Resolver) -> str:
     return _digest(tokens)[:16]
 
 
+def _margin_values(element: ET.Element | None) -> dict[str, int] | None:
+    return None if element is None else {side: _int(_attr(element, side)) for side in _MARGIN_SIDES}
+
+
+def _frame_values(table: ET.Element) -> dict[str, Any]:
+    """A table's own properties by name, so a change of them can be told; its size follows its cells and is told apart."""
+    values: dict[str, Any] = {'cell_spacing': _attr(table, 'cellspacing'), 'page_break': _attr(table, 'pagebreak'), 'repeat_header': _attr(table, 'repeatheader')}
+    children = {_name(child): child for child in table if _name(child) != 'row'}
+    shape = children.get('shapeobject')
+    if shape is not None:
+        values.update(zorder=_attr(shape, 'zorder'), text_wrap=_attr(shape, 'textwrap'), numbering_type=_attr(shape, 'numberingtype'), lock=_attr(shape, 'lock'))
+        parts = {_name(child): child for child in shape}
+        position = parts.get('position')
+        if position is not None:
+            values.update(treat_as_char=_attr(position, 'treataschar'), horz_rel_to=_attr(position, 'horzrelto'), horz_align=_attr(position, 'horzalign'), horz_offset=_attr(position, 'horzoffset'),
+                          vert_rel_to=_attr(position, 'vertrelto'), vert_align=_attr(position, 'vertalign'), vert_offset=_attr(position, 'vertoffset'), flow_with_text=_attr(position, 'flowwithtext'), allow_overlap=_attr(position, 'allowoverlap'))
+        values['outside_margin'] = _margin_values(parts.get('outsidemargin'))
+    values['inside_margin'] = _margin_values(children.get('insidemargin'))
+    return values
+
+
+def _table_size(table: ET.Element) -> tuple[int | None, str]:
+    for child in table:
+        if _name(child) == 'shapeobject':
+            for item in child:
+                if _name(item) == 'size':
+                    return _int(_attr(item, 'width'), -1), (_attr(item, 'widthrelto') or '').strip().lower()
+    return None, ''
+
+
+def _section_geometry(section: ET.Element) -> dict[str, Any] | None:
+    page = next((item for item in section.iter() if _name(item) == 'pagedef'), None)
+    margin = next((item for item in page if _name(item) == 'pagemargin'), None) if page is not None else None
+    if page is None or margin is None:
+        return None
+    return {'width': _int(_attr(page, 'width'), -1), 'height': _int(_attr(page, 'height'), -1), 'landscape': _int(_attr(page, 'landscape'), -1), 'left': _int(_attr(margin, 'left'), -1), 'right': _int(_attr(margin, 'right'), -1),
+            'gutter': _int(_attr(margin, 'gutter'), -1), 'columns': sorted({_int(_attr(item, 'count'), 1) for item in section.iter() if _name(item) == 'coldef'} or {1})}
+
+
+def _picture_payloads(root: ET.Element, body: ET.Element) -> list[str | None]:
+    """The data behind each picture of the document, by what it refers to: a picture that keeps its reference may still have lost what it pointed at."""
+    items = [_attr(item, 'bindata') for item in root.iter() if _name(item) == 'binitem']
+    data = {(_attr(item, 'id') or '').strip(): hashlib.sha256((item.text or '').encode('ascii', 'replace')).hexdigest() for item in root.iter() if _name(item) == 'bindata'}
+    payloads: list[str | None] = []
+    for picture in body.iter():
+        if _name(picture) != 'picture':
+            continue
+        for image in picture.iter():
+            if _name(image) == 'image':
+                number = _int(_attr(image, 'binitem'), 0)
+                reference = items[number - 1] if 1 <= number <= len(items) else None
+                payloads.append(data.get((reference or '').strip()))
+    return payloads
+
+
 def parse_table_model(text: str) -> dict[str, Any]:
-    """Every table and paragraph of the body, in document order; a nested table's content belongs to that table, not to the cell holding it."""
+    """Every table and paragraph of the body, in document order; a nested table's content belongs to that table, not to the cell holding it. Tables in headers and footers are kept apart."""
     if type(text) is not str or len(text) > MAX_HWPML_CHARS or _DOCTYPE.search(text):
         raise nf._ModelUnusable('HWPML2X text is not usable as a document')  # noqa: SLF001
     try:
@@ -263,18 +360,33 @@ def parse_table_model(text: str) -> dict[str, Any]:
         if ident is not None:
             fills[ident.strip()] = _border_facts(item, resolver)
     cache: dict[int, str] = {}
-    tables: list[dict[str, Any]] = []
-    paragraphs: list[dict[str, Any]] = []
+    body_tables: list[dict[str, Any]] = []
+    margin_tables: list[dict[str, Any]] = []
+    body_paragraphs: list[dict[str, Any]] = []
     margins: list[str] = []
     body_count = [0]
+    now: dict[str, Any] = {'tables': body_tables, 'paragraphs': body_paragraphs, 'scope': 'body', 'geometry': None}
 
-    def read_table(table: ET.Element, chain: tuple[str, ...], where: dict[str, Any], before_text: str, depth: int) -> None:
+    def read_margin(element: ET.Element, scope: str, chain: tuple[str, ...], depth: int) -> None:
+        margins.extend(''.join(item.itertext()) for item in element.iter() if _name(item) == 'char')
+        saved = dict(now)
+        now.update(tables=margin_tables, paragraphs=[], scope=scope)
+        try:
+            visit(element, chain, depth + 1)
+        finally:
+            now.update(saved)
+
+    def read_table(table: ET.Element, chain: tuple[str, ...], where: dict[str, Any], before_text: str, depth: int, holder: dict[str, Any] | None = None, position: int = 0) -> None:
+        tables = now['tables']
         inst = _table_inst(table)
         rows, cols = _int(_attr(table, 'rowcount'), -1), _int(_attr(table, 'colcount'), -1)
         if inst is None or rows < 1 or cols < 1:
             raise nf._ModelUnusable('a table has no identity or no grid')  # noqa: SLF001
         fact: dict[str, Any] = {'table_id': f'tbl:{inst}', 'inst_id': inst, 'index': len(tables), 'rows': rows, 'cols': cols, 'nested_in': where.get('table'), 'nested_cell': where.get('cell'), 'body_index': where.get('body_index'),
-                                'before_text': before_text, 'frame': _frame_digest(table, resolver), 'cells': []}
+                                'before_text': before_text, 'frame': _frame_digest(table, resolver), 'frame_values': _frame_values(table), 'scope': now['scope'], 'cells': []}
+        fact['size_width'], fact['width_rel'] = _table_size(table)
+        fact['geometry'] = now['geometry']
+        fact['holder'] = _holder_facts(holder, position) if holder is not None and where.get('body_index') is not None else None
         tables.append(fact)
         inside = (*chain, inst)
         for row_element in table:
@@ -301,16 +413,19 @@ def parse_table_model(text: str) -> dict[str, Any]:
         fact['address'] = cell_address(fact['row'], fact['col'])
         fact.update(json.loads(json.dumps(fills[ref])))
         attrs: list[Any] = sorted((key, value) for key, value in _lower_attrs(cell).items() if key not in _CELL_VOLATILE)
+        values: dict[str, Any] = {'has_margin': _attr(cell, 'hasmargin'), 'header': _attr(cell, 'header'), 'protect': _attr(cell, 'protect'), 'editable': _attr(cell, 'editable')}
         rows: list[dict[str, Any]] = []
         for child in cell:
             name = _name(child)
             if name == 'paralist':
                 attrs.append(sorted((key, value) for key, value in _lower_attrs(child).items() if key not in _LIST_VOLATILE))
+                values.update(vertical_align=_attr(child, 'vertalign'), line_wrap=_attr(child, 'linewrap'), text_direction=_attr(child, 'textdirection'))
                 for item in child:
                     if _name(item) == 'p':
                         rows.append(read_paragraph(item, table, chain, {'table': table['table_id'], 'cell': fact['address']}, depth + 1))
             elif name == 'cellmargin':
                 attrs.append(sorted(_lower_attrs(child).items()))
+                values['margin'] = _margin_values(child)
             else:
                 try:
                     attrs.append(resolver.digest(child, prune=True))
@@ -322,6 +437,7 @@ def parse_table_model(text: str) -> dict[str, Any]:
         fact['tables'] = [inst for item in rows for inst in item['tables']]
         fact['content'] = _digest([item['digest'] for item in rows])[:24]
         fact['attrs'] = _digest(attrs)[:16]
+        fact['attr_values'] = values
         fact['blank'] = len(rows) == 1 and not rows[0]['atoms']
         return fact
 
@@ -329,17 +445,20 @@ def parse_table_model(text: str) -> dict[str, Any]:
         if depth > _MAX_DEPTH:
             raise nf._ModelUnusable('HWPML2X nesting is too deep')  # noqa: SLF001
         fact = _paragraph_facts(paragraph, chars, paras, resolver, cache)
-        paragraphs.append({'chain': chain, 'digest': fact['digest'], 'text': fact['text'], 'body_index': where.get('body_index'), 'heading': _heading_of(fact['shape']), 'objects': fact['objects'], 'in_table': bool(where.get('cell')), 'atoms': fact['atoms']})
+        now['paragraphs'].append({'chain': chain, 'digest': fact['digest'], 'text': fact['text'], 'body_index': where.get('body_index'), 'heading': _heading_of(fact['shape']), 'objects': fact['objects'], 'in_table': bool(where.get('cell')), 'atoms': fact['atoms'],
+                                  'table_id': where.get('table'), 'cell': where.get('cell'), 'holds_tables': [f'tbl:{inst}' for inst in fact['tables'] if inst]})
         own = _own_text_before_table(fact)
         previous = where.get('previous', '')
+        position = 0
         for run in paragraph:
             if _name(run) != 'text':
                 continue
             for child in _text_objects(run):
                 if _name(child) == 'table':
-                    read_table(child, chain, where, own or previous, depth + 1)
+                    read_table(child, chain, where, own or previous, depth + 1, fact, position)
+                    position += 1
                 elif _name(child) in {'header', 'footer'}:
-                    margins.extend(''.join(item.itertext()) for item in child.iter() if _name(item) == 'char')
+                    read_margin(child, _name(child), chain, depth)
                 else:
                     visit(child, chain, depth + 1)
         return fact
@@ -348,10 +467,12 @@ def parse_table_model(text: str) -> dict[str, Any]:
         if depth > _MAX_DEPTH:
             raise nf._ModelUnusable('HWPML2X nesting is too deep')  # noqa: SLF001
         previous = ''
+        if _name(element) == 'section':
+            now['geometry'] = _section_geometry(element)
         for child in element:
             name = _name(child)
             if name in {'header', 'footer'}:
-                margins.extend(''.join(item.itertext()) for item in child.iter() if _name(item) == 'char')
+                read_margin(child, name, chain, depth)
             elif name == 'p':
                 where: dict[str, Any] = {'previous': previous}
                 if _name(element) == 'section':
@@ -365,8 +486,118 @@ def parse_table_model(text: str) -> dict[str, Any]:
                 visit(child, chain, depth + 1)
 
     visit(body, (), 0)
-    identities = [table['inst_id'] for table in tables]
-    return {'tables': tables, 'paragraphs': paragraphs, 'duplicates': sorted({value for value in identities if identities.count(value) > 1}), 'header_footer_text': margins, 'fonts': _fonts}
+    identities = [table['inst_id'] for table in body_tables]
+    by_id = {table['table_id']: table for table in (*body_tables, *margin_tables)}
+    for table in reversed([*body_tables, *margin_tables]):  # What a table holds comes after it.
+        for cell in table['cells']:
+            cell['all_objects'] = [*cell['objects'], *[name for inst in cell['tables'] for inner in by_id[f'tbl:{inst}']['cells'] for name in inner['all_objects']]]
+    for table in body_tables:
+        table['layout'] = table_layout(table, by_id)
+    return {'tables': body_tables, 'margin_tables': margin_tables, 'paragraphs': body_paragraphs, 'duplicates': sorted({value for value in identities if identities.count(value) > 1}), 'header_footer_text': margins, 'fonts': _fonts, 'pictures': _picture_payloads(root, body)}
+
+
+def _holder_facts(paragraph: Mapping[str, Any], position: int) -> dict[str, Any]:
+    """Where a table in line with its paragraph starts: only what the paragraph itself decides, before any other text or object on that line."""
+    margin = paragraph['shape']['children'].get('paramargin', {})
+    leading = False
+    seen = 0
+    for atom in paragraph['atoms']:
+        if atom.get('control') == 'table':
+            if seen == position:
+                break
+            seen += 1
+            leading = True
+        elif 'char' in atom or atom.get('control') not in (*nf._JOINING_CONTROLS, None):  # noqa: SLF001
+            leading = True
+    return {'align': str(paragraph['shape']['attrs'].get('align') or '').lower(), 'left': _int(margin.get('left')), 'indent': _int(margin.get('indent')), 'leading': leading}
+
+
+def table_layout(table: Mapping[str, Any], by_id: Mapping[str, Mapping[str, Any]]) -> dict[str, Any]:
+    """A table's width against the text and the page, from values the document states. What they cannot prove is unverified, never a pass."""
+    width = table['size_width']
+    values = table['frame_values']
+
+    def unverified(reason: str) -> dict[str, Any]:
+        return {'status': 'unverified', 'reason': reason, **({'width_hu': width, 'width_mm': _hu_mm(width)} if type(width) is int and width >= 0 else {})}
+
+    if type(width) is not int or width < 0:
+        return unverified('no_size')
+    if table['width_rel'] != 'absolute':
+        return unverified('relative_width')
+    if _int(values.get('cell_spacing')) != 0:
+        return unverified('cell_spacing')
+    edges = _column_edges(table)
+    if edges is None or abs(edges[-1] - width) > 2 or any(cell['col_span'] == 1 and abs(cell['width'] - (edges[cell['col']] - edges[cell['col'] - 1])) > 2 for cell in table['cells']):
+        return unverified('size_disagrees')
+    if str(values.get('treat_as_char')).lower() != 'true':
+        return unverified('floating')
+    if table['nested_in'] is not None:
+        parent = by_id.get(table['nested_in'])
+        holder_cell = next((cell for cell in parent['cells'] if cell['address'] == table['nested_cell']), None) if parent is not None else None
+        parent_edges = _column_edges(parent) if parent is not None else None
+        if holder_cell is None or parent_edges is None:
+            return unverified('parent_unknown')
+        margin = holder_cell['attr_values'].get('margin') if str(holder_cell['attr_values'].get('has_margin')).lower() == 'true' else parent['frame_values'].get('inside_margin')
+        if margin is None:
+            return unverified('parent_unknown')
+        room = parent_edges[holder_cell['col'] - 1 + holder_cell['col_span']] - parent_edges[holder_cell['col'] - 1] - margin['left'] - margin['right']
+        status = 'wider_than_parent' if width > room else 'fits'
+        return {'status': status, 'width_hu': width, 'width_mm': _hu_mm(width), 'parent_width_hu': room, 'overflow_hu': max(0, width - room), 'overflow_mm': _hu_mm(max(0, width - room))}
+    geometry, holder = table['geometry'], table['holder']
+    if holder is None:
+        return unverified('inside_object')
+    if geometry is None or geometry['landscape'] not in {0, 1} or min(geometry['width'], geometry['height'], geometry['left'], geometry['right']) < 0:
+        return unverified('page_unknown')
+    if geometry['columns'] != [1]:
+        return unverified('columns')
+    if geometry['gutter'] != 0:
+        return unverified('gutter')
+    if holder['leading']:
+        return unverified('text_before_table')
+    if holder['align'] not in {'', 'justify', 'left'}:
+        return unverified('aligned_paragraph')
+    outside = values.get('outside_margin')
+    if outside is None:
+        return unverified('no_margin')
+    page_width = geometry['height'] if geometry['landscape'] else geometry['width']
+    text_width = page_width - geometry['left'] - geometry['right']
+    indent = holder['left'] + holder['indent']
+    left = geometry['left'] + indent + outside['left']
+    right_edge = left + width
+    text_right = geometry['left'] + text_width
+    overflow = max(0, right_edge - text_right)
+    layout = {'status': 'off_page' if right_edge > page_width else 'past_margin' if overflow else 'fits', 'width_hu': width, 'width_mm': _hu_mm(width), 'text_width_hu': text_width, 'left_hu': left, 'right_edge_hu': right_edge, 'page_width_hu': page_width,
+              'overflow_hu': overflow, 'overflow_mm': _hu_mm(overflow), 'available_hu': text_width - indent - outside['left'] - outside['right']}
+    if right_edge > page_width:
+        layout['off_page_mm'] = _hu_mm(right_edge - page_width)
+    return layout
+
+
+def layout_warnings(table_id: str, page: int | None, layout: Mapping[str, Any]) -> list[str]:
+    """What a caller must not miss about where a table now reaches. The review repeats it."""
+    where = f"{table_id} ({page}쪽)" if page else table_id
+    status = layout.get('status')
+    if status == 'off_page':
+        return [f"{where}: 표 너비 {layout['width_mm']}mm. 본문 오른쪽 여백을 {layout['overflow_mm']}mm 넘고 쪽 밖으로 {layout['off_page_mm']}mm 나가 인쇄에서 잘립니다. table_width_exact로 줄일 수 있습니다."]
+    if status == 'past_margin':
+        return [f"{where}: 표 너비 {layout['width_mm']}mm. 본문 오른쪽 여백을 {layout['overflow_mm']}mm 넘습니다. table_width_exact로 줄일 수 있습니다."]
+    if status == 'wider_than_parent':
+        return [f"{where}: 표 너비 {layout['width_mm']}mm. 이 표를 담은 셀의 안쪽 폭보다 {layout['overflow_mm']}mm 넓습니다."]
+    if status == 'unverified':
+        return [f"{where}: 표가 쪽 안에 드는지 확인하지 못했습니다({layout.get('reason')}). 렌더링으로 확인하세요."]
+    return []
+
+
+def tag_readback(paragraphs: list[dict[str, Any]] | None, model: Mapping[str, Any]) -> None:
+    """Say which table and cell each paragraph row belongs to and which tables it holds. A list that does not line up with the model stays untagged."""
+    rows = model['paragraphs']
+    if not paragraphs or len(paragraphs) > len(rows) or any(row['text'][:len(item['text'])] != item['text'] for item, row in zip(paragraphs, rows)):
+        return
+    for item, row in zip(paragraphs, rows):
+        if row['table_id'] is not None:
+            item.update(table_id=row['table_id'], cell=row['cell'])
+        if row['holds_tables']:
+            item['holds_tables'] = row['holds_tables']
 
 
 def _heading_of(shape: Mapping[str, Any]) -> str:
@@ -404,7 +635,7 @@ def public_summary(table: Mapping[str, Any], page: int | None) -> dict[str, Any]
     return {
         'table_id': table['table_id'], 'index': table['index'], 'page': page, 'rows': table['rows'], 'cols': table['cols'], 'cell_count': len(cells),
         'merged_cells': sum(cell['row_span'] > 1 or cell['col_span'] > 1 for cell in cells), 'expected_hash': table['expected_hash'],
-        'before_text': table['before_text'][:120], 'nested_in': table['nested_in'], 'nested_cell': table['nested_cell'],
+        'before_text': table['before_text'][:120], 'nested_in': table['nested_in'], 'nested_cell': table['nested_cell'], 'layout': table.get('layout'),
         'first_cells': [{'address': cell['address'], 'text': cell['text'][:60]} for cell in cells[:8]],
     }
 
@@ -417,7 +648,7 @@ def _public_cell(cell: Mapping[str, Any]) -> dict[str, Any]:
     return {
         'address': cell['address'], 'row': cell['row'], 'col': cell['col'], 'row_span': cell['row_span'], 'col_span': cell['col_span'],
         'width_hu': cell['width'], 'height_hu': cell['height'], 'text': cell['text'][:READ_TEXT], 'text_truncated': len(cell['text']) > READ_TEXT,
-        'paragraph_count': len(cell['paragraphs']), 'paragraphs': paragraphs, 'objects': cell['objects'], 'blank': cell['blank'],
+        'paragraph_count': len(cell['paragraphs']), 'paragraphs': paragraphs, 'objects': cell['all_objects'], 'blank': cell['blank'],
         'border': cell['border'], 'fill': cell['fill'], 'content_sha256': cell['content'],
     }
 
@@ -439,11 +670,12 @@ def review_rows(model: Mapping[str, Any], pages: Mapping[str, int | None]) -> tu
     rows: list[dict[str, Any]] = []
     spent = 0
     truncated = False
-    for table in model['tables']:
+    for table in (*model['tables'], *model['margin_tables']):
         cells = [{'address': cell['address'], 'row': cell['row'], 'col': cell['col'], 'row_span': cell['row_span'], 'col_span': cell['col_span'], 'width': cell['width'],
-                  'text': cell['text'][:REVIEW_TEXT], 'objects': cell['objects'], 'content': cell['content'], 'border': cell['border'], 'fill': cell['fill'], 'rest': cell['rest']} for cell in table['cells']]
-        row = {'table_id': table['table_id'], 'index': table['index'], 'page': pages.get(table['inst_id']), 'rows': table['rows'], 'cols': table['cols'], 'state_sha256': table['state_sha256'],
-               'before_text': table['before_text'][:120], 'nested_in': table['nested_in'], 'cells': cells}
+                  'text': cell['text'][:REVIEW_TEXT], 'text_truncated': len(cell['text']) > REVIEW_TEXT, 'objects': cell['objects'], 'all_objects': cell['all_objects'], 'content': cell['content'], 'border': cell['border'], 'fill': cell['fill'], 'rest': cell['rest'],
+                  'attrs': cell['attrs'], 'attr_values': cell['attr_values']} for cell in table['cells']]
+        row = {'table_id': table['table_id'], 'index': table['index'], 'scope': table['scope'], 'page': pages.get(table['inst_id']), 'rows': table['rows'], 'cols': table['cols'], 'state_sha256': table['state_sha256'], 'width_hu': table['size_width'],
+               'before_text': table['before_text'][:120], 'nested_in': table['nested_in'], 'frame': table['frame'], 'frame_values': table['frame_values'], 'layout': table.get('layout'), 'cells': cells}
         spent += len(json.dumps(row, ensure_ascii=False).encode('utf-8', 'surrogatepass'))
         if spent > REVIEW_BYTES:
             truncated = True
@@ -541,12 +773,15 @@ def _validated_removed(value: Any) -> list[dict[str, Any]]:
         raise NativeNumberingInputError('expected_removed_cells must be a list of the cells that hold content')
     rows: list[dict[str, Any]] = []
     for item in value:
-        if not isinstance(item, Mapping) or set(item) - {'address', 'text', 'objects'} or type(item.get('address')) is not str or _ADDRESS.fullmatch(item['address']) is None or type(item.get('text')) is not str:
-            raise NativeNumberingInputError('each expected removed cell gives its address and full text, and objects when it holds any')
+        if not isinstance(item, Mapping) or set(item) - {'address', 'text', 'content_sha256', 'objects'} or type(item.get('address')) is not str or _ADDRESS.fullmatch(item['address']) is None:
+            raise NativeNumberingInputError('each expected removed cell gives its address, its full text or its content_sha256, and objects when it holds any')
+        text, sha = item.get('text'), item.get('content_sha256')
+        if (text is None) == (sha is None) or (text is not None and type(text) is not str) or (sha is not None and (type(sha) is not str or _CONTENT_HASH.fullmatch(sha) is None)):
+            raise NativeNumberingInputError('each expected removed cell gives either its full text or the content_sha256 table_read reports')
         objects = item.get('objects', [])
         if not isinstance(objects, list) or any(type(name) is not str for name in objects):
             raise NativeNumberingInputError('objects must be a list of object names from table_read')
-        rows.append({'address': item['address'], 'text': item['text'], 'objects': list(objects)})
+        rows.append({'address': item['address'], **({'text': text} if text is not None else {'content_sha256': sha}), 'objects': list(objects)})
     return rows
 
 
@@ -603,11 +838,33 @@ def validate_style_step(step: Mapping[str, Any]) -> dict[str, Any]:
         raise NativeNumberingInputError('table_style_exact needs borders, fill or both')
     if step.get('borders') is not None:
         request['borders'] = _validated_borders(step['borders'])
+    over = step.get('over_wider_neighbour')
+    if over is not None:
+        if over is not True or 'borders' not in request:
+            raise NativeNumberingInputError('over_wider_neighbour is true or left out, and goes with borders')
+        request['over_wider_neighbour'] = True
     fill = step.get('fill')
     if fill is not None:
         if fill != 'none' and (type(fill) is not str or _COLOR.fullmatch(fill) is None):
             raise NativeNumberingInputError("fill must be #RRGGBB, or none for no fill")
         request['fill'] = fill if fill == 'none' else fill.upper()
+    return request
+
+
+def validate_width_step(step: Mapping[str, Any]) -> dict[str, Any]:
+    _reject_unknown_keys(step, (*_BOUND_FIELDS, *_WIDTH_FIELDS, *_STEP_ENVELOPE_KEYS), 'table_width_exact step')
+    request = _validated_binding(step, 'table_width_exact')
+    fit, widths = step.get('fit'), step.get('column_widths_mm')
+    if (fit is None) == (widths is None):
+        raise NativeNumberingInputError('table_width_exact takes fit or column_widths_mm')
+    if fit is not None:
+        if fit != 'text_width':
+            raise NativeNumberingInputError('fit must be text_width')
+        request['fit'] = fit
+    else:
+        if not isinstance(widths, list) or not widths or len(widths) > MAX_GRID or any(isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0 or value > 2000 for value in widths):
+            raise NativeNumberingInputError('column_widths_mm must give a positive width in millimetres for each column')
+        request['column_widths_mm'] = [float(value) for value in widths]
     return request
 
 
@@ -631,6 +888,8 @@ def validate_create_step(step: Mapping[str, Any]) -> dict[str, Any]:
 def resolve_table(model: Mapping[str, Any], table_id: str) -> dict[str, Any]:
     table = next((item for item in model['tables'] if item['table_id'] == table_id), None)
     if table is None:
+        if any(item['table_id'] == table_id for item in model.get('margin_tables', ())):
+            raise NativeNumberingRefusal('this table is in a header or footer, which these commands do not edit', code='target_in_header_footer')
         raise NativeNumberingRefusal('there is no table with this identity; list them again with table_inventory', code='table_not_found')
     if table['inst_id'] in model['duplicates']:
         raise NativeNumberingRefusal('two tables report this identity, so which one is meant cannot be proven', code='table_identity_ambiguous')
@@ -819,13 +1078,15 @@ def _plan_delete(table: Mapping[str, Any], request: Mapping[str, Any]) -> dict[s
             raise NativeNumberingRefusal('this block of lines does not begin at a cell', code='merged_cell_crosses_lines')
         caret = first_cell
         native = ('delete_block',)
-    stated = [{'address': cell['address'], 'text': cell['text'], 'objects': cell['objects']} for cell in removed if not cell['blank']]
-    wanted = sorted(([item['address'], item['text'], sorted(item['objects'])] for item in request['expected_removed_cells']), key=str)
-    if wanted != sorted(([item['address'], item['text'], sorted(item['objects'])] for item in stated), key=str):
-        raise NativeNumberingRefusal('expected_removed_cells must list every cell with content this removes, with its full text and objects as table_read gives them: ' + ', '.join(item['address'] for item in stated)[:200], code='removed_content_mismatch')
+    stated = [{'address': cell['address'], 'text': cell['text'], 'objects': cell['all_objects'], 'content': cell['content']} for cell in removed if not cell['blank']]
+    given = {item['address']: item for item in request['expected_removed_cells']}
+    if len(given) != len(request['expected_removed_cells']) or set(given) != {item['address'] for item in stated} or any(
+            sorted(given[item['address']]['objects']) != sorted(item['objects'])
+            or (given[item['address']]['content_sha256'] != item['content'] if 'content_sha256' in given[item['address']] else given[item['address']]['text'] != item['text']) for item in stated):
+        raise NativeNumberingRefusal('expected_removed_cells must list every cell with content this removes, with its full text or the content_sha256 table_read gives for a longer one, and its objects: ' + ', '.join(item['address'] for item in stated)[:200], code='removed_content_mismatch')
     entries, rows, cols = _collapsed(entries, *((table['rows'] - count, table['cols']) if on_rows else (table['rows'], table['cols'] - count)))
-    return {'action': request['action'], 'kind': 'delete', 'rows': rows, 'cols': cols, 'entries': entries, 'caret': caret, 'native': native, 'rect': rect, 'removed_objects': [name for cell in removed for name in cell['objects']], 'removed_tables': [inst for cell in removed for inst in cell['tables']],
-            'changes': {'deleted_lines': count, 'line_kind': 'row' if on_rows else 'column', 'removed_cells': [{key: item[key] for key in ('address', 'text')} | ({'objects': item['objects']} if item['objects'] else {}) for item in stated],
+    return {'action': request['action'], 'kind': 'delete', 'rows': rows, 'cols': cols, 'entries': entries, 'caret': caret, 'native': native, 'rect': rect, 'removed_objects': [name for cell in removed for name in cell['all_objects']], 'removed_tables': [inst for cell in removed for inst in cell['tables']],
+            'changes': {'deleted_lines': count, 'line_kind': 'row' if on_rows else 'column', 'removed_cells': [{'address': item['address'], 'text': item['text'][:READ_TEXT]} | ({'text_truncated': True} if len(item['text']) > READ_TEXT else {}) | ({'objects': item['objects']} if item['objects'] else {}) for item in stated],
                         'removed_blank_cells': [cell['address'] for cell in removed if cell['blank']], 'shortened_cells': shortened, 'outer_edge_moved': moved_edges[:MAX_REPORT_ROWS]}}
 
 
@@ -1035,6 +1296,19 @@ def _border_items(groups: list[dict[str, Any]]) -> dict[str, int]:
     return items
 
 
+def _shows_through(line: Mapping[str, Any], group: Mapping[str, Any]) -> bool:
+    """As measured: both sides print, so a wider neighbour's line shows unless it has none or a wider solid line covers it."""
+    if line['line'] == 'none':
+        return False
+    return not (group['line'] == 'solid' and group['width_mm'] > (line['width_mm'] or 0))
+
+
+def _faces(cell: Mapping[str, Any], other: Mapping[str, Any], side: str) -> bool:
+    if side in {'top', 'bottom'}:
+        return cell['col'] <= other['col'] + other['col_span'] - 1 and other['col'] <= cell['col'] + cell['col_span'] - 1
+    return cell['row'] <= other['row'] + other['row_span'] - 1 and other['row'] <= cell['row'] + cell['row_span'] - 1
+
+
 def plan_style(table: Mapping[str, Any], request: Mapping[str, Any]) -> dict[str, Any]:
     rect = _target_rect(table, request)
     cells = sorted(rect['cells'], key=lambda cell: (cell['row'], cell['col']))
@@ -1043,7 +1317,14 @@ def plan_style(table: Mapping[str, Any], request: Mapping[str, Any]) -> dict[str
     edge_rows: list[dict[str, Any]] = []
     not_written: list[dict[str, Any]] = []
     groups = request.get('borders') or []
+    has_inner = {'inner_horizontal': any(cell['row'] + cell['row_span'] - 1 < rect['bottom'] for cell in cells), 'inner_vertical': any(cell['col'] + cell['col_span'] - 1 < rect['right'] for cell in cells)}
+    # all and inner mean the lines this target has. A group left with none asks for nothing that exists.
+    groups = [{**group, 'edges': [edge for edge in group['edges'] if edge in SIDES or has_inner[edge]]} for group in groups]
+    for group in groups:
+        if not group['edges']:
+            raise NativeNumberingRefusal('this target has no line of the kind asked for', code='edge_not_in_target')
     by_edge = {edge: group for group in groups for edge in group['edges']}
+    prints_over: list[dict[str, Any]] = []
 
     def on_outer(cell: Mapping[str, Any], side: str) -> bool:
         return {'left': cell['col'] == rect['left'], 'right': cell['col'] + cell['col_span'] - 1 == rect['right'], 'top': cell['row'] == rect['top'], 'bottom': cell['row'] + cell['row_span'] - 1 == rect['bottom']}[side]
@@ -1055,11 +1336,6 @@ def plan_style(table: Mapping[str, Any], request: Mapping[str, Any]) -> dict[str
         if new != old:
             edge_rows.append({'cell': cell['address'], 'side': side, 'role': role, 'before': old, 'after': new})
 
-    for name in ('inner_horizontal', 'inner_vertical'):
-        if name in by_edge:
-            found = any(cell['row'] + cell['row_span'] - 1 < rect['bottom'] for cell in cells) if name == 'inner_horizontal' else any(cell['col'] + cell['col_span'] - 1 < rect['right'] for cell in cells)
-            if not found:
-                raise NativeNumberingRefusal(f'this target has no {name} line', code='edge_not_in_target')
     for cell in cells:
         for side in SIDES:
             if on_outer(cell, side):
@@ -1088,6 +1364,13 @@ def plan_style(table: Mapping[str, Any], request: Mapping[str, Any]) -> dict[str
                 write(other, _OPPOSITE[side], by_edge[side], 'shared_neighbour')
             else:
                 not_written.append({'cell': other['address'], 'side': _OPPOSITE[side], 'reason': 'wider_than_edge'})
+                line = other['border'][_OPPOSITE[side]]
+                if _shows_through(line, by_edge[side]):
+                    under = [cell['address'] for cell in cells if on_outer(cell, side) and _faces(cell, other, side)]
+                    if by_edge[side]['line'] == 'none' or request.get('over_wider_neighbour') is not True:
+                        raise NativeNumberingRefusal(f"the {_OPPOSITE[side]} line of {other['address']} runs past this edge and prints along it too, so {', '.join(under)} would not show what is asked. "
+                                                     f"Style that side of {other['address']} to change the whole line" + ('.' if by_edge[side]['line'] == 'none' else ", use a solid line wider than it, or set over_wider_neighbour to draw over it."), code='edge_held_by_wider_neighbour')
+                    prints_over.append({'cell': other['address'], 'side': _OPPOSITE[side], 'under': ', '.join(under), 'line': line})
     fill_rows: list[dict[str, Any]] = []
     fill = request.get('fill')
     if fill is not None:
@@ -1099,7 +1382,7 @@ def plan_style(table: Mapping[str, Any], request: Mapping[str, Any]) -> dict[str
             if cell['fill'] != new_fill:
                 fill_rows.append({'cell': cell['address'], 'before': cell['fill'], 'after': new_fill})
     return {'rect': rect, 'cells': cells, 'expected': expected, 'border_items': _border_items(groups) if edge_rows else {}, 'fill': fill if fill_rows else None,
-            'changes': {'edges': edge_rows[:MAX_REPORT_ROWS], 'edges_total': len(edge_rows), 'fills': fill_rows[:MAX_REPORT_ROWS], 'fills_total': len(fill_rows), 'neighbours_not_written': not_written[:MAX_REPORT_ROWS]}}
+            'changes': {'edges': edge_rows[:MAX_REPORT_ROWS], 'edges_total': len(edge_rows), 'fills': fill_rows[:MAX_REPORT_ROWS], 'fills_total': len(fill_rows), 'neighbours_not_written': not_written[:MAX_REPORT_ROWS], 'prints_over': prints_over[:MAX_REPORT_ROWS]}}
 
 
 def style_problems(table: Mapping[str, Any], plan: Mapping[str, Any], after: Mapping[str, Any] | None) -> list[str]:
@@ -1148,6 +1431,11 @@ def document_problems(before: Mapping[str, Any], after: Mapping[str, Any], targe
     if 'picture' in removed_objects:
         compared = [name for name in compared if name not in {'bindata_sha256', 'media_sha256'}]
     problems = [f'{name} changed' for name in compared if census_before.get(name) != census_after.get(name)]
+    if 'picture' in removed_objects:
+        problems += _kept_picture_problems(before['model'], after['model'], removed_objects.count('picture'))
+        removed_controls, added_controls = _multiset_delta(before['controls'], after['controls'])
+        if added_controls or len(removed_controls) < sum(name in {'table', 'picture'} for name in removed_objects):
+            problems.append('the document controls changed otherwise than the removed cells say')
     for name in sorted(set(census_before['definitions']) | set(census_after['definitions'])):
         removed, added = _multiset_delta(census_before['definitions'].get(name, []), census_after['definitions'].get(name, []))
         if (removed or added) and name not in allowed_lists:
@@ -1167,6 +1455,18 @@ def document_problems(before: Mapping[str, Any], after: Mapping[str, Any], targe
     if others_before != others_after:
         problems.append('another table changed')
     return problems
+
+
+def _kept_picture_problems(before: Mapping[str, Any], after: Mapping[str, Any], removed: int) -> list[str]:
+    """Every picture left still reaches the data it had; only as many as were asked for went."""
+    old, new = list(before.get('pictures', ())), list(after.get('pictures', ()))
+    if len(new) != len(old) - removed:
+        return [f'{len(old)} pictures became {len(new)}, and {removed} were to be removed']
+    for payload in new:
+        if payload is None or payload not in old:
+            return ['a picture left in the document no longer reaches the data it had']
+        old.remove(payload)
+    return []
 
 
 def new_table_paragraph_problems(before: Mapping[str, Any], after: Mapping[str, Any], anchor: Mapping[str, Any], new_inst: str) -> list[str]:
@@ -1208,12 +1508,12 @@ def table_controls(hwp: Any) -> dict[str, Any]:
     return found
 
 
-def table_pages(hwp: Any, page_of: Callable[[], int], *, only: str | None = None) -> dict[str, int | None]:
-    """The page each table starts on, by visiting its anchor; the caller gives the caret back."""
+def table_pages(hwp: Any, page_of: Callable[[], int], *, only: str | None = None, skip: frozenset[str] = frozenset()) -> dict[str, int | None]:
+    """The page each table starts on, by visiting its anchor; the caller gives the caret back. A table in a header or footer is on every page and is not visited."""
     pages: dict[str, int | None] = {}
     setter = getattr(hwp, 'set_pos_by_set', None)
     for inst, control in table_controls(hwp).items():
-        if only is not None and inst != only:
+        if (only is not None and inst != only) or inst in skip:
             continue
         anchor = getattr(control, 'GetAnchorPos', None)
         if not callable(anchor) or not callable(setter):
@@ -1361,11 +1661,67 @@ def _public_request(request: Mapping[str, Any], names: set[str] | None = None) -
 
 
 def _report_table(table: Mapping[str, Any], page: int | None) -> dict[str, Any]:
-    return {'table_id': table['table_id'], 'page': page, 'rows': table['rows'], 'cols': table['cols'], 'cell_count': len(table['cells']), 'expected_hash': table['expected_hash']}
+    return {'table_id': table['table_id'], 'page': page, 'rows': table['rows'], 'cols': table['cols'], 'cell_count': len(table['cells']), 'expected_hash': table['expected_hash'], 'layout': table.get('layout')}
 
 
 def _state_sha(side: Mapping[str, Any]) -> str:
     return nf.state_digest(evidence_of(side['census'], side['controls']))
+
+
+def _line_text(line: Mapping[str, Any]) -> str:
+    return f"{line['line']} {line['width_mm']} {line['color']}"
+
+
+def state_detail(model: Mapping[str, Any]) -> dict[str, Any] | None:
+    """What a later Undo or Redo mismatch can name without asking Hancom anything: every table's values and every paragraph's digest. No document text."""
+    tables = (*model['tables'], *model.get('margin_tables', ()))
+    if sum(len(table['cells']) for table in tables) > _MAX_STATE_DETAIL_CELLS:
+        return None
+    return {
+        'tables': {table['table_id']: {
+            'rows': table['rows'], 'cols': table['cols'], 'width_hu': table['size_width'], 'frame': table['frame'], 'frame_values': table['frame_values'],
+            'cells': {cell['address']: {'row_span': cell['row_span'], 'col_span': cell['col_span'], 'width': cell['width'], 'height': cell['height'], 'fill': cell['fill'].get('color') or cell['fill'].get('family') or cell['fill']['kind'], 'attrs': cell['attrs'], 'rest': cell['rest'], 'content': cell['content'],
+                                        **{f'border.{side}': _line_text(cell['border'][side]) for side in SIDES}} for cell in table['cells']},
+        } for table in tables},
+        'paragraphs': [row['digest'][:16] for row in model['paragraphs']],
+    }
+
+
+def detail_differences(recorded: Mapping[str, Any], now: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """The named differences between two state details."""
+    rows: list[dict[str, Any]] = []
+
+    def row(table_id: str | None, cell: str | None, field: str, old: Any, new: Any) -> None:
+        rows.append({'table_id': table_id, 'cell': cell, 'field': field, 'recorded': old, 'now': new})
+
+    for table_id in sorted(set(recorded['tables']) | set(now['tables'])):
+        old, new = recorded['tables'].get(table_id), now['tables'].get(table_id)
+        if old is None or new is None:
+            row(table_id, None, 'table', 'present' if old else 'absent', 'present' if new else 'absent')
+            continue
+        for name in ('rows', 'cols', 'width_hu'):
+            if old[name] != new[name]:
+                row(table_id, None, name, old[name], new[name])
+        for name in sorted(set(old['frame_values']) | set(new['frame_values'])):
+            if old['frame_values'].get(name) != new['frame_values'].get(name):
+                row(table_id, None, name, old['frame_values'].get(name), new['frame_values'].get(name))
+        if old['frame'] != new['frame'] and old['frame_values'] == new['frame_values']:
+            row(table_id, None, 'frame', old['frame'], new['frame'])
+        for address in sorted(set(old['cells']) | set(new['cells'])):
+            left, right = old['cells'].get(address), new['cells'].get(address)
+            if left is None or right is None:
+                row(table_id, address, 'cell', 'present' if left else 'absent', 'present' if right else 'absent')
+                continue
+            for name in sorted(left):
+                if left[name] != right[name]:
+                    row(table_id, address, name, left[name], right[name])
+    if len(recorded['paragraphs']) != len(now['paragraphs']):
+        row(None, None, 'paragraph_count', len(recorded['paragraphs']), len(now['paragraphs']))
+    else:
+        for index, (left, right) in enumerate(zip(recorded['paragraphs'], now['paragraphs'])):
+            if left != right:
+                row(None, None, f'paragraph[{index}]', left, right)
+    return rows
 
 
 def _finish(hwp: Any, restore: Callable[[], None]) -> None:
@@ -1403,6 +1759,7 @@ def apply_edit(hwp: Any, *, request: Mapping[str, Any], read: Callable[[], Mappi
             'before': _report_table(table, page), 'after': _report_table(new_table, page), 'changes': plan['changes'],
             'result': {'changed': True, 'status': 'edited', 'native_actions': native_actions},
             'undo': {'native_editing_actions': len(native_actions), 'pre_state_sha256': _state_sha(before), 'post_state_sha256': _state_sha(after)},
+            '_details': (state_detail(before['model']), state_detail(after['model'])),
         }
 
     return _guarded(reach, body, 'table edit')
@@ -1453,9 +1810,124 @@ def apply_style(hwp: Any, *, request: Mapping[str, Any], read: Callable[[], Mapp
         _finish(hwp, restore)
         return {'target': target, 'requested': requested, 'before': _report_table(table, page), 'after': _report_table(new_table, page), 'changes': plan['changes'],
                 'result': {'changed': True, 'status': 'styled', 'native_actions': native_actions},
-                'undo': {'native_editing_actions': len(native_actions), 'pre_state_sha256': _state_sha(before), 'post_state_sha256': _state_sha(after)}}
+                'undo': {'native_editing_actions': len(native_actions), 'pre_state_sha256': _state_sha(before), 'post_state_sha256': _state_sha(after)},
+                '_details': (state_detail(before['model']), state_detail(after['model']))}
 
     return _guarded(reach, body, 'table style')
+
+
+def plan_width(table: Mapping[str, Any], request: Mapping[str, Any]) -> dict[str, Any]:
+    """The width each grid column ends with and the native actions that reach it, from a table whose columns are known."""
+    edges = _column_edges(table)
+    if edges is None:
+        raise NativeNumberingRefusal('the column widths of this table cannot be worked out from its cells', code='table_geometry_unknown')
+    current = [right - left for left, right in zip(edges, edges[1:])]
+    layout = table['layout']
+    if 'fit' in request:
+        if table['nested_in'] is not None or layout['status'] == 'unverified' or 'available_hu' not in layout:
+            raise NativeNumberingRefusal(f"where this table sits cannot be proved ({layout.get('reason') or 'nested table'}), so it cannot be fitted; give column_widths_mm instead", code='table_geometry_unknown')
+        room, total = layout['available_hu'], sum(current)
+        wanted = [round(width * room / total) for width in current]
+        wanted[-1] += room - sum(wanted)
+    else:
+        if len(request['column_widths_mm']) != table['cols']:
+            raise NativeNumberingRefusal(f"this table has {table['cols']} columns, and column_widths_mm gives {len(request['column_widths_mm'])}", code='column_widths_mismatch')
+        wanted = [old if abs(old - mm * HU_PER_MM) <= 1 else round(mm * HU_PER_MM) for old, mm in zip(current, request['column_widths_mm'])]
+        if 'available_hu' in layout and sum(wanted) > layout['available_hu']:
+            raise NativeNumberingRefusal(f"these widths add up to {_hu_mm(sum(wanted))} mm and the text is {_hu_mm(layout['available_hu'])} mm wide", code='table_would_overflow')
+    if min(wanted) < MIN_COLUMN_HU:
+        raise NativeNumberingRefusal(f'a column would be narrower than {_hu_mm(MIN_COLUMN_HU)} mm', code='column_too_narrow')
+    new_edges = [0]
+    for width in wanted:
+        new_edges.append(new_edges[-1] + width)
+    expected = {cell['address']: new_edges[cell['col'] - 1 + cell['col_span']] - new_edges[cell['col'] - 1] for cell in table['cells']}
+    changed = [number for number, (old, new) in enumerate(zip(current, wanted), start=1) if old != new]
+    if any(cell['col_span'] > 1 for cell in table['cells']):
+        # A column block across a merge pulls the merged cell and its other columns to one value, so each cell gets its own action.
+        rects = [{'top': cell['row'], 'bottom': cell['row'] + cell['row_span'] - 1, 'left': cell['col'], 'right': cell['col'] + cell['col_span'] - 1, 'cells': [cell], 'width': expected[cell['address']]}
+                 for cell in sorted(table['cells'], key=lambda item: (item['row'], item['col'])) if cell['width'] != expected[cell['address']]]
+    else:
+        rects = [{**_rect_of(table, (1, column), (table['rows'], column)), 'width': wanted[column - 1]} for column in changed]
+    if len(rects) > MAX_WIDTH_ACTIONS:
+        raise NativeNumberingRefusal(f'this would take {len(rects)} native actions, more than the {MAX_WIDTH_ACTIONS} one command may use', code='table_too_large')
+    return {'expected': expected, 'rects': rects, 'total': new_edges[-1], 'changes': {
+        'columns': [{'column': cell_address(1, number)[:-1], 'before_hu': old, 'after_hu': new} for number, (old, new) in enumerate(zip(current, wanted), start=1)],
+        'width_before_hu': sum(current), 'width_after_hu': new_edges[-1]}}
+
+
+def width_problems(table: Mapping[str, Any], plan: Mapping[str, Any], after: Mapping[str, Any] | None) -> list[str]:
+    if after is None:
+        return ['the table is gone']
+    problems: list[str] = []
+    if (after['rows'], after['cols'], after['frame']) != (table['rows'], table['cols'], table['frame']):
+        problems.append('the table grid or properties changed')
+    observed = {(cell['row'], cell['col']): cell for cell in after['cells']}
+    for cell in table['cells']:
+        got, where = observed.get((cell['row'], cell['col'])), cell['address']
+        if got is None:
+            problems.append(f'no cell at {where}')
+            continue
+        for name in ('row_span', 'col_span', 'content', 'attrs', 'rest', 'border', 'fill'):
+            if got[name] != cell[name]:
+                problems.append(f'{where} changed its {name}')
+        if got['width'] != plan['expected'][where]:
+            problems.append(f"{where} is {got['width']} wide, expected {plan['expected'][where]}")
+    if len(after['cells']) != len(table['cells']):
+        problems.append('the number of cells changed')
+    if type(after['size_width']) is not int or abs(after['size_width'] - plan['total']) > 2:
+        problems.append(f"the table is {after['size_width']} wide, expected {plan['total']}")
+    return problems
+
+
+def _execute_width(hwp: Any, width: int, reach: _MutationReach) -> None:
+    pset = hwp.HParameterSet.HShapeObject
+    if not _action_confirmed(hwp.HAction.GetDefault('TablePropertyDialog', pset.HSet)):
+        _run(hwp, 'Cancel')
+        raise NativeNumberingRefusal('the current table properties could not be read', code='selection_unverified')
+    # Without these two the set reaches the table, whose width native ignores while returning True.
+    pset.HSet.SetItem('ShapeType', 3)
+    pset.HSet.SetItem('ShapeCellSize', 1)
+    pset.ShapeTableCell.Width = width
+    _issue(reach, lambda: hwp.HAction.Execute('TablePropertyDialog', pset.HSet), 'TablePropertyDialog')
+
+
+def apply_width(hwp: Any, *, request: Mapping[str, Any], read: Callable[[], Mapping[str, Any]], page_of: Callable[[], int], restore: Callable[[], None], on_mutating: Callable[[], None] | None = None) -> dict[str, Any]:
+    reach = _MutationReach(on_mutating)
+
+    def body() -> dict[str, Any]:
+        before = read()
+        table = resolve_table(before['model'], request['table_id'])
+        inst = table['inst_id']
+        page = table_pages(hwp, page_of, only=inst).get(inst)
+        require_binding(table, request, page)
+        plan = plan_width(table, request)
+        requested = _public_request(request, set(_WIDTH_FIELDS))
+        target = {'table_id': table['table_id'], 'page': page, 'cells': len(table['cells'])}
+        if not plan['rects']:
+            return {'target': target, 'requested': requested, 'before': _report_table(table, page), 'after': _report_table(table, page), 'changes': plan['changes'],
+                    'result': {'changed': False, 'status': 'already_set', 'native_actions': []}, 'undo': {'native_editing_actions': 0, 'pre_state_sha256': None, 'post_state_sha256': None}}
+        for rect in plan['rects']:
+            try:
+                enter_table(hwp, inst)
+                select_block(hwp, inst, table, rect)
+            except NativeNumberingRefusal as exc:
+                if not reach.reached:
+                    raise
+                raise NativeNumberingMutationError(f'part of the widths were set and the next cell could not be aimed: {exc}; nothing was rolled back') from exc
+            _execute_width(hwp, rect['width'], reach)
+            _run(hwp, 'Cancel')
+        after = read()
+        new_table = next((item for item in after['model']['tables'] if item['table_id'] == table['table_id']), None)
+        problems = width_problems(table, plan, new_table) + document_problems(before, after, table, allowed_lists=frozenset())
+        if problems:
+            raise NativeNumberingMutationError('table width outcome is not as requested: ' + '; '.join(problems[:6]) + '; nothing was rolled back')
+        _finish(hwp, restore)
+        return {'target': target, 'requested': requested, 'before': _report_table(table, page), 'after': _report_table(new_table, page), 'changes': plan['changes'],
+                'result': {'changed': True, 'status': 'width_set', 'native_actions': ['Execute:TablePropertyDialog'] * len(plan['rects'])},
+                'undo': {'native_editing_actions': len(plan['rects']), 'pre_state_sha256': _state_sha(before), 'post_state_sha256': _state_sha(after)},
+                '_details': (state_detail(before['model']), state_detail(after['model']))}
+
+    return _guarded(reach, body, 'table width')
 
 
 def apply_create(hwp: Any, *, request: Mapping[str, Any], read: Callable[[], Mapping[str, Any]], page_of: Callable[[], int], restore: Callable[[], None], on_mutating: Callable[[], None] | None = None) -> dict[str, Any]:
@@ -1468,6 +1940,12 @@ def apply_create(hwp: Any, *, request: Mapping[str, Any], read: Callable[[], Map
             raise NativeNumberingRefusal('cells must hold exactly rows rows of cols texts', code='cells_shape_mismatch')
         if cells is not None and not any(value.strip() for row in cells for value in row):
             raise NativeNumberingRefusal('cells holds no text; leave it out for an empty table', code='cells_shape_mismatch')
+        if cells is not None:
+            # A line break makes a paragraph, as field text takes it. Native drops a lone line feed and other control characters do not read back.
+            cells = [[value.replace('\r\n', '\n') for value in row] for row in cells]
+            bad = next((cell_address(row + 1, col + 1) for row, values in enumerate(cells) for col, value in enumerate(values) if any(ord(char) < 32 and char not in '\n\t' for char in value)), None)
+            if bad is not None:
+                raise NativeNumberingRefusal(f'the text for {bad} holds a control character; only line breaks and tabs can be given', code='cells_text_unsupported')
         anchor = _create_anchor(before['model'], request['match'])
         at = (0, anchor['body_index'], _anchor_end(anchor))
         hwp.set_pos(*at)
@@ -1501,10 +1979,12 @@ def apply_create(hwp: Any, *, request: Mapping[str, Any], read: Callable[[], Map
         new_inst = new_tables[0]['inst_id']
         new_page = table_pages(hwp, page_of, only=new_inst).get(new_inst)
         hwp.set_pos(*at)
+        details = (state_detail(before['model']), state_detail(after['model'])) if not filled else None
         return {'target': {'kind': 'after_paragraph', 'paragraph': anchor['text'][:120], 'body_index': anchor['body_index'], 'page': page}, 'requested': {key: request.get(key) for key in ('rows', 'cols')},
                 'table': public_summary(new_tables[0], new_page), 'result': {'changed': True, 'status': 'created', 'native_actions': native_actions},
                 'changes': {'new_table': new_tables[0]['table_id'], 'cell_text_filled': filled},
-                'undo': {'native_editing_actions': None if filled else 1, 'pre_state_sha256': None if filled else _state_sha(before), 'post_state_sha256': None if filled else _state_sha(after)}}
+                'undo': {'native_editing_actions': None if filled else 1, 'pre_state_sha256': None if filled else _state_sha(before), 'post_state_sha256': None if filled else _state_sha(after)},
+                '_details': details}
 
     return _guarded(reach, body, 'table creation')
 
@@ -1536,7 +2016,7 @@ def _fill_new_table(hwp: Any, cells: list[list[str]]) -> None:
     _run(hwp, 'TableCellBlockExtend')
     hwp.set_cur_field_name(name)
     try:
-        hwp.put_field_text(name, [value for row in cells for value in row])
+        hwp.put_field_text(name, [value.replace('\n', '\r\n') for row in cells for value in row])
     finally:
         hwp.set_cur_field_name('')
 
@@ -1569,6 +2049,6 @@ def _guarded(reach: _MutationReach, body: Callable[[], dict[str, Any]], what: st
 
 
 __all__ = [
-    'CensusError', 'EDIT_ACTIONS', 'LINE_TYPES', 'LINE_WIDTHS', 'apply_create', 'apply_edit', 'apply_style', 'parse_table_model', 'public_summary', 'public_table', 'resolve_table',
-    'review_rows', 'table_pages', 'validate_create_step', 'validate_edit_step', 'validate_inventory_step', 'validate_read_step', 'validate_style_step',
+    'CensusError', 'EDIT_ACTIONS', 'LINE_TYPES', 'LINE_WIDTHS', 'apply_create', 'apply_edit', 'apply_style', 'apply_width', 'detail_differences', 'layout_warnings', 'parse_table_model', 'public_summary', 'public_table', 'resolve_table',
+    'review_rows', 'state_detail', 'table_layout', 'tag_readback', 'table_pages', 'validate_create_step', 'validate_edit_step', 'validate_inventory_step', 'validate_read_step', 'validate_style_step', 'validate_width_step',
 ]

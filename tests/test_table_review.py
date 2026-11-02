@@ -111,7 +111,7 @@ class TableComparison(unittest.TestCase):
 
     def test_the_paragraph_holding_a_changed_table_is_not_left_unexplained(self) -> None:
         format_fact = {'runs': [], 'runs_truncated': False, 'paragraph': {}, 'paragraph_rest': 'p', 'paragraph_heading': 'h', 'objects': ['table'], 'objects_sha256': 'before'}
-        holder = {'text': '', 'heading': 'NONE', 'level': 0, 'in_body': True, 'content_sha256': 'x', 'numbering_ref_sha256': None, 'index': 0, 'context': 'body', 'format': format_fact}
+        holder = {'text': '', 'heading': 'NONE', 'level': 0, 'in_body': True, 'content_sha256': 'x', 'numbering_ref_sha256': None, 'index': 0, 'context': 'body', 'format': format_fact, 'holds_tables': ['tbl:1']}
         after = {**holder, 'content_sha256': 'y', 'format': {**format_fact, 'objects_sha256': 'after'}}
         cells = base_grid()
         cells[0]['fill'] = {'kind': 'solid', 'color': '#000000'}

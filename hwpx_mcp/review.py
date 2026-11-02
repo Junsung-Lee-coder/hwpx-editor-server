@@ -312,9 +312,28 @@ def _evidence_state(before: dict[str, Any] | None, after: dict[str, Any] | None,
     return 'unchanged' if left == right else 'changed'
 
 
-def _only_table_object_differs(before: dict[str, Any], after: dict[str, Any], tables: dict[str, Any] | None) -> bool:
-    """A paragraph holding a table changes its object digest with the table. The table comparison names that change, so it is not unexplained here."""
-    if not tables or not tables['changed']:
+def _named_table_change(item: dict[str, Any]) -> bool:
+    return bool(item.get('grid') or item.get('width') or any(item.get(key) for key in _NAMED_TABLE_CHANGES))
+
+
+def _explained_tables(tables: dict[str, Any] | None, current: list[dict[str, Any]] | None) -> set[str]:
+    """Tables whose change the comparison names, with the tables holding them: a paragraph holding either changes with them."""
+    if not tables:
+        return set()
+    parents = {row['table_id']: row.get('nested_in') for row in current or []}
+    explained: set[str] = set()
+    for item in tables['changed']:
+        if _named_table_change(item):
+            at = item['table_id']
+            while at and at not in explained:
+                explained.add(at)
+                at = parents.get(at)
+    return explained
+
+
+def _only_table_object_differs(before: dict[str, Any], after: dict[str, Any], explained: set[str]) -> bool:
+    """A paragraph holding a table changes its object digest with the table. Only the change of that same table, by name, explains it."""
+    if not explained or not set(after.get('holds_tables') or ()) & explained or before.get('holds_tables') != after.get('holds_tables'):
         return False
     old, new = before.get('format'), after.get('format')
     if not isinstance(old, dict) or not isinstance(new, dict) or 'table' not in (new.get('objects') or []) or old.get('objects') != new.get('objects'):
@@ -325,7 +344,47 @@ def _only_table_object_differs(before: dict[str, Any], after: dict[str, Any], ta
 
 def _table_mark(paragraph: dict[str, Any], tables: dict[str, Any] | None) -> dict[str, Any]:
     """A paragraph of a table cell that came or went is the table's change, which the table comparison reports."""
-    return {'in_table': True} if tables and (tables['changed'] or tables['added'] or tables['removed']) and paragraph.get('context') == 'table_cell' else {}
+    return {'in_table': True} if tables and (tables['changed'] or tables['added'] or tables['removed']) and (paragraph.get('context') == 'table_cell' or paragraph.get('table_id')) else {}
+
+
+def _object_mark(paragraph: dict[str, Any]) -> dict[str, Any]:
+    """A removed paragraph's objects, so a picture gone from a saved file can be traced to it."""
+    objects = (paragraph.get('format') or {}).get('objects') if isinstance(paragraph.get('format'), dict) else None
+    return {'objects': objects} if objects else {}
+
+
+def _scoped(before: list[dict[str, Any]], after: list[dict[str, Any]]) -> bool:
+    """Whether every cell paragraph on both sides says which table and cell it belongs to."""
+    return all(item.get('table_id') for side in (before, after) for item in side if item.get('context') == 'table_cell')
+
+
+def _paragraph_groups(baseline: dict[str, Any], current: dict[str, Any], before: list[dict[str, Any]], after: list[dict[str, Any]]) -> list[tuple[list[int], list[int]]]:
+    """What may pair with what: the document's own paragraphs as one sequence, and each table's only within the cell that became which. A blank cell paragraph never pairs with a blank holder."""
+    if baseline.get('paragraphs_truncated') or current.get('paragraphs_truncated') or not _scoped(before, after):
+        return [(list(range(len(before))), list(range(len(after))))]
+    groups = [([index for index, item in enumerate(before) if not item.get('table_id')], [index for index, item in enumerate(after) if not item.get('table_id')])]
+    old_tables, new_tables = {row['table_id']: row for row in baseline.get('tables') or []}, {row['table_id']: row for row in current.get('tables') or []}
+    left_ids = {item['table_id'] for item in before if item.get('table_id')}
+    right_ids = {item['table_id'] for item in after if item.get('table_id')}
+    for table_id in sorted(left_ids | right_ids):
+        left = {}
+        for index, item in enumerate(before):
+            if item.get('table_id') == table_id:
+                left.setdefault(item.get('cell'), []).append(index)
+        right = {}
+        for index, item in enumerate(after):
+            if item.get('table_id') == table_id:
+                right.setdefault(item.get('cell'), []).append(index)
+        if table_id in old_tables and table_id in new_tables:
+            pairs, removed, added = _cell_pairs(old_tables[table_id]['cells'], new_tables[table_id]['cells'])
+            for old, new in pairs:
+                groups.append((left.pop(old['address'], []), right.pop(new['address'], [])))
+            for old in removed:
+                groups.append((left.pop(old['address'], []), []))
+            for new in added:
+                groups.append(([], right.pop(new['address'], [])))
+        groups.append(([index for rows in left.values() for index in rows], [index for rows in right.values() for index in rows]))
+    return groups
 
 
 def compare(baseline: dict[str, Any], current: dict[str, Any], rows: list[dict[str, Any]]) -> dict[str, Any]:
@@ -342,48 +401,51 @@ def compare(baseline: dict[str, Any], current: dict[str, Any], rows: list[dict[s
     before, after = baseline['paragraphs'], current['paragraphs']
     tables_compared = compare_tables(baseline.get('tables'), current.get('tables'))
     result['tables'] = tables_compared
+    explained_tables = _explained_tables(tables_compared, current.get('tables'))
     old_labels, new_labels = _labels_by_paragraph(before, baseline.get('numbering') or []), _labels_by_paragraph(after, rows)
     changes: list[dict[str, Any]] = []
     uncompared = 0
     nested_format = 0
     marks = {'compared': 0, 'changed': 0, 'new': 0}
-    matcher = difflib.SequenceMatcher(None, [item['text'] for item in before], [item['text'] for item in after], autojunk=False)
-    for op, i1, i2, j1, j2 in matcher.get_opcodes():
-        if op == 'equal':
-            for left, right in zip(range(i1, i2), range(j1, j2)):
-                (old_label, old_known), (new_label, new_known) = old_labels[left], new_labels[right]
-                changes_before = len(changes)
-                if old_known and new_known:
-                    if old_label != new_label:
-                        changes.append({'kind': 'number_changed', 'text': after[right]['text'], 'before': old_label, 'after': new_label})
-                elif ((before[left]['heading'], before[left]['level'], before[left].get('numbering_ref_sha256'))
-                      != (after[right]['heading'], after[right]['level'], after[right].get('numbering_ref_sha256'))):
-                    changes.append({'kind': 'number_changed', 'text': after[right]['text'], 'before': old_label or _numbering_kind(before[left]), 'after': new_label or _numbering_kind(after[right])})
-                else:
-                    uncompared += 1
-                if before[left]['content_sha256'] != after[right]['content_sha256']:
-                    # A number row explains the paragraph's numbering values, but not a definition that changed under a number it already had.
-                    explained = changes_before != len(changes) and (before[left]['heading'] == 'NONE' or after[right]['heading'] == 'NONE' or before[left].get('numbering_ref_sha256') == after[right].get('numbering_ref_sha256'))
-                    detail = format_changes(before[left], after[right], heading_explained=explained)
-                    if not _only_table_object_differs(before[left], after[right], tables_compared) and not (explained and _nothing_left(detail)):
-                        changes.append({'kind': 'format_changed', 'text': after[right]['text'], 'paragraph_index': after[right].get('index', right), **detail})
-                        nested_format += not after[right].get('in_body')
-                old_mark, new_mark = _mark_values(before[left]), _mark_values(after[right])
-                if before[left]['heading'] == 'NONE' and after[right]['heading'] != 'NONE':
-                    marks['new'] += 1  # It had no mark, so there is no earlier look to compare.
-                elif old_mark is not None and new_mark is not None:
-                    marks['compared'] += 1
-                    mark_changes = _changed_fields(old_mark, new_mark, ('kind', 'source', *_CHARACTER_FIELDS))
-                    if mark_changes:
-                        marks['changed'] += 1
-                        changes.append({'kind': 'number_mark_changed', 'text': after[right]['text'], 'paragraph_index': after[right].get('index', right), 'changes': mark_changes, 'objects': (after[right].get('format') or {}).get('objects')})
-            continue
-        # What runs off the end of a truncated list says nothing about the document.
-        if not (baseline.get('paragraphs_truncated') and i2 == len(before)):
-            changes.extend({'kind': 'removed', 'text': before[index]['text'], 'before': old_labels[index][0] or _numbering_kind(before[index]), **_table_mark(before[index], tables_compared)} for index in range(i1, i2))
-        if not (current.get('paragraphs_truncated') and j2 == len(after)):
-            changes.extend({'kind': 'added', 'text': after[index]['text'], 'after': new_labels[index][0] or _numbering_kind(after[index]), **_table_mark(after[index], tables_compared)} for index in range(j1, j2))
-            marks['new'] += sum(after[index]['heading'] != 'NONE' for index in range(j1, j2))
+    for left_indexes, right_indexes in _paragraph_groups(baseline, current, before, after):
+        # A paragraph holding a table is that table's place: it pairs with no other blank paragraph.
+        matcher = difflib.SequenceMatcher(None, [(before[index]['text'], tuple(before[index].get('holds_tables') or ())) for index in left_indexes], [(after[index]['text'], tuple(after[index].get('holds_tables') or ())) for index in right_indexes], autojunk=False)
+        for op, i1, i2, j1, j2 in matcher.get_opcodes():
+            if op == 'equal':
+                for left, right in zip(left_indexes[i1:i2], right_indexes[j1:j2]):
+                    (old_label, old_known), (new_label, new_known) = old_labels[left], new_labels[right]
+                    changes_before = len(changes)
+                    if old_known and new_known:
+                        if old_label != new_label:
+                            changes.append({'kind': 'number_changed', 'text': after[right]['text'], 'before': old_label, 'after': new_label})
+                    elif ((before[left]['heading'], before[left]['level'], before[left].get('numbering_ref_sha256'))
+                          != (after[right]['heading'], after[right]['level'], after[right].get('numbering_ref_sha256'))):
+                        changes.append({'kind': 'number_changed', 'text': after[right]['text'], 'before': old_label or _numbering_kind(before[left]), 'after': new_label or _numbering_kind(after[right])})
+                    else:
+                        uncompared += 1
+                    if before[left]['content_sha256'] != after[right]['content_sha256']:
+                        # A number row explains the paragraph's numbering values, but not a definition that changed under a number it already had.
+                        explained = changes_before != len(changes) and (before[left]['heading'] == 'NONE' or after[right]['heading'] == 'NONE' or before[left].get('numbering_ref_sha256') == after[right].get('numbering_ref_sha256'))
+                        detail = format_changes(before[left], after[right], heading_explained=explained)
+                        if not _only_table_object_differs(before[left], after[right], explained_tables) and not (explained and _nothing_left(detail)):
+                            changes.append({'kind': 'format_changed', 'text': after[right]['text'], 'paragraph_index': after[right].get('index', right), **detail})
+                            nested_format += not after[right].get('in_body')
+                    old_mark, new_mark = _mark_values(before[left]), _mark_values(after[right])
+                    if before[left]['heading'] == 'NONE' and after[right]['heading'] != 'NONE':
+                        marks['new'] += 1  # It had no mark, so there is no earlier look to compare.
+                    elif old_mark is not None and new_mark is not None:
+                        marks['compared'] += 1
+                        mark_changes = _changed_fields(old_mark, new_mark, ('kind', 'source', *_CHARACTER_FIELDS))
+                        if mark_changes:
+                            marks['changed'] += 1
+                            changes.append({'kind': 'number_mark_changed', 'text': after[right]['text'], 'paragraph_index': after[right].get('index', right), 'changes': mark_changes, 'objects': (after[right].get('format') or {}).get('objects')})
+                continue
+            # What runs off the end of a truncated list says nothing about the document.
+            if not (baseline.get('paragraphs_truncated') and i2 == len(left_indexes)):
+                changes.extend({'kind': 'removed', 'text': before[index]['text'], 'before': old_labels[index][0] or _numbering_kind(before[index]), **_table_mark(before[index], tables_compared), **_object_mark(before[index])} for index in left_indexes[i1:i2])
+            if not (current.get('paragraphs_truncated') and j2 == len(right_indexes)):
+                changes.extend({'kind': 'added', 'text': after[index]['text'], 'after': new_labels[index][0] or _numbering_kind(after[index]), **_table_mark(after[index], tables_compared)} for index in right_indexes[j1:j2])
+                marks['new'] += sum(after[index]['heading'] != 'NONE' for index in right_indexes[j1:j2])
     partial = 'partial' in states
     cells_before = [item['text'] for item in before if not item.get('in_body')]
     cells_after = [item['text'] for item in after if not item.get('in_body')]
@@ -403,6 +465,13 @@ _SIDE_WORDS = {'left': '왼쪽 선', 'right': '오른쪽 선', 'top': '위쪽 �
 _LINE_WORDS = {'none': '없음', 'solid': '실선', 'dash': '긴 점선', 'dot': '점선', 'dash_dot': '일점쇄선', 'dash_dot_dot': '이점쇄선', 'long_dash': '긴 파선', 'circle': '원형 점선',
                'double': '이중선', 'slim_thick': '가는+굵은 이중선', 'thick_slim': '굵은+가는 이중선', 'slim_thick_slim': '삼중선'}
 _MAX_TABLE_ROWS = 200
+_NAMED_TABLE_CHANGES = ('edges', 'fills', 'moved_cells', 'span_changes', 'content_changes', 'added_cells', 'removed_cells', 'frame_changes', 'cell_properties', 'width_changes', 'styled_content_cells')
+_FRAME_WORDS = {'zorder': '표 겹침 순서', 'page_break': '쪽 나눔', 'repeat_header': '제목 줄 반복', 'text_wrap': '본문과의 배치', 'cell_spacing': '셀 간격', 'numbering_type': '번호 종류', 'lock': '잠금', 'treat_as_char': '글자처럼 취급',
+                'horz_rel_to': '가로 기준', 'horz_align': '가로 정렬', 'horz_offset': '가로 위치', 'vert_rel_to': '세로 기준', 'vert_align': '세로 정렬', 'vert_offset': '세로 위치', 'flow_with_text': '쪽 영역 안으로 제한', 'allow_overlap': '겹침 허용',
+                'outside_margin': '바깥 여백', 'inside_margin': '안쪽 여백'}
+_CELL_WORDS = {'margin': '셀 여백', 'vertical_align': '세로 정렬', 'line_wrap': '줄 나눔', 'text_direction': '글 방향', 'has_margin': '셀 여백 지정', 'header': '제목 셀', 'protect': '보호', 'editable': '양식 편집'}
+_SCOPE_WORDS = {'header': '머리말', 'footer': '꼬리말'}
+_FILL_FAMILIES = {'pattern': '무늬', 'gradation': '그러데이션', 'image': '그림', 'mixed': '여러 채우기'}
 
 
 def _table_cell_key(cell: dict[str, Any]) -> tuple[Any, ...]:
@@ -434,11 +503,21 @@ def _cell_pairs(before: list[dict[str, Any]], after: list[dict[str, Any]]) -> tu
 
 def _compare_table(before: dict[str, Any], after: dict[str, Any]) -> dict[str, Any]:
     pairs, removed, added = _cell_pairs(before['cells'], after['cells'])
-    row: dict[str, Any] = {'table_id': after['table_id'], 'page': after.get('page'), 'index': after.get('index'), 'before_text': after.get('before_text'), 'edges': [], 'fills': [], 'moved_cells': [], 'span_changes': [], 'content_changes': [],
-                           'added_cells': [{'cell': cell['address'], 'text': cell['text']} for cell in added], 'removed_cells': [{'cell': cell['address'], 'text': cell['text']} for cell in removed]}
+    row: dict[str, Any] = {'table_id': after['table_id'], 'page': after.get('page'), 'index': after.get('index'), 'scope': after.get('scope', 'body'), 'before_text': after.get('before_text'), 'edges': [], 'fills': [], 'moved_cells': [], 'span_changes': [], 'content_changes': [],
+                           'frame_changes': [], 'cell_properties': [], 'width_changes': [], 'added_cells': [{'cell': cell['address'], 'text': cell['text']} for cell in added],
+                           'removed_cells': [{'cell': cell['address'], 'text': cell['text'], **({'objects': cell.get('all_objects') or cell['objects']} if cell.get('all_objects') or cell.get('objects') else {})} for cell in removed]}
     if (before['rows'], before['cols']) != (after['rows'], after['cols']):
         row['grid'] = {'before': {'rows': before['rows'], 'cols': before['cols']}, 'after': {'rows': after['rows'], 'cols': after['cols']}}
     other = False
+    old_frame, new_frame = before.get('frame_values') or {}, after.get('frame_values') or {}
+    for name in sorted(set(old_frame) | set(new_frame)):
+        if old_frame.get(name) != new_frame.get(name):
+            row['frame_changes'].append({'field': name, 'before': old_frame.get(name), 'after': new_frame.get(name)})
+    if before.get('frame') != after.get('frame') and not row['frame_changes']:
+        other = True
+    old_width, new_width = _table_width(before), _table_width(after)
+    if old_width is not None and new_width is not None and old_width != new_width:
+        row['width'] = {'before_hu': old_width, 'after_hu': new_width}
     for old, new in pairs:
         if old['address'] != new['address']:
             row['moved_cells'].append({'from': old['address'], 'to': new['address'], 'text': new['text']})
@@ -454,11 +533,22 @@ def _compare_table(before: dict[str, Any], after: dict[str, Any]) -> dict[str, A
                 row['edges'].append({'cell': new['address'], 'side': side, 'before': old['border'][side], 'after': new['border'][side]})
         if old['fill'] != new['fill']:
             row['fills'].append({'cell': new['address'], 'before': old['fill'], 'after': new['fill']})
-        if old.get('rest') != new.get('rest') or (old['width'] != new['width'] and (old['row_span'], old['col_span']) == (new['row_span'], new['col_span']) and 'grid' not in row):
+        if old['width'] != new['width'] and (old['row_span'], old['col_span']) == (new['row_span'], new['col_span']):
+            row['width_changes'].append({'cell': new['address'], 'before_hu': old['width'], 'after_hu': new['width']})
+        old_values, new_values = old.get('attr_values') or {}, new.get('attr_values') or {}
+        named = [name for name in sorted(set(old_values) | set(new_values)) if old_values.get(name) != new_values.get(name)]
+        row['cell_properties'].extend({'cell': new['address'], 'field': name, 'before': old_values.get(name), 'after': new_values.get(name)} for name in named)
+        if old.get('rest') != new.get('rest') or (old.get('attrs') != new.get('attrs') and not named):
             other = True
-    if other:
+    # A hash that moved with nothing named is never called unchanged: something this comparison has no name for changed.
+    if other or not _named_table_change(row):
         row['other_properties'] = True
     return row
+
+
+def _table_width(table: dict[str, Any]) -> int | None:
+    value = (table.get('layout') or {}).get('width_hu')
+    return value if value is not None else table.get('width_hu')
 
 
 def compare_tables(baseline: list[dict[str, Any]] | None, current: list[dict[str, Any]] | None) -> dict[str, Any] | None:
@@ -470,12 +560,13 @@ def compare_tables(baseline: list[dict[str, Any]] | None, current: list[dict[str
     for table_id, table in after.items():
         old = before.get(table_id)
         if old is None:
-            result['added'].append({'table_id': table_id, 'page': table.get('page'), 'rows': table['rows'], 'cols': table['cols'], 'before_text': table.get('before_text')})
+            result['added'].append({'table_id': table_id, 'page': table.get('page'), 'rows': table['rows'], 'cols': table['cols'], 'before_text': table.get('before_text'), 'scope': table.get('scope', 'body')})
         elif old.get('state_sha256') == table.get('state_sha256'):
             result['unchanged'].append(table_id)
         else:
             result['changed'].append(_compare_table(old, table))
-    result['removed'] = [{'table_id': table_id, 'page': table.get('page'), 'rows': table['rows'], 'cols': table['cols']} for table_id, table in before.items() if table_id not in after]
+    result['removed'] = [{'table_id': table_id, 'page': table.get('page'), 'rows': table['rows'], 'cols': table['cols'], 'scope': table.get('scope', 'body'),
+                          'pictures': sum((cell.get('all_objects') or cell.get('objects') or []).count('picture') for cell in table['cells'])} for table_id, table in before.items() if table_id not in after]
     return result
 
 
@@ -490,7 +581,82 @@ def table_coverage(tables: list[dict[str, Any]] | None, truncated: bool, compari
     if has_baseline and comparison is None:
         return {'state': 'unverified', 'tables': len(tables), 'compared': 0}
     compared = len((comparison or {}).get('changed', [])) + len((comparison or {}).get('unchanged', []))
-    return {'state': 'partial' if limited else 'complete', 'tables': len(tables), 'compared': compared, 'not_fully_named': limited}
+    pages_unknown = sum(item.get('scope', 'body') == 'body' and item.get('page') is None for item in tables)
+    return {'state': 'partial' if limited or pages_unknown else 'complete', 'tables': len(tables), 'compared': compared, 'not_fully_named': limited, 'pages_unknown': pages_unknown}
+
+
+def layout_coverage(tables: list[dict[str, Any]] | None) -> dict[str, Any]:
+    """Every table's width against the text and the page, as the live document states them: what overflows and what could not be proved, by table and page."""
+    rows = [item for item in tables or [] if item.get('layout')]
+    if not rows:
+        return {'state': 'not_reported', 'overflow': [], 'unverified': []}
+    overflow = [{'table_id': item['table_id'], 'page': item.get('page'), 'status': item['layout']['status'], **{key: item['layout'][key] for key in ('width_mm', 'overflow_mm', 'off_page_mm', 'width_hu', 'overflow_hu') if key in item['layout']}}
+                for item in rows if item['layout'].get('status') in {'off_page', 'past_margin', 'wider_than_parent'}]
+    unverified = [{'table_id': item['table_id'], 'page': item.get('page'), 'reason': item['layout'].get('reason')} for item in rows if item['layout'].get('status') == 'unverified']
+    return {'state': 'problem' if overflow else 'unverified' if unverified else 'complete', 'tables': len(rows), 'overflow': overflow, 'unverified': unverified}
+
+
+def _layout_note(row: dict[str, Any]) -> str:
+    where = f"{row['table_id']}({row['page']}쪽)" if row.get('page') else row['table_id']
+    if row['status'] == 'off_page':
+        return f"표 {where}가 본문 오른쪽 여백을 {row.get('overflow_mm'):g}mm 넘고 쪽 밖으로 {row.get('off_page_mm'):g}mm 나가 인쇄에서 잘립니다"
+    if row['status'] == 'past_margin':
+        return f"표 {where}가 본문 오른쪽 여백을 {row.get('overflow_mm'):g}mm 넘습니다"
+    return f"표 {where}가 담긴 셀의 안쪽 폭보다 {row.get('overflow_mm'):g}mm 넓습니다"
+
+
+def _removed_pictures(comparison: dict[str, Any] | None) -> int:
+    """How many pictures the compared edits removed, from what they say they removed."""
+    if not comparison:
+        return 0
+    count = sum((change.get('objects') or []).count('picture') for change in comparison['changes'] if change['kind'] == 'removed' and not change.get('in_table'))
+    tables = comparison.get('tables') or {}
+    count += sum(item.get('pictures', 0) for item in tables.get('removed', []))
+    count += sum((cell.get('objects') or []).count('picture') for item in tables.get('changed', []) for cell in item['removed_cells'])
+    return count
+
+
+def package_media_coverage(saved_output: dict[str, Any] | None, comparison: dict[str, Any] | None, *, has_baseline: bool) -> dict[str, Any]:
+    """The saved file's image data against the file that was opened: pictures the document shows apart from data nothing refers to."""
+    if not isinstance(saved_output, dict) or saved_output.get('retrieved') is not True:
+        return {'state': 'not_saved'}
+    media = (saved_output.get('compared_with_source') or {}).get('media')
+    if not isinstance(media, dict):
+        return {'state': 'not_compared'}
+    result = {key: media.get(key) for key in ('referenced_source', 'referenced_saved', 'referenced_lost', 'unreferenced_lost', 'dangling_saved', 'all_bindata_identical')}
+    lost = media.get('referenced_lost') or 0
+    removed = _removed_pictures(comparison)
+    if media.get('dangling_saved') or (lost and has_baseline and removed < lost):
+        state = 'mismatch'
+    elif lost and not has_baseline:
+        state = 'unverified'
+    elif media.get('unreferenced_lost'):
+        state = 'partial'
+    elif lost:
+        state = 'removed_by_edit'
+    else:
+        state = 'complete'
+    return {'state': state, **result, 'removed_by_edit': min(lost, removed) if has_baseline else 0}
+
+
+def _media_line(media: dict[str, Any]) -> str | None:
+    state = media.get('state')
+    if state in {None, 'not_saved', 'not_compared'}:
+        return None
+    parts = [f"저장 파일의 그림: 참조 그림 {media.get('referenced_saved')}개의 데이터가 저장본에 있습니다"]
+    if state == 'complete':
+        parts = [f"저장 파일의 그림: 참조 그림 {media.get('referenced_source')}개의 데이터가 보존됐습니다"]
+        if media.get('all_bindata_identical'):
+            parts.append('패키지의 그림 데이터 전체도 원본과 같습니다')
+    if media.get('removed_by_edit'):
+        parts.append(f"삭제한 셀의 그림 {media['removed_by_edit']}개는 요청대로 저장본에서 빠졌습니다")
+    if (media.get('referenced_lost') or 0) > (media.get('removed_by_edit') or 0):
+        parts.append(f"참조되던 그림 {media['referenced_lost'] - (media.get('removed_by_edit') or 0)}개의 데이터가 저장본에 없습니다")
+    if media.get('dangling_saved'):
+        parts.append(f"저장본에서 데이터 없는 참조가 {media['dangling_saved']}개 있습니다")
+    if media.get('unreferenced_lost'):
+        parts.append(f"원본의 참조 없는 이미지 {media['unreferenced_lost']}개는 저장본에 없습니다. 어떤 그림도 쓰지 않던 데이터로, 한글이 문서를 열 때 읽어 들이지 않습니다")
+    return '. '.join(parts) + '.'
 
 
 def _line_word(line: dict[str, Any]) -> str:
@@ -501,12 +667,20 @@ def _line_word(line: dict[str, Any]) -> str:
 
 
 def _fill_word(fill: dict[str, Any]) -> str:
-    return {'none': '없음', 'solid': str(fill.get('color')), 'other': '무늬·그러데이션·그림'}.get(fill.get('kind'), str(fill.get('kind')))
+    if fill.get('kind') == 'other':
+        return _FILL_FAMILIES.get(fill.get('family'), '무늬·그러데이션·그림')
+    return {'none': '없음', 'solid': str(fill.get('color'))}.get(fill.get('kind'), str(fill.get('kind')))
 
 
 def _table_name(item: dict[str, Any]) -> str:
-    page = f"{item['page']}쪽" if item.get('page') else '쪽 확인 못함'
+    page = _SCOPE_WORDS.get(item.get('scope')) or (f"{item['page']}쪽" if item.get('page') else '쪽 확인 못함')
     return f"{item['table_id']} ({page})"
+
+
+def _property_word(value: Any) -> str:
+    if isinstance(value, dict):
+        return ' '.join(f'{key} {inner}' for key, inner in value.items())
+    return _cell('없음' if value is None else value)
 
 
 def _table_rows(tables: dict[str, Any]) -> list[str]:
@@ -527,9 +701,19 @@ def _table_rows(tables: dict[str, Any]) -> list[str]:
         rows += [f"| {name} | {cell['cell']} | 내용 | {_cell(_clip(cell['before'], 40)) or '(빈 셀)'} | {_cell(_clip(cell['after'], 40)) or '(빈 셀)'} |" for cell in item['content_changes']]
         rows += [f"| {name} | {edge['cell']} | {_SIDE_WORDS[edge['side']]} | {_line_word(edge['before'])} | {_line_word(edge['after'])} |" for edge in item['edges']]
         rows += [f"| {name} | {fill['cell']} | 채우기 | {_fill_word(fill['before'])} | {_fill_word(fill['after'])} |" for fill in item['fills']]
+        rows += [f"| {name} | {cell} | 글 서식 | 같은 글 | 서식이나 개체가 다름 |" for cell in item.get('styled_content_cells', [])]
+        if item.get('width'):
+            rows.append(f"| {name} | 표 전체 | 너비 | {_mm(item['width']['before_hu'])} | {_mm(item['width']['after_hu'])} |")
+        rows += [f"| {name} | {cell['cell']} | 셀 너비 | {_mm(cell['before_hu'])} | {_mm(cell['after_hu'])} |" for cell in item.get('width_changes', [])]
+        rows += [f"| {name} | 표 전체 | 표 속성: {_FRAME_WORDS.get(change['field'], change['field'])} | {_property_word(change['before'])} | {_property_word(change['after'])} |" for change in item.get('frame_changes', [])]
+        rows += [f"| {name} | {change['cell']} | {_CELL_WORDS.get(change['field'], change['field'])} | {_property_word(change['before'])} | {_property_word(change['after'])} |" for change in item.get('cell_properties', [])]
         if item.get('other_properties'):
             rows.append(f'| {name} | 표 안 | 이름 없는 다른 값 | 확인 못함 | 바뀜 |')
     return rows
+
+
+def _mm(value: int) -> str:
+    return f'{round(value * 25.4 / 7200, 2):g}mm'
 
 
 def _tables_changed(comparison: dict[str, Any]) -> bool:
@@ -548,12 +732,15 @@ def _table_lines(tables: dict[str, Any]) -> list[str]:
         grid = item.get('grid')
         if grid:
             parts.append(f"{grid['before']['rows']}행 {grid['before']['cols']}열 → {grid['after']['rows']}행 {grid['after']['cols']}열")
-        for key, word in (('added_cells', '새 셀'), ('removed_cells', '제거된 셀'), ('moved_cells', '이동한 셀'), ('span_changes', '병합 범위가 바뀐 셀'), ('content_changes', '내용이 바뀐 셀'), ('edges', '바뀐 선'), ('fills', '채우기가 바뀐 셀')):
-            if item[key]:
+        if item.get('width'):
+            parts.append(f"표 너비 {_mm(item['width']['before_hu'])} → {_mm(item['width']['after_hu'])}")
+        for key, word in (('added_cells', '새 셀'), ('removed_cells', '제거된 셀'), ('moved_cells', '이동한 셀'), ('span_changes', '병합 범위가 바뀐 셀'), ('content_changes', '내용이 바뀐 셀'), ('styled_content_cells', '글 서식이 바뀐 셀'), ('edges', '바뀐 선'), ('fills', '채우기가 바뀐 셀'),
+                          ('width_changes', '너비가 바뀐 셀'), ('frame_changes', '바뀐 표 속성'), ('cell_properties', '바뀐 셀 속성')):
+            if item.get(key):
                 parts.append(f'{word} {len(item[key])}개')
         if item.get('other_properties'):
-            parts.append('이름 없는 다른 값도 바뀜')
-        lines.append(f"표 변경: {_table_name(item)} " + (', '.join(parts) if parts else '값 차이 없음'))
+            parts.append('이름 없는 다른 값이 바뀜')
+        lines.append(f"표 변경: {_table_name(item)} " + ', '.join(parts))
     if tables['unchanged']:
         lines.append(f"변경 없는 표 {len(tables['unchanged'])}개: {', '.join(tables['unchanged'][:6])}" + (' 외' if len(tables['unchanged']) > 6 else ''))
     return lines
@@ -561,6 +748,27 @@ def _table_lines(tables: dict[str, Any]) -> list[str]:
 
 # Measured on Hancom 13.0.0.3457: native line 2 prints as dashes and native line 3 as dots, and the file calls them DOT and DASH.
 _HWPX_LINES = {'NONE': 'none', 'SOLID': 'solid', 'DOT': 'dash', 'DASH': 'dot', 'DASH_DOT': 'dash_dot', 'DASH_DOT_DOT': 'dash_dot_dot', 'LONG_DASH': 'long_dash', 'CIRCLE': 'circle', 'DOUBLE_SLIM': 'double', 'SLIM_THICK': 'slim_thick', 'THICK_SLIM': 'thick_slim', 'SLIM_THICK_SLIM': 'slim_thick_slim'}
+
+
+def _hwpx_int(element: ET.Element, name: str) -> int:
+    try:
+        return int(_attribute(element, name) or 0)
+    except ValueError:
+        return 0
+
+
+def _hwpx_other_fill(brushes: list[ET.Element]) -> dict[str, Any]:
+    """A fill this code does not edit, by the meaning the live document can state too. A picture's data is not compared here."""
+    names = sorted(_local(item) for item in brushes)
+    if names == ['winBrush']:
+        brush = brushes[0]
+        face = _attribute(brush, 'faceColor') or 'none'
+        return {'kind': 'other', 'family': 'pattern', 'meaning': {'style': (_attribute(brush, 'hatchStyle') or '').replace('_', '').lower(), 'face': 'none' if face.lower() == 'none' else face.upper(), 'hatch': (_attribute(brush, 'hatchColor') or '').upper(), 'alpha': _hwpx_int(brush, 'alpha')}}
+    if names == ['gradation']:
+        brush = brushes[0]
+        return {'kind': 'other', 'family': 'gradation', 'meaning': {'type': (_attribute(brush, 'type') or '').replace('_', '').lower(), 'angle': _hwpx_int(brush, 'angle'), 'center_x': _hwpx_int(brush, 'centerX'), 'center_y': _hwpx_int(brush, 'centerY'), 'step': _hwpx_int(brush, 'step'),
+                                                                    'step_center': _hwpx_int(brush, 'stepCenter'), 'colors': [(_attribute(item, 'value') or '').upper() for item in brush if _local(item) == 'color'], 'alpha': _hwpx_int(brush, 'alpha')}}
+    return {'kind': 'other', 'family': 'image' if names == ['imgBrush'] else 'mixed'}
 
 
 def _hwpx_border_fill(element: ET.Element) -> dict[str, Any]:
@@ -578,7 +786,7 @@ def _hwpx_border_fill(element: ET.Element) -> dict[str, Any]:
                 face = (_attribute(brushes[0], 'faceColor') or 'none')
                 fill = {'kind': 'none'} if face.lower() == 'none' else {'kind': 'solid', 'color': face.upper()}
             else:
-                fill = {'kind': 'other'}
+                fill = _hwpx_other_fill(brushes)
     return {'border': border, 'fill': fill}
 
 
@@ -612,30 +820,56 @@ def package_tables(path: Path) -> list[dict[str, Any]]:
         header, *sections = [_parsed_part(archive.read(name)) for name in ('Contents/header.xml', *names)]
     fills = {_attribute(item, 'id') or '': _hwpx_border_fill(item) for item in header.iter() if _local(item) == 'borderFill'}
     tables: list[dict[str, Any]] = []
-    for section in sections:
-        for table in section.iter():
-            if _local(table) != 'tbl':
+
+    def visit(element: ET.Element, scope: str) -> None:
+        for child in element:
+            name = _local(child)
+            inner = name if name in {'header', 'footer'} else scope
+            if name == 'tbl':
+                tables.append(read_table(child, inner))
+            visit(child, inner)
+
+    def read_table(table: ET.Element, scope: str) -> dict[str, Any]:
+        cells: list[dict[str, Any]] = []
+        for row in table:
+            if _local(row) != 'tr':
                 continue
-            cells: list[dict[str, Any]] = []
-            for row in table:
-                if _local(row) != 'tr':
+            for cell in row:
+                if _local(cell) != 'tc':
                     continue
-                for cell in row:
-                    if _local(cell) != 'tc':
-                        continue
-                    addr = next(item for item in cell if _local(item) == 'cellAddr')
-                    span = next(item for item in cell if _local(item) == 'cellSpan')
-                    size = next(item for item in cell if _local(item) == 'cellSz')
-                    number_row, number_col = int(_attribute(addr, 'rowAddr')) + 1, int(_attribute(addr, 'colAddr')) + 1
-                    letters = ''
-                    remaining = number_col
-                    while remaining:
-                        remaining, rem = divmod(remaining - 1, 26)
-                        letters = chr(65 + rem) + letters
-                    cells.append({'address': f'{letters}{number_row}', 'row': number_row, 'col': number_col, 'row_span': int(_attribute(span, 'rowSpan')), 'col_span': int(_attribute(span, 'colSpan')), 'width': int(_attribute(size, 'width')),
-                                  'text': _hwpx_cell_text(cell), **fills[_attribute(cell, 'borderFillIDRef') or '']})
-            tables.append({'table_id': f"tbl:{_attribute(table, 'id')}", 'rows': int(_attribute(table, 'rowCnt')), 'cols': int(_attribute(table, 'colCnt')), 'cells': sorted(cells, key=lambda item: (item['row'], item['col']))})
+                addr = next(item for item in cell if _local(item) == 'cellAddr')
+                span = next(item for item in cell if _local(item) == 'cellSpan')
+                size = next(item for item in cell if _local(item) == 'cellSz')
+                number_row, number_col = int(_attribute(addr, 'rowAddr')) + 1, int(_attribute(addr, 'colAddr')) + 1
+                letters = ''
+                remaining = number_col
+                while remaining:
+                    remaining, rem = divmod(remaining - 1, 26)
+                    letters = chr(65 + rem) + letters
+                cells.append({'address': f'{letters}{number_row}', 'row': number_row, 'col': number_col, 'row_span': int(_attribute(span, 'rowSpan')), 'col_span': int(_attribute(span, 'colSpan')), 'width': int(_attribute(size, 'width')),
+                              'text': _hwpx_cell_text(cell), **fills[_attribute(cell, 'borderFillIDRef') or '']})
+        size = next((item for item in table if _local(item) == 'sz'), None)
+        return {'table_id': f"tbl:{_attribute(table, 'id')}", 'scope': scope, 'rows': int(_attribute(table, 'rowCnt')), 'cols': int(_attribute(table, 'colCnt')), 'width_hu': int(_attribute(size, 'width')) if size is not None else None,
+                'cells': sorted(cells, key=lambda item: (item['row'], item['col']))}
+
+    for section in sections:
+        visit(section, 'body')
     return tables
+
+
+def _same_fill(live: dict[str, Any], saved: dict[str, Any]) -> bool | None:
+    """Whether two fills mean the same, or None when the two sides cannot both say. A digest only the live side has is not a difference."""
+    if live.get('kind') != saved.get('kind'):
+        return False
+    if live.get('kind') != 'other':
+        return live == saved
+    if live.get('family') is None or saved.get('family') is None:
+        return None
+    if live['family'] != saved['family']:
+        return False
+    if live.get('meaning') is None or saved.get('meaning') is None:
+        return None
+    return live['meaning'] == saved['meaning']
 
 
 def persisted_tables(path: Path, live: list[dict[str, Any]], *, truncated: bool = False) -> dict[str, Any]:
@@ -650,13 +884,21 @@ def persisted_tables(path: Path, live: list[dict[str, Any]], *, truncated: bool 
     except (zipfile.BadZipFile, ET.ParseError, expat.ExpatError, zlib.error, KeyError, ValueError, TypeError, AttributeError, OSError, RuntimeError, NotImplementedError, EOFError, StopIteration):
         return unverified('package_tables_unreadable')
     mismatches: list[dict[str, Any]] = []
-    if not truncated and {item['table_id'] for item in live} != set(saved):
-        mismatches.append({'table_id': None, 'cell': None, 'field': 'tables', 'live': sorted(item['table_id'] for item in live), 'saved': sorted(saved)})
-    limited = truncated
+    known = {item['table_id'] for item in live}
+    # A table in a header or footer the live side did not report is a scope it did not cover, by name. Anything else on one side only is a difference.
+    unverified_tables = sorted(table_id for table_id, item in saved.items() if table_id not in known and item.get('scope', 'body') != 'body')
+    if not truncated and known != set(saved) - set(unverified_tables):
+        mismatches.append({'table_id': None, 'cell': None, 'field': 'tables', 'live': sorted(known), 'saved': sorted(saved)})
+    limited = truncated or bool(unverified_tables)
+    fills_not_compared = 0
     for table in live:
         theirs = saved.get(table['table_id'])
         if theirs is None:
             continue
+        if table.get('scope', 'body') != theirs['scope']:
+            mismatches.append({'table_id': table['table_id'], 'cell': None, 'field': 'scope', 'live': table.get('scope', 'body'), 'saved': theirs['scope']})
+        if table.get('width_hu') is not None and theirs.get('width_hu') is not None and table['width_hu'] != theirs['width_hu']:
+            mismatches.append({'table_id': table['table_id'], 'cell': None, 'field': 'width_hu', 'live': table['width_hu'], 'saved': theirs['width_hu']})
         if (table['rows'], table['cols']) != (theirs['rows'], theirs['cols']):
             mismatches.append({'table_id': table['table_id'], 'cell': None, 'field': 'grid', 'live': [table['rows'], table['cols']], 'saved': [theirs['rows'], theirs['cols']]})
             continue
@@ -666,17 +908,23 @@ def persisted_tables(path: Path, live: list[dict[str, Any]], *, truncated: bool 
             continue
         for cell in table['cells']:
             other = cells[cell['address']]
-            for field in ('row_span', 'col_span', 'width', 'fill'):
+            for field in ('row_span', 'col_span', 'width'):
                 if cell[field] != other[field]:
                     mismatches.append({'table_id': table['table_id'], 'cell': cell['address'], 'field': field, 'live': cell[field], 'saved': other[field]})
+            same_fill = _same_fill(cell['fill'], other['fill'])
+            if same_fill is None:
+                fills_not_compared += 1
+            elif not same_fill:
+                mismatches.append({'table_id': table['table_id'], 'cell': cell['address'], 'field': 'fill', 'live': cell['fill'], 'saved': other['fill']})
             for side in ('left', 'right', 'top', 'bottom'):
                 if cell['border'][side] != other['border'][side]:
                     mismatches.append({'table_id': table['table_id'], 'cell': cell['address'], 'field': f'border.{side}', 'live': cell['border'][side], 'saved': other['border'][side]})
             shown = cell['text']
-            if not other['text'].startswith(shown):
+            # Only a row that says it was cut is compared by its start.
+            if not (other['text'].startswith(shown) if cell.get('text_truncated') is True else other['text'] == shown):
                 mismatches.append({'table_id': table['table_id'], 'cell': cell['address'], 'field': 'text', 'live': shown, 'saved': other['text'][:300]})
-    state = 'mismatch' if mismatches else 'partial' if limited else 'match'
-    return {'state': state, 'tables_checked': len(live), 'mismatches': mismatches[:_MAX_TABLE_ROWS], **({'mismatch_total': len(mismatches)} if len(mismatches) > _MAX_TABLE_ROWS else {})}
+    state = 'mismatch' if mismatches else 'partial' if limited or fills_not_compared else 'match'
+    return {'state': state, 'tables_checked': len(live), 'fills_not_compared': fills_not_compared, 'mismatches': mismatches[:_MAX_TABLE_ROWS], **({'unverified_tables': unverified_tables} if unverified_tables else {}), **({'mismatch_total': len(mismatches)} if len(mismatches) > _MAX_TABLE_ROWS else {})}
 
 
 def _labels_by_paragraph(paragraphs: list[dict[str, Any]], rows: list[dict[str, Any]]) -> list[tuple[str | None, bool]]:
@@ -733,7 +981,7 @@ def package_inventory(path: Path) -> dict[str, Any]:
             infos = archive.infolist()
             if len(infos) > MAX_PACKAGE_MEMBERS or sum(info.file_size for info in infos) > MAX_PACKAGE_TOTAL_BYTES:
                 raise PackageUnreadable('package_limit', 'The HWPX package is larger than this inspection reads.')
-            is_text = [re.fullmatch(r'Contents/(section\d+|header)\.xml', info.filename) is not None for info in infos]
+            is_text = [re.fullmatch(r'Contents/((section\d+|header)\.xml|content\.hpf)', info.filename) is not None for info in infos]
             if sum(info.file_size for info, text in zip(infos, is_text) if text) > MAX_PACKAGE_TEXT_BYTES:
                 raise PackageUnreadable('package_limit', 'The text of this HWPX package is larger than this inspection reads.')
             for info, text in zip(infos, is_text):
@@ -754,9 +1002,12 @@ def package_inventory(path: Path) -> dict[str, Any]:
         raise PackageUnreadable('package_corrupt', 'The file could not be read as an HWPX package.') from exc
     section_text = b''.join(data for name, data in sorted(texts.items()) if 'section' in name).decode('utf-8', 'replace')
     header = texts.get('Contents/header.xml')
+    references = _bindata_references(section_text + (header or b'').decode('utf-8', 'replace'), (texts.get('Contents/content.hpf') or b'').decode('utf-8', 'replace'), bindata)
     return {
         'member_count': len(infos),
         'bindata': bindata,
+        'references': references,
+        'unreferenced_bindata': sorted(set(bindata.values()) - {value for value in references.values() if value}),
         'sections': sum('section' in name for name in texts),
         'tables': len(re.findall(r'<hp:tbl\b', section_text)),
         'pictures': len(re.findall(r'<hp:pic\b', section_text)),
@@ -767,11 +1018,41 @@ def package_inventory(path: Path) -> dict[str, Any]:
     }
 
 
+def _bindata_references(text: str, manifest: str, bindata: dict[str, str]) -> dict[str, str | None]:
+    """Each image id the document's parts refer to and the data it reaches: by the package manifest, or else by member name. None when it reaches nothing."""
+    members = {name.casefold(): digest for name, digest in bindata.items()}
+    by_stem = {Path(name).stem.casefold(): digest for name, digest in bindata.items()}
+    hrefs: dict[str, str] = {}
+    for item in re.findall(r'<(?:\w+:)?item\b[^>]*>', manifest):
+        ident, href = re.search(r'\bid="([^"]+)"', item), re.search(r'\bhref="([^"]+)"', item)
+        if ident and href:
+            hrefs[ident.group(1)] = href.group(1)
+    references: dict[str, str | None] = {}
+    for ident in sorted(set(re.findall(r'binaryItemIDRef="([^"]+)"', text))):
+        href = hrefs.get(ident)
+        references[ident] = members.get(href.casefold()) if href and href.casefold() in members else by_stem.get(ident.casefold())
+    return references
+
+
+def _media_comparison(source: dict[str, Any], saved: dict[str, Any]) -> dict[str, Any]:
+    source_refs, saved_refs = source.get('references', {}), saved.get('references', {})
+    kept = {value for value in saved_refs.values() if value}
+    saved_payloads = set(saved['bindata'].values())
+    return {
+        'referenced_source': len(source_refs), 'referenced_saved': len(saved_refs),
+        'referenced_lost': sum(1 for value in source_refs.values() if value and value not in kept),
+        'unreferenced_lost': sum(1 for value in source.get('unreferenced_bindata', []) if value not in saved_payloads),
+        'dangling_saved': sum(1 for value in saved_refs.values() if value is None),
+        'all_bindata_identical': sorted(source['bindata'].values()) == sorted(saved['bindata'].values()),
+    }
+
+
 def compare_packages(source: dict[str, Any], saved: dict[str, Any]) -> dict[str, Any]:
     return {
         # Hancom may rename a member on save (image1.png to image1.PNG); the payload is what must survive.
         'bindata_identical': sorted(source['bindata'].values()) == sorted(saved['bindata'].values()),
         'bindata_files': len(saved['bindata']),
+        'media': _media_comparison(source, saved),
         **{key: {'source': source[key], 'saved': saved[key]} for key in ('tables', 'pictures', 'headers', 'footers', 'page_number_controls')},
     }
 
@@ -1063,6 +1344,24 @@ def _coverage_notes(review: dict[str, Any]) -> list[str]:
         notes.append(f"번호 문단 {marks.get('not_compared')}개의 번호 모양을 비교하지 못했습니다" if marks.get('compared') or marks.get('new') else '번호 모양은 비교하지 않았습니다')
     elif marks.get('state') in _MARKS_NOT_ALL_COMPARED:
         notes.append(f"새 번호 문단 {marks.get('new')}개의 번호 모양은 이전 값이 없어 비교하지 못했습니다")
+    layout = coverage.get('layout') or {}
+    notes.extend(_layout_note(row) for row in (layout.get('overflow') or [])[:5])
+    if len(layout.get('overflow') or []) > 5:
+        notes.append(f"그 밖에 넘치는 표 {len(layout['overflow']) - 5}개")
+    if layout.get('unverified'):
+        notes.append('쪽 안에 드는지 확인하지 못한 표 ' + ', '.join(row['table_id'] for row in layout['unverified'][:6]) + (' 외' if len(layout['unverified']) > 6 else ''))
+    tables = coverage.get('tables') or {}
+    if tables.get('pages_unknown'):
+        notes.append(f"쪽을 확인하지 못한 표 {tables['pages_unknown']}개")
+    if tables.get('not_fully_named'):
+        notes.append(f"이름 없는 값이 바뀐 표 {tables['not_fully_named']}개")
+    media = coverage.get('package_media') or {}
+    if media.get('state') == 'partial':
+        notes.append(f"원본의 참조 없는 이미지 {media.get('unreferenced_lost')}개가 저장본에 없습니다")
+    elif media.get('state') == 'unverified':
+        notes.append(f"참조되던 그림 {media.get('referenced_lost')}개의 데이터가 저장본에 없는데, 요청한 삭제인지 대조할 이전 확인이 없습니다")
+    elif media.get('state') == 'mismatch':
+        notes.append('저장본의 그림 데이터가 원본의 참조와 맞지 않습니다')
     return notes
 
 
@@ -1082,6 +1381,15 @@ def _headline(review: dict[str, Any]) -> str | None:
 
 def _row_status(row: dict[str, Any]) -> str:
     return row.get('status') or ('match' if row.get('matches') else 'mismatch')
+
+
+def _persisted_gaps(fact: dict[str, Any]) -> str:
+    gaps = []
+    if fact.get('fills_not_compared'):
+        gaps.append(f"채우기 {fact['fills_not_compared']}칸")
+    if fact.get('unverified_tables'):
+        gaps.append('머리말·꼬리말 표 ' + ', '.join(fact['unverified_tables'][:6]))
+    return f"({', '.join(gaps)})" if gaps else ''
 
 
 def summarize(review: dict[str, Any]) -> str:
@@ -1154,16 +1462,21 @@ def summarize(review: dict[str, Any]) -> str:
         if unproven:
             lines.append('보존 확인: 확인 못함 — ' + ', '.join(unproven))
         if not changed and not unproven:
-            lines.append('보존 확인: 머리말·꼬리말, 스타일, 그림 데이터, 번호 정의 동일' + ('(번호 모양은 이 확인에 들지 않습니다)' if mark_state in _MARKS_NOT_ALL_COMPARED else ''))
+            media_state = ((review.get('coverage') or {}).get('package_media') or {}).get('state')
+            scope_word = '보존 확인(열린 문서 기준)' if media_state in {'partial', 'mismatch', 'unverified', 'removed_by_edit'} else '보존 확인'
+            lines.append(f'{scope_word}: 머리말·꼬리말, 스타일, 그림 데이터, 번호 정의 동일' + ('(번호 모양은 이 확인에 들지 않습니다)' if mark_state in _MARKS_NOT_ALL_COMPARED else ''))
     table_state = (review.get('coverage') or {}).get('tables') or {}
     if table_state.get('state') == 'unverified':
         lines.append('표: 값을 읽지 못해 확인하지 못했습니다.')
     elif table_state.get('state') == 'partial':
         lines.append('표: 일부 값만 확인했습니다. 전체는 review.json에 있는 범위까지입니다.')
+    media_line = _media_line((review.get('coverage') or {}).get('package_media') or {})
+    if media_line:
+        lines.append(media_line)
     persisted_tables_fact = review.get('persisted_tables')
     if isinstance(persisted_tables_fact, dict):
         lines.append({'match': f"저장본 표: 표 {persisted_tables_fact.get('tables_checked')}개의 격자·병합·글·선·채우기가 저장 파일과 일치합니다.",
-                      'partial': f"저장본 표: 읽은 표 {persisted_tables_fact.get('tables_checked')}개는 일치합니다. 일부는 비교하지 못했습니다.",
+                      'partial': f"저장본 표: 읽은 표 {persisted_tables_fact.get('tables_checked')}개는 일치합니다. 일부는 비교하지 못했습니다" + _persisted_gaps(persisted_tables_fact) + '.',
                       'mismatch': f"저장본 표: 저장 파일과 다른 곳이 {persisted_tables_fact.get('mismatch_total', len(persisted_tables_fact.get('mismatches') or []))}건 있습니다.",
                       'unverified': '저장본 표: 저장 파일과 비교하지 못했습니다.'}[persisted_tables_fact['state']])
     persisted = review.get('persisted_format')
@@ -1220,6 +1533,8 @@ def assemble(*, session_id: str, review_id: str, readback: dict[str, Any], pdf: 
     # A backend that does not report tables at all says nothing about them; one that reports them as unreadable lowers the review.
     current['coverage']['tables'] = (table_coverage(current['tables'], current['tables_truncated'], (current['comparison'] or {}).get('tables'), has_baseline=baseline is not None)
                                      if 'tables' in readback else {'state': 'not_reported', 'tables': None, 'compared': 0})
+    current['coverage']['layout'] = layout_coverage(current['tables'])
+    current['coverage']['package_media'] = package_media_coverage(saved_output, current['comparison'], has_baseline=baseline is not None)
     statuses = [row['status'] for row in current['numbering']]
     if 'unverified' in {paragraph_coverage['state'], page_coverage['state'], text_coverage['state']}:
         coverage_status = 'unverified'
@@ -1227,12 +1542,14 @@ def assemble(*, session_id: str, review_id: str, readback: dict[str, Any], pdf: 
           or current['page_numbers'].get('state') in {'partial', 'unverified'} or (current['comparison'] or {}).get('state', 'complete') != 'complete'
           or unread_lists['state'] == 'unverified' or current['coverage']['format']['state'] != 'complete'
           or current['coverage']['number_mark']['state'] in _MARKS_NOT_ALL_COMPARED
-          or current['coverage']['tables']['state'] in {'unverified', 'partial'}):
+          or current['coverage']['tables']['state'] in {'unverified', 'partial'}
+          or current['coverage']['layout']['state'] in {'problem', 'unverified'}
+          or current['coverage']['package_media']['state'] in {'partial', 'unverified'}):
         coverage_status = 'partial'
     else:
         coverage_status = 'complete'
     current['coverage']['status'] = coverage_status
-    mismatch = 'mismatch' in statuses or current['page_numbers'].get('state') == 'missing' or (persisted_format or {}).get('state') == 'mismatch' or (persisted_tables or {}).get('state') == 'mismatch'
+    mismatch = 'mismatch' in statuses or current['page_numbers'].get('state') == 'missing' or (persisted_format or {}).get('state') == 'mismatch' or (persisted_tables or {}).get('state') == 'mismatch' or current['coverage']['package_media']['state'] == 'mismatch'
     current['review_status'] = 'mismatch' if mismatch else coverage_status
     current['numbering_all_match'] = False if 'mismatch' in statuses else (True if statuses and coverage_status != 'unverified' and paragraph_coverage['state'] == 'complete' and page_coverage['state'] == 'complete' and unread_lists['state'] == 'none' and all(status == 'match' for status in statuses) else None)
     current['summary_text'] = summarize(current)
@@ -1319,8 +1636,6 @@ def to_markdown(review: dict[str, Any]) -> str:
             if len(table_rows) > _MAX_TABLE_ROWS:
                 out += [f'앞 {_MAX_TABLE_ROWS}행만 보여 줍니다. 전체 {len(table_rows)}행의 값은 `review.json`의 `comparison.tables`에 있습니다.', '']
             out += ['| 표 | 셀 | 항목 | 이전 | 이후 |', '|---|---|---|---|---|'] + table_rows[:_MAX_TABLE_ROWS] + ['']
-        else:
-            out += ['- 바뀐 표 없음', '']
         if tables['unchanged']:
             out += [f"- 변경 없는 표 {len(tables['unchanged'])}개: {', '.join(tables['unchanged'])}", '']
     table_state = (coverage or {}).get('tables') or {}
@@ -1339,10 +1654,23 @@ def to_markdown(review: dict[str, Any]) -> str:
                 f"- 번호 문단 {mark_coverage['numbered']}개 중 비교 {mark_coverage['compared']}개, 바뀜 {mark_coverage['changed']}개, 새 번호 {mark_coverage['new']}개, 비교 못함 {mark_coverage['not_compared']}개",
                 '- 서식 값으로 비교한 결과이며, 인쇄된 모양은 미리보기로 확인합니다.' if mark_coverage['compared'] else '- 인쇄된 모양은 미리보기로 확인합니다.',
                 '- 번호 글자·종류·수준 확인과는 별개입니다.', '']
+    layout = (coverage or {}).get('layout') or {}
+    if layout.get('overflow') or layout.get('unverified'):
+        out += ['## 표 너비', '']
+        out += [f'- {_layout_note(row)}' for row in layout.get('overflow') or []]
+        out += [f"- 표 {row['table_id']}: 쪽 안에 드는지 확인하지 못함 ({row.get('reason')})" for row in layout.get('unverified') or []]
+        out.append('')
+    media_line = _media_line((coverage or {}).get('package_media') or {})
+    if media_line:
+        out += ['## 저장 파일의 그림', '', f'- {media_line}', '']
     saved_tables = review.get('persisted_tables')
     if saved_tables:
         words = {'match': '일치', 'partial': '읽은 범위에서 일치', 'mismatch': '불일치', 'unverified': '비교하지 못함'}
         out += ['## 저장된 표 확인', '', f"- 판정: {words[saved_tables['state']]}", f"- 비교한 표: {saved_tables.get('tables_checked')}개 (격자, 병합, 글, 선, 채우기, 너비)"]
+        if saved_tables.get('fills_not_compared'):
+            out.append(f"- 비교하지 못한 채우기: {saved_tables['fills_not_compared']}칸")
+        if saved_tables.get('unverified_tables'):
+            out.append(f"- 비교하지 못한 머리말·꼬리말 표: {', '.join(saved_tables['unverified_tables'])}")
         if saved_tables.get('reason'):
             out.append(f"- 이유: {saved_tables['reason']}")
         if saved_tables.get('mismatches'):

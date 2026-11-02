@@ -541,7 +541,7 @@ class Borders(unittest.TestCase):
 
     def test_a_neighbour_only_partly_on_the_edge_keeps_its_side_and_the_reply_says_so(self) -> None:
         hwp = sample_document()
-        value = ok_result(self, style(hwp, '1015', scope='cell', cell='B2', borders=[{'edges': ['top'], **LINE}]))
+        value = ok_result(self, style(hwp, '1015', scope='cell', cell='B2', over_wider_neighbour=True, borders=[{'edges': ['top'], **LINE}]))
         self.assertEqual(hwp.by_inst('1015').named('A1').border['bottom'], SOLID)
         self.assertEqual(value['changes']['neighbours_not_written'], [{'cell': 'A1', 'side': 'bottom', 'reason': 'wider_than_edge'}])
         hwp = sample_document()

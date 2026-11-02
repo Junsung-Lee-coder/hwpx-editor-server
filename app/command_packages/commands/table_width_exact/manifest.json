@@ -1,0 +1,21 @@
+{
+  "op": "table_width_exact",
+  "version": "local-cli/table-width-exact/v1-package",
+  "summary": "Set one table's column widths exactly, or scale them to the text width on explicit request.",
+  "module": "app.command_packages.commands.table_width_exact.run",
+  "read_only": false,
+  "dirty_default": true,
+  "allowed_keys": [
+    "op",
+    "operation",
+    "label",
+    "table_id",
+    "expected_hash",
+    "expected_page",
+    "expected_rows",
+    "expected_cols",
+    "fit",
+    "column_widths_mm",
+    "confirm_layout"
+  ]
+}

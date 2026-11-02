@@ -78,6 +78,7 @@ _VALIDATION_SAMPLES: dict[str, dict[str, object]] = {
     'table_read': {'table_id': 'tbl:1'},
     'table_edit_exact': {'table_id': 'tbl:1', 'expected_hash': 'sha256:' + 'a' * 24, 'expected_page': 1, 'expected_rows': 2, 'expected_cols': 2, 'action': 'insert_row_below', 'row': 1, 'confirm_layout': True},
     'table_style_exact': {'table_id': 'tbl:1', 'expected_hash': 'sha256:' + 'a' * 24, 'expected_page': 1, 'expected_rows': 2, 'expected_cols': 2, 'scope': 'table', 'fill': 'none', 'confirm_layout': True},
+    'table_width_exact': {'table_id': 'tbl:1', 'expected_hash': 'sha256:' + 'a' * 24, 'expected_page': 1, 'expected_rows': 2, 'expected_cols': 2, 'fit': 'text_width', 'confirm_layout': True},
     'table_create_exact': {'match': 'hello', 'expected_page': 1, 'rows': 2, 'cols': 2, 'confirm_layout': True},
     'paragraph_format_exact': {'match': 'hello', 'expected_page': 1, 'align': 'center', 'confirm_layout': True},
     'paragraph_delete_exact': {'match': 'hello', 'expected_page': 1, 'confirm_remove': True},

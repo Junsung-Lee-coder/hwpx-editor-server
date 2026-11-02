@@ -318,8 +318,8 @@ class OtherFills(SavedParts):
 
     def test_pattern_and_gradation_read_with_their_meaning_from_the_file(self) -> None:
         cells = {item['address']: item for item in self.live_with_fills(self.package())['tbl:1013']['cells']}
-        self.assertEqual(cells['A1']['fill'], {'kind': 'other', 'family': 'pattern', 'meaning': {'style': 'slash', 'face': '#FFFFFF', 'hatch': '#0000FF', 'alpha': 0}})
-        self.assertEqual(cells['B1']['fill'], {'kind': 'other', 'family': 'gradation', 'meaning': {'type': 'linear', 'angle': 90, 'center_x': 0, 'center_y': 0, 'step': 255, 'step_center': 50, 'colors': ['#FF0000', '#0000FF'], 'alpha': 0}})
+        self.assertEqual(cells['B1']['fill'], {'kind': 'other', 'family': 'pattern', 'meaning': {'style': 'slash', 'face': '#FFFFFF', 'hatch': '#0000FF', 'alpha': 0}})
+        self.assertEqual(cells['C1']['fill'], {'kind': 'other', 'family': 'gradation', 'meaning': {'type': 'linear', 'angle': 90, 'center_x': 0, 'center_y': 0, 'step': 255, 'step_center': 50, 'colors': ['#FF0000', '#0000FF'], 'alpha': 0}})
 
     def test_a_live_digest_is_no_difference_and_the_same_meaning_is_a_match(self) -> None:
         path = self.package()
@@ -339,7 +339,7 @@ class OtherFills(SavedParts):
                         {'kind': 'solid', 'color': '#FFFFFF'}):
             with self.subTest(changed=changed):
                 live = self.live(path)
-                row = next(item for item in live if item['table_id'] == 'tbl:1013')['cells'][0]
+                row = next(item for item in live if item['table_id'] == 'tbl:1013')['cells'][1]
                 row['fill'] = changed
                 result = rules.persisted_tables(path, live)
                 self.assertEqual(result['state'], 'mismatch')
@@ -348,7 +348,7 @@ class OtherFills(SavedParts):
     def test_what_cannot_be_read_on_both_sides_is_not_compared_and_is_partial(self) -> None:
         path = self.package()
         live = self.live(path)
-        row = next(item for item in live if item['table_id'] == 'tbl:1013')['cells'][0]
+        row = next(item for item in live if item['table_id'] == 'tbl:1013')['cells'][1]
         row['fill'] = {'kind': 'other', 'family': 'pattern'}
         result = rules.persisted_tables(path, live)
         self.assertEqual(result['state'], 'partial')
@@ -359,7 +359,7 @@ class OtherFills(SavedParts):
         header = (FIXTURES / 'saved_margins.header.xml').read_bytes().replace(b'<hc:winBrush faceColor="#FFFFFF" hatchColor="#0000FF" hatchStyle="SLASH" alpha="0"/>', b'<hc:imgBrush mode="TOTAL"><hc:img binaryItemIDRef="image1"/></hc:imgBrush>')
         path = self.package(header=header)
         live = self.live(path)
-        cell_ = next(item for item in live if item['table_id'] == 'tbl:1013')['cells'][0]
+        cell_ = next(item for item in live if item['table_id'] == 'tbl:1013')['cells'][1]
         self.assertEqual(cell_['fill'], {'kind': 'other', 'family': 'image'})
         result = rules.persisted_tables(path, live)
         self.assertEqual((result['state'], result['fills_not_compared']), ('partial', 1))

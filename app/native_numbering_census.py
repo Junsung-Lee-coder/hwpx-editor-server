@@ -500,8 +500,11 @@ def live_protection_reader(hwp: Any) -> Callable[[], dict[str, Any]]:
         getter = getattr(hwp, 'get_text_file', None)
         if not callable(getter):
             raise CensusError('get_text_file is unavailable on this machine')
-        return parse_hwpml2x_census(getter('HWPML2X', ''))
+        text = getter('HWPML2X', '')
+        read.last_text = text  # What was read can be looked at again with no other native call.
+        return parse_hwpml2x_census(text)
 
+    read.last_text = None
     return read
 
 

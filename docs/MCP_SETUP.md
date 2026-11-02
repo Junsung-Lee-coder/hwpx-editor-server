@@ -186,8 +186,8 @@ GUI에서 범위를 직접 선택해 둘 필요가 없습니다. 명령마다 �
 
 ### 표 찾기와 읽기
 
-- `{"op": "table_inventory"}`: 문서의 모든 표를 `table_id`(예: `tbl:1011`), `page`, `rows`, `cols`, `merged_cells`, `expected_hash`, 표 앞 문장(`before_text`), 앞쪽 셀 글(`first_cells`), 중첩 표면 `nested_in`과 `nested_cell`로 돌려줍니다. 내용이 같은 표도 식별자가 다르므로 구별됩니다.
-- `{"op": "table_read", "table_id": "tbl:1011", "max_cells": 500}`: 셀마다 `address`, `row`, `col`, `row_span`, `col_span`, `text`(문단은 줄바꿈으로 잇고 탭과 연속 공백을 그대로 유지), `paragraphs`(글자 묶음별 글꼴·크기·굵기·기울임·밑줄·글자색과 문단 값), `objects`, `border`(`left`, `right`, `top`, `bottom`마다 `line`, `width_mm`, `color`), `fill`을 돌려줍니다. `max_cells`는 1~2000(기본 2000)이고, 잘리면 `cells_truncated=true`입니다.
+- `{"op": "table_inventory"}`: 문서의 모든 표를 `table_id`(예: `tbl:1011`), `page`, `rows`, `cols`, `merged_cells`, `expected_hash`, 표 앞 문장(`before_text`), 앞쪽 셀 글(`first_cells`), 표 너비와 쪽의 관계(`layout`), 중첩 표면 `nested_in`과 `nested_cell`로 돌려줍니다. 내용이 같은 표도 식별자가 다르므로 구별됩니다. 본문의 표만 나옵니다. 머리말·꼬리말의 표는 이 명령들로 편집하지 않으며(`target_in_header_footer`), 확인(`review`)에서 값을 비교합니다.
+- `{"op": "table_read", "table_id": "tbl:1011", "max_cells": 500}`: 셀마다 `address`, `row`, `col`, `row_span`, `col_span`, `text`(문단은 줄바꿈으로 잇고 탭과 연속 공백을 그대로 유지), `paragraphs`(글자 묶음별 글꼴·크기·굵기·기울임·밑줄·글자색과 문단 값), `objects`(중첩 표 안의 개체까지), `content_sha256`, `border`(`left`, `right`, `top`, `bottom`마다 `line`, `width_mm`, `color`), `fill`을 돌려줍니다. 글은 2000자까지 나오고, 더 길면 `text_truncated=true`입니다. `max_cells`는 1~2000(기본 2000)이고, 잘리면 `cells_truncated=true`입니다.
 
 병합된 셀은 첫 칸의 주소로 부릅니다. A1:B1을 합친 셀은 `A1`이고, `B1`을 지정하면 `cell_covered_by_merge`로 거부합니다.
 
@@ -208,7 +208,7 @@ GUI에서 범위를 직접 선택해 둘 필요가 없습니다. 명령마다 �
 | `split_cell` | `cell`, `split_rows`, `split_cols`(1~20) | 셀 나누기 |
 | `unmerge_cell` | `cell` | 병합 셀을 합쳐진 칸 수대로 나누기 |
 
-삭제할 때는 지워지는 셀 중 내용이 있는 셀을 모두 적어야 합니다: `"expected_removed_cells": [{"address": "A2", "text": "전체 글"}, {"address": "B2", "text": "그림 옆 글", "objects": ["picture"]}]`. `table_read`의 `text`, `objects`와 정확히 같아야 하며 다르면 `removed_content_mismatch`로 거부합니다. 빈 줄을 지울 때는 비워 둡니다. 결과의 `changes.removed_cells`와 `removed_blank_cells`에 지워진 셀이 나옵니다.
+삭제할 때는 지워지는 셀 중 내용이 있는 셀을 모두 적어야 합니다: `"expected_removed_cells": [{"address": "A2", "text": "전체 글"}, {"address": "B2", "text": "그림 옆 글", "objects": ["picture"]}]`. `table_read`의 `text`, `objects`와 정확히 같아야 하며 다르면 `removed_content_mismatch`로 거부합니다. `text`가 잘린 셀은 글 대신 `{"address": "A2", "content_sha256": "..."}`로 적습니다. 이 값은 그 셀의 글, 글자 모양과 개체를 함께 가리키고, 표 해시와 주소에 묶입니다. 중첩 표에 든 그림도 `objects`에 적습니다. 다른 곳에서 함께 쓰는 그림 데이터는 그대로 남고, 마지막으로 쓰던 그림이 지워지면 데이터도 함께 빠집니다. 빈 줄을 지울 때는 비워 둡니다. 결과의 `changes.removed_cells`와 `removed_blank_cells`에 지워진 셀이 나옵니다.
 
 Hancom 13.0.0.3457에서 측정한 결과이며, 결과의 `changes`와 `after`로 그대로 알려 줍니다.
 
@@ -230,19 +230,45 @@ Hancom 13.0.0.3457에서 측정한 결과이며, 결과의 `changes`와 `after`�
  "fill": "#FFF2CC", "confirm_layout": true}
 ```
 
-- `edges`: 대상의 바깥 변 `top`, `bottom`, `left`, `right`, 네 변을 함께 `outline`, 안쪽 선 `inner_horizontal`, `inner_vertical`, 둘을 함께 `inner`, 전부 `all`. 한 변은 한 번만 지정합니다. 안쪽 선이 없는 대상에 안쪽 선을 주면 `edge_not_in_target`입니다.
+- `edges`: 대상의 바깥 변 `top`, `bottom`, `left`, `right`, 네 변을 함께 `outline`, 안쪽 선 `inner_horizontal`, `inner_vertical`, 둘을 함께 `inner`, 전부 `all`. 한 변은 한 번만 지정합니다. `all`과 `inner`는 그 대상에 있는 선만 뜻합니다. 한 셀의 `all`은 네 변이고, 한 행의 `all`은 네 변과 세로 안쪽 선입니다. 묶음 하나가 가리키는 선이 대상에 하나도 없을 때만 `edge_not_in_target`입니다.
 - `line`: `solid`, `dash`, `dot`, `dash_dot`, `dash_dot_dot`, `long_dash`, `circle`, `double`, `slim_thick`, `thick_slim`, `slim_thick_slim`, 그리고 선을 지우는 `none`. 이 열두 값은 Hancom 공식 선 종류 표의 0~11입니다.
 - `width_mm`: 0.1, 0.12, 0.15, 0.2, 0.25, 0.3, 0.4, 0.5, 0.6, 0.7, 1, 1.5, 2, 3, 4, 5. `color`는 `#RRGGBB`입니다. `none`에는 두 값을 주지 않으며, Hancom은 저장된 굵기와 색을 그대로 두고 종류만 없음으로 합니다.
 
 **공유 변.** 맞닿은 두 셀의 경계는 두 셀이 각각 값을 가집니다. 바깥 변을 바꾸면 Hancom이 맞은편 셀의 마주 보는 변도 함께 씁니다. 결과의 `changes.edges`에 행마다 `cell`, `side`, `before`, `after`, `role`(`requested` 또는 `shared_neighbour`)이 있어 어느 셀의 어느 변이 바뀌었는지 볼 수 있습니다. 예외가 하나 있습니다. 맞은편 셀이 그 변보다 넓은 병합 셀이면 그 셀의 값은 그대로이고 `changes.neighbours_not_written`에 나옵니다. 범위가 그 셀의 변 전체를 덮으면 그 셀도 함께 씁니다. 이 밖의 셀이나 변이 바뀌면 성공으로 보고하지 않습니다.
 
+**더 넓은 이웃 아래의 선.** 더 넓은 병합 셀과 마주 보는 변은 두 셀의 선이 겹쳐 인쇄됩니다. 측정한 결과는 다음과 같습니다.
+
+| 요청한 선 (이웃은 0.12mm 실선) | 인쇄 결과 | 처리 |
+|---|---|---|
+| `none` | 이웃의 선이 그대로 보임 | `edge_held_by_wider_neighbour`로 거부 |
+| 이웃과 같은 굵기의 실선 | 절반씩 겹쳐 두 색이 함께 보임 | 거부, `over_wider_neighbour: true`면 실행 |
+| 점선 계열 | 끊긴 곳으로 이웃의 선이 보임 | 거부, `over_wider_neighbour: true`면 실행 |
+| 이웃보다 굵은 실선 | 요청한 선만 보임 | 실행 |
+
+선을 지우려면 넓은 셀의 그 변을 대상으로 합니다. 그러면 그 변을 마주 보는 셀 전체의 선이 함께 지워지며, 일부 구간만 지우는 방법은 없습니다. 이웃의 선이 `none`이면 거부하지 않습니다. `over_wider_neighbour`로 실행하면 결과의 `changes.prints_over`에 함께 인쇄되는 이웃과 그 선이 나옵니다.
+
 ### 채우기
 
 `fill`은 `#RRGGBB` 또는 `none`입니다. 흰색 `#FFFFFF`는 채우기이고 `none`은 채우기 없음이며, `table_read`와 저장 파일에서 구별됩니다. 대상 셀의 글, 서식, 선은 그대로입니다. 무늬·그러데이션·그림 채우기가 있는 셀에는 `fill_kind_unsupported`로 거부합니다. `borders`와 `fill`을 함께 주면 네이티브 동작 두 번이고 Undo 한 번으로 둘 다 되돌아갑니다. 요청한 값이 이미 있으면 네이티브 호출 없이 `result.status`가 `already_set`이고 `dirty=false`입니다.
 
+### 표 너비
+
+표의 `layout`은 너비(`width_hu`, `width_mm`), 본문 폭(`text_width_hu`), 왼쪽 시작(`left_hu`), 오른쪽 끝(`right_edge_hu`), 쪽 폭(`page_width_hu`), 넘친 값(`overflow_hu`, `overflow_mm`, `off_page_mm`), 판정(`status`)을 담습니다. `status`는 `fits`, `past_margin`(본문 오른쪽 여백을 넘음), `off_page`(쪽 밖으로 나가 인쇄에서 잘림), `wider_than_parent`(중첩 표가 담긴 셀의 안쪽 폭보다 넓음), `unverified`(`reason`에 이유)입니다. 글자처럼 취급하지 않는 표, 다단, 제본 여백, 셀 간격, 상대 너비, 표 앞에 글이 있는 문단, 가운데·오른쪽 정렬 문단은 `unverified`입니다.
+
+**열을 넣으면 표가 넓어집니다.** 새 열은 옆 열과 같은 너비로 생기고 다른 열은 줄지 않으므로, 본문 폭을 다 쓰는 표는 쪽 밖으로 나갈 수 있습니다. 응답의 `after.layout`과 `warnings`, 그리고 확인 결과가 표와 쪽을 밝힙니다. 너비는 요청이 있을 때만 바꿉니다.
+
+```json
+{"op": "table_width_exact", "table_id": "tbl:1011", "expected_hash": "sha256:...", "expected_page": 1, "expected_rows": 2, "expected_cols": 5, "fit": "text_width", "confirm_layout": true}
+{"op": "table_width_exact", "table_id": "tbl:1011", "expected_hash": "sha256:...", "expected_page": 1, "expected_rows": 2, "expected_cols": 3, "column_widths_mm": [30, 60, 50], "confirm_layout": true}
+```
+
+- `fit: "text_width"`: 열 비율을 유지한 채 표를 본문 폭에 맞춥니다. `unverified`인 표와 중첩 표는 `table_geometry_unknown`으로 거부합니다.
+- `column_widths_mm`: 모든 격자 열의 너비를 왼쪽부터 줍니다. 병합 셀은 그 열들의 합이 됩니다. 열 수가 다르면 `column_widths_mismatch`, 합이 본문 폭을 넘으면 `table_would_overflow`, 5mm보다 좁은 열은 `column_too_narrow`입니다.
+- 일반 표는 바뀌는 열마다, 병합 셀이 가로지르는 표는 바뀌는 셀마다 네이티브 동작 하나입니다. 응답의 `undo.native_editing_actions`에 개수가 있고, Undo·Redo 한 번으로 전부 되돌립니다. 같은 값이면 호출 없이 `already_set`입니다. 표 전체 너비를 한 번에 바꾸는 네이티브 값은 Hancom이 무시하므로 쓰지 않습니다.
+
 ### 새 표
 
-`{"op": "table_create_exact", "match": "기준 문단의 고유한 문구", "expected_page": 1, "rows": 2, "cols": 3, "confirm_layout": true}`는 그 본문 문단 뒤에 표 문단과 빈 문단 하나를 만듭니다. 결과의 `table`에 다음 편집에 쓸 값이 있습니다. 선택 항목 `cells`로 행별 글을 넣을 수 있습니다. 표 문단은 기준 문단의 문단 모양을 물려받으므로 번호 문단 뒤에는 `target_numbered`로 거부합니다. 표 안, 머리말·꼬리말, 없는 문구, 여러 문단에 있는 문구, 다른 쪽도 거부합니다.
+`{"op": "table_create_exact", "match": "기준 문단의 고유한 문구", "expected_page": 1, "rows": 2, "cols": 3, "confirm_layout": true}`는 그 본문 문단 뒤에 표 문단과 빈 문단 하나를 만듭니다. 결과의 `table`에 다음 편집에 쓸 값이 있습니다. 선택 항목 `cells`로 행별 글을 넣을 수 있습니다. 빈 글은 빈 셀이고, 줄바꿈은 새 문단이 되며, 탭과 연속 공백은 그대로입니다. 그 밖의 제어 문자는 편집 전에 `cells_text_unsupported`로 거부합니다. 표 문단은 기준 문단의 문단 모양을 물려받으므로 번호 문단 뒤에는 `target_numbered`로 거부합니다. 표 안, 머리말·꼬리말, 없는 문구, 여러 문단에 있는 문구, 다른 쪽도 거부합니다.
 
 ### 되돌리기
 
@@ -250,8 +276,20 @@ Hancom 13.0.0.3457에서 측정한 결과이며, 결과의 `changes`와 `after`�
 
 - 병합 셀을 가로지르는 삽입을 되돌리면 격자, 글, 선, 표 해시와 인쇄 결과는 돌아오지만 그 병합 셀에 저장된 높이가 달라 `undo_state_mismatch`로 알립니다.
 - 빈 새 표의 Redo는 표가 돌아오지만 Hancom이 겹침 순서 값을 새로 주어 `redo_state_mismatch`로 알립니다.
+- 이렇게 알릴 때 `confirmation.expected_state.differences`에 표, 셀, 항목, 기록된 값, 현재 값이 나옵니다. 비교에 이미 읽은 내용으로 만들며 네이티브 호출을 더하지 않습니다. 편집이 값을 남기지 못한 경우(문서가 아주 크거나 오래전 편집)에는 `differences_unavailable`입니다.
 - 이렇게 알린 뒤에는 그 지점 너머로 되돌리지 않습니다(`undo_not_counted`). 문서와 세션은 그대로 쓸 수 있습니다.
 - `cells`를 준 새 표는 Undo 단위를 셀 수 없어 `undo_not_counted`로 거부합니다.
+
+### 표 확인 결과
+
+`hwpx_proof`의 `review`에서 표에 관해 읽을 값입니다.
+
+- `coverage.layout`: 넘치는 표(`overflow`)와 확인하지 못한 표(`unverified`)를 표와 쪽으로 밝힙니다. 어느 쪽이든 있으면 `review_status`는 `complete`가 아니고 첫 줄에 이름이 나옵니다.
+- `comparison.tables.changed`: 선, 채우기, 글, 병합, 표 너비(`width`), 셀 너비(`width_changes`), 표 속성(`frame_changes`), 셀 여백·세로 정렬 등(`cell_properties`)을 전후 값으로 보여 줍니다. 표 해시가 바뀌었는데 이름 붙일 값이 없으면 `other_properties=true`이고 `partial`입니다.
+- `persisted_tables`: 저장 파일을 직접 읽어 격자, 병합, 전체 글, 선, 채우기, 표·셀 너비를 비교합니다. 머리말·꼬리말의 표도 비교합니다. 실행 중 문서가 알리지 않은 머리말·꼬리말 표는 `unverified_tables`로 이름을 밝히고 `partial`입니다. 무늬와 그러데이션은 양쪽에서 읽은 값으로 비교하고, 그림 채우기처럼 양쪽 값을 맞출 수 없으면 `fills_not_compared`로 세고 `partial`입니다.
+- `coverage.package_media`: 저장 파일과 원본 파일의 그림 데이터입니다. `complete`, `partial`(어떤 그림도 쓰지 않던 원본 이미지가 저장본에 없음), `removed_by_edit`(이 세션의 삭제로 빠진 그림), `unverified`(참조되던 그림이 빠졌는데 대조할 이전 확인이 없음), `mismatch`(요청 없이 빠진 그림, 데이터 없는 참조), `not_compared`, `not_saved`입니다. Hancom은 어떤 그림도 쓰지 않는 이미지를 문서를 열 때 읽어 들이지 않으므로, 열린 문서만 비교하는 `보존 확인`은 이를 알 수 없습니다.
+
+선과 채우기를 값과 인쇄로 볼 때 다음을 구별합니다. 흰색 `#FFFFFF`와 `none`은 저장 값으로 구별되지만 흰 종이에서는 같게 인쇄됩니다. 이중선과 삼중선은 0.4mm 이하 굵기를 100dpi 미리보기로 보면 한 줄처럼 보일 수 있으므로, 모양을 눈으로 확인하려면 1mm 이상으로 그리거나 PDF를 확대합니다. 이 값들은 저장 값으로 확인합니다.
 
 ### 거부와 결과 불명
 

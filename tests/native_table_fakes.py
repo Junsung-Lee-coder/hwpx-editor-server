@@ -201,6 +201,13 @@ class FakeTableCtrl:
         return FakeAnchor(self.table)
 
 
+class FakePictureCtrl:
+    CtrlID = 'gso'
+
+    def __init__(self) -> None:
+        self.Next: Any = None
+
+
 class TableHwp:
     def __init__(self, body: list[Any], *, pages: dict[str, int] | None = None) -> None:
         self.body = body  # paragraphs (text or para dict) and Tables; a Table holds its own body paragraph.
@@ -274,13 +281,17 @@ class TableHwp:
         if self.head_ctrl_error is not None:
             raise self.head_ctrl_error
         margins = [table for table in (self.header_table, self.footer_table) if table is not None]
-        controls = [FakeTableCtrl(table) for table in [*margins, *self.tables()]]
+        controls = [FakeTableCtrl(table) for table in [*margins, *self.tables()]] + [FakePictureCtrl() for _ in range(self._picture_count())]
         if self.control_id_override is not None:
             for control in controls:
                 control.CtrlID = self.control_id_override
         for left, right in zip(controls, controls[1:]):
             left.Next = right
         return controls[0] if controls else None
+
+    def _picture_count(self) -> int:
+        count = sum(run == 'picture' for table in self.tables() for cell in table.cells for item in cell.paragraphs for run in item['runs'])
+        return count + sum(run == 'picture' for item in self.body if isinstance(item, dict) for run in item['runs'])
 
     @property
     def ParentCtrl(self) -> Any:  # noqa: N802
@@ -776,7 +787,7 @@ class TableHwp:
     def _section_head(self, fills: list[tuple]) -> str:
         head = _SECTION_HEAD
         for key, value in self.page_def.items():
-            head = re.sub(rf'(<PAGEDEF[^>]*\b{key}=")[^"]*"', rf'\g<1>{value}"', head)
+            head = re.sub(rf'(<(?:PAGEDEF|PAGEMARGIN)[^>]*\b{key}=")[^"]*"', rf'\g<1>{value}"', head)
         if self.column_count != 1:
             head = head.replace('<COLDEF Count="1"', f'<COLDEF Count="{self.column_count}"')
         for table, closing in ((self.header_table, '</HEADER>'), (self.footer_table, '</FOOTER>')):
