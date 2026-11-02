@@ -58,6 +58,8 @@ class Cell:
         self.fill: Any = None
         self.margin = (141, 510, 510, 141)  # bottom, left, right, top
         self.vert_align = 'Center'
+        self.dirty = 'false'
+        self.link_list = 0
 
     @property
     def address(self) -> str:
@@ -74,6 +76,7 @@ class Table:
     def __init__(self, inst: str, rows: int, cols: int, cells: list[Cell]) -> None:
         self.inst, self.rows, self.cols, self.cells = inst, rows, cols, cells
         self.treat_as_char, self.cell_spacing, self.zorder, self.page_break, self.width_rel = True, 0, 1, 'Cell', 'Absolute'
+        self.size_height = 9000
 
     def at(self, row: int, col: int) -> Cell | None:
         return next((cell for cell in self.cells if cell.covers(row, col)), None)
@@ -777,12 +780,12 @@ class TableHwp:
             for cell in [item for item in table.ordered() if item.row == row]:
                 key = (*[cell.border[side] for side in SIDES], self._fill_key(cell.fill))
                 body = ''.join(self._para_xml(item, fills) for item in cell.paragraphs)
-                cells += (f'<CELL BorderFill="{fills.index(key) + 1}" ColAddr="{cell.col - 1}" ColSpan="{cell.cs}" Dirty="false" Editable="false" HasMargin="false" Header="false" Height="{cell.height}" Protect="false" '
-                          f'RowAddr="{cell.row - 1}" RowSpan="{cell.rs}" Width="{cell.width}"><CELLMARGIN Bottom="{cell.margin[0]}" Left="{cell.margin[1]}" Right="{cell.margin[2]}" Top="{cell.margin[3]}"/><PARALIST LineWrap="Break" LinkListID="0" LinkListIDNext="0" TextDirection="0" VertAlign="{cell.vert_align}">{body}</PARALIST></CELL>')
+                cells += (f'<CELL BorderFill="{fills.index(key) + 1}" ColAddr="{cell.col - 1}" ColSpan="{cell.cs}" Dirty="{cell.dirty}" Editable="false" HasMargin="false" Header="false" Height="{cell.height}" Protect="false" '
+                          f'RowAddr="{cell.row - 1}" RowSpan="{cell.rs}" Width="{cell.width}"><CELLMARGIN Bottom="{cell.margin[0]}" Left="{cell.margin[1]}" Right="{cell.margin[2]}" Top="{cell.margin[3]}"/><PARALIST LineWrap="Break" LinkListID="{cell.link_list}" LinkListIDNext="0" TextDirection="0" VertAlign="{cell.vert_align}">{body}</PARALIST></CELL>')
             rows.append(f'<ROW>{cells}</ROW>')
         size = max(sum(cell.width for cell in table.cells if cell.row == row) for row in range(1, table.rows + 1))
         return (f'<TABLE BorderFill="1" CellSpacing="{table.cell_spacing}" ColCount="{table.cols}" PageBreak="{table.page_break}" RepeatHeader="true" RowCount="{table.rows}"><SHAPEOBJECT InstId="{table.inst}" Lock="false" NumberingType="Table" TextWrap="TopAndBottom" ZOrder="{table.zorder}">'
-                f'<SIZE Height="9000" HeightRelTo="Absolute" Protect="false" Width="{size}" WidthRelTo="{table.width_rel}"/><POSITION AffectLSpacing="false" AllowOverlap="false" FlowWithText="true" HoldAnchorAndSO="false" HorzAlign="Left" HorzOffset="0" HorzRelTo="Column" TreatAsChar="{"true" if table.treat_as_char else "false"}" VertAlign="Top" VertOffset="0" VertRelTo="Para"/>'
+                f'<SIZE Height="{table.size_height}" HeightRelTo="Absolute" Protect="false" Width="{size}" WidthRelTo="{table.width_rel}"/><POSITION AffectLSpacing="false" AllowOverlap="false" FlowWithText="true" HoldAnchorAndSO="false" HorzAlign="Left" HorzOffset="0" HorzRelTo="Column" TreatAsChar="{"true" if table.treat_as_char else "false"}" VertAlign="Top" VertOffset="0" VertRelTo="Para"/>'
                 '<OUTSIDEMARGIN Bottom="283" Left="283" Right="283" Top="283"/></SHAPEOBJECT><INSIDEMARGIN Bottom="141" Left="510" Right="510" Top="141"/>' + ''.join(rows) + '</TABLE>')
 
     def _section_head(self, fills: list[tuple]) -> str:

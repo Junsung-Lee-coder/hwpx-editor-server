@@ -470,6 +470,16 @@ class HistoryDifferences(unittest.TestCase):
         owned.service.undo()
         self.assertEqual(len([call for call in hwp.calls if call[0] == 'get_text_file']) - without, 2)  # Before and after the Undo, and no more.
 
+    def test_values_a_hash_leaves_out_are_named_when_they_are_what_moved(self) -> None:
+        for damage, row in ((lambda t: setattr(t.named('A2'), 'dirty', 'true'), {'table_id': 'tbl:1015', 'cell': 'A2', 'field': 'dirty', 'recorded': 'false', 'now': 'true'}),
+                            (lambda t: setattr(t.named('A2'), 'link_list', 7), {'table_id': 'tbl:1015', 'cell': 'A2', 'field': 'linklistid', 'recorded': '0', 'now': '7'}),
+                            (lambda t: setattr(t, 'size_height', 7777), {'table_id': 'tbl:1015', 'cell': None, 'field': 'size.height', 'recorded': '9000', 'now': '7777'})):
+            with self.subTest(row=row):
+                hwp = sample_document()
+                owned, _result = self.run_edit(hwp, scope='cell', cell='B2', fill='#FFF2CC')
+                hwp.history_damage = lambda native, change=damage: change(native.by_inst('1015'))
+                self.assertIn(row, owned.service.undo()['confirmation']['expected_state']['differences'])
+
     def test_a_difference_only_in_the_compared_evidence_is_named_too(self) -> None:
         evidence = {'paragraphs': [{'text': '비밀글', 'heading': 'NONE', 'level': 0, 'content_sha256': 'aaaa', 'end_charshape_sha256': 'bbbb'}], 'controls': ['tbl'], 'digests': {'styles_sha256': 's', 'media_sha256': 'm'}}
         table = {'tables': {}, 'paragraphs': []}

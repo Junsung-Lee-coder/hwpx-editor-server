@@ -307,6 +307,15 @@ def _frame_values(table: ET.Element) -> dict[str, Any]:
     return values
 
 
+def _size_values(table: ET.Element) -> dict[str, str]:
+    for child in table:
+        if _name(child) == 'shapeobject':
+            for item in child:
+                if _name(item) == 'size':
+                    return dict(_lower_attrs(item))
+    return {}
+
+
 def _table_size(table: ET.Element) -> tuple[int | None, str]:
     for child in table:
         if _name(child) == 'shapeobject':
@@ -385,6 +394,7 @@ def parse_table_model(text: str) -> dict[str, Any]:
         fact: dict[str, Any] = {'table_id': f'tbl:{inst}', 'inst_id': inst, 'index': len(tables), 'rows': rows, 'cols': cols, 'nested_in': where.get('table'), 'nested_cell': where.get('cell'), 'body_index': where.get('body_index'),
                                 'before_text': before_text, 'frame': _frame_digest(table, resolver), 'frame_values': _frame_values(table), 'scope': now['scope'], 'cells': []}
         fact['size_width'], fact['width_rel'] = _table_size(table)
+        fact['size_values'] = _size_values(table)
         fact['geometry'] = now['geometry']
         fact['holder'] = _holder_facts(holder, position) if holder is not None and where.get('body_index') is not None else None
         tables.append(fact)
@@ -420,6 +430,7 @@ def parse_table_model(text: str) -> dict[str, Any]:
             if name == 'paralist':
                 attrs.append(sorted((key, value) for key, value in _lower_attrs(child).items() if key not in _LIST_VOLATILE))
                 values.update(vertical_align=_attr(child, 'vertalign'), line_wrap=_attr(child, 'linewrap'), text_direction=_attr(child, 'textdirection'))
+                fact['list_ids'] = {key: value for key, value in _lower_attrs(child).items() if key in _LIST_VOLATILE}
                 for item in child:
                     if _name(item) == 'p':
                         rows.append(read_paragraph(item, table, chain, {'table': table['table_id'], 'cell': fact['address']}, depth + 1))
@@ -437,6 +448,7 @@ def parse_table_model(text: str) -> dict[str, Any]:
         fact['tables'] = [inst for item in rows for inst in item['tables']]
         fact['content'] = _digest([item['digest'] for item in rows])[:24]
         fact['attrs'] = _digest(attrs)[:16]
+        fact['dirty'] = _attr(cell, 'dirty')
         fact['attr_values'] = values
         fact['blank'] = len(rows) == 1 and not rows[0]['atoms']
         return fact
@@ -1689,8 +1701,8 @@ def state_detail(model: Mapping[str, Any], evidence: Mapping[str, Any] | None = 
     return {
         'evidence': evidence_detail(evidence) if evidence is not None else None,
         'tables': {table['table_id']: {
-            'rows': table['rows'], 'cols': table['cols'], 'width_hu': table['size_width'], 'frame': table['frame'], 'frame_values': table['frame_values'],
-            'cells': {cell['address']: {'row_span': cell['row_span'], 'col_span': cell['col_span'], 'width': cell['width'], 'height': cell['height'], 'fill': cell['fill'].get('color') or cell['fill'].get('family') or cell['fill']['kind'], 'attrs': cell['attrs'], 'rest': cell['rest'], 'content': cell['content'],
+            'rows': table['rows'], 'cols': table['cols'], 'width_hu': table['size_width'], 'frame': table['frame'], 'frame_values': table['frame_values'], 'size': {f'size.{key}': value for key, value in table['size_values'].items() if key != 'width'},
+            'cells': {cell['address']: {'row_span': cell['row_span'], 'col_span': cell['col_span'], 'width': cell['width'], 'height': cell['height'], 'fill': cell['fill'].get('color') or cell['fill'].get('family') or cell['fill']['kind'], 'attrs': cell['attrs'], 'rest': cell['rest'], 'content': cell['content'], 'dirty': cell['dirty'], **cell.get('list_ids', {}),
                                         **{f'border.{side}': _line_text(cell['border'][side]) for side in SIDES}} for cell in table['cells']},
         } for table in tables},
         'paragraphs': [row['digest'][:16] for row in model['paragraphs']],
@@ -1715,6 +1727,9 @@ def detail_differences(recorded: Mapping[str, Any], now: Mapping[str, Any]) -> l
         for name in sorted(set(old['frame_values']) | set(new['frame_values'])):
             if old['frame_values'].get(name) != new['frame_values'].get(name):
                 row(table_id, None, name, old['frame_values'].get(name), new['frame_values'].get(name))
+        for name in sorted(set(old['size']) | set(new['size'])):
+            if old['size'].get(name) != new['size'].get(name):
+                row(table_id, None, name, old['size'].get(name), new['size'].get(name))
         if old['frame'] != new['frame'] and old['frame_values'] == new['frame_values']:
             row(table_id, None, 'frame', old['frame'], new['frame'])
         for address in sorted(set(old['cells']) | set(new['cells'])):
