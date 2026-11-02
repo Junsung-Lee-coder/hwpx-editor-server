@@ -1119,7 +1119,10 @@ def _media_comparison(source: dict[str, Any], saved: dict[str, Any]) -> dict[str
     return {
         'referenced_source': len(source_refs), 'referenced_saved': len(saved_refs),
         'referenced_lost': sum(1 for value in source_refs.values() if value and value not in kept),
-        'referenced_lost_payloads': sorted({value for value in source_refs.values() if value and value not in kept}),
+        # Keep one identity per lost package reference, just like referenced_lost.
+        # Distinct IDs can reach identical bytes; deduplicating only this list
+        # hides an unrelated missing survivor behind a count mismatch.
+        'referenced_lost_payloads': sorted(value for value in source_refs.values() if value and value not in kept),
         'unreferenced_lost': sum(1 for value in source.get('unreferenced_bindata', []) if value not in saved_payloads),
         'dangling_saved': sum(1 for value in saved_refs.values() if value is None),
         'all_bindata_identical': sorted(source['bindata'].values()) == sorted(saved['bindata'].values()),

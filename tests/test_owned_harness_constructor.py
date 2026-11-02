@@ -7,6 +7,7 @@ process baseline present it still refuses this harness's fake constructor, here 
 from __future__ import annotations
 
 import os
+import threading
 import unittest
 from unittest.mock import patch
 
@@ -21,6 +22,15 @@ class Harness(unittest.TestCase):
             owned = Owned(self, sample_document())
         self.assertTrue(owned.session._thread.is_alive())
         self.assertIsNone(getattr(owned.session, '_native_close_owner', None))
+
+    def test_refused_fake_constructor_releases_its_test_only_worker(self) -> None:
+        before = set(threading.enumerate())
+        negative = type(self)('test_with_a_process_baseline_the_production_guard_still_refuses_the_fake_constructor')
+        result = unittest.TestResult()
+        negative.run(result)
+        self.assertTrue(result.wasSuccessful(), result.errors + result.failures)
+        leaked = [t.name for t in threading.enumerate() if t not in before and t.name.startswith('local-cli-live-')]
+        self.assertEqual(leaked, [], 'the fake-only negative control left an owning thread behind')
 
     def test_with_a_process_baseline_the_production_guard_still_refuses_the_fake_constructor(self) -> None:
         with patch.object(Owned, 'native_baseline', staticmethod(lambda: frozenset())):

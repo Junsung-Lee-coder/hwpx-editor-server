@@ -623,6 +623,26 @@ class Media(SavedParts):
         media = self.compare(source, self.hwpx('b', referenced=['image2'], files={'BinData/image2.png': b'second'}))['media']
         self.assertEqual(media['referenced_lost_payloads'], [hashlib.sha256(self.PNG).hexdigest()])
 
+    def test_duplicate_package_payloads_do_not_hide_another_lost_picture(self) -> None:
+        source = self.hwpx('duplicate-source', referenced=['image1', 'image2', 'image3'], files={
+            'BinData/image1.png': self.PNG, 'BinData/image2.png': self.PNG, 'BinData/image3.png': b'second'})
+        a, b = hashlib.sha256(self.PNG).hexdigest(), hashlib.sha256(b'second').hexdigest()
+        for name, data, expected, unexplained in (
+            ('corrupt-survivor', b'wrong', 'mismatch', [b]),
+            ('kept-survivor', b'second', 'removed_by_edit', []),
+        ):
+            with self.subTest(name=name):
+                saved = self.hwpx(name, referenced=['image3'], files={'BinData/image3.png': data})
+                comparison = self.compare(source, saved)
+                output = {'retrieved': True, 'path': str(saved), 'compared_with_source': comparison}
+                review = self.identified(output, [a, a, b], [b])
+                media = review['coverage']['package_media']
+                self.assertEqual(media['state'], expected)
+                self.assertEqual(media['unexplained_lost'], unexplained)
+                self.assertEqual(media['removed_by_edit'], 2)
+                self.assertEqual(len(comparison['media']['referenced_lost_payloads']), comparison['media']['referenced_lost'])
+                self.assertEqual(review['review_status'] == 'mismatch', expected == 'mismatch')
+
     def test_a_dangling_reference_is_a_mismatch(self) -> None:
         self.assertEqual(self.review_with(self.saved(dangling_saved=1))['review_status'], 'mismatch')
 

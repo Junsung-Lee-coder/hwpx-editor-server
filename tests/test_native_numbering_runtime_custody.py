@@ -137,10 +137,13 @@ class Owned:
         (root / 'session').mkdir()
         self.root = root / 'session'
         self.manager = rt.LocalCliRuntimeManager()
-        self.manager.open_session(session_id=session_id, session_root=self.root, working_copy_path=root / 'wc.hwpx', source_filename='document.hwpx')
-        self.session = self.manager._sessions[session_id]
-        # Registered after stack.close so the final-release adapter runs while the fakes are still patched.
+        # Register before start: a refused constructor deliberately retains its
+        # owning thread too. Release only this fake SDK after all assertions.
         case.addCleanup(self.final_release)
+        try:
+            self.manager.open_session(session_id=session_id, session_root=self.root, working_copy_path=root / 'wc.hwpx', source_filename='document.hwpx')
+        finally:
+            self.session = self.manager._sessions.get(session_id)
         self.service = self._make_service(protection, real_execute_live)
 
     def arm(self, action, make_exc=None, exploding=False, ret=_UNSET):
@@ -150,6 +153,8 @@ class Owned:
     def final_release(self):
         """TEST-ONLY adapter, run after every assertion, so the fake owning thread can settle. Not a production path."""
         session = self.session
+        if session is None:
+            return
         if session._thread.is_alive():
             session._allow_native_cleanup = True
             # Fake-only release after assertions. The real wrapper has no
