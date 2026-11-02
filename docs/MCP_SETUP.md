@@ -83,6 +83,12 @@ $mcpProcess = Start-Process -FilePath '.mcp-venv\Scripts\python.exe' -ArgumentLi
 
 거부되면 세션은 보류되지 않고 저장하지 않은 이전 변경도 그대로 남습니다. 실제 인쇄된 번호는 `hwpx_proof`의 `review`가 PDF에서 확인합니다.
 
+## 보호된 편집 묶음의 보조 관찰
+
+표 읽기·편집·생성, 정확한 글자·문단 서식, 문단 삽입·삭제와 번호 명령이 있는 묶음은 보조 커서/문서 snapshot을 추가로 읽지 않습니다. 응답의 `before`/`after`에 `observation_status=omitted_guarded_envelope`가 표시되며, 생략된 문서 변경 상태는 `null`이지 깨끗하다는 증거가 아닙니다. 명령 자체의 대상·변경 전후·문서 보존 증거는 그대로 제공됩니다. 이전 저장 전 변경도 유지합니다.
+
+이 묶음 안의 명시적 `where`는 엄격하게 읽은 커서·선택만 `partial_guarded_cursor`로 반환하며, 서식·주변 글·문서·쪽·셀 관찰의 생략을 명시합니다. 독립 `where`의 기존 상세 관찰은 유지됩니다. 기술 실패 뒤에는 다음 묶음 명령이나 진단용 SDK 읽기를 실행하지 않고 실제 편집 세션을 보류합니다.
+
 ## 번호 문단 편집
 
 번호 체계 `1.` → `가.` → `1)` → `가)`는 `official_numbering_apply`로 지정합니다. 번호는 Hancom이 매기므로 문단을 넣거나 지우면 뒤따르는 번호가 자동으로 다시 매겨집니다.
