@@ -266,6 +266,68 @@ class Lines(unittest.TestCase):
         refused(self, edit(hwp, '1015', 'delete_row', row=1, count=2, expected_removed_cells=[]), 'merged_cell_crosses_lines', hwp)
 
 
+class OuterEdge(unittest.TestCase):
+    FRAME = {'edges': ['outline'], 'line': 'double', 'width_mm': 0.5, 'color': '#333333'}
+    DOUBLE = ('DoubleSlim', '0.5mm', 0x333333)
+
+    def framed(self) -> TableHwp:
+        hwp = sample_document()
+        ok_result(self, style(hwp, '1012', scope='table', borders=[self.FRAME]))
+        return hwp
+
+    def test_a_new_line_past_each_edge_takes_the_frame_and_the_old_line_takes_its_other_side(self) -> None:
+        cases = [('insert_row_below', {'row': 5}, 'A5', 'bottom', 'A6'), ('insert_row_above', {'row': 1}, 'A2', 'top', 'A1'), ('insert_col_right', {'col': 4}, 'D1', 'right', 'E1'), ('insert_col_left', {'col': 1}, 'B1', 'left', 'A1')]
+        for action, where, old_line, side, new_line in cases:
+            with self.subTest(action=action):
+                hwp = self.framed()
+                value = ok_result(self, edit(hwp, '1012', action, **where))
+                table = hwp.by_inst('1012')
+                self.assertEqual(table.named(old_line).border[side], SOLID)
+                self.assertEqual(table.named(new_line).border[side], self.DOUBLE)
+                moved = {(row['cell'], row['side']) for row in value['changes']['outer_edge_moved']}
+                self.assertIn((old_line, side), moved)
+
+    def test_a_line_inside_the_table_moves_no_frame(self) -> None:
+        hwp = self.framed()
+        value = ok_result(self, edit(hwp, '1012', 'insert_row_below', row=2))
+        self.assertEqual(value['changes']['outer_edge_moved'], [])
+
+    def test_several_new_lines_past_the_edge(self) -> None:
+        hwp = self.framed()
+        ok_result(self, edit(hwp, '1012', 'insert_row_below', row=5, count=2))
+        table = hwp.by_inst('1012')
+        self.assertEqual(table.named('A5').border['bottom'], SOLID)
+        self.assertEqual(table.named('A7').border['bottom'], self.DOUBLE)
+
+    def test_a_deleted_edge_line_hands_its_frame_on(self) -> None:
+        cases = [('delete_row', {'row': 5}, 'A4', 'bottom', [f'{c}5' for c in 'ABCD']), ('delete_row', {'row': 1}, 'A1', 'top', [f'{c}1' for c in 'ABCD']), ('delete_col', {'col': 4}, 'C1', 'right', [f'D{r}' for r in range(1, 6)]), ('delete_col', {'col': 1}, 'A1', 'left', [f'A{r}' for r in range(1, 6)])]
+        for action, where, new_edge, side, cells in cases:
+            with self.subTest(action=action, where=where):
+                hwp = self.framed()
+                value = ok_result(self, edit(hwp, '1012', action, expected_removed_cells=[{'address': cell, 'text': cell} for cell in cells], **where))
+                self.assertEqual(hwp.by_inst('1012').named(new_edge).border[side], self.DOUBLE)
+                self.assertTrue(value['changes']['outer_edge_moved'])
+
+    def test_several_deleted_edge_lines_hand_on_the_outermost_frame(self) -> None:
+        hwp = self.framed()
+        cells = [f'{col}{row}' for row in (4, 5) for col in 'ABCD']
+        ok_result(self, edit(hwp, '1012', 'delete_row', row=4, count=2, expected_removed_cells=[{'address': cell, 'text': cell} for cell in cells]))
+        self.assertEqual(hwp.by_inst('1012').named('A3').border['bottom'], self.DOUBLE)
+
+    def test_a_deleted_inner_line_moves_no_frame(self) -> None:
+        hwp = self.framed()
+        value = ok_result(self, edit(hwp, '1012', 'delete_row', row=3, expected_removed_cells=[{'address': f'{c}3', 'text': f'{c}3'} for c in 'ABCD']))
+        self.assertEqual(value['changes']['outer_edge_moved'], [])
+
+    def test_a_tall_cell_on_the_edge_follows_the_same_rule(self) -> None:
+        hwp = sample_document()
+        ok_result(self, style(hwp, '1015', scope='table', borders=[self.FRAME]))
+        ok_result(self, edit(hwp, '1015', 'insert_row_below', row=3))
+        table = hwp.by_inst('1015')
+        self.assertEqual(table.named('A2').border['bottom'], table.named('A2').border['top'])
+        self.assertEqual(table.named('A4').border['bottom'], self.DOUBLE)
+
+
 class MergeAndSplit(unittest.TestCase):
     def test_merging_text_keeps_every_paragraph_in_reading_order_with_its_styles(self) -> None:
         hwp = sample_document()

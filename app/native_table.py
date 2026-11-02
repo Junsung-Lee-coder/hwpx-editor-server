@@ -16,10 +16,12 @@ CellFill changes the fill alone only through the GetDefault set: a sparse set re
 colour is a fill, white included, and type 0 removes the fill altogether.
 
 TableInsertRowColumn with Side 0 left, 1 right, 2 above, 3 below makes Count lines in one action and one Undo; a new line repeats the
-merged shape and the border and fill of the line it was made from. The per-side insert actions ignore Count. TableDeleteRow and
+merged shape and the border and fill of the line it was made from. Past the table's edge the new line takes the frame, and the old
+line's side there takes the value of its other side. The per-side insert actions ignore Count. TableDeleteRow and
 TableDeleteColumn work on the caret's line and do nothing on a block; TableDeleteCell on a block of whole lines removes them in one
 action. A line through a merged cell shortens that cell and keeps its content, and a line holding the merged cell's first slot leaves
-it where it was. A table's last line cannot be deleted.
+it where it was. A deleted line at the table's edge hands that edge's values to the cells that become the edge. A table's last line
+cannot be deleted.
 
 TableMergeCell joins the paragraphs of its cells in reading order with their styles. A cell holding one blank paragraph adds nothing.
 The merged cell takes the first cell's border and fill, and a grid line no cell starts on any more disappears, so a merge can reduce
@@ -669,7 +671,7 @@ def _whole_cell(table: Mapping[str, Any], at: tuple[int, int]) -> dict[str, Any]
 # What a structure edit must produce. An entry says where each cell must end up and what must hold there.
 
 def _kept(cell: Mapping[str, Any], row: int, col: int, row_span: int, col_span: int) -> dict[str, Any]:
-    return {'kind': 'kept', 'source': cell, 'row': row, 'col': col, 'row_span': row_span, 'col_span': col_span, 'exact_width': (row_span, col_span) == (cell['row_span'], cell['col_span'])}
+    return {'kind': 'kept', 'source': cell, 'row': row, 'col': col, 'row_span': row_span, 'col_span': col_span, 'exact_width': (row_span, col_span) == (cell['row_span'], cell['col_span']), 'border': {}}
 
 
 def _new(row: int, col: int, row_span: int, col_span: int, source: Mapping[str, Any], kind: str = 'new') -> dict[str, Any]:
@@ -726,6 +728,17 @@ def _plan_insert(table: Mapping[str, Any], request: Mapping[str, Any]) -> dict[s
         entries.append(_kept(cell, where['row'], where['col'], where['row_span'], where['col_span']))
         if start <= source_line < start + length and not (start < at < start + length):
             mirrored.append(cell)
+    moved_edges: list[dict[str, Any]] = []
+    outer_side = {0: 'left', 1: 'right', 2: 'top', 3: 'bottom'}[side]
+    if (before and at == 1) or (not before and at == total + 1):
+        # The frame goes to the new line. The old line's side there takes the value of its other side.
+        for entry in entries:
+            cell = entry['source']
+            if cell in mirrored:
+                value = cell['border'][_OPPOSITE[outer_side]]
+                entry['border'][outer_side] = value
+                if value != cell['border'][outer_side]:
+                    moved_edges.append({'cell': cell_address(entry['row'], entry['col']), 'side': outer_side, 'before': cell['border'][outer_side], 'after': value})
     added: list[str] = []
     for number in range(count):
         for cell in mirrored:
@@ -736,7 +749,7 @@ def _plan_insert(table: Mapping[str, Any], request: Mapping[str, Any]) -> dict[s
     rows, cols = (table['rows'] + count, table['cols']) if on_rows else (table['rows'], table['cols'] + count)
     caret_after = (caret['row'] + count, caret['col']) if side == 2 else (caret['row'], caret['col'] + count) if side == 0 else (caret['row'], caret['col'])
     return {'action': request['action'], 'kind': 'insert', 'rows': rows, 'cols': cols, 'entries': entries, 'caret': caret, 'native': ('insert', side, count), 'caret_after': caret_after,
-            'changes': {'inserted_lines': count, 'line_kind': 'row' if on_rows else 'column', 'new_cells': added, 'widened_cells': [entry['source']['address'] for entry in entries if entry['kind'] == 'kept' and (entry['row_span'], entry['col_span']) != (entry['source']['row_span'], entry['source']['col_span'])]}}
+            'changes': {'inserted_lines': count, 'line_kind': 'row' if on_rows else 'column', 'new_cells': added, 'outer_edge_moved': moved_edges[:MAX_REPORT_ROWS], 'widened_cells': [entry['source']['address'] for entry in entries if entry['kind'] == 'kept' and (entry['row_span'], entry['col_span']) != (entry['source']['row_span'], entry['source']['col_span'])]}}
 
 
 def _plan_delete(table: Mapping[str, Any], request: Mapping[str, Any]) -> dict[str, Any]:
@@ -753,6 +766,10 @@ def _plan_delete(table: Mapping[str, Any], request: Mapping[str, Any]) -> dict[s
     entries: list[dict[str, Any]] = []
     removed: list[dict[str, Any]] = []
     shortened: list[str] = []
+    moved_edges: list[dict[str, Any]] = []
+    at_edge = first == 1 or last == total + 1
+    outer_side = ('top' if on_rows else 'left') if first == 1 else ('bottom' if on_rows else 'right')
+    outer_line, inner_line = (1, last) if first == 1 else (total, first - 1)
     for cell in table['cells']:
         start, end = cell[axis], cell[axis] + cell[span]
         if start >= first and end <= last:
@@ -764,7 +781,18 @@ def _plan_delete(table: Mapping[str, Any], request: Mapping[str, Any]) -> dict[s
         where[axis] = start if start < first else first if start < last else start - count
         if remaining != cell[span]:
             shortened.append(cell['address'])
-        entries.append(_kept(cell, where['row'], where['col'], where['row_span'], where['col_span']))
+        entry = _kept(cell, where['row'], where['col'], where['row_span'], where['col_span'])
+        if at_edge and start <= inner_line < end:
+            # The cells that become the edge take the deleted edge's values, side by side.
+            sources = [_covering(table, *((outer_line, slot) if on_rows else (slot, outer_line))) for slot in range(cell[other], cell[other] + cell[other_span])]
+            values = [item['border'][outer_side] for item in sources if item is not None and not (item[axis] <= inner_line < item[axis] + item[span])]
+            if values and all(value == values[0] for value in values):
+                entry['border'][outer_side] = values[0]
+                if values[0] != cell['border'][outer_side]:
+                    moved_edges.append({'cell': cell_address(entry['row'], entry['col']), 'side': outer_side, 'before': cell['border'][outer_side], 'after': values[0]})
+            elif values:
+                entry['border'][outer_side] = None  # Several values along one side: which one it took is not predicted.
+        entries.append(entry)
     if count == 1:
         candidates = [cell for cell in table['cells'] if cell[axis] == first and cell[span] == 1 and cell in removed]
         if not candidates:
@@ -794,7 +822,7 @@ def _plan_delete(table: Mapping[str, Any], request: Mapping[str, Any]) -> dict[s
     entries, rows, cols = _collapsed(entries, *((table['rows'] - count, table['cols']) if on_rows else (table['rows'], table['cols'] - count)))
     return {'action': request['action'], 'kind': 'delete', 'rows': rows, 'cols': cols, 'entries': entries, 'caret': caret, 'native': native, 'rect': rect, 'removed_objects': [name for cell in removed for name in cell['objects']],
             'changes': {'deleted_lines': count, 'line_kind': 'row' if on_rows else 'column', 'removed_cells': [{key: item[key] for key in ('address', 'text')} | ({'objects': item['objects']} if item['objects'] else {}) for item in stated],
-                        'removed_blank_cells': [cell['address'] for cell in removed if cell['blank']], 'shortened_cells': shortened}}
+                        'removed_blank_cells': [cell['address'] for cell in removed if cell['blank']], 'shortened_cells': shortened, 'outer_edge_moved': moved_edges[:MAX_REPORT_ROWS]}}
 
 
 def _plan_merge(table: Mapping[str, Any], request: Mapping[str, Any]) -> dict[str, Any]:
@@ -924,9 +952,13 @@ def _entry_problems(where: str, want: Mapping[str, Any], got: Mapping[str, Any])
     if kind == 'kept':
         if got['content'] != source['content']:
             problems.append(f'{where} does not hold the content of {source["address"]}')
-        for name in ('border', 'fill', 'rest', 'attrs'):
+        for name in ('fill', 'rest', 'attrs'):
             if got[name] != source[name]:
                 problems.append(f'{where} changed its {name}')
+        for side in SIDES:
+            expected = want['border'].get(side, source['border'][side])
+            if expected is not None and got['border'][side] != expected:
+                problems.append(f'{where} changed its {side} line')
         if want['exact_width'] and got['width'] != source['width']:
             problems.append(f'{where} changed its width')
     elif kind == 'merged':

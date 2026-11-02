@@ -5,8 +5,9 @@ its position; set_pos ends a block; a block grows from its first cell by TableRi
 cell occupies the next slot, and a cell it touches is taken whole; a sparse CellBorder treats BorderType* as the outer edges of
 the block and TypeHorz/TypeVert as its inner lines, writes the shared side of a neighbour only when that neighbour's whole side
 lies on the edge, and ignores BorderColorLeft because the item is spelled BorderCorlorLeft; a sparse CellFill does nothing and the
-GetDefault set writes the fill alone; TableInsertRowColumn makes all its lines in one action, mirroring the source line, and ignores
-nothing else; TableDeleteRow on a block does nothing while TableDeleteCell on a whole-line block removes the lines; a merge joins
+GetDefault set writes the fill alone; TableInsertRowColumn makes all its lines in one action, mirroring the source line; a new line
+past the table's edge takes the frame, and the old line's side there takes the value of its other side; a deleted line at the table's
+edge hands its frame to the line that becomes the edge; TableDeleteRow on a block does nothing while TableDeleteCell on a whole-line block removes the lines; a merge joins
 the paragraphs in reading order, drops a cell that is one blank paragraph, takes the first cell's border and fill and collapses a
 line no cell starts on; a split leaves everything in the first part and divides width equally. One native edit is one Undo.
 Not Hancom evidence.
@@ -26,6 +27,7 @@ _SECTION_HEAD = _CAPTURED[_CAPTURED.index('<SECDEF', _BODY_START):_CAPTURED.inde
 _PICTURE = re.search(r'<PICTURE .*?</PICTURE>', _CAPTURED, re.S).group(0)
 SOLID = ('Solid', '0.12mm', 0)
 SIDES = ('left', 'right', 'top', 'bottom')
+_OUTER_SIDE = {0: 'left', 1: 'right', 2: 'top', 3: 'bottom'}
 _OPPOSITE = {'left': 'right', 'right': 'left', 'top': 'bottom', 'bottom': 'top'}
 LINE_NAMES = {0: 'None', 1: 'Solid', 2: 'Dash', 3: 'Dot', 4: 'DashDot', 5: 'DashDotDot', 6: 'LongDash', 7: 'Circle', 8: 'DoubleSlim', 9: 'SlimThick', 10: 'ThickSlim', 11: 'SlimThickSlim'}
 WIDTH_NAMES = ('0.1mm', '0.12mm', '0.15mm', '0.2mm', '0.25mm', '0.3mm', '0.4mm', '0.5mm', '0.6mm', '0.7mm', '1.0mm', '1.5mm', '2.0mm', '3.0mm', '4.0mm', '5.0mm')
@@ -256,6 +258,7 @@ class TableHwp:
         return self.pages.get(self.table.inst, 1) if self.table is not None else self._anchor_page
 
     _anchor_page = 1
+    _walk_row = 1
 
     def is_cell(self) -> bool:
         return self.cell is not None
@@ -332,7 +335,9 @@ class TableHwp:
             self.cell = self.table.at(1, self.cell.col)
             return True
         if name == 'TableRightCell':
-            return self._move(self.cell.row, self.cell.col + self.cell.cs)
+            # Measured: a walk re-enters a tall cell once per row it covers and goes on along that row.
+            row = self._walk_row if self.cell.row <= self._walk_row < self.cell.row + self.cell.rs else self.cell.row
+            return self._move(row, self.cell.col + self.cell.cs)
         if name == 'TableLowerCell':
             return self._move(self.cell.row + self.cell.rs, self.cell.col)
         if name == 'TableCellBlock':
@@ -355,6 +360,7 @@ class TableHwp:
         if row > table.rows:
             return False
         self.cell = table.at(row, col)
+        self._walk_row = row
         if self.block:
             self.block = (self.block[0], self.cell)
         return True
@@ -530,6 +536,7 @@ class TableHwp:
                 setattr(cell, axis, start + count)
             elif start + getattr(cell, span) > at:
                 setattr(cell, span, getattr(cell, span) + count)
+        outer = _OUTER_SIDE[side] if (at == 1 and side in {0, 2}) or (at == (table.rows if on_rows else table.cols) + 1 and side in {1, 3}) else None
         for number in range(count):
             for model in mirrored:
                 start = getattr(model, axis)
@@ -544,6 +551,9 @@ class TableHwp:
                 setattr(new, other_span, getattr(model, other_span))
                 new.border, new.fill = dict(model.border), copy.deepcopy(model.fill)
                 table.cells.append(new)
+        if outer is not None:
+            for model in mirrored:
+                model.border[outer] = model.border[_OPPOSITE[outer]]
         if on_rows:
             table.rows += count
         else:
@@ -553,6 +563,17 @@ class TableHwp:
         table = self.table
         span, total = ('rs', 'rows') if axis == 'row' else ('cs', 'cols')
         last = first + count
+        lines = getattr(table, total)
+        other = 'col' if axis == 'row' else 'row'
+        if first == 1 or last == lines + 1:
+            side = ('top' if axis == 'row' else 'left') if first == 1 else ('bottom' if axis == 'row' else 'right')
+            outer_line = 1 if first == 1 else lines
+            inner_line = last if first == 1 else first - 1
+            for cell in table.cells:
+                if getattr(cell, axis) <= inner_line < getattr(cell, axis) + getattr(cell, span):
+                    removed = table.at(*((outer_line, cell.col) if axis == 'row' else (cell.row, outer_line)))
+                    if removed is not None and not (getattr(removed, axis) <= inner_line < getattr(removed, axis) + getattr(removed, span)):
+                        cell.border[side] = removed.border[side]
         kept: list[Cell] = []
         for cell in table.cells:
             start, end = getattr(cell, axis), getattr(cell, axis) + getattr(cell, span)
