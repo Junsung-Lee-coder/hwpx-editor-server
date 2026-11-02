@@ -47,8 +47,6 @@ the table's stored SIZE behind its cells now and then (seen once as Width 45000 
 """
 from __future__ import annotations
 
-import base64
-import binascii
 import hashlib
 import json
 import math
@@ -56,7 +54,7 @@ import re
 from typing import Any, Callable, Mapping
 import xml.etree.ElementTree as ET
 
-from app import native_format as nf
+from app import native_format as nf, native_numbering_census
 from app.native_numbering import (
     ControlEnumerationUnproven,
     NativeNumberingInputError,
@@ -337,20 +335,10 @@ def _section_geometry(section: ET.Element) -> dict[str, Any] | None:
             'gutter': _int(_attr(margin, 'gutter'), -1), 'columns': sorted({_int(_attr(item, 'count'), 1) for item in section.iter() if _name(item) == 'coldef'} or {1})}
 
 
-def _payload_identity(text: str | None) -> str | None:
-    """The digest of the data itself. Measured: the live text holds it in base64 and the saved package holds the same bytes, so the two
-    digests are one identity. Text that is not base64 has none."""
-    try:
-        data = base64.b64decode(''.join((text or '').split()), validate=True)
-    except (binascii.Error, ValueError):
-        return None
-    return hashlib.sha256(data).hexdigest() if data else None
-
-
 def _picture_payloads(root: ET.Element, body: ET.Element) -> list[str | None]:
     """The data behind each picture of the document, by what it refers to: a picture that keeps its reference may still have lost what it pointed at."""
     items = [_attr(item, 'bindata') for item in root.iter() if _name(item) == 'binitem']
-    data = {(_attr(item, 'id') or '').strip(): _payload_identity(item.text) for item in root.iter() if _name(item) == 'bindata'}
+    data = {(_attr(item, 'id') or '').strip(): native_numbering_census.payload_identity(item.text) for item in root.iter() if _name(item) == 'bindata'}
     payloads: list[str | None] = []
     for picture in body.iter():
         if _name(picture) != 'picture':
