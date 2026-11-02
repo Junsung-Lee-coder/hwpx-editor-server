@@ -186,7 +186,7 @@ GUI에서 범위를 직접 선택해 둘 필요가 없습니다. 명령마다 �
 
 ### 표 찾기와 읽기
 
-- `{"op": "table_inventory"}`: 문서의 모든 표를 `table_id`(예: `tbl:1011`), `page`, `rows`, `cols`, `merged_cells`, `expected_hash`, 표 앞 문장(`before_text`), 앞쪽 셀 글(`first_cells`), 표 너비와 쪽의 관계(`layout`), 중첩 표면 `nested_in`과 `nested_cell`로 돌려줍니다. 내용이 같은 표도 식별자가 다르므로 구별됩니다. 본문의 표만 나옵니다. 머리말·꼬리말의 표는 이 명령들로 편집하지 않으며(`target_in_header_footer`), 확인(`review`)에서 값을 비교합니다.
+- `{"op": "table_inventory"}`: 문서의 모든 표를 `table_id`(예: `tbl:1011`), `page`, `rows`, `cols`, `merged_cells`, `expected_hash`, 표 앞 문장(`before_text`), 앞쪽 셀 글(`first_cells`), 표 너비와 쪽의 관계(`layout`), 표에 저장된 크기(`stored_size`의 `width_hu`, `height_hu`), 중첩 표면 `nested_in`과 `nested_cell`로 돌려줍니다. 내용이 같은 표도 식별자가 다르므로 구별됩니다. 본문의 표만 나옵니다. 머리말·꼬리말의 표는 이 명령들로 편집하지 않으며(`target_in_header_footer`), 확인(`review`)에서 값을 비교합니다.
 - `{"op": "table_read", "table_id": "tbl:1011", "max_cells": 500}`: 셀마다 `address`, `row`, `col`, `row_span`, `col_span`, `text`(문단은 줄바꿈으로 잇고 탭과 연속 공백을 그대로 유지), `paragraphs`(글자 묶음별 글꼴·크기·굵기·기울임·밑줄·글자색과 문단 값), `objects`(중첩 표 안의 개체까지), `content_sha256`, `border`(`left`, `right`, `top`, `bottom`마다 `line`, `width_mm`, `color`), `fill`을 돌려줍니다. 글은 2000자까지 나오고, 더 길면 `text_truncated=true`입니다. `max_cells`는 1~2000(기본 2000)이고, 잘리면 `cells_truncated=true`입니다.
 
 병합된 셀은 첫 칸의 주소로 부릅니다. A1:B1을 합친 셀은 `A1`이고, `B1`을 지정하면 `cell_covered_by_merge`로 거부합니다.
@@ -230,7 +230,7 @@ Hancom 13.0.0.3457에서 측정한 결과이며, 결과의 `changes`와 `after`�
  "fill": "#FFF2CC", "confirm_layout": true}
 ```
 
-- `edges`: 대상의 바깥 변 `top`, `bottom`, `left`, `right`, 네 변을 함께 `outline`, 안쪽 선 `inner_horizontal`, `inner_vertical`, 둘을 함께 `inner`, 전부 `all`. 한 변은 한 번만 지정합니다. `all`과 `inner`는 그 대상에 있는 선만 뜻합니다. 한 셀의 `all`은 네 변이고, 한 행의 `all`은 네 변과 세로 안쪽 선입니다. 묶음 하나가 가리키는 선이 대상에 하나도 없을 때만 `edge_not_in_target`입니다.
+- `edges`: 대상의 바깥 변 `top`, `bottom`, `left`, `right`, 네 변을 함께 `outline`, 안쪽 선 `inner_horizontal`, `inner_vertical`, 둘을 함께 `inner`, 전부 `all`. 한 변은 한 번만 지정합니다. `all`과 `inner`는 그 대상에 있는 선만 뜻합니다. 한 셀의 `all`은 네 변이고, 한 행의 `all`은 네 변과 세로 안쪽 선입니다. 묶음 하나가 가리키는 선이 대상에 하나도 없으면 `edge_not_in_target`입니다. `inner_horizontal`이나 `inner_vertical`을 이름으로 적었는데 대상에 그 선이 없으면, `top` 같은 다른 변과 한 묶음이어도 편집 전에 `edge_not_in_target`으로 거부합니다.
 - `line`: `solid`, `dash`, `dot`, `dash_dot`, `dash_dot_dot`, `long_dash`, `circle`, `double`, `slim_thick`, `thick_slim`, `slim_thick_slim`, 그리고 선을 지우는 `none`. 이 열두 값은 Hancom 공식 선 종류 표의 0~11입니다.
 - `width_mm`: 0.1, 0.12, 0.15, 0.2, 0.25, 0.3, 0.4, 0.5, 0.6, 0.7, 1, 1.5, 2, 3, 4, 5. `color`는 `#RRGGBB`입니다. `none`에는 두 값을 주지 않으며, Hancom은 저장된 굵기와 색을 그대로 두고 종류만 없음으로 합니다.
 
@@ -287,8 +287,9 @@ Hancom 13.0.0.3457에서 측정한 결과이며, 결과의 `changes`와 `after`�
 
 - `coverage.layout`: 넘치는 표(`overflow`)와 확인하지 못한 표(`unverified`)를 표와 쪽으로 밝힙니다. 어느 쪽이든 있으면 `review_status`는 `complete`가 아니고 첫 줄에 이름이 나옵니다.
 - `comparison.tables.changed`: 선, 채우기, 글, 병합, 표 너비(`width`), 셀 너비(`width_changes`), 표 속성(`frame_changes`), 셀 여백·세로 정렬 등(`cell_properties`)을 전후 값으로 보여 줍니다. 표 해시가 바뀌었는데 이름 붙일 값이 없으면 `other_properties=true`이고 `partial`입니다.
-- `persisted_tables`: 저장 파일을 직접 읽어 격자, 병합, 전체 글, 선, 채우기, 표·셀 너비를 비교합니다. 머리말·꼬리말의 표도 비교합니다. 실행 중 문서가 알리지 않은 머리말·꼬리말 표는 `unverified_tables`로 이름을 밝히고 `partial`입니다. 무늬와 그러데이션은 양쪽에서 읽은 값으로 비교하고, 그림 채우기처럼 양쪽 값을 맞출 수 없으면 `fills_not_compared`로 세고 `partial`입니다.
-- `coverage.package_media`: 저장 파일과 원본 파일의 그림 데이터입니다. `complete`, `partial`(어떤 그림도 쓰지 않던 원본 이미지가 저장본에 없음), `removed_by_edit`(이 세션의 삭제로 빠진 그림), `unverified`(참조되던 그림이 빠졌는데 대조할 이전 확인이 없음), `mismatch`(요청 없이 빠진 그림, 데이터 없는 참조), `not_compared`, `not_saved`입니다. Hancom은 어떤 그림도 쓰지 않는 이미지를 문서를 열 때 읽어 들이지 않으므로, 열린 문서만 비교하는 `보존 확인`은 이를 알 수 없습니다.
+- `comparison.tables.stored_sizes`: 해시가 같은 표에서 저장된 표 크기만 바뀐 경우를 표와 전후 값으로 보여 줍니다. 한글은 편집 뒤 레이아웃에 따라 다른 표의 저장 높이도 다시 계산하므로 이런 표가 여럿 나올 수 있고, 내용·선·채우기가 같다는 뜻입니다. 바뀐 표의 저장 높이는 `stored_height`입니다. 되돌리기가 `size.height`를 차이로 알리면 이 항목으로 값을 볼 수 있습니다.
+- `persisted_tables`: 저장 파일을 직접 읽어 격자, 병합, 전체 글, 선, 채우기, 표·셀 너비를 비교합니다. 저장된 표 높이는 내용 비교와 따로 `stored_size_differences`에 적고, 다르면 `partial`입니다. 실제 한글에서 저장 직후에는 둘이 같았습니다. 머리말·꼬리말의 표도 비교합니다. 실행 중 문서가 알리지 않은 머리말·꼬리말 표는 `unverified_tables`로 이름을 밝히고 `partial`입니다. 무늬와 그러데이션은 양쪽에서 읽은 값으로 비교하고, 그림 채우기처럼 양쪽 값을 맞출 수 없으면 `fills_not_compared`로 세고 `partial`입니다.
+- `coverage.package_media`: 저장 파일과 원본 파일의 그림 데이터입니다. `complete`, `partial`(어떤 그림도 쓰지 않던 원본 이미지가 저장본에 없음), `removed_by_edit`(이 세션의 삭제로 빠진 그림), `unverified`(빠진 그림 데이터를 어느 삭제와도 대조하지 못함), `mismatch`(아직 문서에 있는 그림의 데이터가 빠짐, 데이터 없는 참조), `not_compared`, `not_saved`입니다. 대조는 개수가 아니라 그림 데이터 자체의 SHA-256으로 합니다. 이전 확인과 지금 사이에 지워진 그림의 데이터이고, 남은 그림 중 그 데이터를 쓰는 것이 없을 때만 삭제로 빠졌다고 봅니다. 실행 중 문서의 Base64 데이터를 풀어 얻은 값이 저장 파일의 BinData와 같은 것을 실제 한글에서 확인했습니다. 빠진 데이터는 `unexplained_lost`(문서에 남은 그림)와 `untraceable_lost`(대조할 수 없음)로도 나옵니다. Hancom은 어떤 그림도 쓰지 않는 이미지를 문서를 열 때 읽어 들이지 않으므로, 열린 문서만 비교하는 `보존 확인`은 이를 알 수 없습니다.
 
 선과 채우기를 값과 인쇄로 볼 때 다음을 구별합니다. 흰색 `#FFFFFF`와 `none`은 저장 값으로 구별되지만 흰 종이에서는 같게 인쇄됩니다. 이중선과 삼중선은 0.4mm 이하 굵기를 100dpi 미리보기로 보면 한 줄처럼 보일 수 있으므로, 모양을 눈으로 확인하려면 1mm 이상으로 그리거나 PDF를 확대합니다. 이 값들은 저장 값으로 확인합니다.
 

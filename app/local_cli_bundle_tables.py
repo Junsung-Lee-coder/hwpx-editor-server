@@ -5,7 +5,7 @@ from collections import OrderedDict
 from typing import Any, Callable
 
 from app import native_numbering, native_numbering_census, native_table
-from app.local_cli_bundle_numbering import _guard_protection, _mutation_error, _runtime_error
+from app.local_cli_bundle_numbering import _give_back, _guard_protection, _mutation_error, _no_change_proof, _runtime_error
 from app.local_cli_runtime import LocalCliRuntimeError
 
 
@@ -43,19 +43,14 @@ class LocalCliBundleTablesMixin:
         return original
 
     def _table_give_back(self, hwp: Any, original: tuple[Any, Any]) -> None:
-        caret, selection = original
-        native_numbering._set_pos(hwp, caret)  # noqa: SLF001
-        if selection:
-            if selection[0] != selection[3]:
-                raise LocalCliRuntimeError('Cross-list selection restoration is unproven.')
-            native_numbering._require_motion_result(hwp.select_text(selection[1], selection[2], selection[4], selection[5], selection[0]))  # noqa: SLF001
-        if native_numbering._read_target_state(hwp) != original:  # noqa: SLF001
-            raise LocalCliRuntimeError('The caret could not be given back after reading a table.')
+        _give_back(hwp, original, 'The caret could not be given back after reading a table.')
 
     def _table_pages_then_back(self, hwp: Any, original: tuple[Any, Any], model: dict[str, Any], *, only: str | None = None) -> dict[str, int | None]:
         """Pages are read by visiting anchors. A refusal found on the way gives the caret back too; a raising read has no next call."""
         try:
             pages = native_table.table_pages(hwp, self._table_page_reader(hwp), only=only, skip=frozenset(item['inst_id'] for item in model['margin_tables']))
+        except native_numbering.NativeNumberingReadFailure:
+            raise  # Unknown: nothing is given back and no other SDK call follows.
         except native_numbering.NativeNumberingRefusal:
             self._table_give_back(hwp, original)
             raise
@@ -104,10 +99,10 @@ class LocalCliBundleTablesMixin:
         try:
             model = native_table.parse_table_model(hwp.get_text_file('HWPML2X', ''))
         except native_numbering_census.CensusError:
-            return {'tables': None, 'tables_truncated': False}
+            return {'tables': None, 'tables_truncated': False, 'picture_payloads': None}
         native_table.tag_readback(paragraphs, model)
         if not model['tables'] and not model['margin_tables']:
-            return {'tables': [], 'tables_truncated': False}
+            return {'tables': [], 'tables_truncated': False, 'picture_payloads': model['pictures']}
         facts: dict[str, Any] = {}
         pages: dict[str, int | None] = {}
         if model['tables']:
@@ -122,10 +117,12 @@ class LocalCliBundleTablesMixin:
             else:
                 try:
                     pages = self._table_pages_then_back(hwp, original, model)
+                except native_numbering.NativeNumberingReadFailure:
+                    raise  # Unknown, so the review stops here and the session is held.
                 except native_numbering.NativeNumberingRefusal as exc:
-                    facts['tables_pages_reason'] = exc.code
+                    facts['tables_pages_reason'] = exc.code  # Refused with the caret proven back; a failed give-back raises instead.
         rows, truncated = native_table.review_rows(model, pages)
-        return {'tables': rows, 'tables_truncated': truncated, **facts}
+        return {'tables': rows, 'tables_truncated': truncated, 'picture_payloads': model['pictures'], **facts}
 
     def _table_mutation(self, hwp: Any, step: dict[str, Any], *, validate: Callable[[dict[str, Any]], dict[str, Any]], apply: Callable[..., dict[str, Any]], name: str, on_mutating: Callable[[], None] | None) -> dict[str, Any]:
         try:
@@ -140,7 +137,7 @@ class LocalCliBundleTablesMixin:
             # A refusal found the caret and selection somewhere; they go back, and only then is nothing proven changed.
             native_table._run(hwp, 'Cancel')  # noqa: SLF001
             self._table_give_back(hwp, original)
-            if read()['census'] != before:
+            if _no_change_proof(lambda: read()['census'], 'The refusal could not be proven to have changed nothing.') != before:
                 raise LocalCliRuntimeError('The refusal could not be proven to have changed nothing.')
 
         def settle() -> None:

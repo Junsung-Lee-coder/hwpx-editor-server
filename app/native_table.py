@@ -47,6 +47,8 @@ the table's stored SIZE behind its cells now and then (seen once as Width 45000 
 """
 from __future__ import annotations
 
+import base64
+import binascii
 import hashlib
 import json
 import math
@@ -335,10 +337,20 @@ def _section_geometry(section: ET.Element) -> dict[str, Any] | None:
             'gutter': _int(_attr(margin, 'gutter'), -1), 'columns': sorted({_int(_attr(item, 'count'), 1) for item in section.iter() if _name(item) == 'coldef'} or {1})}
 
 
+def _payload_identity(text: str | None) -> str | None:
+    """The digest of the data itself. Measured: the live text holds it in base64 and the saved package holds the same bytes, so the two
+    digests are one identity. Text that is not base64 has none."""
+    try:
+        data = base64.b64decode(''.join((text or '').split()), validate=True)
+    except (binascii.Error, ValueError):
+        return None
+    return hashlib.sha256(data).hexdigest() if data else None
+
+
 def _picture_payloads(root: ET.Element, body: ET.Element) -> list[str | None]:
     """The data behind each picture of the document, by what it refers to: a picture that keeps its reference may still have lost what it pointed at."""
     items = [_attr(item, 'bindata') for item in root.iter() if _name(item) == 'binitem']
-    data = {(_attr(item, 'id') or '').strip(): hashlib.sha256((item.text or '').encode('ascii', 'replace')).hexdigest() for item in root.iter() if _name(item) == 'bindata'}
+    data = {(_attr(item, 'id') or '').strip(): _payload_identity(item.text) for item in root.iter() if _name(item) == 'bindata'}
     payloads: list[str | None] = []
     for picture in body.iter():
         if _name(picture) != 'picture':
@@ -396,6 +408,7 @@ def parse_table_model(text: str) -> dict[str, Any]:
                                 'before_text': before_text, 'frame': _frame_digest(table, resolver), 'frame_values': _frame_values(table), 'scope': now['scope'], 'cells': []}
         fact['size_width'], fact['width_rel'] = _table_size(table)
         fact['size_values'] = _size_values(table)
+        fact['size_height'] = _int(fact['size_values'].get('height'), -1) if 'height' in fact['size_values'] else None
         fact['geometry'] = now['geometry']
         fact['holder'] = _holder_facts(holder, position) if holder is not None and where.get('body_index') is not None else None
         tables.append(fact)
@@ -649,6 +662,7 @@ def public_summary(table: Mapping[str, Any], page: int | None) -> dict[str, Any]
         'table_id': table['table_id'], 'index': table['index'], 'page': page, 'rows': table['rows'], 'cols': table['cols'], 'cell_count': len(cells),
         'merged_cells': sum(cell['row_span'] > 1 or cell['col_span'] > 1 for cell in cells), 'expected_hash': table['expected_hash'],
         'before_text': table['before_text'][:120], 'nested_in': table['nested_in'], 'nested_cell': table['nested_cell'], 'layout': table.get('layout'),
+        'stored_size': {'width_hu': table['size_width'], 'height_hu': table['size_height']},
         'first_cells': [{'address': cell['address'], 'text': cell['text'][:60]} for cell in cells[:8]],
     }
 
@@ -687,7 +701,7 @@ def review_rows(model: Mapping[str, Any], pages: Mapping[str, int | None]) -> tu
         cells = [{'address': cell['address'], 'row': cell['row'], 'col': cell['col'], 'row_span': cell['row_span'], 'col_span': cell['col_span'], 'width': cell['width'],
                   'height': cell['height'], 'text': cell['text'][:REVIEW_TEXT], 'text_truncated': len(cell['text']) > REVIEW_TEXT, 'objects': cell['objects'], 'all_objects': cell['all_objects'], 'content': cell['content'], 'border': cell['border'], 'fill': cell['fill'], 'rest': cell['rest'],
                   'attrs': cell['attrs'], 'attr_values': cell['attr_values']} for cell in table['cells']]
-        row = {'table_id': table['table_id'], 'index': table['index'], 'scope': table['scope'], 'page': pages.get(table['inst_id']), 'rows': table['rows'], 'cols': table['cols'], 'state_sha256': table['state_sha256'], 'width_hu': table['size_width'],
+        row = {'table_id': table['table_id'], 'index': table['index'], 'scope': table['scope'], 'page': pages.get(table['inst_id']), 'rows': table['rows'], 'cols': table['cols'], 'state_sha256': table['state_sha256'], 'width_hu': table['size_width'], 'height_hu': table['size_height'],
                'before_text': table['before_text'][:120], 'nested_in': table['nested_in'], 'frame': table['frame'], 'frame_values': table['frame_values'], 'layout': table.get('layout'), 'cells': cells}
         spent += len(json.dumps(row, ensure_ascii=False).encode('utf-8', 'surrogatepass'))
         if spent > REVIEW_BYTES:
@@ -816,7 +830,7 @@ def _validated_borders(value: Any) -> list[dict[str, Any]]:
         line = item.get('line')
         if type(line) is not str or line not in LINE_TYPES:
             raise NativeNumberingInputError('line must be one of ' + ', '.join(sorted(LINE_TYPES)))
-        group: dict[str, Any] = {'edges': parts, 'line': line}
+        group: dict[str, Any] = {'edges': parts, 'line': line, 'named_inner': [edge for edge in edges if edge in {'inner_horizontal', 'inner_vertical'}]}
         if line == 'none':
             if item.get('width_mm') is not None or item.get('color') is not None:
                 raise NativeNumberingInputError('removing a line takes no width_mm or color')
@@ -1331,7 +1345,11 @@ def plan_style(table: Mapping[str, Any], request: Mapping[str, Any]) -> dict[str
     not_written: list[dict[str, Any]] = []
     groups = request.get('borders') or []
     has_inner = {'inner_horizontal': any(cell['row'] + cell['row_span'] - 1 < rect['bottom'] for cell in cells), 'inner_vertical': any(cell['col'] + cell['col_span'] - 1 < rect['right'] for cell in cells)}
-    # all and inner mean the lines this target has. A group left with none asks for nothing that exists.
+    # An interior edge named outright is asked for; all and inner mean the lines this target has. A group left with none asks for nothing that exists.
+    for group in groups:
+        lacking = [edge for edge in group.get('named_inner', ()) if not has_inner[edge]]
+        if lacking:
+            raise NativeNumberingRefusal(f"this target has no {' or '.join(lacking)} line", code='edge_not_in_target')
     groups = [{**group, 'edges': [edge for edge in group['edges'] if edge in SIDES or has_inner[edge]]} for group in groups]
     for group in groups:
         if not group['edges']:
@@ -1670,7 +1688,10 @@ def _execute_edit(hwp: Any, inst: str, table: Mapping[str, Any], plan: Mapping[s
 
 def _public_request(request: Mapping[str, Any], names: set[str] | None = None) -> dict[str, Any]:
     """What was asked for, in the caller's terms: a parsed cell goes back to its address."""
-    return {key: cell_address(*value) if key in {'cell', 'end_cell'} else value for key, value in request.items() if key not in _BOUND_FIELDS and (names is None or key in names)}
+    public = {key: cell_address(*value) if key in {'cell', 'end_cell'} else value for key, value in request.items() if key not in _BOUND_FIELDS and (names is None or key in names)}
+    if 'borders' in public:
+        public['borders'] = [{key: value for key, value in group.items() if key != 'named_inner'} for group in public['borders']]
+    return public
 
 
 def _report_table(table: Mapping[str, Any], page: int | None) -> dict[str, Any]:

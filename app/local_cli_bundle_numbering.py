@@ -20,6 +20,35 @@ def _runtime_error(exc: Exception) -> LocalCliRuntimeError:
     return LocalCliRuntimeError(str(exc))
 
 
+def _give_back(hwp: Any, original: Any, what: str) -> None:
+    """Set the caret and selection found before back, and prove it. A read that raises stays unknown, with no next call. A read
+    that returns but is not an exact position, a refused native API or another place means the restoration failed: never a refusal."""
+    caret, selection = original
+    try:
+        native_numbering._set_pos(hwp, caret)  # noqa: SLF001
+        if selection:
+            if selection[0] != selection[3]:
+                raise LocalCliRuntimeError('Cross-list selection restoration is unproven.')
+            native_numbering._require_motion_result(hwp.select_text(selection[1], selection[2], selection[4], selection[5], selection[0]))  # noqa: SLF001
+        now = native_numbering._read_target_state(hwp)  # noqa: SLF001
+    except native_numbering.NativeNumberingReadFailure:
+        raise
+    except native_numbering.NativeNumberingRefusal as exc:
+        raise LocalCliRuntimeError(what) from exc
+    if now != original:
+        raise LocalCliRuntimeError(what)
+
+
+def _no_change_proof(read: Callable[[], Any], what: str) -> Any:
+    """Evidence read after a give-back to prove a refusal changed nothing. Evidence it cannot read makes the proof fail, not a new refusal."""
+    try:
+        return read()
+    except native_numbering.NativeNumberingReadFailure:
+        raise
+    except native_numbering.NativeNumberingRefusal as exc:
+        raise LocalCliRuntimeError(what) from exc
+
+
 def _mutation_error(exc: native_numbering.NativeNumberingMutationError) -> LocalCliMutationError:
     return LocalCliMutationError(
         str(exc),
@@ -171,13 +200,8 @@ class LocalCliBundleNumberingMixin:
 
         def restored() -> None:
             """A refusal is reported as changing nothing only after the state it found is back and proven."""
-            caret, selection = original
-            native_numbering._set_pos(hwp, caret)  # noqa: SLF001
-            if selection:
-                if selection[0] != selection[3]:
-                    raise LocalCliRuntimeError('Cross-list selection restoration is unproven.')
-                native_numbering._require_motion_result(hwp.select_text(selection[1], selection[2], selection[4], selection[5], selection[0]))  # noqa: SLF001
-            if native_numbering._read_target_state(hwp) != original or _guard_protection(protection) != before:  # noqa: SLF001
+            _give_back(hwp, original, 'Paragraph edit refusal restoration is unproven.')
+            if _guard_protection(protection) != before:
                 raise LocalCliRuntimeError('Paragraph edit refusal restoration is unproven.')
 
         try:
@@ -261,13 +285,8 @@ class LocalCliBundleNumberingMixin:
             return {'census': census, 'model': model}
 
         def restored() -> None:
-            caret, selection = original
-            native_numbering._set_pos(hwp, caret)  # noqa: SLF001
-            if selection:
-                if selection[0] != selection[3]:
-                    raise LocalCliRuntimeError('Cross-list selection restoration is unproven.')
-                native_numbering._require_motion_result(hwp.select_text(selection[1], selection[2], selection[4], selection[5], selection[0]))  # noqa: SLF001
-            if native_numbering._read_target_state(hwp) != original or read()['census'] != before:  # noqa: SLF001
+            _give_back(hwp, original, 'Formatting refusal restoration is unproven.')
+            if _no_change_proof(lambda: read()['census'], 'Formatting refusal restoration is unproven.') != before:
                 raise LocalCliRuntimeError('Formatting refusal restoration is unproven.')
 
         before = None

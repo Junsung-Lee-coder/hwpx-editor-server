@@ -328,8 +328,8 @@ def _explained_tables(tables: dict[str, Any] | None, current: list[dict[str, Any
             while at and at not in explained:
                 explained.add(at)
                 at = parents.get(at)
-    # Only the height moved in a table of the same hash: that is what its holder's object digest changed with.
-    for item in tables.get('stored_heights', []):
+    # Only a stored height or size moved in a table of the same hash: that is what its holder's object digest changed with.
+    for item in (*tables.get('stored_heights', []), *tables.get('stored_sizes', [])):
         at = item['table_id']
         while at and at not in explained:
             explained.add(at)
@@ -524,6 +524,8 @@ def _compare_table(before: dict[str, Any], after: dict[str, Any]) -> dict[str, A
     old_width, new_width = _table_width(before), _table_width(after)
     if old_width is not None and new_width is not None and old_width != new_width:
         row['width'] = {'before_hu': old_width, 'after_hu': new_width}
+    if before.get('height_hu') is not None and after.get('height_hu') is not None and before['height_hu'] != after['height_hu']:
+        row['stored_height'] = {'before_hu': before['height_hu'], 'after_hu': after['height_hu']}
     for old, new in pairs:
         if old['address'] != new['address']:
             row['moved_cells'].append({'from': old['address'], 'to': new['address'], 'text': new['text']})
@@ -557,6 +559,16 @@ def _table_width(table: dict[str, Any]) -> int | None:
     return value if value is not None else table.get('width_hu')
 
 
+def _size_changes(before: dict[str, Any], after: dict[str, Any]) -> dict[str, Any]:
+    """The table's own stored size. Layout moves its height after any edit, of this table or another; a move is told, never equal by fiat."""
+    moved: dict[str, Any] = {}
+    for name, key in (('width', 'width_hu'), ('height', 'height_hu')):
+        old, new = before.get(key), after.get(key)
+        if old is not None and new is not None and old != new:
+            moved[name] = {'before_hu': old, 'after_hu': new}
+    return moved
+
+
 def _height_changes(before: dict[str, Any], after: dict[str, Any]) -> list[dict[str, Any]]:
     """A table's hash leaves heights out, as layout moves them. A height moving is still a difference, told by name."""
     old = {cell['address']: cell.get('height') for cell in before['cells']}
@@ -578,6 +590,9 @@ def compare_tables(baseline: list[dict[str, Any]] | None, current: list[dict[str
             heights = _height_changes(old, table)
             if heights:
                 result.setdefault('stored_heights', []).append({'table_id': table_id, 'page': table.get('page'), 'scope': table.get('scope', 'body'), 'cells': heights})
+            size = _size_changes(old, table)
+            if size:
+                result.setdefault('stored_sizes', []).append({'table_id': table_id, 'page': table.get('page'), 'scope': table.get('scope', 'body'), **size})
         else:
             result['changed'].append(_compare_table(old, table))
     result['removed'] = [{'table_id': table_id, 'page': table.get('page'), 'rows': table['rows'], 'cols': table['cols'], 'scope': table.get('scope', 'body'),
@@ -620,38 +635,62 @@ def _layout_note(row: dict[str, Any]) -> str:
     return f"표 {where}가 담긴 셀의 안쪽 폭보다 {row.get('overflow_mm'):g}mm 넓습니다"
 
 
-def _removed_pictures(comparison: dict[str, Any] | None) -> int:
-    """How many pictures the compared edits removed, from what they say they removed."""
-    if not comparison:
-        return 0
-    count = sum((change.get('objects') or []).count('picture') for change in comparison['changes'] if change['kind'] == 'removed' and not change.get('in_table'))
-    tables = comparison.get('tables') or {}
-    count += sum(item.get('pictures', 0) for item in tables.get('removed', []))
-    count += sum((cell.get('objects') or []).count('picture') for item in tables.get('changed', []) for cell in item['removed_cells'])
-    return count
+def _lost_by_identity(lost: list[str], before: list[str | None] | None, after: list[str | None] | None) -> tuple[list[str], list[str], list[str]]:
+    """Which lost image data a removal explains, by the data itself: (explained, unexplained, untraceable).
+
+    A picture removed between the earlier review and now explains the loss of its data only when no picture left still shows it. Data a
+    picture left still shows, lost, is unexplained. Data no picture showed at the earlier review cannot be traced to anything here."""
+    remaining: dict[str, int] = {}
+    for payload in before or ():
+        remaining[payload] = remaining.get(payload, 0) + 1
+    for payload in after or ():
+        remaining[payload] = remaining.get(payload, 0) - 1
+    removed = {payload for payload, count in remaining.items() if count > 0}
+    explained, unexplained, untraceable = [], [], []
+    for payload in lost:
+        if payload in set(after or ()):
+            unexplained.append(payload)
+        elif payload in removed:
+            explained.append(payload)
+        else:
+            untraceable.append(payload)
+    return explained, unexplained, untraceable
 
 
-def package_media_coverage(saved_output: dict[str, Any] | None, comparison: dict[str, Any] | None, *, has_baseline: bool) -> dict[str, Any]:
-    """The saved file's image data against the file that was opened: pictures the document shows apart from data nothing refers to."""
+def package_media_coverage(saved_output: dict[str, Any] | None, baseline: dict[str, Any] | None, current: dict[str, Any]) -> dict[str, Any]:
+    """The saved file's image data against the file that was opened: pictures the document shows apart from data nothing refers to, and
+    data a requested removal took apart from any other loss, matched by the data's identity and never by a count."""
     if not isinstance(saved_output, dict) or saved_output.get('retrieved') is not True:
         return {'state': 'not_saved'}
     media = (saved_output.get('compared_with_source') or {}).get('media')
     if not isinstance(media, dict):
         return {'state': 'not_compared'}
     result = {key: media.get(key) for key in ('referenced_source', 'referenced_saved', 'referenced_lost', 'unreferenced_lost', 'dangling_saved', 'all_bindata_identical')}
-    lost = media.get('referenced_lost') or 0
-    removed = _removed_pictures(comparison)
-    if media.get('dangling_saved') or (lost and has_baseline and removed < lost):
+    lost_count = media.get('referenced_lost') or 0
+    lost = media.get('referenced_lost_payloads')
+    before = (baseline or {}).get('picture_payloads') if baseline is not None else None
+    after = current.get('picture_payloads')
+    explained: list[str] = []
+    unexplained: list[str] = []
+    untraceable: list[str] = []
+    if lost_count:
+        known = (type(lost) is list and len(lost) == lost_count and type(before) is list and type(after) is list
+                 and None not in before and None not in after)
+        if known:
+            explained, unexplained, untraceable = _lost_by_identity(lost, before, after)
+        else:
+            untraceable = list(lost) if type(lost) is list else []
+    if media.get('dangling_saved') or unexplained:
         state = 'mismatch'
-    elif lost and not has_baseline:
+    elif lost_count and (untraceable or not explained or len(explained) != lost_count):
         state = 'unverified'
     elif media.get('unreferenced_lost'):
         state = 'partial'
-    elif lost:
+    elif lost_count:
         state = 'removed_by_edit'
     else:
         state = 'complete'
-    return {'state': state, **result, 'removed_by_edit': min(lost, removed) if has_baseline else 0}
+    return {'state': state, **result, 'removed_by_edit': len(explained), 'unexplained_lost': unexplained, 'untraceable_lost': len(untraceable)}
 
 
 def _media_line(media: dict[str, Any]) -> str | None:
@@ -665,8 +704,10 @@ def _media_line(media: dict[str, Any]) -> str | None:
             parts.append('패키지의 그림 데이터 전체도 원본과 같습니다')
     if media.get('removed_by_edit'):
         parts.append(f"삭제한 셀의 그림 {media['removed_by_edit']}개는 요청대로 저장본에서 빠졌습니다")
-    if (media.get('referenced_lost') or 0) > (media.get('removed_by_edit') or 0):
-        parts.append(f"참조되던 그림 {media['referenced_lost'] - (media.get('removed_by_edit') or 0)}개의 데이터가 저장본에 없습니다")
+    if media.get('unexplained_lost'):
+        parts.append(f"아직 문서에 있는 그림 {len(media['unexplained_lost'])}개의 데이터가 저장본에 없습니다")
+    elif (media.get('referenced_lost') or 0) > (media.get('removed_by_edit') or 0):
+        parts.append(f"참조되던 그림 {media['referenced_lost'] - (media.get('removed_by_edit') or 0)}개의 데이터가 저장본에 없고, 어느 삭제로 빠졌는지 대조하지 못했습니다")
     if media.get('dangling_saved'):
         parts.append(f"저장본에서 데이터 없는 참조가 {media['dangling_saved']}개 있습니다")
     if media.get('unreferenced_lost'):
@@ -726,6 +767,11 @@ def _table_rows(tables: dict[str, Any]) -> list[str]:
             rows.append(f'| {name} | 표 안 | 이름 없는 다른 값 | 확인 못함 | 바뀜 |')
     for item in tables.get('stored_heights', []):
         rows += [f"| {_table_name(item)} | {cell['cell']} | 저장된 높이 | {cell['before']} | {cell['after']} |" for cell in item['cells']]
+    for item in tables.get('stored_sizes', []):
+        rows += [f"| {_table_name(item)} | 표 전체 | {word} | {item[key]['before_hu']} | {item[key]['after_hu']} |" for key, word in (('height', '저장된 높이'), ('width', '저장된 너비')) if key in item]
+    for item in tables['changed']:
+        if item.get('stored_height'):
+            rows.append(f"| {_table_name(item)} | 표 전체 | 저장된 높이 | {item['stored_height']['before_hu']} | {item['stored_height']['after_hu']} |")
     return rows
 
 
@@ -762,6 +808,10 @@ def _table_lines(tables: dict[str, Any]) -> list[str]:
         lines.append(f"변경 없는 표 {len(tables['unchanged'])}개: {', '.join(tables['unchanged'][:6])}" + (' 외' if len(tables['unchanged']) > 6 else ''))
     for item in tables.get('stored_heights', []):
         lines.append(f"표 저장 높이: {_table_name(item)} " + ', '.join(f"{cell['cell']} {cell['before']} → {cell['after']}" for cell in item['cells'][:4]) + ' (다른 값은 같습니다)')
+    sizes = tables.get('stored_sizes', [])
+    if sizes:
+        named = ', '.join(f"{item['table_id']} " + ' '.join(f"{word} {item[key]['before_hu']} → {item[key]['after_hu']}" for key, word in (('height', '저장 높이'), ('width', '저장 너비')) if key in item) for item in sizes[:4])
+        lines.append(f"저장 크기만 바뀐 표 {len(sizes)}개: {named}" + (' 외' if len(sizes) > 4 else '') + ' (내용·선·채우기는 같습니다)')
     return lines
 
 
@@ -869,6 +919,7 @@ def package_tables(path: Path) -> list[dict[str, Any]]:
                               'text': _hwpx_cell_text(cell), **fills[_attribute(cell, 'borderFillIDRef') or '']})
         size = next((item for item in table if _local(item) == 'sz'), None)
         return {'table_id': f"tbl:{_attribute(table, 'id')}", 'scope': scope, 'rows': int(_attribute(table, 'rowCnt')), 'cols': int(_attribute(table, 'colCnt')), 'width_hu': int(_attribute(size, 'width')) if size is not None else None,
+                'height_hu': int(_attribute(size, 'height')) if size is not None and _attribute(size, 'height') is not None else None,
                 'cells': sorted(cells, key=lambda item: (item['row'], item['col']))}
 
     for section in sections:
@@ -910,6 +961,8 @@ def persisted_tables(path: Path, live: list[dict[str, Any]], *, truncated: bool 
         mismatches.append({'table_id': None, 'cell': None, 'field': 'tables', 'live': sorted(known), 'saved': sorted(saved)})
     limited = truncated or bool(unverified_tables)
     fills_not_compared = 0
+    stored_size_differences: list[dict[str, Any]] = []
+    stored_size_not_compared = 0
     for table in live:
         theirs = saved.get(table['table_id'])
         if theirs is None:
@@ -918,6 +971,11 @@ def persisted_tables(path: Path, live: list[dict[str, Any]], *, truncated: bool 
             mismatches.append({'table_id': table['table_id'], 'cell': None, 'field': 'scope', 'live': table.get('scope', 'body'), 'saved': theirs['scope']})
         if table.get('width_hu') is not None and theirs.get('width_hu') is not None and table['width_hu'] != theirs['width_hu']:
             mismatches.append({'table_id': table['table_id'], 'cell': None, 'field': 'width_hu', 'live': table['width_hu'], 'saved': theirs['width_hu']})
+        # The stored height follows layout. Measured equal at save; a difference is its own observation, apart from the table's content.
+        if table.get('height_hu') is None or theirs.get('height_hu') is None:
+            stored_size_not_compared += 1
+        elif table['height_hu'] != theirs['height_hu']:
+            stored_size_differences.append({'table_id': table['table_id'], 'field': 'height_hu', 'live': table['height_hu'], 'saved': theirs['height_hu']})
         if (table['rows'], table['cols']) != (theirs['rows'], theirs['cols']):
             mismatches.append({'table_id': table['table_id'], 'cell': None, 'field': 'grid', 'live': [table['rows'], table['cols']], 'saved': [theirs['rows'], theirs['cols']]})
             continue
@@ -942,8 +1000,9 @@ def persisted_tables(path: Path, live: list[dict[str, Any]], *, truncated: bool 
             # Only a row that says it was cut is compared by its start.
             if not (other['text'].startswith(shown) if cell.get('text_truncated') is True else other['text'] == shown):
                 mismatches.append({'table_id': table['table_id'], 'cell': cell['address'], 'field': 'text', 'live': shown, 'saved': other['text'][:300]})
-    state = 'mismatch' if mismatches else 'partial' if limited or fills_not_compared else 'match'
-    return {'state': state, 'tables_checked': len(live), 'fills_not_compared': fills_not_compared, 'mismatches': mismatches[:_MAX_TABLE_ROWS], **({'unverified_tables': unverified_tables} if unverified_tables else {}), **({'mismatch_total': len(mismatches)} if len(mismatches) > _MAX_TABLE_ROWS else {})}
+    state = 'mismatch' if mismatches else 'partial' if limited or fills_not_compared or stored_size_differences or stored_size_not_compared else 'match'
+    return {'state': state, 'tables_checked': len(live), 'fills_not_compared': fills_not_compared, 'stored_size_differences': stored_size_differences[:_MAX_TABLE_ROWS], 'stored_size_not_compared': stored_size_not_compared,
+            'mismatches': mismatches[:_MAX_TABLE_ROWS], **({'unverified_tables': unverified_tables} if unverified_tables else {}), **({'mismatch_total': len(mismatches)} if len(mismatches) > _MAX_TABLE_ROWS else {})}
 
 
 def _labels_by_paragraph(paragraphs: list[dict[str, Any]], rows: list[dict[str, Any]]) -> list[tuple[str | None, bool]]:
@@ -1060,6 +1119,7 @@ def _media_comparison(source: dict[str, Any], saved: dict[str, Any]) -> dict[str
     return {
         'referenced_source': len(source_refs), 'referenced_saved': len(saved_refs),
         'referenced_lost': sum(1 for value in source_refs.values() if value and value not in kept),
+        'referenced_lost_payloads': sorted({value for value in source_refs.values() if value and value not in kept}),
         'unreferenced_lost': sum(1 for value in source.get('unreferenced_bindata', []) if value not in saved_payloads),
         'dangling_saved': sum(1 for value in saved_refs.values() if value is None),
         'all_bindata_identical': sorted(source['bindata'].values()) == sorted(saved['bindata'].values()),
@@ -1378,7 +1438,7 @@ def _coverage_notes(review: dict[str, Any]) -> list[str]:
     if media.get('state') == 'partial':
         notes.append(f"원본의 참조 없는 이미지 {media.get('unreferenced_lost')}개가 저장본에 없습니다")
     elif media.get('state') == 'unverified':
-        notes.append(f"참조되던 그림 {media.get('referenced_lost')}개의 데이터가 저장본에 없는데, 요청한 삭제인지 대조할 이전 확인이 없습니다")
+        notes.append(f"참조되던 그림 {media.get('referenced_lost')}개의 데이터가 저장본에 없는데, 어느 삭제로 빠졌는지 그림 데이터로 대조하지 못했습니다")
     elif media.get('state') == 'mismatch':
         notes.append('저장본의 그림 데이터가 원본의 참조와 맞지 않습니다')
     return notes
@@ -1408,6 +1468,10 @@ def _persisted_gaps(fact: dict[str, Any]) -> str:
         gaps.append(f"채우기 {fact['fills_not_compared']}칸")
     if fact.get('unverified_tables'):
         gaps.append('머리말·꼬리말 표 ' + ', '.join(fact['unverified_tables'][:6]))
+    if fact.get('stored_size_differences'):
+        gaps.append('저장 높이가 다른 표 ' + ', '.join(item['table_id'] for item in fact['stored_size_differences'][:6]))
+    if fact.get('stored_size_not_compared'):
+        gaps.append(f"저장 크기를 비교하지 못한 표 {fact['stored_size_not_compared']}개")
     return f"({', '.join(gaps)})" if gaps else ''
 
 
@@ -1527,7 +1591,7 @@ def assemble(*, session_id: str, review_id: str, readback: dict[str, Any], pdf: 
         'page_count': native_pages, 'pages_rendered': len(pages), 'pages_truncated': bool(pages) and not pages_complete,
         'document_is_modified': readback.get('document_is_modified') is True,
         'paragraphs': paragraphs, 'paragraphs_truncated': truncated,
-        'tables': readback.get('tables'), 'tables_truncated': readback.get('tables_truncated') is True,
+        'tables': readback.get('tables'), 'tables_truncated': readback.get('tables_truncated') is True, 'picture_payloads': readback.get('picture_payloads'),
         'controls': controls, 'evidence': readback.get('evidence'),
         'caret_unchanged': readback.get('caret_unchanged'),
         'readback_reason': readback.get('reason'), 'render_error': render_error,
@@ -1553,7 +1617,7 @@ def assemble(*, session_id: str, review_id: str, readback: dict[str, Any], pdf: 
     current['coverage']['tables'] = (table_coverage(current['tables'], current['tables_truncated'], (current['comparison'] or {}).get('tables'), has_baseline=baseline is not None)
                                      if 'tables' in readback else {'state': 'not_reported', 'tables': None, 'compared': 0})
     current['coverage']['layout'] = layout_coverage(current['tables'])
-    current['coverage']['package_media'] = package_media_coverage(saved_output, current['comparison'], has_baseline=baseline is not None)
+    current['coverage']['package_media'] = package_media_coverage(saved_output, baseline, current)
     statuses = [row['status'] for row in current['numbering']]
     if 'unverified' in {paragraph_coverage['state'], page_coverage['state'], text_coverage['state']}:
         coverage_status = 'unverified'
@@ -1690,6 +1754,10 @@ def to_markdown(review: dict[str, Any]) -> str:
             out.append(f"- 비교하지 못한 채우기: {saved_tables['fills_not_compared']}칸")
         if saved_tables.get('unverified_tables'):
             out.append(f"- 비교하지 못한 머리말·꼬리말 표: {', '.join(saved_tables['unverified_tables'])}")
+        for item in saved_tables.get('stored_size_differences') or []:
+            out.append(f"- {item['table_id']}의 저장 높이: 실행 중 문서 {item['live']}, 저장 파일 {item['saved']} (내용 비교와 별도)")
+        if saved_tables.get('stored_size_not_compared'):
+            out.append(f"- 저장 크기를 비교하지 못한 표: {saved_tables['stored_size_not_compared']}개")
         if saved_tables.get('reason'):
             out.append(f"- 이유: {saved_tables['reason']}")
         if saved_tables.get('mismatches'):

@@ -92,7 +92,13 @@ def chain(exc):
 
 
 class Owned:
-    """A real manager + real owning thread over a fake SDK, with the real command_bundle bound to it."""
+    """A real manager + real owning thread over a fake SDK, with the real command_bundle bound to it.
+
+    Construction is not what these tests are about. Windows reads the real process list as a constructor baseline, which a fake SDK cannot
+    satisfy, so the harness takes the path of a runtime with no native process baseline, as every portable run does. The production guard
+    is unchanged; tests/test_owned_harness_constructor.py shows it still refuses this fake constructor once a baseline is present."""
+
+    native_baseline = staticmethod(lambda: None)
 
     def __init__(self, case, hwp, *, protection=None, session_id='custody-session-0001', real_execute_live=False):
         self.case = case
@@ -123,6 +129,7 @@ class Owned:
             ('start_runtime_watchdog', lambda *a, **k: (None, None)),
             ('update_runtime_status', lambda *a, **k: None),
             ('current_windows_session_snapshot', lambda: {'interactive': True, 'session_id': 1, 'session_name': 'fake'}),
+            ('_native_close_processes', type(self).native_baseline),
             ('collect_hwp_snapshot', lambda h: {}),
             ('snapshot_live_location', lambda **kw: {}),
         ):

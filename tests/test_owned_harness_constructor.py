@@ -24,9 +24,11 @@ class Harness(unittest.TestCase):
 
     def test_with_a_process_baseline_the_production_guard_still_refuses_the_fake_constructor(self) -> None:
         with patch.object(Owned, 'native_baseline', staticmethod(lambda: frozenset())):
-            with self.assertRaises(rt.LocalCliRuntimeError) as caught:
+            with self.assertRaises(rt.LocalCliNativeCustodyHeldError) as caught:
                 Owned(self, sample_document())
-        self.assertIn('Native constructor wrapper contract is unproved', str(caught.exception))
+        # The constructor ran, so the session is held, and the cause is the guard's own refusal of the fake.
+        self.assertIs(type(caught.exception.__cause__), rt.LocalCliRuntimeError)
+        self.assertEqual(str(caught.exception.__cause__), 'Native constructor wrapper contract is unproved.')
 
 
 if __name__ == '__main__':
