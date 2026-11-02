@@ -70,6 +70,7 @@ class Backend(BaseHTTPRequestHandler):
     readback_paragraphs = None
     readback_evidence = None
     readback_truncated = False
+    readback_tables = None
     held = False
     dirty = False
     readback_mode = 'ok'
@@ -124,7 +125,7 @@ class Backend(BaseHTTPRequestHandler):
                 return self.reply({'ok': True, 'session_id': SID, 'available': False, 'reason': 'census_unavailable', 'source_filename': 'fixture.hwpx', 'page_count': 2, 'document_is_modified': False,
                                    'paragraphs': None, 'controls': {'tbl': 1}, 'page_numbers': [], 'page_restarts': [], 'evidence': None, 'caret_unchanged': True})
             return self.reply({'ok': True, 'session_id': SID, 'available': True, 'source_filename': 'fixture.hwpx', 'page_count': 2, 'document_is_modified': False,
-                               'paragraphs': type(self).readback_paragraphs or [paragraph('Alpha'), paragraph('Beta')], 'paragraph_total': 2500 if type(self).readback_truncated else len(type(self).readback_paragraphs or 'ab'), 'paragraphs_truncated': type(self).readback_truncated, 'controls': {'tbl': 1}, 'page_numbers': [], 'page_restarts': [], 'caret_unchanged': True,
+                               'paragraphs': type(self).readback_paragraphs or [paragraph('Alpha'), paragraph('Beta')], 'paragraph_total': 2500 if type(self).readback_truncated else len(type(self).readback_paragraphs or 'ab'), 'paragraphs_truncated': type(self).readback_truncated, 'controls': {'tbl': 1}, 'page_numbers': [], 'page_restarts': [], 'caret_unchanged': True, **({'tables': type(self).readback_tables, 'tables_truncated': False} if type(self).readback_tables is not None else {}),
                                'evidence': {'header_footer': [], 'styles_sha256': 's', 'media_sha256': 'm', 'numberings_sha256': 'n', 'bindata_sha256': 'b', **(type(self).readback_evidence or {})}})
         if self.path == '/local-cli/command-bundle':
             return self.reply(type(self).bundle_reply)
