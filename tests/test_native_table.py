@@ -517,6 +517,18 @@ class Unknown(unittest.TestCase):
                 outcome = style(hwp, '1012', scope='cell', cell='B2', fill=RED) if fields['op'] == 'style' else edit(hwp, '1012', 'insert_row_below', row=1)
                 self.assert_held(outcome)
 
+    def test_the_reason_reaches_the_caller_with_addresses_and_no_document_text(self) -> None:
+        def stray(hwp: TableHwp) -> None:
+            hwp.by_inst('1012').named('A1').paragraphs = [para('비밀 문구')]
+
+        hwp = sample_document()
+        hwp.corrupt_after_execute = stray
+        outcome = style(hwp, '1012', scope='cell', cell='B2', fill=RED)
+        self.assert_held(outcome)
+        detail = outcome['steps'][0]['outcome_detail']
+        self.assertIn('A1', detail)
+        self.assertNotIn('비밀', detail)
+
     def test_an_unrequested_neighbour_edge_is_not_hidden(self) -> None:
         def stray(hwp: TableHwp) -> None:
             hwp.by_inst('1012').named('D5').border['bottom'] = ('Dash', '0.5mm', 0)

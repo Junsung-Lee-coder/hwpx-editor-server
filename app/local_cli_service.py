@@ -7259,6 +7259,9 @@ class LocalCliService(
                             'rollback': rollback,
                         },
                     }
+                    if type(exc) is LocalCliMutationError and step.get('op') in {'table_edit_exact', 'table_style_exact', 'table_create_exact'}:
+                        # These messages name cells and properties, never document text, and say why the outcome is not proven.
+                        status['outcome_detail'] = error_text[:800]
                     if target_refused and not mutation_may_have_persisted:
                         from app.local_cli_runtime import _native_diagnostic
                         status['refusal_code'] = (exc.code if type(exc) is _NumberingSemanticRefusal or type(exc) is _NumberingCleanRefusal

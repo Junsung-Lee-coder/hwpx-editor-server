@@ -74,6 +74,11 @@ class TableCommands(Base):
         details = (await self.command(REQUESTS[7])).structured_content['error']['details']
         self.assertEqual((details['stopped_before_edit'], details['session_held']), (False, True))
 
+    async def test_the_reason_for_an_unknown_outcome_reaches_the_caller(self):
+        Backend.bundle_reply = {'ok': False, 'native_custody_held': True, 'steps': [{'ok': False, 'mutation_may_have_persisted': True, 'native_custody_held': True, 'outcome_detail': 'table style outcome is not as requested: A1 changed its content'}]}
+        details = (await self.command(REQUESTS[7])).structured_content['error']['details']
+        self.assertIn('A1 changed', details['message'])
+
     async def test_invalid_requests_never_reach_the_backend(self):
         for request in ({**REQUESTS[2], 'count': 99}, {**REQUESTS[7], 'fill': 'yellow'}, {**REQUESTS[8], 'method': 'CellFill'}, {**REQUESTS[2], 'confirm_layout': False},
                         {'op': 'table_edit_exact', 'action': 'TableMergeCell', 'cell': 'A1', **BOUND}, {**REQUESTS[8], 'borders': [{'edges': ['outline'], 'line': 'wave', 'width_mm': 0.12, 'color': '#000000'}]}):
