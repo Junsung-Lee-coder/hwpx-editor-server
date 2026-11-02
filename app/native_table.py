@@ -210,6 +210,7 @@ def _paragraph_facts(paragraph: ET.Element, chars: Mapping[str, Any], paras: Map
     return {
         'text': ''.join(atom['char'] for atom in atoms if 'char' in atom), 'atoms': atoms, 'shape': shape,
         'objects': [atom['control'] for atom in atoms if 'control' in atom and atom['control'] not in nf._JOINING_CONTROLS],  # noqa: SLF001
+        'tables': [row[1] for row in rows if row[0] == 't'],
         'digest': _digest([rows, _shape_id(shape, cache), _shape_id(end, cache) if end is not None else None, other_attrs, style_digest]),
     }
 
@@ -318,6 +319,7 @@ def parse_table_model(text: str) -> dict[str, Any]:
         fact['paragraphs'] = rows
         fact['text'] = '\n'.join(item['text'] for item in rows)
         fact['objects'] = [name for item in rows for name in item['objects']]
+        fact['tables'] = [inst for item in rows for inst in item['tables']]
         fact['content'] = _digest([item['digest'] for item in rows])[:24]
         fact['attrs'] = _digest(attrs)[:16]
         fact['blank'] = len(rows) == 1 and not rows[0]['atoms']
@@ -822,7 +824,7 @@ def _plan_delete(table: Mapping[str, Any], request: Mapping[str, Any]) -> dict[s
     if wanted != sorted(([item['address'], item['text'], sorted(item['objects'])] for item in stated), key=str):
         raise NativeNumberingRefusal('expected_removed_cells must list every cell with content this removes, with its full text and objects as table_read gives them: ' + ', '.join(item['address'] for item in stated)[:200], code='removed_content_mismatch')
     entries, rows, cols = _collapsed(entries, *((table['rows'] - count, table['cols']) if on_rows else (table['rows'], table['cols'] - count)))
-    return {'action': request['action'], 'kind': 'delete', 'rows': rows, 'cols': cols, 'entries': entries, 'caret': caret, 'native': native, 'rect': rect, 'removed_objects': [name for cell in removed for name in cell['objects']],
+    return {'action': request['action'], 'kind': 'delete', 'rows': rows, 'cols': cols, 'entries': entries, 'caret': caret, 'native': native, 'rect': rect, 'removed_objects': [name for cell in removed for name in cell['objects']], 'removed_tables': [inst for cell in removed for inst in cell['tables']],
             'changes': {'deleted_lines': count, 'line_kind': 'row' if on_rows else 'column', 'removed_cells': [{key: item[key] for key in ('address', 'text')} | ({'objects': item['objects']} if item['objects'] else {}) for item in stated],
                         'removed_blank_cells': [cell['address'] for cell in removed if cell['blank']], 'shortened_cells': shortened, 'outer_edge_moved': moved_edges[:MAX_REPORT_ROWS]}}
 
@@ -849,9 +851,11 @@ def _plan_merge(table: Mapping[str, Any], request: Mapping[str, Any]) -> dict[st
 def _column_edges(table: Mapping[str, Any]) -> list[int] | None:
     """Each grid column's left edge, from the cells' widths; None when the cells do not say."""
     widths: dict[int, int] = {}
+    # Plain cells first: a wider cell's stored width can lag after an edit through it.
+    ordered = sorted(table['cells'], key=lambda cell: cell['col_span'])
     for _round in range(table['cols'] + 1):
         moved = False
-        for cell in table['cells']:
+        for cell in ordered:
             missing = [col for col in range(cell['col'], cell['col'] + cell['col_span']) if col not in widths]
             if len(missing) == 1:
                 known = sum(widths[col] for col in range(cell['col'], cell['col'] + cell['col_span']) if col in widths)
@@ -1129,7 +1133,16 @@ def style_problems(table: Mapping[str, Any], plan: Mapping[str, Any], after: Map
 _STRUCTURE_LISTS = frozenset({'borderfilllist', 'charshapelist', 'parashapelist', 'facenamelist', 'tabdeflist'})
 
 
-def document_problems(before: Mapping[str, Any], after: Mapping[str, Any], target: Mapping[str, Any] | None, *, allowed_lists: frozenset[str], removed_objects: tuple[str, ...] = (), allow_new_paragraphs: bool = False, allow_new_table: bool = False) -> list[str]:
+def _with_descendants(model: Mapping[str, Any], insts: list[str]) -> set[str]:
+    """Table identities together with every table nested in them."""
+    found = {f'tbl:{inst}' for inst in insts}
+    for table in model['tables']:  # A parent comes before what it holds.
+        if table['nested_in'] in found:
+            found.add(table['table_id'])
+    return found
+
+
+def document_problems(before: Mapping[str, Any], after: Mapping[str, Any], target: Mapping[str, Any] | None, *, allowed_lists: frozenset[str], removed_objects: tuple[str, ...] = (), removed_tables: tuple[str, ...] = (), allow_new_paragraphs: bool = False, allow_new_table: bool = False) -> list[str]:
     census_before, census_after = before['census'], after['census']
     compared = [*_COMPARED, *([] if allow_new_paragraphs else ['frame'])]
     if 'picture' in removed_objects:
@@ -1146,7 +1159,8 @@ def document_problems(before: Mapping[str, Any], after: Mapping[str, Any], targe
     new = [row for row in after['model']['paragraphs'] if inst not in row['chain']]
     if not allow_new_table and [row['digest'] for row in old] != [row['digest'] for row in new]:
         problems.append('a paragraph outside the table changed')
-    others_before = {item['table_id']: item['state_sha256'] for item in before['model']['tables'] if inst is None or item['table_id'] != target['table_id']}
+    gone = _with_descendants(before['model'], list(removed_tables))
+    others_before = {item['table_id']: item['state_sha256'] for item in before['model']['tables'] if (inst is None or item['table_id'] != target['table_id']) and item['table_id'] not in gone}
     others_after = {item['table_id']: item['state_sha256'] for item in after['model']['tables'] if inst is None or item['table_id'] != target['table_id']}
     if allow_new_table:
         others_after = {key: value for key, value in others_after.items() if key in others_before}
@@ -1378,7 +1392,7 @@ def apply_edit(hwp: Any, *, request: Mapping[str, Any], read: Callable[[], Mappi
         after = read()
         new_table = next((item for item in after['model']['tables'] if item['table_id'] == table['table_id']), None)
         problems = edit_problems(table, plan, new_table)
-        problems += document_problems(before, after, table, allowed_lists=_STRUCTURE_LISTS, removed_objects=tuple(plan.get('removed_objects', ())))
+        problems += document_problems(before, after, table, allowed_lists=_STRUCTURE_LISTS, removed_objects=tuple(plan.get('removed_objects', ())), removed_tables=tuple(plan.get('removed_tables', ())))
         if plan['kind'] == 'insert' and caret_address != cell_address(*plan['caret_after']):
             problems.append(f"the caret ended on {caret_address}, so the new lines are not where they were asked for")
         if problems:

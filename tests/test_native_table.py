@@ -220,6 +220,24 @@ class Lines(unittest.TestCase):
         ok_result(self, edit(hwp, '1011', 'delete_row', row=5, expected_removed_cells=cells))
         self.assertEqual(hwp.by_inst('1011').rows, 4)
 
+    def test_a_removed_nested_table_must_be_named_and_goes_with_its_cell(self) -> None:
+        nested = grid('2001', [['속A', '속B']])
+        hwp = TableHwp(['앞 문단', grid('2000', [[{'paragraphs': [para('바깥', nested)]}, 'B1'], ['A2', 'B2']]), grid('2002', [['옆표']]), '뒤 문단'])
+        refused(self, edit(hwp, '2000', 'delete_row', row=1, expected_removed_cells=[{'address': 'A1', 'text': '바깥'}, {'address': 'B1', 'text': 'B1'}]), 'removed_content_mismatch', hwp)
+        ok_result(self, edit(hwp, '2000', 'delete_row', row=1, expected_removed_cells=[{'address': 'A1', 'text': '바깥', 'objects': ['table']}, {'address': 'B1', 'text': 'B1'}]))
+        self.assertEqual([table.inst for table in hwp.tables()], ['2000', '2002'])
+
+    def test_a_nested_table_in_a_kept_cell_is_still_compared(self) -> None:
+        def stray(hwp: TableHwp) -> None:
+            hwp.by_inst('2001').named('A1').paragraphs = [para('바뀜')]
+
+        nested = grid('2001', [['속A', '속B']])
+        hwp = TableHwp(['앞 문단', grid('2000', [[{'paragraphs': [para('바깥', nested)]}, 'B1'], ['A2', 'B2']]), '뒤 문단'])
+        hwp.corrupt_after_execute = stray
+        outcome = edit(hwp, '2000', 'insert_row_below', row=1)
+        self.assertFalse(outcome['ok'], outcome)
+        self.assertTrue(outcome['steps'][0]['mutation_may_have_persisted'])
+
     def test_several_lines_are_one_native_delete_on_a_whole_line_block(self) -> None:
         hwp = sample_document()
         removed = [{'address': f'{col}{row}', 'text': f'{col}{row}'} for row in (2, 3) for col in 'ABCD']

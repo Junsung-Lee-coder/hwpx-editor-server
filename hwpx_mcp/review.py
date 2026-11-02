@@ -532,6 +532,11 @@ def _table_rows(tables: dict[str, Any]) -> list[str]:
     return rows
 
 
+def _tables_changed(comparison: dict[str, Any]) -> bool:
+    tables = comparison.get('tables') or {}
+    return bool(tables.get('changed') or tables.get('added') or tables.get('removed'))
+
+
 def _table_lines(tables: dict[str, Any]) -> list[str]:
     lines: list[str] = []
     for item in tables['added']:
@@ -1304,7 +1309,7 @@ def to_markdown(review: dict[str, Any]) -> str:
             out.append('- 표 셀 등 본문 밖 문단: 전체를 비교하지 못함')
         else:
             nested = comparison.get('nested_format_changes')
-            out.append(f"- 표 셀 등 본문 밖 문단 {comparison['nested_paragraph_count']}개: {'글 동일' if comparison['nested_paragraphs_identical'] else '글 변경 감지'}" + (f', 서식 변경 {nested}개' if nested else ''))
+            out.append(f"- 표 셀 등 본문 밖 문단 {comparison['nested_paragraph_count']}개: {'글 동일' if comparison['nested_paragraphs_identical'] else ('글 변경 감지(위 표 변경 참고)' if _tables_changed(comparison) else '글 변경 감지')}" + (f', 서식 변경 {nested}개' if nested else ''))
         out.append('')
     tables = (comparison or {}).get('tables')
     if tables:

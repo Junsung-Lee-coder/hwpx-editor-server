@@ -135,6 +135,14 @@ class TableComparison(unittest.TestCase):
         self.assertIn('표 변경', second['summary_text'])
 
 
+class TextBesideTables(unittest.TestCase):
+    def test_the_nested_text_line_points_to_the_table_changes(self) -> None:
+        row = {'heading': 'NONE', 'level': 0, 'in_body': False, 'content_sha256': 'x', 'numbering_ref_sha256': None, 'index': 0, 'context': 'table_cell', 'format': {'runs': [], 'runs_truncated': False, 'paragraph': {}, 'paragraph_rest': 'p', 'paragraph_heading': 'h', 'objects': [], 'objects_sha256': 'o'}}
+        first = rules.assemble(session_id='s', review_id='s/review-1', readback=readback([table('1', 2, 2, base_grid())], paragraphs=[{**row, 'text': 'A1'}], paragraph_total=1), pdf=None, pages=[{'page': 1, 'path': 'p'}], texts=['글'], baseline=None, saved_output=None, render_error=None)
+        second = rules.assemble(session_id='s', review_id='s/review-2', readback=readback([table('1', 3, 2, base_grid() + [cell('A3', 3, 1, '')])], paragraphs=[{**row, 'text': 'A1'}, {**row, 'text': '', 'index': 1}], paragraph_total=2), pdf=None, pages=[{'page': 1, 'path': 'p'}], texts=['글'], baseline=first, saved_output=None, render_error=None)
+        self.assertIn('글 변경 감지(위 표 변경 참고)', rules.to_markdown(second))
+
+
 class SavedTables(unittest.TestCase):
     """The saved file itself, read with no help from Hancom: captured from a synthetic document saved by Hancom 13.0.0.3457."""
 
