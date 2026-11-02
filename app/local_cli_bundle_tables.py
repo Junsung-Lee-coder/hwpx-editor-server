@@ -20,7 +20,12 @@ class LocalCliBundleTablesMixin:
         def read() -> dict[str, Any]:
             try:
                 # One native read for each: the model is taken from the very text the census proved usable.
-                source = hwp.get_text_file('HWPML2X', '')
+                try:
+                    source = hwp.get_text_file('HWPML2X', '')
+                except native_numbering.NativeNumberingRefusal as exc:
+                    # SDK exception identity is not a pure model refusal.
+                    # Stop before parsing/restoration or another SDK call.
+                    raise native_numbering.NativeNumberingReadFailure('Native table evidence read failed.', code='preservation_unprovable') from exc
                 raw = _guard_protection(lambda: native_numbering_census.parse_hwpml2x_census(source))
                 model = native_table.parse_table_model(source)
             except (LocalCliRuntimeError, native_numbering_census.CensusError) as exc:
