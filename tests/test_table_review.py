@@ -4,7 +4,6 @@ from __future__ import annotations
 import copy
 import json
 from pathlib import Path
-import shutil
 import tempfile
 import unittest
 import zipfile
@@ -147,7 +146,18 @@ class SavedTables(unittest.TestCase):
     """The saved file itself, read with no help from Hancom: captured from a synthetic document saved by Hancom 13.0.0.3457."""
 
     def setUp(self) -> None:
-        self.saved = FIXTURES / 'saved_edges.hwpx'
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        self.folder = Path(folder.name)
+        self.saved = self.package('saved_edges')
+
+    def package(self, name: str) -> Path:
+        # The parts as Hancom wrote them; a whole .hwpx is not kept in the repository.
+        target = self.folder / f'{name}.hwpx'
+        with zipfile.ZipFile(target, 'w') as out:
+            out.writestr('Contents/header.xml', (FIXTURES / f'{name}.header.xml').read_bytes())
+            out.writestr('Contents/section0.xml', (FIXTURES / f'{name}.section0.xml').read_bytes())
+        return target
 
     def live(self):
         tables = rules.package_tables(self.saved)
@@ -167,7 +177,7 @@ class SavedTables(unittest.TestCase):
 
     def test_the_file_names_dash_and_dot_the_other_way_round_than_hancom_prints_them(self) -> None:
         # Measured: native line 2 prints as dashes and is DOT in the file, native line 3 prints as dots and is DASH there, and both reopen as they were.
-        tables = {item['table_id']: item for item in rules.package_tables(FIXTURES / 'saved_lines.hwpx')}
+        tables = {item['table_id']: item for item in rules.package_tables(self.package('saved_lines'))}
         lines = {cell_['address']: cell_ for cell_ in tables['tbl:1012']['cells']}
         self.assertEqual(lines['B2']['border']['top'], {'line': 'dash', 'width_mm': 0.4, 'color': '#00AA00'})
         self.assertEqual(lines['C3']['border']['top'], {'line': 'dot', 'width_mm': 0.4, 'color': '#0000FF'})
