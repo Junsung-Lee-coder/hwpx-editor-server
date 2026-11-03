@@ -38,6 +38,17 @@ class HeadReasonCodes(unittest.TestCase):
     def test_tail_change(self):
         self.assertEqual(self.codes(doc(), doc(tail='WFla')), ('tail_changed', 'tail_changed'))
 
+    def test_a_new_list_with_an_unlisted_entry_name_is_growth(self):
+        # The entry element name of a new list is not assumed; one name throughout is enough.
+        before = doc(extra='<MAPPINGTABLE><CHARSHAPELIST Count="1"><CHARSHAPE Id="0"/></CHARSHAPELIST></MAPPINGTABLE>')
+        after = doc(extra='<MAPPINGTABLE><CHARSHAPELIST Count="1"><CHARSHAPE Id="0"/></CHARSHAPELIST><MEMOSHAPELIST Count="1"><MEMOPR Id="0"/></MEMOSHAPELIST></MAPPINGTABLE>')
+        self.assertEqual(head_tail_reasons(before, after), [])
+
+    def test_a_new_list_that_reorders_existing_children_is_named(self):
+        before = doc(extra='<MAPPINGTABLE><CHARSHAPELIST Count="0"/><STYLELIST/></MAPPINGTABLE>')
+        after = doc(extra='<MAPPINGTABLE><STYLELIST/><CHARSHAPELIST Count="0"/><MEMOSHAPELIST Count="0"/></MAPPINGTABLE>')
+        self.assertEqual(self.codes(before, after), ('head_mappingtable_newlist_misaligned', 'head_mappingtable_newlist_misaligned'))
+
     def test_a_new_growable_list_is_growth(self):
         # As on Hancom 2024 after a section break: MAPPINGTABLE gains a MEMOSHAPELIST with one memo shape.
         before = doc(extra='<MAPPINGTABLE><CHARSHAPELIST Count="1"><CHARSHAPE Id="0"/></CHARSHAPELIST><STYLELIST/></MAPPINGTABLE>')
@@ -47,7 +58,7 @@ class HeadReasonCodes(unittest.TestCase):
     def test_other_new_children_or_changed_lists_are_still_named(self):
         before = doc(extra='<MAPPINGTABLE><CHARSHAPELIST Count="1"><CHARSHAPE Id="0"/></CHARSHAPELIST></MAPPINGTABLE>')
         cases = (('<BULLETLIST Count="1"><BULLET Id="0"/></BULLETLIST>', 'head_mappingtable_gained_bulletlist'),
-                 ('<MEMOSHAPELIST Count="1"><CHARSHAPE Id="0"/></MEMOSHAPELIST>', 'head_mappingtable_gained_memoshapelist'))
+                 ('<MEMOSHAPELIST Count="2"><MEMOSHAPE Id="0"/><CHARSHAPE Id="1"/></MEMOSHAPELIST>', 'head_mappingtable_newlist_entries'))
         for added, code in cases:
             after = doc(extra=f'<MAPPINGTABLE><CHARSHAPELIST Count="1"><CHARSHAPE Id="0"/></CHARSHAPELIST>{added}</MAPPINGTABLE>')
             self.assertEqual(self.codes(before, after), (code, code))

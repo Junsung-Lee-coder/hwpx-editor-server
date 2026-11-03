@@ -173,10 +173,15 @@ def _head_growth_reasons(before: ET.Element, after: ET.Element, path: str, allow
                 index += 1
             else:
                 new_lists.append(child)
-        if index != len(old_children) or any(child.tag not in GROWABLE_HEAD_LISTS or child.tag in {old.tag for old in old_children}
-                                             or any(entry.tag != GROWABLE_HEAD_LISTS[child.tag] for entry in child) for child in new_lists):
+        # The new list's entry element name is not compared with GROWABLE_HEAD_LISTS (not natively verified for every
+        # list); a new list cannot change existing content, so it must only hold entries of one element name.
+        old_tags = {old.tag for old in old_children}
+        problem = ('misaligned' if index != len(old_children)
+                   else 'gained' if any(child.tag not in GROWABLE_HEAD_LISTS or child.tag in old_tags for child in new_lists)
+                   else 'entries' if any(len({entry.tag for entry in child}) > 1 for child in new_lists) else None)
+        if problem is not None:
             added = sorted((Counter(child.tag for child in new_children) - Counter(child.tag for child in old_children)).elements())
-            out.append(f'{where} gained children {added}, but only {sorted(GROWABLE_HEAD_LISTS)} may gain entries')
+            out.append(f'{where} gained children {added} ({problem}), but only {sorted(GROWABLE_HEAD_LISTS)} may gain entries')
             return
     if any(child.tag != entry_tag for child in appended):
         out.append(f'{where} gained entries other than {entry_tag}')
@@ -203,6 +208,7 @@ _HEAD_CHANGE_KINDS = (('became', ' became '), ('attrs', ' attributes changed'), 
                       ('entry', ' existing '))
 HEAD_REASON_CODES = frozenset({f'head_{tag.lower()}_{kind}' for tag in KNOWN_HEAD_TAGS for kind, _needle in _HEAD_CHANGE_KINDS}
                               | {f'head_{tag.lower()}_gained_{child.lower()}' for tag in KNOWN_HEAD_TAGS for child in (*KNOWN_HEAD_TAGS, 'OTHER')}
+                              | {f'head_{tag.lower()}_newlist_{why}' for tag in KNOWN_HEAD_TAGS for why in ('misaligned', 'entries')}
                               | {'head_changed', 'tail_changed', 'hwpml_parts_changed'})
 
 
@@ -221,6 +227,10 @@ def head_reason_code(reason: str) -> str | None:
         kind = next((name for name, needle in _HEAD_CHANGE_KINDS if needle in ' ' + rest), None)
         if kind is None:
             return 'head_changed'
+        if kind == 'gained' and ' (misaligned)' in rest:
+            return f'head_{tags[-1].lower()}_newlist_misaligned'
+        if kind == 'gained' and ' (entries)' in rest:
+            return f'head_{tags[-1].lower()}_newlist_entries'
         if kind == 'gained':
             added = re.findall(r"'([A-Z][A-Z0-9]*)'", rest.split(', but only', 1)[0])
             child = added[0] if added and added[0] in KNOWN_HEAD_TAGS else 'OTHER'
