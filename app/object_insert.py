@@ -97,9 +97,11 @@ NATIVE: dict[str, dict[str, Any]] = {
 }
 CLOSE_ACTION = 'CloseEx'
 EQUATION_VERSION = 'Equation Version 60'
-# HeaderFooter parameter items (unverified; all "which one" aliases get the same value).
-HEADER_FOOTER_TYPE_ITEMS = ('Type', 'HeaderFooterCtrlType', 'CtrlType')
-HEADER_FOOTER_APPLY_ITEM = 'ApplyTo'
+# HeaderFooter parameter items. On Hancom 2024, with every item below set to the same value, a header with 0 read back
+# ApplyPageType Both and a footer with 1 read back Even, while ApplyTo had no effect: 'Type' carries the page type
+# (0 both, 1 even, 2 odd) and the other two choose header (0) or footer (1).
+HEADER_FOOTER_TYPE_ITEMS = ('HeaderFooterCtrlType', 'CtrlType')
+HEADER_FOOTER_APPLY_ITEM = 'Type'
 HEADER_FOOTER_APPLY_VALUES: dict[str, int] = {'both': 0, 'even': 1, 'odd': 2}
 
 # Per-kind parameters. None = required; anything else is the default.

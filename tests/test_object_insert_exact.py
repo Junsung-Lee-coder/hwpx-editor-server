@@ -487,8 +487,9 @@ class _FakeHwp:
             self.pending = {'tag': 'ENDNOTE' if self.wrong_tag and tag == 'FOOTNOTE' else tag, 'text': '', 'body': list(self.caret)}
             self.caret = [1, 0, 0]
         elif name == 'HeaderFooter':
-            tag = 'HEADER' if items.get('Type') == 0 else 'FOOTER'
-            apply = {0: 'Both', 1: 'Even', 2: 'Odd'}[items['ApplyTo']]
+            # As read back on Hancom 2024: HeaderFooterCtrlType chooses header/footer, Type the page type.
+            tag = 'HEADER' if items.get('HeaderFooterCtrlType') == 0 else 'FOOTER'
+            apply = {0: 'Both', 1: 'Even', 2: 'Odd'}[items.get('Type', 0)]
             self.pending = {'tag': tag, 'text': '', 'apply': apply, 'body': list(self.caret)}
             self.caret = [2, 0, 0]
         elif name == 'CloseEx' and self.pending is not None:
