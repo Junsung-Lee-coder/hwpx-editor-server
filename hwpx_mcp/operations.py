@@ -578,7 +578,7 @@ ShapeMm = Annotated[float, Field(ge=0.0, le=1000.0)]
 
 
 class ObjectInsertStep(Closed):
-    """Insert one note, field, bookmark, equation, shape, header or footer at the proven caret (expected_pos from hwpx_where). Refusal codes before any edit: caret_moved, editor_not_normal, selection_required, selection_text_mismatch, existing_header_footer, bookmark_exists, unverifiable_layout, proof_budget. A request the backend proves stale or impossible from its own exact reads before the first native edit is refused with a refusal_code; the document and caret are unchanged and the session stays usable. Any other backend error, and any failure after the edit started, is reported as an unknown outcome and holds the session."""
+    """Insert one note, field, bookmark, equation, shape, header or footer at the proven caret (expected_pos from hwpx_where). Per kind: hyperlink needs a live selection whose text is exactly display_text (make it with select_target; hwpx_where keeps it) and expected_pos equal to the caret at the selection end as hwpx_where reports it, with no other command in between; memo works with or without a selection; every other kind needs no selection. header and footer are refused (existing_header_footer) when a header or footer already covers those pages; a bookmark name must not already be used (bookmark_exists). Refusal codes before any edit: caret_moved, editor_not_normal, selection_required, selection_text_mismatch, existing_header_footer, bookmark_exists, unverifiable_layout, proof_budget. A request the backend proves stale or impossible from its own exact reads before the first native edit is refused with a refusal_code; the document and caret are unchanged and the session stays usable. Any other backend error, and any failure after the edit started, is reported as an unknown outcome and holds the session."""
     op: Literal['object_insert_exact']
     label: Label = 'mcp:object-insert-exact'
     kind: Literal['footnote', 'endnote', 'memo', 'hyperlink', 'bookmark', 'equation', 'line', 'rectangle', 'ellipse',
@@ -587,13 +587,13 @@ class ObjectInsertStep(Closed):
     confirm_mutation: Literal[True]
     text: Annotated[str, Field(min_length=1, max_length=2000)] | None = None
     url: Annotated[str, Field(min_length=1, max_length=2000)] | None = Field(default=None, description='http, https or mailto.')
-    display_text: Annotated[str, Field(min_length=1, max_length=2000)] | None = None
-    name: Annotated[str, Field(min_length=1, max_length=40)] | None = None
+    display_text: Annotated[str, Field(min_length=1, max_length=2000)] | None = Field(default=None, description='hyperlink: exactly the text of the live selection.')
+    name: Annotated[str, Field(min_length=1, max_length=40)] | None = Field(default=None, description='bookmark: a name not already used in the document.')
     script: Annotated[str, Field(min_length=1, max_length=4000)] | None = None
     width_mm: ShapeMm | None = None
     height_mm: ShapeMm | None = None
     treat_as_char: bool | None = None
-    apply_to: Literal['both', 'even', 'odd'] | None = None
+    apply_to: Literal['both', 'even', 'odd'] | None = Field(default=None, description='header/footer: the pages; refused when an existing header or footer already covers them.')
 
     @model_validator(mode='after')
     def fields_of_the_kind(self):

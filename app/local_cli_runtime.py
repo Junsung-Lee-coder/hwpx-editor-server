@@ -616,7 +616,16 @@ def snapshot_live_location(
     include_document_snapshot: bool = True,
 ) -> dict[str, Any]:
     cursor = _snapshot_cursor_context(hwp)
-    nearby = _capture_nearby_text_context(hwp) if include_nearby_context else {}
+    # Nearby paragraph text is read by selecting each paragraph and putting only the caret back, which would drop
+    # a live selection (for example the one select_target made for a hyperlink). Read it only when the editor
+    # provably has no selection; otherwise the observation leaves the selection and the caret exactly as they are.
+    selection_free = cursor.get('has_selection') is False and cursor.get('selection_mode') in (0, None)
+    if include_nearby_context and selection_free:
+        nearby = _capture_nearby_text_context(hwp)
+    elif include_nearby_context:
+        nearby = {'skipped': 'selection_kept'}
+    else:
+        nearby = {}
     hwp_snapshot = collect_hwp_snapshot(hwp) if include_document_snapshot else {}
     document_info = hwp_snapshot.get('document') if isinstance(hwp_snapshot.get('document'), dict) else {}
     doc_path = str(_safe_hwp_attr(hwp, 'Path') or document_info.get('FullName') or '').strip()

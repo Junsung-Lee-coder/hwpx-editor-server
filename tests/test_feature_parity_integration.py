@@ -135,11 +135,13 @@ class _SelectingHwp(_FakeHwp):
 
 
 class WhereKeepsSelectionTests(unittest.TestCase):
-    def test_nearby_capture_is_what_drops_a_selection(self) -> None:
+    def test_nearby_capture_keeps_an_active_selection(self) -> None:
+        # Nearby paragraphs are read by selecting them, so with a live selection the standalone where skips them.
         hwp = _SelectingHwp()
         hwp.select(6, 11)
-        snapshot_live_location(hwp=hwp, source_filename='a.hwpx', working_copy_id='s')
-        self.assertIsNone(hwp.selection)
+        location = snapshot_live_location(hwp=hwp, source_filename='a.hwpx', working_copy_id='s')
+        self.assertEqual(hwp.selection, (6, 11))
+        self.assertEqual(location['nearby_context'], {'skipped': 'selection_kept'})
 
     def test_where_then_hyperlink_recipe_keeps_the_selection(self) -> None:
         hwp = _SelectingHwp()
