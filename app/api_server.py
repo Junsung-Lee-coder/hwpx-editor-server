@@ -1665,6 +1665,11 @@ def _shared_table_conflict_blocker(compiled: Any) -> str | None:
     return f'shared_table_cell_conflict: {detail}. Resolve the conflicting table sections and resend before approval.'
 
 
+# Unbounded native actions are never queued through MCP, and the queued runtime refuses the numbering ops;
+# the compiler does not emit them, and a compiled plan that carries one is refused rather than forwarded.
+_COMPILED_PLAN_FORBIDDEN_OPS = frozenset({'native_action', 'page_number', 'official_numbering'})
+
+
 def _build_authoring_instruction_payload(compiled: Any) -> dict[str, Any]:
     """The job instructions for a compiled authoring plan.
 
@@ -1675,7 +1680,12 @@ def _build_authoring_instruction_payload(compiled: Any) -> dict[str, Any]:
     edit_plan = compiled.get('edit_plan') if isinstance(compiled, dict) else None
     if not isinstance(edit_plan, dict):
         raise EditOperationError('compiled authoring plan has no edit_plan')
-    raw: dict[str, Any] = {'operations': edit_plan.get('operations'), 'validation': edit_plan.get('validation') or {}}
+    operations = edit_plan.get('operations')
+    for index, item in enumerate(operations if isinstance(operations, list) else [], start=1):
+        op = str(item.get('op', '')).strip() if isinstance(item, dict) else ''
+        if op in _COMPILED_PLAN_FORBIDDEN_OPS:
+            raise EditOperationError(f'compiled authoring plan operation #{index} uses {op}, which authoring plans may not carry')
+    raw: dict[str, Any] = {'operations': operations, 'validation': edit_plan.get('validation') or {}}
     if isinstance(edit_plan.get('instruction_metadata'), dict):
         raw['metadata'] = edit_plan['instruction_metadata']
     for key in ('template_version', 'inspect_snapshot_id', 'template_fingerprint'):

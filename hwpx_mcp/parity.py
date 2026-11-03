@@ -236,7 +236,8 @@ QUEUED_OPS: dict[str, dict[str, Any]] = {
         'cursor_replace_text', 'cursor_delete_range', 'cursor_insert_text', 'cursor_snapshot', 'control_delete_by_anchor',
         'table_cell_action', 'table_cell_clear_text', 'table_cell_replace_text', 'table_patch_cells')},
     'native_action': _excluded('runs any HAction name with any parameter set (run/execute/auto); the backend has no allowlist for it, '
-                               'so it is an unbounded escape hatch. Backend-compiled authoring plans may still contain it'),
+                               'so it is an unbounded escape hatch. The authoring compiler does not emit it, and compiled authoring plans '
+                               'that carry it are refused before job instructions are written'),
     'page_number': {'status': 'backend_unsupported', 'reason': 'the queued runtime refuses it before any SDK work (require_queued_job_runtime_support); '
                     'use hwpx_command page_number_apply'},
     'official_numbering': {'status': 'backend_unsupported', 'reason': 'the queued runtime refuses it before any SDK work (require_queued_job_runtime_support); '
