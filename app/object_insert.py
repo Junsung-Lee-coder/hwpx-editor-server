@@ -86,7 +86,9 @@ NATIVE: dict[str, dict[str, Any]] = {
     'memo': {'mode': 'run', 'action': 'InsertFieldMemo', 'types_text': True, 'closes': True},
     'hyperlink': {'mode': 'execute', 'action': 'InsertHyperlink', 'pset': 'HHyperLink'},
     'bookmark': {'mode': 'execute', 'action': 'Bookmark', 'pset': 'HBookMark'},
-    'equation': {'mode': 'execute', 'action': 'EquationCreate', 'pset': 'HEqEdit'},
+    # The script goes in through the parameter-set property (pset.string), as pyhwpx 1.7.2 EquationRefresh does; on
+    # Hancom 2024 HSet.SetItem('string', ...) left the new equation's script different from the request.
+    'equation': {'mode': 'execute', 'action': 'EquationCreate', 'pset': 'HEqEdit', 'set_by': 'property'},
     'line': {'mode': 'execute', 'action': 'DrawObjCreatorLine', 'pset': 'HShapeObject'},
     'rectangle': {'mode': 'execute', 'action': 'DrawObjCreatorRectangle', 'pset': 'HShapeObject'},
     'ellipse': {'mode': 'execute', 'action': 'DrawObjCreatorEllipse', 'pset': 'HShapeObject'},
@@ -143,6 +145,9 @@ _REASON_CODES: tuple[tuple[str, str], ...] = (
     ('text is not exactly the requested text', 'object_text_mismatch'),
     ('hyperlink Command does not name exactly the url', 'hyperlink_command_mismatch'),
     ('BOOKMARK Name differs', 'bookmark_name_mismatch'),
+    ('EQUATION has no script element', 'equation_script_missing'),
+    ('EQUATION has more than one script element', 'equation_script_multiple'),
+    ('EQUATION script is empty', 'equation_script_empty'),
     ('EQUATION script differs', 'equation_script_mismatch'),
     ('HWPUNIT', 'shape_size_mismatch'),
     ('TreatAsChar', 'shape_treat_as_char_mismatch'),
@@ -480,7 +485,13 @@ def _element_reasons(plan: Mapping[str, Any], element: ET.Element) -> list[str]:
         reasons.append('new BOOKMARK Name differs from the requested name')
     if kind == 'equation':
         scripts = [child for tag in ATTRS['equation_script_tags'].split(',') for child in element.iter(tag)]
-        if len(scripts) != 1 or (scripts[0].text or '').strip() != plan['script'].strip():
+        if not scripts:
+            reasons.append('new EQUATION has no script element')
+        elif len(scripts) > 1:
+            reasons.append('new EQUATION has more than one script element')
+        elif not (scripts[0].text or '').strip():
+            reasons.append('new EQUATION script is empty')
+        elif (scripts[0].text or '').strip() != plan['script'].strip():
             reasons.append('new EQUATION script differs from the requested script')
     if kind in SHAPE_KINDS:
         size = element.find(f'.//{ATTRS["shape_size_tag"]}')

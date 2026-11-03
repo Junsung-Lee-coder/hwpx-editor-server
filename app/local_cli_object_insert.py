@@ -78,8 +78,10 @@ class LocalCliObjectInsertMixin:
             return {'action': action_name, 'succeeded': False, 'method': label, 'outcome_unknown': True, 'error': f'{type(exc).__name__}: {exc}'}
         return {'action': action_name, 'succeeded': raw is None or bool(raw), 'method': label, 'result': bool(raw) if raw is not None else None}
 
-    def _object_insert_prepare_pset(self, hwp: Any, action_name: str, pset_name: str, items: dict[str, Any]) -> tuple[Any, Any]:
-        """GetDefault + SetItem for an Execute action. Not mutating; raises LocalCliRuntimeError."""
+    def _object_insert_prepare_pset(self, hwp: Any, action_name: str, pset_name: str, items: dict[str, Any], *,
+                                    by_property: bool = False) -> tuple[Any, Any]:
+        """GetDefault, then each item through HSet.SetItem (or the parameter-set property when ``by_property``), for an
+        Execute action. Not mutating; raises LocalCliRuntimeError."""
         haction = getattr(hwp, 'HAction', None)
         get_default = getattr(haction, 'GetDefault', None)
         execute = getattr(haction, 'Execute', None)
@@ -90,7 +92,10 @@ class LocalCliObjectInsertMixin:
         try:
             get_default(action_name, hset)
             for name, value in items.items():
-                hset.SetItem(name, value)
+                if by_property:
+                    setattr(pset, name, value)
+                else:
+                    hset.SetItem(name, value)
         except Exception as exc:
             raise LocalCliRuntimeError(f'{OP} could not prepare {pset_name} for {action_name}: {type(exc).__name__}: {exc}') from exc
         return execute, hset
@@ -189,7 +194,8 @@ class LocalCliObjectInsertMixin:
             mutation.editing_actions += 1
             result = self._object_insert_run(hwp, native['action'])
         else:
-            execute, hset = self._object_insert_prepare_pset(hwp, native['action'], native['pset'], native_items(plan))
+            execute, hset = self._object_insert_prepare_pset(hwp, native['action'], native['pset'], native_items(plan),
+                                                             by_property=native.get('set_by') == 'property')
             self._object_insert_require(hwp, plan, control, where=f'before {native["action"]}')
             control.begin_mutation()
             mutation.started = True

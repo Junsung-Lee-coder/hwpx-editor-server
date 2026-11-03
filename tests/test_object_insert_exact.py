@@ -368,11 +368,24 @@ class ValidationTests(unittest.TestCase):
 
 
 class _Set:
+    """One parameter set: items come in through HSet.SetItem or a property.
+
+    As on Hancom 2024, the equation script reaches EquationCreate only through the HEqEdit property (pset.string, the
+    way pyhwpx 1.7.2 sets it); HSet.SetItem('string', ...) leaves the script out.
+    """
+
     def __init__(self, hwp: _FakeHwp, name: str) -> None:
-        self.hwp, self.name, self.items = hwp, name, {}
-        self.HSet = self
+        object.__setattr__(self, 'hwp', hwp)
+        object.__setattr__(self, 'name', name)
+        object.__setattr__(self, 'items', {})
+        object.__setattr__(self, 'HSet', self)
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        self.items[name] = value
 
     def SetItem(self, name: str, value: Any) -> None:  # noqa: N802
+        if self.name == 'HEqEdit' and name == 'string':
+            return
         self.items[name] = value
 
 
@@ -487,7 +500,7 @@ class _FakeHwp:
         elif name == 'Bookmark':
             self.put(f'<BOOKMARK Name={quoteattr(items["Name"])}/>')
         elif name == 'EquationCreate':
-            self.put(f'<EQUATION><SHAPEOBJECT/><SCRIPT>{escape(items["string"])}</SCRIPT></EQUATION>')
+            self.put(f'<EQUATION><SHAPEOBJECT/><SCRIPT>{escape(items.get("string", ""))}</SCRIPT></EQUATION>')
         elif name.startswith('DrawObjCreator'):
             tag = name.removeprefix('DrawObjCreator').upper()
             self.put(_shape(tag, items['Width'], items['Height'], bool(items['TreatAsChar'])))
