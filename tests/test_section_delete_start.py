@@ -2,8 +2,8 @@
 
 On Hancom 2024 the first text of a new section's first paragraph is at position 16, after its inline SECDEF and
 COLDEF (8 positions each), and MoveLeft from there leaves the paragraph, so position 0 cannot be reached by
-navigation. section_delete therefore accepts expected_pos at 0, 8 or 16; after proving the section start it puts the
-caret at position 0 itself, proves it, and runs the one DeleteBack there.
+navigation (and a caret set to 0 is not kept there). section_delete therefore accepts expected_pos at 0, 8 or 16 and,
+after proving the section start, runs the one DeleteBack at that position; the readback decides the outcome.
 """
 from __future__ import annotations
 
@@ -17,6 +17,8 @@ class HancomSectionStart(_FakeLayoutHwp):
     """MoveLeft at a section's first text position (16, after the two inline definitions) leaves the paragraph."""
 
     def run(self, name):
+        if name == 'DeleteBack' and self.caret[2] == 16:
+            self.caret = (0, self.caret[1], 0)  # modelled: Backspace at the first text removes the section break
         if name == 'MoveLeft' and self.caret[2] == 16:
             self.log.append(name)
             para = self.caret[1]
@@ -35,7 +37,6 @@ class SectionDeleteFromTextStart(unittest.TestCase):
         hwp.caret = (0, 2, 16)
         result = _run(hwp, step(16))
         self.assertEqual(len(hwp.sections), 2)
-        self.assertEqual(result['section_start_proof']['delete_at'], [0, 2, 0])
         self.assertEqual(hwp.mutations(), ['DeleteBack'])
 
     def test_other_positions_are_refused_before_any_edit(self):

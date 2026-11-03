@@ -495,7 +495,7 @@ class LayoutStep(Closed):
         default=None, description='page_setup: current_section or whole_document; columns: current_section or from_caret_new.')
     section_index: int | None = Field(default=None, ge=2, description='section_delete: the section merged into its predecessor. Put the caret on the '
                                       "first text of that section's first paragraph (hwpx_where then reports pos 16, after the section and column definitions, or 0); "
-                                      'the backend proves the section start and deletes the break from the paragraph start itself.')
+                                      'the backend proves the section start and deletes the break from there.')
     marker_text: Annotated[str, Field(min_length=1, max_length=40)] | None = None
     expected_before: LayoutExpectedBefore | None = None
     confirm_layout: Literal[True]

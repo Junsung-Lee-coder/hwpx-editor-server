@@ -38,8 +38,8 @@ SCHEMA_VERSION = 'local-cli/layout-exact/v1'
 
 KINDS = ('page_setup', 'columns', 'section_insert', 'section_delete', 'hanging_indent')
 # Where a caret can stand at a section's start. On Hancom 2024 the first text of a new section's first paragraph is at
-# position 16, after its inline SECDEF and COLDEF (8 positions each), and MoveLeft from there leaves the paragraph, so
-# position 0 cannot be reached by navigation; the engine moves there itself after proving the section start.
+# position 16, after its inline SECDEF and COLDEF (8 positions each); MoveLeft from there leaves the paragraph and
+# a caret set to position 0 was not kept there, so DeleteBack runs at the proven start as given.
 SECTION_START_POSITIONS = (0, 8, 16)
 
 # 1 mm in HWPUNIT (1 HWPUNIT = 1/7200 inch; 1 inch = 25.4 mm).

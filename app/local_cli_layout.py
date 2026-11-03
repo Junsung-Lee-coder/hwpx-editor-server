@@ -367,13 +367,9 @@ class LocalCliLayoutMixin:
         proof = self._layout_prove_section_start(hwp, request, control)
         doc_before = self._layout_document(hwp, control, where='before edit', body_rule='section_delete')
         plan = self._layout_plan(control, lambda: plan_section_delete(request, doc_before, key_indicator_sections=proof['section_count']))
-        # The section's very start is position 0 of that paragraph, before its inline definitions; navigation stops at
-        # the first text, so after the proof the engine puts the caret there itself and proves it (strict reads).
-        start = (expected_pos[0], expected_pos[1], 0)
-        if tuple(expected_pos) != start:
-            restore_caret(hwp, OP, start)
-            proof['delete_at'] = list(start)
-        self._layout_require(hwp, start, control, where='before DeleteBack', body_only=True)
+        # DeleteBack runs at the proven section start where Hancom keeps the caret: position 0, or the first text after
+        # the section's inline definitions (a caret before them is not kept). The readback decides the outcome.
+        self._layout_require(hwp, expected_pos, control, where='before DeleteBack', body_only=True)
         result = self._layout_native_run(hwp, 'DeleteBack', control)
         self._layout_raise_if_failed(result)
         doc_after = self._layout_after(hwp, control)
