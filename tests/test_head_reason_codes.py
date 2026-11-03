@@ -49,6 +49,21 @@ class HeadReasonCodes(unittest.TestCase):
         after = doc(extra='<MAPPINGTABLE><STYLELIST/><CHARSHAPELIST Count="0"/><MEMOSHAPELIST Count="0"/></MAPPINGTABLE>')
         self.assertEqual(self.codes(before, after), ('head_mappingtable_newlist_misaligned', 'head_mappingtable_newlist_misaligned'))
 
+    def test_a_numbering_list_may_gain_a_definition(self):
+        # As on Hancom 2024 after a section break: NUMBERINGLIST gains one entry and its Count follows.
+        before = doc(extra='<MAPPINGTABLE><NUMBERINGLIST Count="1"><NUMBERING Id="1"/></NUMBERINGLIST></MAPPINGTABLE>')
+        after = doc(extra='<MAPPINGTABLE><NUMBERINGLIST Count="2"><NUMBERING Id="1"/><NUMBERING Id="2"/></NUMBERINGLIST></MAPPINGTABLE>')
+        self.assertEqual(head_tail_reasons(before, after), [])
+        changed = doc(extra='<MAPPINGTABLE><NUMBERINGLIST Count="2"><NUMBERING Id="1" Start="5"/><NUMBERING Id="2"/></NUMBERINGLIST></MAPPINGTABLE>')
+        self.assertEqual(self.codes(before, changed), ('head_numberinglist_entry', 'head_numberinglist_entry'))
+
+    def test_appended_entries_follow_the_lists_own_entry_name(self):
+        before = doc(extra='<MAPPINGTABLE><MEMOSHAPELIST Count="1"><MEMOPR Id="0"/></MEMOSHAPELIST></MAPPINGTABLE>')
+        after = doc(extra='<MAPPINGTABLE><MEMOSHAPELIST Count="2"><MEMOPR Id="0"/><MEMOPR Id="1"/></MEMOSHAPELIST></MAPPINGTABLE>')
+        self.assertEqual(head_tail_reasons(before, after), [])
+        mixed = doc(extra='<MAPPINGTABLE><MEMOSHAPELIST Count="2"><MEMOPR Id="0"/><MEMOSHAPE Id="1"/></MEMOSHAPELIST></MAPPINGTABLE>')
+        self.assertEqual(self.codes(before, mixed), ('head_memoshapelist_foreign', 'head_memoshapelist_foreign'))
+
     def test_a_new_growable_list_is_growth(self):
         # As on Hancom 2024 after a section break: MAPPINGTABLE gains a MEMOSHAPELIST with one memo shape.
         before = doc(extra='<MAPPINGTABLE><CHARSHAPELIST Count="1"><CHARSHAPE Id="0"/></CHARSHAPELIST><STYLELIST/></MAPPINGTABLE>')

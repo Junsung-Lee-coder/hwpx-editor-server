@@ -40,6 +40,8 @@ GROWABLE_HEAD_LISTS: dict[str, str] = {
     'TABDEFLIST': 'TABDEF',
     'BORDERFILLLIST': 'BORDERFILL',
     'MEMOSHAPELIST': 'MEMOSHAPE',
+    # On Hancom 2024 a section break changed NUMBERINGLIST (head_numberinglist_attrs: its Count with a new entry).
+    'NUMBERINGLIST': 'NUMBERING',
 }
 BODY_TAG = 'BODY'
 HEAD_TAG = 'HEAD'
@@ -148,6 +150,9 @@ def _head_growth_reasons(before: ET.Element, after: ET.Element, path: str, allow
         return
     old_children, new_children = list(before), list(after)
     entry_tag = GROWABLE_HEAD_LISTS.get(before.tag)
+    if entry_tag and old_children and len({child.tag for child in old_children}) == 1:
+        # The list's own entries name the entry element; the table above is only the fallback for an empty list.
+        entry_tag = old_children[0].tag
     appended = new_children[len(old_children):] if entry_tag else []
     free = set(allow.get(before.tag, ())) | ({LIST_COUNT_ATTR} if appended else set())
     old_attrs = {key: value for key, value in attrs(before) if key not in free}
