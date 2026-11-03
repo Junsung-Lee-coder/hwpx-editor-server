@@ -2374,31 +2374,6 @@ def _safe_replace_paragraph_range(
     whole_word: bool,
     allow_packed_paragraph: bool = False,
 ) -> int:
-    def _recover_current_paragraph_selection(find_text: str, label: str) -> tuple[Any, ...] | None:
-        before = _snapshot_cursor_context(hwp)
-        selected_before = _get_selected_pos(hwp)
-        if selected_before and selected_before[0]:
-            return _select_whole_paragraph_for_current_selection(hwp)
-        current_pos = _get_pos(hwp)
-        if len(current_pos) < 3:
-            return None
-        current_para_text = _get_current_paragraph_text_at_cursor(hwp)
-        if find_text not in current_para_text:
-            return None
-        _set_pos(hwp, int(current_pos[0]), int(current_pos[1]), 0)
-        if hasattr(hwp, 'select_text'):
-            hwp.select_text(int(current_pos[1]), 0, int(current_pos[1]), -1, int(current_pos[0]))
-        else:
-            raise EditOperationError('pyhwpx select_text is unavailable on this machine')
-        recovered = _get_selected_pos(hwp)
-        if recovered and recovered[0]:
-            return recovered
-        after = _snapshot_cursor_context(hwp)
-        raise EditOperationError(
-            f'{label} selection recovery failed after find-hit; '
-            f'before={before}, after={after}, current_para_text={current_para_text[:240]!r}'
-        )
-
     _move_doc_begin(hwp)
     count = 0
 
@@ -2426,12 +2401,7 @@ def _safe_replace_paragraph_range(
         ):
             raise EditOperationError(f'end paragraph for replace_paragraph_range_safe not found: {end_find!r}')
 
-        try:
-            end_selection = _select_whole_paragraph_for_current_selection(hwp)
-        except EditOperationError:
-            if not cluster_method_body:
-                raise
-            end_selection = _recover_current_paragraph_selection(end_find, 'method-p112 end')
+        end_selection = _select_whole_paragraph_for_current_selection(hwp)
         if not end_selection or not end_selection[0]:
             raise EditOperationError('expected selected text after finding range end paragraph')
         _, range_start_list, range_start_para, _range_start_pos, range_end_list, range_end_para, _range_end_pos = end_selection
