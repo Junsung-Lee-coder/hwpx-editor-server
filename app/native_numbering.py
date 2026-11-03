@@ -1952,7 +1952,20 @@ def _locate_unique_body_paragraph(hwp: Any, find: str, *, match_case: bool,
         key = (slist, spara)
         if key not in found:
             found.append(key)
-        _require_motion_result(advance())
+        moved = advance()
+        if moved is False:
+            # A BOOL MoveRight cannot move past the document end. End the search only when that is proven:
+            # MoveDocEnd confirmed and the exact caret equals this hit's selection end. Anything else stays technical.
+            _require_motion_result(_native_method(hwp, 'MoveDocEnd')())
+            try:
+                here = _native_method(hwp, 'get_pos', 'GetPos')()
+            except Exception as exc:
+                raise NativeNumberingReadFailure('native caret read failed at the end of the text search', code='target_unlocatable') from exc
+            if (type(here) is not tuple and type(here) is not list) or len(here) != 3 or not all(_exact_index(item) for item in here) \
+                    or tuple(here) != (elist, epara, selected[5]):
+                raise RuntimeError('native cursor operation was not confirmed')
+            break
+        _require_motion_result(moved)
     else:
         if len(found) > 1:
             # Exact positions in more than one paragraph already answer the question; one paragraph may be a stuck search.
