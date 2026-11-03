@@ -67,7 +67,14 @@ BUNDLE_OPS: dict[str, dict[str, Any]] = {
     'cell_row_fit_exact': _exposed(SESSION_TOOLS, note=_LEGACY),
     'table_split_exact': _exposed(SESSION_TOOLS, note=_LEGACY),
     'table_structure_exact': _exposed(SESSION_TOOLS, note=f'{_LEGACY}; table_edit_exact is the exact table_id engine'),
-    'table_column_width_exact': _exposed(SESSION_TOOLS, note=f'{_LEGACY}; table_width_exact is the exact table_id engine'),
+    'table_column_width_exact': _equivalent('hwpx_command:table_width_exact', 'the legacy engine refuses any request without four '
+                                            'whole-document SHA-256 guards (working-copy preimage, cell inventory, document text, BinData manifest) '
+                                            'and positive counts, and no public read returns the inventory or BinData hashes; table_width_exact '
+                                            'sets the same thing (the width in mm of every column of one table, from table_inventory table_id+hash '
+                                            'instead of control_inventory target_id+hash; requested_widths_mm maps to column_widths_mm) and '
+                                            'verifies the widths after the edit. It does not require the total to stay the same, and it refuses '
+                                            'before any edit (table_would_overflow) widths that would make the table wider than the text, where '
+                                            'the legacy engine only keeps the current total; fit=text_width brings a wider table inside first'),
     'native_table_insert': _exposed(SESSION_TOOLS, note='inserts a native table at the caret with field names'),
     'anchor_range_replace_native_table': _exposed(SESSION_TOOLS, note='replaces a proven text range with a 4-column native table'),
     'selected_text_delete_exact': _exposed(SESSION_TOOLS, note='deletes the exactly selected source text after a table replacement'),

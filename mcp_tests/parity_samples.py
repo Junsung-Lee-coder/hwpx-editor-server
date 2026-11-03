@@ -53,9 +53,6 @@ BUNDLE_SAMPLES: dict[str, list[dict]] = {
         {**SCOPED, 'action': 'merge_cells', 'row': 1, 'col': 1, 'end_row': 1, 'end_col': 2, 'expected_rows': 2, 'expected_cols': 2, 'confirm_layout': True},
         {**SCOPED, 'action': 'split_cell', 'row': 1, 'col': 1, 'split_rows': 1, 'split_cols': 2, 'expected_rows': 2, 'expected_cols': 2, 'confirm_layout': True},
     ],
-    'table_column_width_exact': [{**SCOPED, 'expected_div0_count': 0, 'expected_rows': 2, 'expected_cols': 2,
-                                  'expected_total_width_mm': 150.0, 'expected_table_height_mm': 20.0,
-                                  'requested_widths_mm': [50.0, 100.0], 'confirm_layout': True}],
     'native_table_insert': [{'rows': 2, 'cols': 2, 'cells': _TABLE_CELLS, 'field_name': 'parity_table',
                              'confirm_native_table': True, 'source_text_deleted': False,
                              'old_plain_text_removal': 'deferred_until_rendered_proof',
@@ -145,8 +142,6 @@ BUNDLE_REFUSALS: dict[str, list[dict]] = {
     # (found on Hancom 2024 with a section-definition target); MCP refuses such a target before the backend.
     'table_cell_structure_exact': [{**SCOPED, 'target_id': 'ctrl/0/secd/no-inst'}],
     'table_split_exact': [{**SCOPED, 'target_id': 'ctrl/7/gso/1', 'down_rows': 1, 'confirm_layout': True}],
-    'table_column_width_exact': [{**SCOPED, 'target_id': 'ctrl/2/head/no-inst', 'expected_div0_count': 0, 'expected_total_width_mm': 1.0,
-                                  'expected_table_height_mm': 1.0, 'requested_widths_mm': [1.0], 'confirm_layout': True}],
 }
 for _op, _fields in (('cell_row_fit_exact', {'row_height_mm': 12.0, 'confirm_layout': True}),
                      ('table_structure_exact', {'action': 'insert_row_below', 'row': 1, 'col': 1, 'expected_rows': 2, 'expected_cols': 2, 'confirm_layout': True}),

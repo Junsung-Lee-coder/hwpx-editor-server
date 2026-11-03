@@ -219,32 +219,6 @@ class TableStructureStep(_TableControl):
         return self
 
 
-class TableColumnWidthStep(_TableControl):
-    """Set column widths of one table control against a full set of expected values. Not one of the backend's guarded exact engines: any backend error in this step, including a stale or wrong target, is reported as an unknown outcome and holds the session."""
-    op: Literal['table_column_width_exact']
-    label: Label = 'mcp:table-column-width-exact'
-    expected_preimage_sha256: Text500 | None = None
-    expected_cell_inventory_hash: Text500 | None = None
-    expected_document_text_hash: Text500 | None = None
-    expected_bindata_manifest_hash: Text500 | None = None
-    expected_text_char_count: int | None = Field(default=None, ge=1)
-    expected_nonempty_line_count: int | None = Field(default=None, ge=1)
-    expected_rows: int | None = Field(default=None, ge=1, le=500)
-    expected_cols: int | None = Field(default=None, ge=1, le=500)
-    expected_control_count: int | None = Field(default=None, ge=1)
-    expected_div0_count: int = Field(ge=0)
-    expected_total_width_mm: float = Field(gt=0)
-    expected_table_height_mm: float = Field(gt=0)
-    requested_widths_mm: Annotated[list[Annotated[float, Field(gt=0, le=2000)]], Field(min_length=1, max_length=500)]
-    confirm_layout: Literal[True]
-
-    @model_validator(mode='after')
-    def widths_match_columns(self):
-        if self.expected_cols is not None and len(self.requested_widths_mm) != self.expected_cols:
-            raise ValueError('requested_widths_mm must have expected_cols entries')
-        return self
-
-
 # --------------------------------------------------------------------------
 # Native table creation from text
 # --------------------------------------------------------------------------
@@ -800,7 +774,7 @@ REST_OPS = {
 
 NEW_BUNDLE_STEPS = (
     ControlInventoryStep, TableFrameInventoryStep, ExactControlSelectProofStep, TableCellStructureStep, ControlDeleteStep,
-    ControlMoveResizeStep, ControlJoinPreviousStep, CellRowFitStep, TableSplitStep, TableStructureStep, TableColumnWidthStep,
+    ControlMoveResizeStep, ControlJoinPreviousStep, CellRowFitStep, TableSplitStep, TableStructureStep,
     NativeTableInsertStep, AnchorRangeReplaceStep, SelectedTextDeleteStep, ParagraphStyleApplyStep, ParagraphDeleteStep,
     ParagraphJoinPreviousStep, ParagraphJoinNextStep, ParagraphRehomeStep, AnchorInsertStep, SetTextFileStep,
     GetSelectedTextStep, StyleInspectStep, TypographyOverviewStep, WhereStep, LayoutStep, LayoutInspectStep,
