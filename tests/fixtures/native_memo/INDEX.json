@@ -1,0 +1,48 @@
+{
+ "origin": "Hancom Office 2024 (Windows): each file is the memo field (FIELDBEGIN Type Memo through its FIELDEND) exactly as GetTextFile('HWPML2X', '') read it back: a memo inserted (InsertFieldMemo, text, CloseEx) into section 1 or 2 of a Hancom-saved two-section document whose section 2 has memo shape 1, after the insert and after saving and reopening, and a memo in a Hancom-saved single-section document without memo shapes",
+ "cases": {
+  "memo_section1_no_memo_shape_after.xml": {
+   "section": 1,
+   "readback": "after insert",
+   "memo_shape_list": "<MEMOSHAPELIST Count=\"1\"><MEMO ActiveColor=\"13103567\" FillColor=\"15335408\" Id=\"1\" LineColor=\"11458486\" LineType=\"1\" LineWidth=\"1\" MemoType=\"0\" Width=\"15591\"/></MEMOSHAPELIST>",
+   "secdef_memo_shape_ids": [
+    "1"
+   ],
+   "source_hwpml2x_sha256": "9dd62fe3380c04fa244ba7cee8ca6f480eb1fd35974bc60b9875ef89e9404c88"
+  },
+  "memo_section1_no_memo_shape_reopened.xml": {
+   "section": 1,
+   "readback": "saved, closed and reopened",
+   "memo_shape_list": "<MEMOSHAPELIST Count=\"1\"><MEMO ActiveColor=\"13103567\" FillColor=\"15335408\" Id=\"1\" LineColor=\"11458486\" LineType=\"1\" LineWidth=\"1\" MemoType=\"0\" Width=\"15591\"/></MEMOSHAPELIST>",
+   "secdef_memo_shape_ids": [
+    "1"
+   ],
+   "source_hwpml2x_sha256": "9dd62fe3380c04fa244ba7cee8ca6f480eb1fd35974bc60b9875ef89e9404c88"
+  },
+  "memo_section2_memo_shape_1_after.xml": {
+   "section": 2,
+   "readback": "after insert",
+   "memo_shape_list": "<MEMOSHAPELIST Count=\"1\"><MEMO ActiveColor=\"13103567\" FillColor=\"15335408\" Id=\"1\" LineColor=\"11458486\" LineType=\"1\" LineWidth=\"1\" MemoType=\"0\" Width=\"15591\"/></MEMOSHAPELIST>",
+   "secdef_memo_shape_ids": [
+    "1"
+   ],
+   "source_hwpml2x_sha256": "c51bbb81604ddd357c6515285b7adad0ca4725c13786f5f8cfe3fa5b7bc0696c"
+  },
+  "memo_section2_memo_shape_1_reopened.xml": {
+   "section": 2,
+   "readback": "saved, closed and reopened",
+   "memo_shape_list": "<MEMOSHAPELIST Count=\"1\"><MEMO ActiveColor=\"13103567\" FillColor=\"15335408\" Id=\"1\" LineColor=\"11458486\" LineType=\"1\" LineWidth=\"1\" MemoType=\"0\" Width=\"15591\"/></MEMOSHAPELIST>",
+   "secdef_memo_shape_ids": [
+    "1"
+   ],
+   "source_hwpml2x_sha256": "c51bbb81604ddd357c6515285b7adad0ca4725c13786f5f8cfe3fa5b7bc0696c"
+  },
+  "memo_single_section_opened.xml": {
+   "section": 1,
+   "readback": "Hancom-saved single-section document opened",
+   "memo_shape_list": null,
+   "secdef_memo_shape_ids": [],
+   "source_hwpml2x_sha256": "729ba40bdab1e64199ef2dd7c52b099d72694e68fe02fe640d27503f766f634f"
+  }
+ }
+}

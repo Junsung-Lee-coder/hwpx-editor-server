@@ -31,7 +31,7 @@ from collections import Counter
 from typing import Any, Mapping
 
 from app.hwpml_invariants import (DefinitionDelta, HEAD_REASON_CODES, SECDEF_REFERENCES, SECTION_REF_PROBLEMS, head_reason_code, head_summary,
-                                  head_tail_reasons, section_delete_definitions, section_insert_definitions, signature)
+                                  head_tail_reasons, memo_field_problems, section_delete_definitions, section_insert_definitions, signature)
 from app.object_insert import CONTROL_TAGS, _middle, linearize
 
 OP = 'layout_exact'
@@ -1072,6 +1072,14 @@ def plan_section_delete(request: Mapping[str, Any], doc: Mapping[str, Any], *, k
     if key_indicator_sections is not None and key_indicator_sections != doc['section_count']:
         # Two strict reads that contradict each other describe an unknown editor state, not a stale request.
         raise LayoutError(f'KeyIndicator reports {key_indicator_sections} sections but HWPML has {doc["section_count"]}', 'readback_malformed')
+    secdefs = list(doc['_body'].iter('SECDEF')) if '_body' in doc else []
+    removed = secdefs[index - 1] if 0 < index - 1 < len(secdefs) else None
+    if removed is None or removed.get('MemoShapeId') is not None:
+        # Hancom drops the memo shape only the removed section names; a memo field whose reference cannot be read might
+        # still use it.
+        problems = memo_field_problems(doc['_root']) if '_root' in doc else ['the document root was not read']
+        if problems:
+            raise LayoutError(f'deleting section {index} could drop a memo shape a memo field still uses: {problems[0]}')
     return {'kind': 'section_delete', 'section_index': index, 'section_count_before': doc['section_count']}
 
 

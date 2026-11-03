@@ -340,12 +340,63 @@ SECDEF_REFERENCES: dict[str, str] = {'OutlineShape': 'NUMBERINGLIST', 'MemoShape
 _NOT_NUMBERING_HEADINGS = frozenset({'none', 'bullet', '0', '3'})
 
 
-def definition_references(root: ET.Element) -> dict[str, dict[str, list[str]]]:
-    """Every reference to a NUMBERINGLIST or MEMOSHAPELIST entry: list tag -> entry Id -> referrers in document order.
+# Memo fields, as read back on Hancom 2024 (tests/fixtures/native_memo): <FIELDBEGIN Type="Memo" Command="MEMO/<memo
+# shape>/<number>/<date>/<time>/<author>/...">; the saved HWPX keeps the same value as the MemoShapeIDRef parameter.
+MEMO_FIELD_TYPE = 'Memo'
+_MEMO_COMMAND = re.compile(r'MEMO/([0-9]+)/')
+# The memo shape value of a memo field that names no memo shape. Every memo Hancom 2024 inserted or saved read 65535:
+# in a single-section document without memo shapes, and in either section of a two-section document whose second
+# section has memo shape 1, after saving and reopening as well. No other sentinel was observed, so any other value
+# must name an existing memo shape.
+MEMO_SHAPE_NONE = frozenset({'65535'})
 
-    Referrers are ``SECDEF[n].<attribute>`` (n counts SECDEF elements in BODY order), ``PARASHAPE[Id=i].Heading``, or
-    ``<TAG>.<attribute>`` for any other attribute whose name contains ``MemoShape``, so a memo shape reference this
-    module does not know by name still keeps its definition.
+
+def _memo_field_reference(element: ET.Element, who: str, memo_ids: set[str] | None) -> tuple[str | None, str | None]:
+    """(memo shape Id the field names, or None) and the problem when its reference cannot be read exactly."""
+    field_type, command = element.get('Type'), element.get('Command')
+    if field_type != MEMO_FIELD_TYPE:
+        return None, f'{who} is a MEMO command on a field of type {field_type!r}'
+    match = _MEMO_COMMAND.match(command or '')
+    if match is None:
+        return None, f'{who} of a memo field is {"missing" if command is None else "not MEMO/<memo shape>/..."}'
+    value = match.group(1)
+    if value in MEMO_SHAPE_NONE:
+        return None, None
+    if memo_ids is None or value not in memo_ids:
+        return None, f'{who} names memo shape {value}, which the memo shape list does not hold'
+    return value, None
+
+
+def _is_memo_field(element: ET.Element) -> bool:
+    return (element.get('Type') or '').lower() == 'memo' or (element.get('Command') or '').startswith('MEMO/')
+
+
+def _memo_ids(root: ET.Element) -> set[str] | None:
+    index, problem = _bound_index(root, 'MEMOSHAPELIST')
+    return None if problem else set(index)
+
+
+def memo_field_problems(root: ET.Element) -> list[str]:
+    """Why a memo field's memo-shape reference cannot be read exactly (empty when every one can). While any remains,
+    no memo shape may be treated as unreferenced."""
+    memo_ids = _memo_ids(root)
+    problems = []
+    fields = (element for element in root.iter('FIELDBEGIN') if _is_memo_field(element))
+    for index, element in enumerate(fields):
+        _value, problem = _memo_field_reference(element, f'FIELDBEGIN[{index}].Command', memo_ids)
+        if problem:
+            problems.append(problem)
+    return problems
+
+
+def definition_references(root: ET.Element) -> dict[str, dict[str, list[str]]]:
+    """Every readable reference to a NUMBERINGLIST or MEMOSHAPELIST entry, in BODY and HEAD: list tag -> entry Id ->
+    referrers in document order.
+
+    Referrers are ``SECDEF[n].<attribute>`` (n counts SECDEF elements in BODY order), ``PARASHAPE[Id=i].Heading``,
+    ``FIELDBEGIN[n].Command`` for a memo field naming a memo shape (n counts memo fields), or ``<TAG>.<attribute>``
+    for any other attribute whose name contains ``MemoShape``. A memo field whose reference cannot be read is not a
+    reference here; memo_field_problems reports it, and callers must then keep every memo shape.
     """
     refs: dict[str, dict[str, list[str]]] = {tag: {} for tag in REFERENCE_BOUND_LISTS}
 
@@ -353,9 +404,14 @@ def definition_references(root: ET.Element) -> dict[str, dict[str, list[str]]]:
         if value is not None:
             refs[list_tag].setdefault(value.strip(), []).append(who)
 
-    secdef_index = 0
+    memo_ids = _memo_ids(root)
+    secdef_index = memo_index = 0
     for element in root.iter():
         tag = element.tag if isinstance(element.tag, str) else ''
+        if tag == 'FIELDBEGIN' and _is_memo_field(element):
+            who = f'FIELDBEGIN[{memo_index}].Command'
+            memo_index += 1
+            add('MEMOSHAPELIST', _memo_field_reference(element, who, memo_ids)[0], who)
         if tag == 'SECDEF':
             for attr, list_tag in SECDEF_REFERENCES.items():
                 add(list_tag, element.get(attr), f'SECDEF[{secdef_index}].{attr}')
@@ -462,12 +518,14 @@ def section_insert_definitions(before_root: ET.Element, after_root: ET.Element, 
 def section_delete_definitions(before_root: ET.Element, after_root: ET.Element, removed: ET.Element, removed_index: int) -> DefinitionDelta:
     """The entries a section delete may remove: those the removed SECDEF (index ``removed_index`` in BODY order)
     references and nothing else references, neither in the document before (other SECDEFs, numbered paragraph shapes,
-    memo shape attributes anywhere) nor after the edit."""
+    memo fields, memo shape attributes anywhere) nor after the edit. While a memo field's reference cannot be read,
+    before or after, no memo shape may be removed."""
     before_refs, after_refs = definition_references(before_root), definition_references(after_root)
+    unreadable_memo = bool(memo_field_problems(before_root) or memo_field_problems(after_root))
     removable: dict[str, set[str]] = {}
     for attr, list_tag in SECDEF_REFERENCES.items():
         value = removed.get(attr)
-        if value is None:
+        if value is None or (list_tag == 'MEMOSHAPELIST' and unreadable_memo):
             continue
         ident = value.strip()
         if before_refs[list_tag].get(ident) == [f'SECDEF[{removed_index}].{attr}'] and not after_refs[list_tag].get(ident):
