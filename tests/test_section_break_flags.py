@@ -1,8 +1,9 @@
 """Which paragraph attribute differs when a section break's new paragraph does not keep the split paragraph's.
 
 On Hancom 2024 a section break inside a paragraph stopped with section_break_attributes, then (with the attribute
-named) section_break_attr_columnbreak: the paragraph opening the new section has its own ColumnBreak flag. That flag
-may differ there; every other attribute of the split paragraph must be kept, and the first differing one is named.
+named) section_break_attr_columnbreak: the paragraph opening the new section has its own ColumnBreak flag, and then (section_break_attr_pagebreak) its own
+PageBreak flag. Those break flags may differ there; every other attribute must be kept, and the first differing one is
+named.
 """
 from __future__ import annotations
 
@@ -26,7 +27,6 @@ def two(second):
 class SectionBreakAttributes(unittest.TestCase):
     def test_the_differing_attribute_is_named(self):
         for second, code in (('ParaShape="2" Style="0"', 'section_break_attr_parashape'), ('ParaShape="1" Style="3"', 'section_break_attr_style'),
-                             ('ParaShape="1" Style="0" PageBreak="true"', 'section_break_attr_pagebreak'),
                              ('ParaShape="1" Style="0" Odd="1"', 'section_break_attr_other')):
             with self.subTest(second):
                 reasons = body_token_reasons('section_insert', one(), two(second), caret=[0, 0, 1])
@@ -35,8 +35,8 @@ class SectionBreakAttributes(unittest.TestCase):
                 self.assertTrue(step_diagnostic_allowed('verify', code))
 
     def test_the_break_flag_of_the_new_section_is_allowed(self):
-        # As read back on Hancom 2024: the paragraph opening the new section has its own ColumnBreak flag.
-        for flag in ('ColumnBreak="true"', 'ColumnBreak="false"'):
+        # As read back on Hancom 2024: the paragraph opening the new section has its own ColumnBreak and PageBreak flags.
+        for flag in ('ColumnBreak="true"', 'ColumnBreak="false"', 'PageBreak="true"', 'ColumnBreak="true" PageBreak="true"'):
             self.assertEqual(body_token_reasons('section_insert', one(), two(f'ParaShape="1" Style="0" {flag}'), caret=[0, 0, 1]), [])
 
     def test_the_same_attributes_pass(self):

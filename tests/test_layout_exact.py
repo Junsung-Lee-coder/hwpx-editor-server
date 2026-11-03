@@ -535,7 +535,8 @@ class ReadbackTests(unittest.TestCase):
             with self.subTest(copied=label):
                 changed = parse_layout_xml(f'<HWPML><BODY>{section("<CHAR>a</CHAR>")}{section("<CHAR>b</CHAR>", secdef)}</BODY></HWPML>')
                 self.assertIn('is not a copy', ' '.join(body_token_reasons('section_insert', one, changed, caret=[0, 0, 1])))
-        second = section('<CHAR>b</CHAR>').replace('ParaShape="1"', 'ParaShape="1" PageBreak="true"')
+        # The new section's paragraph may carry its own break flags (as on Hancom 2024), but not another style.
+        second = section('<CHAR>b</CHAR>').replace('ParaShape="1"', 'ParaShape="1" Style="7"')
         restyled = parse_layout_xml('<HWPML><BODY>' + section('<CHAR>a</CHAR>') + second + '</BODY></HWPML>')
         self.assertTrue(body_token_reasons('section_insert', one, restyled, caret=[0, 0, 1]))
         eaten = parse_layout_xml(f'<HWPML><BODY>{section("<CHAR>a</CHAR>")}{section("<CHAR>c</CHAR>")}</BODY></HWPML>')

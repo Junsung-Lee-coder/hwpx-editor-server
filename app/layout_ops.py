@@ -471,9 +471,10 @@ def _column_scope_reasons(plan: Mapping[str, Any], doc_before: Mapping[str, Any]
 
 BODY_RULES = ('page_setup', 'columns', 'columns_new', 'hanging_indent', 'section_insert', 'section_delete')
 # HWPML P attributes named in the section-break diagnostic (fixed set). On Hancom 2024 the paragraph that opens the
-# new section reads back with a different ColumnBreak flag (section_break_attr_columnbreak), which belongs to the
-# break itself; that flag alone may differ there.
-_SECTION_START_FLAGS: frozenset[str] = frozenset({'ColumnBreak'})
+# new section reads back with its own ColumnBreak and PageBreak flags (section_break_attr_columnbreak, then
+# section_break_attr_pagebreak): a new section starts a new page, so those break flags belong to the break itself and
+# may differ there; nothing else may.
+_SECTION_START_FLAGS: frozenset[str] = frozenset({'ColumnBreak', 'PageBreak'})
 _SECTION_PARA_ATTRS = ('ParaShape', 'Style', 'PageBreak', 'ColumnBreak')
 _SECTION_BREAK_TOKENS = {('/E', 'P'), ('E', 'P'), ('/E', 'SECTION'), ('E', 'SECTION'), ('C', 'SECDEF'), ('C', 'COLDEF')}
 _SECTION_BREAK_SHAPES = frozenset(
