@@ -15,6 +15,8 @@ The attribute names here are HWPML 2.x names and are UNVERIFIED natively.
 
 from __future__ import annotations
 
+import re
+
 import xml.etree.ElementTree as ET
 from collections.abc import Iterable, Mapping
 
@@ -164,6 +166,30 @@ def _head_growth_reasons(before: ET.Element, after: ET.Element, path: str, allow
                 out.append(f'{where}[{index}] existing {old.tag} changed')
         else:
             _head_growth_reasons(old, new, f'{where}[{index}]', allow, out)
+
+
+# Fixed diagnostic labels for a HEAD/TAIL reason: the deepest HWPML 2.x HEAD element the reason names, from this
+# closed list of schema element names (never document text). Anything else is head_changed.
+KNOWN_HEAD_TAGS = ('DOCSUMMARY', 'TITLE', 'SUBJECT', 'AUTHOR', 'DATE', 'KEYWORDS', 'COMMENTS', 'FORBIDDENSTRING', 'FORBIDDEN',
+                   'DOCSETTING', 'BEGINNUMBER', 'CARETPOS', 'MAPPINGTABLE', 'BINDATALIST', 'BINITEM', 'FACENAMELIST', 'FONTFACE',
+                   'FONT', 'SUBSTFONT', 'TYPEINFO', 'BORDERFILLLIST', 'BORDERFILL', 'CHARSHAPELIST', 'CHARSHAPE', 'TABDEFLIST',
+                   'TABDEF', 'NUMBERINGLIST', 'NUMBERING', 'BULLETLIST', 'BULLET', 'PARASHAPELIST', 'PARASHAPE', 'STYLELIST', 'STYLE',
+                   'MEMOSHAPELIST', 'MEMOSHAPE', 'COMPATIBLEDOCUMENT', 'LAYOUTCOMPATIBILITY', 'TRACKCHANGELIST',
+                   'TRACKCHANGEAUTHORLIST', 'HEAD')
+HEAD_REASON_CODES = frozenset({f'head_{tag.lower()}_changed' for tag in KNOWN_HEAD_TAGS} | {'head_changed', 'tail_changed', 'hwpml_parts_changed'})
+
+
+def head_reason_code(reason: str) -> str | None:
+    """The fixed label of a head_tail_reasons() reason, or None for any other reason."""
+    if reason.startswith('existing HEAD entry changed: '):
+        path = reason[len('existing HEAD entry changed: '):].split(' ', 1)[0]
+        tags = re.findall(r'/([A-Z][A-Z0-9]*)', path)
+        return f'head_{tags[-1].lower()}_changed' if tags and tags[-1] in KNOWN_HEAD_TAGS else 'head_changed'
+    if 'changed (it holds embedded binary data' in reason:
+        return 'tail_changed'
+    if reason.startswith('top-level HWPML parts changed'):
+        return 'hwpml_parts_changed'
+    return None
 
 
 def head_tail_reasons(before_root: ET.Element, after_root: ET.Element, *, allow_head_attrs: Mapping[str, Iterable[str]] | None = None) -> list[str]:

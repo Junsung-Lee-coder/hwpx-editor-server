@@ -30,7 +30,7 @@ import xml.etree.ElementTree as ET
 from collections import Counter
 from typing import Any, Mapping
 
-from app.hwpml_invariants import head_tail_reasons, signature
+from app.hwpml_invariants import head_tail_reasons, signature, HEAD_REASON_CODES, head_reason_code
 from app.object_insert import CONTROL_TAGS, _middle, linearize
 
 OP = 'layout_exact'
@@ -131,6 +131,7 @@ _REASON_CODES: tuple[tuple[str, str], ...] = (
     ('SECTION count is', 'section_count'),
     ('SECTION element count moved', 'section_count'),
     ('COLDEF count is', 'coldef_count'),
+    ('COLDEF count moved by', 'coldef_count_moved'),
     ('column definition (COLDEF) changed', 'coldef_changed'),
     ('per-section column readback moved', 'coldef_sections_moved'),
     ('changed the column definitions of sections', 'coldef_wrong_section'),
@@ -156,10 +157,13 @@ _REASON_CODES: tuple[tuple[str, str], ...] = (
     ('paragraph shape ', 'parashape_changed'),
     ('the paragraph text changed', 'text_changed'),
 )
-REASON_CODES = frozenset(code for _needle, code in _REASON_CODES) | {'other'}
+REASON_CODES = frozenset(code for _needle, code in _REASON_CODES) | {'other'} | HEAD_REASON_CODES
 
 
 def reason_code(reason: str) -> str:
+    head = head_reason_code(reason)
+    if head is not None:
+        return head
     for needle, code in _REASON_CODES:
         if needle in reason:
             return code

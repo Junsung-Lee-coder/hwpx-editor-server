@@ -25,7 +25,7 @@ from collections import Counter
 from typing import Any, Mapping
 from urllib.parse import urlsplit
 
-from app.hwpml_invariants import attrs, head_tail_reasons, signature
+from app.hwpml_invariants import attrs, head_tail_reasons, signature, HEAD_REASON_CODES, head_reason_code
 
 OP = 'object_insert_exact'
 SCHEMA_VERSION = 'local-cli/object-insert-exact/v1'
@@ -160,10 +160,13 @@ _REASON_CODES: tuple[tuple[str, str], ...] = (
     ('expected exactly +1', 'object_count_mismatch'),
     ('count changed by', 'companion_count_mismatch'),
 )
-REASON_CODES = frozenset(code for _needle, code in _REASON_CODES) | {'other'}
+REASON_CODES = frozenset(code for _needle, code in _REASON_CODES) | {'other'} | HEAD_REASON_CODES
 
 
 def reason_code(reason: str) -> str:
+    head = head_reason_code(reason)
+    if head is not None:
+        return head
     for needle, code in _REASON_CODES:
         if needle in reason:
             return code
