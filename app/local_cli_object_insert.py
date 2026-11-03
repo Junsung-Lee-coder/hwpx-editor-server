@@ -5,10 +5,11 @@ from __future__ import annotations
 import time
 from typing import Any
 
-from app.edit_ops import _get_pos, _get_selected_pos, _get_selected_text
+from app.edit_ops import _get_pos, _get_selected_text
 from app.hwpml_invariants import before_budget_reason, readback_size_reason
 from app.local_cli_runtime import LocalCliRuntimeError, insert_text_at_caret
 from app.local_cli_service_support import LocalCliMutationError
+from app.step_refusal import STEP_REFUSAL_CODES, StepControl, strict_state
 from app.object_insert import (
     CLOSE_ACTION,
     OP,
@@ -23,6 +24,7 @@ from app.object_insert import (
     parse_hwpml,
     public_counts,
     public_plan,
+    reason_code,
     summarize,
 )
 
@@ -101,7 +103,7 @@ class LocalCliObjectInsertMixin:
             return {'action': action_name, 'succeeded': False, 'method': label, 'outcome_unknown': True, 'error': f'{type(exc).__name__}: {exc}'}
         return {'action': action_name, 'succeeded': raw is None or bool(raw), 'method': label, 'result': bool(raw) if raw is not None else None}
 
-    def _object_insert_readback(self, hwp: Any, *, where: str) -> Any:
+    def _object_insert_readback(self, hwp: Any, control: StepControl, *, where: str) -> Any:
         get_text = getattr(hwp, 'GetTextFile', None)
         if not callable(get_text):
             raise LocalCliRuntimeError(f'{OP} {where}: GetTextFile is unavailable, so the document cannot be read back')
@@ -109,24 +111,59 @@ class LocalCliObjectInsertMixin:
             xml_text = get_text('HWPML2X', '')
         except Exception as exc:
             raise LocalCliRuntimeError(f'{OP} {where}: HWPML readback failed: {type(exc).__name__}: {exc}') from exc
+        if type(xml_text) is not str:
+            raise LocalCliRuntimeError(f'{OP} {where}: HWPML readback was not text')
         too_big = readback_size_reason(xml_text)
         if too_big:
+            if where == 'before insert':
+                raise control.refuse('proof_budget', f'{OP} refused before mutation: {too_big}')
             raise LocalCliRuntimeError(f'{OP} {where}: {too_big}')
         try:
             return parse_hwpml(xml_text)
         except ObjectInsertError as exc:
             raise LocalCliRuntimeError(f'{OP} {where}: {exc}') from exc
 
-    def _object_insert_state(self, hwp: Any) -> dict[str, Any]:
-        snapshot = self._bundle_compact_snapshot(hwp)
-        mode = snapshot.get('selection_mode')
-        mode_known = isinstance(mode, int) and not isinstance(mode, bool)
-        has_selection = snapshot.get('has_selection')
-        return {
-            'snapshot': snapshot,
-            'normal': mode_known and mode == 0 and has_selection is False,
-            'selected': mode_known and has_selection is True,
-        }
+    def _object_insert_require(self, hwp: Any, plan: dict[str, Any], control: StepControl, *, where: str,
+                               initial: bool = False) -> dict[str, Any]:
+        """Prove edit state, caret position and (hyperlink) the selected text from strict reads.
+
+        ``initial``: against the untouched editor, so a difference is the caller's stale view and a clean refusal.
+        Later re-checks follow the engine's own reads or parameter preparation, so any difference is technical.
+        """
+        state = strict_state(hwp, OP)
+        policy = plan['selection_policy']
+        problems = []
+        if policy == 'none' and not state['normal']:
+            problems.append(('editor_not_normal', f'{OP} {where}: editor is not provably in normal edit state'))
+        if policy == 'required' and not state['selected']:
+            problems.append(('selection_required', f'{OP} {where}: {plan["kind"]} needs a live selection whose text is display_text'))
+        if policy == 'optional' and not (state['normal'] or state['selected']):
+            problems.append(('editor_not_normal', f'{OP} {where}: editor is neither in normal edit state nor holding a selection'))
+        if list(state['pos']) != plan['expected_pos']:
+            problems.append(('caret_moved', f'{OP} {where}: caret is at {list(state["pos"])!r}, expected {plan["expected_pos"]!r}; re-run where'))
+        if problems:
+            code, message = problems[0]
+            if initial:
+                raise control.refuse(code, message)
+            raise LocalCliRuntimeError(message + " after the engine's own reads")
+        proof: dict[str, Any] = {'snapshot': {'pos': list(state['pos']), 'selection_mode': state['selection_mode'],
+                                              'has_selection': state['selected']}, 'pos': list(state['pos'])}
+        if plan['kind'] == 'hyperlink':
+            try:
+                selected = _get_selected_text(hwp, keep_select=True)
+            except Exception as exc:
+                raise LocalCliRuntimeError(f'{OP} {where}: selected text is unreadable: {type(exc).__name__}') from exc
+            if type(selected) is not str:
+                raise LocalCliRuntimeError(f'{OP} {where}: selected text read back was not text')
+            after = strict_state(hwp, OP)
+            if after['selection'] != state['selection'] or after['pos'] != state['pos']:
+                raise LocalCliRuntimeError(f'{OP} {where}: selection or caret changed while its text was read')
+            if selected != plan['display_text']:
+                if initial:
+                    raise control.refuse('selection_text_mismatch', f'{OP} {where}: selected text ({len(selected)} chars) is not exactly display_text ({len(plan["display_text"])} chars)')
+                raise LocalCliRuntimeError(f'{OP} {where}: selected text changed after it was proved')
+            proof['selected_range'] = [True, *state['selection']]
+        return proof
 
     def _object_insert_pos(self, hwp: Any) -> list[int] | None:
         try:
@@ -135,53 +172,34 @@ class LocalCliObjectInsertMixin:
         except Exception:
             return None
 
-    def _object_insert_require(self, hwp: Any, plan: dict[str, Any], *, where: str) -> dict[str, Any]:
-        """Re-prove edit state, caret position and (hyperlink) the selected text. Raises on any doubt."""
-        state = self._object_insert_state(hwp)
-        policy = plan['selection_policy']
-        if policy == 'none' and not state['normal']:
-            raise LocalCliRuntimeError(f'{OP} {where}: editor is not provably in normal edit state: {state["snapshot"]!r}')
-        if policy == 'required' and not state['selected']:
-            raise LocalCliRuntimeError(f'{OP} {where}: {plan["kind"]} needs a live selection: {state["snapshot"]!r}')
-        if policy == 'optional' and not (state['normal'] or state['selected']):
-            raise LocalCliRuntimeError(f'{OP} {where}: editor state is not provably known: {state["snapshot"]!r}')
-        pos = self._object_insert_pos(hwp)
-        if pos != plan['expected_pos']:
-            raise LocalCliRuntimeError(f'{OP} {where}: caret is at {pos!r}, expected {plan["expected_pos"]!r}; re-run where')
-        proof: dict[str, Any] = {'snapshot': state['snapshot'], 'pos': pos}
-        if plan['kind'] == 'hyperlink':
-            try:
-                range_before = list(_get_selected_pos(hwp))
-                selected = _get_selected_text(hwp, keep_select=True)
-                range_after = list(_get_selected_pos(hwp))
-            except Exception as exc:
-                raise LocalCliRuntimeError(f'{OP} {where}: selected text is unreadable: {type(exc).__name__}: {exc}') from exc
-            if selected != plan['display_text']:
-                raise LocalCliRuntimeError(f'{OP} {where}: selected text ({len(selected)} chars) is not exactly display_text ({len(plan["display_text"])} chars)')
-            if range_before != range_after or not range_after or not range_after[0]:
-                raise LocalCliRuntimeError(f'{OP} {where}: selection moved or vanished while its text was read')
-            if not self._object_insert_state(hwp)['selected'] or self._object_insert_pos(hwp) != plan['expected_pos']:
-                raise LocalCliRuntimeError(f'{OP} {where}: selection or caret changed while its text was read')
-            proof['selected_range'] = range_after
-        return proof
+    def _object_insert_normal_after(self, hwp: Any) -> bool:
+        """After the mutator: is the editor back in normal state? (Unreadable counts as not normal.)"""
+        try:
+            return strict_state(hwp, OP)['normal']
+        except LocalCliRuntimeError:
+            return False
 
-    def _object_insert_mutate(self, hwp: Any, plan: dict[str, Any], mutation: _Mutation) -> list[dict[str, Any]]:
+    def _object_insert_mutate(self, hwp: Any, plan: dict[str, Any], control: StepControl, mutation: _Mutation) -> list[dict[str, Any]]:
         native = plan['native']
         actions: list[dict[str, Any]] = []
         if native['mode'] == 'run':
-            self._object_insert_require(hwp, plan, where=f'before {native["action"]}')
+            self._object_insert_require(hwp, plan, control, where=f'before {native["action"]}')
+            control.begin_mutation()
             mutation.started = True
             mutation.editing_actions += 1
             result = self._object_insert_run(hwp, native['action'])
         else:
             execute, hset = self._object_insert_prepare_pset(hwp, native['action'], native['pset'], native_items(plan))
-            self._object_insert_require(hwp, plan, where=f'before {native["action"]}')
+            self._object_insert_require(hwp, plan, control, where=f'before {native["action"]}')
+            control.begin_mutation()
             mutation.started = True
             mutation.editing_actions += 1
             result = self._object_insert_execute(execute, hset, native['action'])
         actions.append(result)
         if not result['succeeded']:
-            raise LocalCliRuntimeError(f'{OP} native action did not succeed: {result!r}')
+            error = LocalCliRuntimeError(f'{OP} native action did not succeed: {result!r}')
+            error.step_phase, error.step_reason = 'native', 'native_outcome_unknown' if result.get('outcome_unknown') else 'native_action_failed'
+            raise error
         if native.get('types_text'):
             mutation.editing_actions += 1
             try:
@@ -189,45 +207,59 @@ class LocalCliObjectInsertMixin:
                 actions.append({'action': 'InsertText', 'succeeded': True, 'chars': len(plan['text'])})
             except Exception as exc:
                 actions.append({'action': 'InsertText', 'succeeded': False, 'outcome_unknown': True, 'error': f'{type(exc).__name__}: {exc}'})
-                actions.append(self._object_insert_run(hwp, CLOSE_ACTION))
-                raise LocalCliRuntimeError(f'{OP} typing into the new {plan["kind"]} failed: {actions!r}') from exc
+                error = LocalCliRuntimeError(f'{OP} typing into the new {plan["kind"]} failed: {actions!r}')
+                error.step_phase, error.step_reason = 'native', 'typing_failed'
+                raise error from exc
         if native.get('closes'):
             closed = self._object_insert_run(hwp, CLOSE_ACTION)
             actions.append(closed)
             pos = self._object_insert_pos(hwp)
             if not closed['succeeded'] or pos is None or pos[0] != plan['expected_pos'][0]:
-                raise LocalCliRuntimeError(f'{OP} could not return to the original list after editing the {plan["kind"]} (caret {pos!r}): {closed!r}')
+                error = LocalCliRuntimeError(f'{OP} could not return to the original list after editing the {plan["kind"]} (caret {pos!r}): {closed!r}')
+                error.step_phase, error.step_reason = 'native', 'close_return_failed'
+                raise error
         elif plan['kind'] in SHAPE_KINDS or plan['kind'] == 'equation':
             # A fresh drawing object may stay selected (or in drawing mode); Esc once.
-            if not self._object_insert_state(hwp)['normal']:
+            if not self._object_insert_normal_after(hwp):
                 actions.append(self._object_insert_run(hwp, 'Cancel'))
         return actions
 
-    def _bundle_object_insert_exact(self, hwp: Any, step: dict[str, Any]) -> dict[str, Any]:
+    def _bundle_object_insert_exact(self, hwp: Any, step: dict[str, Any], control: StepControl | None = None) -> dict[str, Any]:
+        control = control if control is not None else StepControl(OP)
         try:
             plan = normalize_step(step)
         except ObjectInsertError as exc:
-            raise LocalCliRuntimeError(f'{OP} refused: {exc}') from exc
+            refusal = control.refuse('invalid_request', f'{OP} refused: {exc}')
+            control.register(refusal)
+            raise refusal from exc
         mutation = _Mutation()
         try:
+            proof = self._object_insert_require(hwp, plan, control, where='before the readback', initial=True)
             started = time.monotonic()
-            before_root = self._object_insert_readback(hwp, where='before insert')
+            before_root = self._object_insert_readback(hwp, control, where='before insert')
             # Dry run of the after-edit proof (its cost, not its verdict) so an
             # edit whose proof cannot finish in time is refused before mutating.
             dry_run_proof(plan, before_root)
             slow = before_budget_reason(time.monotonic() - started)
             if slow:
-                raise LocalCliRuntimeError(f'{OP} refused before mutation: {slow}')
+                raise control.refuse('proof_budget', f'{OP} refused before mutation: {slow}')
             try:
                 before = check_before(plan, before_root)
             except ObjectInsertError as exc:
-                raise LocalCliRuntimeError(f'{OP} refused before mutation: {exc}') from exc
-            proof = self._object_insert_require(hwp, plan, where='after before-readback')
-            actions = self._object_insert_mutate(hwp, plan, mutation)
-            after_root = self._object_insert_readback(hwp, where='after insert')
+                code = getattr(exc, 'code', 'unverifiable_layout')
+                raise control.refuse(code if code in STEP_REFUSAL_CODES[OP] else 'unverifiable_layout', f'{OP} refused before mutation: {exc}') from exc
+            proof = self._object_insert_require(hwp, plan, control, where='after before-readback')
+            actions = self._object_insert_mutate(hwp, plan, control, mutation)
+            try:
+                after_root = self._object_insert_readback(hwp, control, where='after insert')
+            except LocalCliRuntimeError as exc:
+                exc.step_phase, exc.step_reason = 'readback', 'readback_after_failed'
+                raise
             verification = evaluate_insert(plan, before_root, after_root)
             if not verification['ok']:
-                raise LocalCliRuntimeError(f'{OP} refused to mark success: {"; ".join(verification["reasons"])}')
+                error = LocalCliRuntimeError(f'{OP} refused to mark success: {"; ".join(verification["reasons"])}')
+                error.step_phase, error.step_reason = 'verify', reason_code(verification['reasons'][0]) if verification['reasons'] else 'other'
+                raise error
             return {
                 'schema_version': SCHEMA_VERSION,
                 'succeeded': True,
@@ -243,9 +275,19 @@ class LocalCliObjectInsertMixin:
                 'warnings': [],
             }
         except Exception as exc:
+            if control.is_pending(exc):
+                # Nothing before the mutator moves the caret or selection; register the exact refusal object.
+                control.register(exc)
+                raise
             if not mutation.started:
                 raise
             message = str(exc) if isinstance(exc, LocalCliRuntimeError) else f'{OP} failed after native mutation started: {type(exc).__name__}: {exc}'
             rollback = dict(_ROLLBACK_HINT)
             rollback['undo'] = _undo_report(mutation)
-            raise LocalCliMutationError(message, mutation_may_have_persisted=True, rollback=rollback) from exc
+            error = LocalCliMutationError(message, mutation_may_have_persisted=True, rollback=rollback)
+            phase, reason = getattr(exc, 'step_phase', None), getattr(exc, 'step_reason', None)
+            if type(phase) is str and type(reason) is str and phase in ('native', 'readback', 'verify'):
+                error.step_phase, error.step_reason = phase, reason
+            else:
+                error.step_phase, error.step_reason = 'after_mutation', 'other'
+            raise error from exc

@@ -549,7 +549,8 @@ def run_step_for_op(op: str, *, service: Any, handle: Any, step: dict[str, Any],
         result = service._bundle_table_cell_structure_exact(handle.hwp, step)  # noqa: SLF001
         return result, False, list(result.get('warnings') or [])
     if op == 'paragraph_rehome_exact':
-        result = service._bundle_paragraph_rehome_exact(handle.hwp, step)  # noqa: SLF001
+        from app.step_refusal import StepControl
+        result = service._bundle_paragraph_rehome_exact(handle.hwp, step, control=StepControl('paragraph_rehome_exact', on_mutating=getattr(handle, 'mark_mutating_intent', None), on_refusal=getattr(handle, 'register_step_refusal', None)))  # noqa: SLF001
         return result, True, list(result.get('warnings') or [])
     if op == 'control_join_previous_exact':
         result = service._bundle_control_join_previous_exact(handle.hwp, step)  # noqa: SLF001

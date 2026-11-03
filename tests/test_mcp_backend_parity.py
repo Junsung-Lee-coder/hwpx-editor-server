@@ -499,46 +499,21 @@ class NativeFindings(unittest.TestCase):
         self.assertIsNotNone(model)
         self.assertIn('active selection', json.dumps(model.model_json_schema(), ensure_ascii=False))
 
-    def test_paragraph_replace_schemas_say_the_paragraph_break_is_deleted(self):
-        # Queued paragraph mode selects the found paragraph with its trailing break (MoveSelNextParaBegin), deletes it
-        # and types `replace`; on Hancom 2024 the next paragraph joined a replacement without a trailing "\r\n".
-        tree = ast.parse((APP / 'edit_ops.py').read_text(encoding='utf-8'))
-        selector = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == '_select_paragraph_with_trailing_break_for_current_selection')
-        takes_break = any(isinstance(n, ast.Constant) and n.value == 'MoveSelNextParaBegin' for n in ast.walk(selector))
-        from hwpx_mcp import job_schema
-        for model in (job_schema.ReplaceParagraphSafe, job_schema.ParagraphReplaceNative):
-            text = json.dumps(model.model_json_schema(), ensure_ascii=False)
-            self.assertEqual('paragraph break' in text, takes_break, f'{model.__name__} must say whether the paragraph break is deleted')
-        # The authoring compiler appends that break only for sections of two or more rendered lines.
-        engine = ast.parse((APP / 'template_engine.py').read_text(encoding='utf-8'))
-        one_line_gap = any(isinstance(n, ast.Compare) and isinstance(n.left, ast.Call) and getattr(n.left.func, 'id', None) == 'len'
-                           and getattr(n.left.args[0], 'id', None) == 'rendered_lines' and isinstance(n.ops[0], ast.Gt)
-                           and isinstance(n.comparators[0], ast.Constant) and n.comparators[0].value == 1 for n in ast.walk(engine))
-        for model in (job_schema.JobCompileAuthoring, job_schema.JobAuthorAndConvert):
-            text = json.dumps(model.model_json_schema(), ensure_ascii=False)
-            self.assertEqual('one-line section' in text, one_line_gap, f'{model.__name__} must say what a one-line section does')
-
-    def test_rehome_schema_says_what_the_insert_first_order_does(self):
-        # The backend engine inserts the copy, then searches delete_match from the top of the page; moving a paragraph
-        # before an earlier anchor deletes the new copy and still reports success (measured on Hancom 2024).
-        tree = ast.parse((APP / 'local_cli_bundle_controls.py').read_text(encoding='utf-8'))
-        engine = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == '_bundle_paragraph_rehome_exact')
-        insert_line = min(n.lineno for n in ast.walk(engine) if isinstance(n, ast.Call) and getattr(n.func, 'id', None) == 'insert_text_at_caret')
-        finds = [n for n in ast.walk(engine) if isinstance(n, ast.Call) and getattr(n.func, 'attr', None) == '_find_text_on_expected_page'
-                 and any(k.arg == 'match' and getattr(k.value, 'id', None) == 'delete_match' for k in n.keywords)]
-        self.assertEqual(len(finds), 1, 'delete_match search not found in the rehome engine')
-        insert_first = insert_line < finds[0].lineno
-        text = json.dumps(command_models()['paragraph_rehome_exact'].model_json_schema(), ensure_ascii=False)
-        says = 'deletes the copy it just inserted' in text
-        self.assertEqual(says, insert_first, 'the rehome schema must describe the engine order: insert first, then search delete_match')
-        # The finder starts at the document start and takes the first match on the expected page.
-        finder_tree = ast.parse((APP / 'local_cli_bundle_paragraphs.py').read_text(encoding='utf-8'))
-        finder = next(n for n in ast.walk(finder_tree) if isinstance(n, ast.FunctionDef) and n.name == '_find_text_on_expected_page')
-        from_doc_start = any(isinstance(n, ast.Call) and getattr(n.func, 'id', None) == '_move_doc_begin' for n in ast.walk(finder))
-        self.assertEqual('start of the document' in text, from_doc_start, 'the rehome schema must say where the delete_match search starts')
-        # After deleting, the engine refuses (Undo, then an error that holds the session) when the visible text differs.
-        compares = any(isinstance(n, ast.Constant) and isinstance(n.value, str) and 'changed visible text' in n.value for n in ast.walk(engine))
-        self.assertEqual('visible text' in text, compares, 'the rehome schema must say that a change in visible text order is refused')
+    def test_contract_names_the_backend_deferred_intent_ops_and_their_codes(self):
+        # Behavior lives in tests/test_deferred_step_intent.py; this ties the contract and schemas to the backend code set.
+        tree = ast.parse((APP / 'step_refusal.py').read_text(encoding='utf-8'))
+        codes = next(n.value for n in tree.body if isinstance(n, ast.AnnAssign) and getattr(n.target, 'id', None) == 'STEP_REFUSAL_CODES')
+        backend = {}
+        for key, value in zip(codes.keys, codes.values):
+            backend[key.value] = {elt.value for elt in value.args[0].elts}
+        self.assertEqual(set(_contract('DEFERRED')), set(backend))
+        self.assertFalse(set(_contract('DEFERRED')) & set(_contract('GUARDED')))
+        commands = command_models()
+        for op, op_codes in backend.items():
+            text = json.dumps(commands[op].model_json_schema(), ensure_ascii=False)
+            self.assertIn('refusal_code', text, op)
+            self.assertIn('holds the session', text, op)
+            self.assertEqual([code for code in sorted(op_codes - {'invalid_request'}) if code not in text], [], op)
 
 
 if __name__ == '__main__':

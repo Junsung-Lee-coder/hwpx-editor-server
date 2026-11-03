@@ -431,6 +431,8 @@ class _FakeHwp:
         self.eat_char = bool(faults.get('eat_char'))
         self.bad_readback = bool(faults.get('bad_readback'))
         self.snapshot_unknown = bool(faults.get('snapshot_unknown'))
+        if self.snapshot_unknown:
+            self.SelectionMode = None  # an unreadable mode: the strict state proof treats it as technical
         self.no_return = bool(faults.get('no_return'))
         if faults.get('no_readback'):
             self.GetTextFile = None  # type: ignore[assignment]
@@ -620,8 +622,9 @@ class ServiceFlowTests(unittest.TestCase):
         cases = (
             (_FakeHwp(no_readback=True), {}, 'GetTextFile is unavailable'),
             (_FakeHwp(bad_readback=True), {}, 'not well-formed HWPML'),
-            (_FakeHwp(snapshot_unknown=True), {}, 'not provably in normal edit state'),
-            (_FakeHwp(snapshot_unknown=True), {'kind': 'memo'}, 'not provably known'),
+            # An unreadable selection mode is a technical failure (the bundle holds it), never a refusal.
+            (_FakeHwp(snapshot_unknown=True), {}, 'the selection mode could not be read'),
+            (_FakeHwp(snapshot_unknown=True), {'kind': 'memo'}, 'the selection mode could not be read'),
             (selected, {}, 'not provably in normal edit state'),
             (_FakeHwp(), {'expected_pos': [0, 0, 4]}, 'caret is at [0, 0, 5], expected [0, 0, 4]'),
             (_FakeHwp(), {'expected_pos': [0, 1, 5]}, 'expected [0, 1, 5]'),

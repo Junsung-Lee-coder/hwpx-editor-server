@@ -152,6 +152,19 @@ def _native_diagnostic(site: object, error: BaseException) -> dict[str, str]:
                 ('preservation', 'preservation_unproven'),
             ):
                 diagnostic.update(numbering_phase=phase, numbering_reason=reason)
+            # Deferred-intent and legacy engines: one fixed phase and the first failing check's fixed label.
+            step_phase = step_reason = None
+            if type(data) is dict and len(data) <= 16:
+                for key, value in dict.items(data):
+                    if type(key) is str and type(value) is str:
+                        if key == 'step_phase':
+                            step_phase = value
+                        elif key == 'step_reason':
+                            step_reason = value
+            if type(step_phase) is str and type(step_reason) is str:
+                from app.step_refusal import step_diagnostic_allowed
+                if step_diagnostic_allowed(step_phase, step_reason):
+                    diagnostic.update(step_phase=step_phase, step_reason=step_reason)
         current = error
         for field in ('causal_class', 'cause_class', 'cause2_class'):
             label = _exception_label(current)
@@ -1265,6 +1278,8 @@ class LocalCliRuntimeHandle:
     mutation_intent: bool = False
     guarded_bundle: bool = False
     observe_pre_save: Callable[[], dict[str, Any]] | None = None
+    # Set by command_bundle for the duration of one step (app/step_refusal.py StepControl.register).
+    register_step_refusal: Callable[[BaseException], None] | None = None
 
 
 @dataclass

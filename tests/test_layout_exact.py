@@ -134,6 +134,21 @@ class _FakeLayoutHwp:
         self.selection = None
         return True
 
+    # Exact readers the engine uses for its strict state proof; ``snapshot_unknown`` makes the mode unreadable.
+    @property
+    def SelectionMode(self) -> Any:  # noqa: N802
+        return None if self.snapshot_unknown else (1 if self.selection is not None else 0)
+
+    def get_selected_pos(self) -> tuple[Any, ...]:
+        if self.selection is None:
+            return (False, 0, 0, 0, 0, 0, 0)
+        spara, spos, epara, epos = self.selection
+        end = len(self._para(epara)['text']) if epos == -1 else epos
+        return (True, 0, spara, spos, 0, epara, end)
+
+    def is_cell(self) -> bool:
+        return self.in_cell
+
     def select_text(self, spara: int, spos: int, epara: int, epos: int, slist: int = 0) -> bool:
         self.selection = (spara, spos, epara, epos)
         return True
@@ -689,10 +704,11 @@ class PageSetupFlowTests(unittest.TestCase):
         self.assertEqual(hwp.mutations(), [])
 
     def test_selection_or_unknown_state_refused(self) -> None:
-        for hwp in (_FakeLayoutHwp(snapshot_unknown=True), _FakeLayoutHwp()):
+        # A selection is a clean refusal; an unreadable state is a technical failure. Neither mutates.
+        for hwp, pattern in ((_FakeLayoutHwp(snapshot_unknown=True), 'state is unknown'), (_FakeLayoutHwp(), 'normal edit state')):
             if not hwp.snapshot_unknown:
                 hwp.selection = (0, 0, 0, 1)
-            with self.assertRaisesRegex(LocalCliRuntimeError, 'normal edit state'):
+            with self.assertRaisesRegex(LocalCliRuntimeError, pattern):
                 _run(hwp, _page_step())
             self.assertEqual(hwp.mutations(), [])
 
@@ -736,7 +752,8 @@ class ColumnFlowTests(unittest.TestCase):
     def test_multi_section_without_caret_section_is_refused_before_mutation(self) -> None:
         hwp = _FakeLayoutHwp([['one'], ['two']])
         hwp.KeyIndicator = lambda: None  # type: ignore[method-assign]
-        with self.assertRaisesRegex(LocalCliRuntimeError, 'cannot be scoped'):
+        # An unreadable KeyIndicator is a technical failure before mutation (held by the bundle), not a refusal.
+        with self.assertRaisesRegex(LocalCliRuntimeError, 'caret section is unknown'):
             _run(hwp, self._step())
         self.assertEqual(hwp.mutations(), [])
 
@@ -906,7 +923,8 @@ class HangingIndentFlowTests(unittest.TestCase):
 
     def test_unknown_state_refused(self) -> None:
         hwp = _FakeLayoutHwp(snapshot_unknown=True)
-        with self.assertRaisesRegex(LocalCliRuntimeError, 'normal edit state'):
+        # Unreadable state: a technical failure before mutation, never a refusal.
+        with self.assertRaisesRegex(LocalCliRuntimeError, 'state is unknown'):
             _run(hwp, self._step())
         self.assertEqual(hwp.mutations(), [])
 

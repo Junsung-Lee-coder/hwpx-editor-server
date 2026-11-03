@@ -72,6 +72,7 @@ from app.local_cli_runtime import (
 )
 from app import native_format, native_numbering, native_numbering_census, native_paragraph_edit, native_table
 from app.local_cli_type_guard import type_insert_guard_reason
+from app.step_refusal import DEFERRED_INTENT_OPS, STEP_REFUSAL_CODES, LocalCliStepRefusal, StepControl
 from app.command_packages.runtime import get_command_package_registry
 from app.raw_readback import RawReadbackMismatch, build_raw_target_readback
 from app.readiness import (
@@ -3773,9 +3774,9 @@ class LocalCliService(
         op = str(step.get('op') or '')
         warnings: list[str] = []
 
-        # Numbering publishes intent at actual Execute boundaries. Other
-        # packages are conservative before invocation, never error callbacks.
-        if op not in _GUARDED_BUNDLE_OPS | {'control_inventory', 'table_frame_inventory', 'style_inspect', 'where'}:
+        # Numbering publishes intent at actual Execute boundaries, and the deferred-intent engines (app/step_refusal.py)
+        # at their first native mutator. Other packages are conservative before invocation, never error callbacks.
+        if op not in _GUARDED_BUNDLE_OPS | DEFERRED_INTENT_OPS | {'control_inventory', 'table_frame_inventory', 'style_inspect', 'where'}:
             if handle.mark_mutating_intent is not None:
                 handle.mark_mutating_intent()
         package = self.command_packages.get(op)
@@ -3807,7 +3808,8 @@ class LocalCliService(
             return result, True, list(result.get('warnings') or [])
 
         if op == 'paragraph_rehome_exact':
-            result = self._bundle_paragraph_rehome_exact(handle.hwp, step)
+            result = self._bundle_paragraph_rehome_exact(handle.hwp, step, control=StepControl(
+                op, on_mutating=getattr(handle, 'mark_mutating_intent', None), on_refusal=getattr(handle, 'register_step_refusal', None)))
             return result, True, list(result.get('warnings') or [])
 
         if op == 'control_join_previous_exact':
@@ -7236,6 +7238,7 @@ class LocalCliService(
                 # invocation when an earlier step already set it True.
                 step_mutation_issued = False
                 mark_mutating_intent = getattr(handle, 'mark_mutating_intent', None)
+                registered_refusals: list[BaseException] = []
 
                 def mark_step_mutating_intent() -> None:
                     nonlocal step_mutation_issued
@@ -7243,12 +7246,18 @@ class LocalCliService(
                     if mark_mutating_intent is not None:
                         mark_mutating_intent()
 
+                def register_step_refusal(exc: BaseException) -> None:
+                    # Trusted producer edge: the engine hands over the exact refusal object it built.
+                    registered_refusals.append(exc)
+
                 try:
                     handle.mark_mutating_intent = mark_step_mutating_intent
+                    handle.register_step_refusal = register_step_refusal
                     try:
                         result, step_dirty, step_warnings = self._execute_command_bundle_step(handle, step, binding=binding)
                     finally:
                         handle.mark_mutating_intent = mark_mutating_intent
+                        handle.register_step_refusal = None
                     dirty = dirty or bool(step_dirty)
                     if isinstance(result, dict) and result.get('artifact_kind') and result.get('artifact_path'):
                         artifacts[f"latest_{result.get('artifact_kind')}_path"] = str(result.get('artifact_path'))
@@ -7271,16 +7280,29 @@ class LocalCliService(
                     from app.local_cli_bundle_numbering import _NumberingCleanRefusal, _NumberingSemanticRefusal
                     numbering = step.get('op') in _GUARDED_BUNDLE_OPS
                     target_refused = numbering and (type(exc) is NativeNumberingRefusal or type(exc) is _NumberingSemanticRefusal or type(exc) is _NumberingCleanRefusal)
+                    # Deferred-intent engines: clean only for the exact object the engine registered, of the exact
+                    # class, with an allowed code, and no mutator issued by this step. Never from an exception's class alone.
+                    deferred = step.get('op') in DEFERRED_INTENT_OPS
+                    step_refusal_code = None
+                    if (deferred and not step_mutation_issued and len(registered_refusals) == 1
+                            and exc is registered_refusals[0] and type(exc) is LocalCliStepRefusal):
+                        data = BaseException.__dict__['__dict__'].__get__(exc)
+                        code = dict.get(data, 'code') if type(data) is dict else None
+                        if type(code) is str and code in STEP_REFUSAL_CODES[step.get('op')]:
+                            step_refusal_code = code
+                    step_refused = step_refusal_code is not None
+                    target_refused = target_refused or step_refused
                     # Only an existing proved semantic refusal may disregard
                     # confirmed earlier steps. Technical/unknown outcomes keep
                     # the conservative cumulative projection and custody debt.
                     mutation_may_have_persisted = (step_mutation_issued if target_refused else handle.mutation_intent) or (step.get('op') == 'official_numbering_apply' and not target_refused)
                     held = False
-                    if (mutation_may_have_persisted or (guarded and not target_refused)) and handle.hold_native_custody is not None:
+                    if (mutation_may_have_persisted or (guarded and not target_refused) or (deferred and not step_refused)) and handle.hold_native_custody is not None:
                         if mutation_may_have_persisted:
                             handle.hold_native_custody('Bundle mutator outcome unknown; session retained.', exc)
                         else:
-                            handle.hold_native_custody('Numbering inspection unproven before mutation; session retained.', exc,
+                            handle.hold_native_custody('Step inspection unproven before mutation; session retained.' if deferred
+                                                       else 'Numbering inspection unproven before mutation; session retained.', exc,
                                                        may_have_mutated=False)
                         held = True
                     if not isinstance(exc, Exception) and not held:
@@ -7290,11 +7312,13 @@ class LocalCliService(
                     # text/rollback. Never inspect an arbitrary subclass's
                     # descriptors, metadata, metaclass name or representation.
                     error_text = 'Native command failed; outcome is unproven.'
-                    if target_refused:
+                    if step_refused:
+                        error_text = f'Refused before any edit ({step_refusal_code}); the document and caret are unchanged.'
+                    elif target_refused:
                         error_text = ('Formatting refused before any edit; original state and preservation verified.' if step.get('op') in {'character_format_exact', 'paragraph_format_exact', 'table_inventory', 'table_read', 'table_edit_exact', 'table_style_exact', 'table_width_exact', 'table_create_exact'}
                                       else 'Numbering preflight refused; original state and preservation verified.')
                     rollback = {}
-                    if type(exc) is LocalCliMutationError or type(exc) is LocalCliRuntimeError:
+                    if not step_refused and (type(exc) is LocalCliMutationError or type(exc) is LocalCliRuntimeError):
                         args = BaseException.__dict__['args'].__get__(exc)
                         if type(args) is tuple and len(args) == 1 and type(args[0]) is str:
                             error_text = args[0]
@@ -7325,7 +7349,9 @@ class LocalCliService(
                     if type(exc) is LocalCliMutationError and step.get('op') in {'table_edit_exact', 'table_style_exact', 'table_width_exact', 'table_create_exact'}:
                         # These messages name cells and properties, never document text, and say why the outcome is not proven.
                         status['outcome_detail'] = error_text[:800]
-                    if target_refused and not mutation_may_have_persisted:
+                    if step_refused and not mutation_may_have_persisted:
+                        status['refusal_code'] = step_refusal_code
+                    elif target_refused and not mutation_may_have_persisted:
                         from app.local_cli_runtime import _native_diagnostic
                         status['refusal_code'] = (exc.code if type(exc) is _NumberingSemanticRefusal or type(exc) is _NumberingCleanRefusal
                                                   else _native_diagnostic('bundle_step', exc)['refusal_code'])
@@ -7336,7 +7362,7 @@ class LocalCliService(
                             found_page = BaseException.__dict__['__dict__'].__get__(exc).get('found_page')
                             if type(found_page) is int:
                                 status['found_page'] = found_page
-                    if numbering:
+                    if numbering or (deferred and not step_refused):
                         # Fixed labels only, so a caller can see the stopping phase without opening the journal.
                         from app.local_cli_runtime import _native_diagnostic
                         status['failure_diagnostic'] = _native_diagnostic('bundle_step', exc)

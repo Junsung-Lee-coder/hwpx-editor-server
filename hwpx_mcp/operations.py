@@ -37,6 +37,7 @@ Rgb = Annotated[str, Field(pattern=r'^#[0-9A-Fa-f]{6}$')]
 CARET_DEBT_NOTE = ('Navigation only: when the document has no unsaved edit and is unchanged before and after, hwpx_close works afterwards '
                    'without a save. After an earlier unsaved edit, hwpx_close still needs a save that writes.')
 HOLD_NOTE = "Not one of the backend's guarded exact engines: any backend error in this step, including a stale or wrong target, is reported as an unknown outcome and holds the session."
+DEFERRED_NOTE = ('A request the backend proves stale or impossible from its own exact reads before the first native edit is refused with a refusal_code; the document and caret are unchanged and the session stays usable. Any other backend error, and any failure after the edit started, is reported as an unknown outcome and holds the session.')
 Pos3 = Annotated[list[Annotated[int, Field(ge=0)]], Field(min_length=3, max_length=3,
                  description='The caret position [list, para, pos] exactly as hwpx_where or a where step reports it.')]
 CursorPos = Annotated[list[int], Field(min_length=3, max_length=3, description='[list, para, pos].')]
@@ -380,7 +381,7 @@ Text1000 = Annotated[str, Field(min_length=1, max_length=1000)]
 
 
 class ParagraphRehomeStep(Closed):
-    """Re-place one text run just before another anchor (insert, then delete). The backend first types insert_text and a line break at the start of insert_before_match, then searches delete_match from the start of the document, takes the first match on delete_expected_page and deletes it. It then compares the document's visible text (all whitespace removed) with the text before the step; if they differ it tries Undo twice and fails, so only a move that leaves the order of visible text unchanged can pass (moving a paragraph past two other paragraphs failed and held the session on Hancom 2024). When insert_before_match comes before delete_match, the search finds and deletes the copy it just inserted: the step reports success, the order is unchanged and a line break is left before insert_before_match (measured on Hancom 2024). Not one of the backend's guarded exact engines: any backend error in this step, including a stale or wrong target, is reported as an unknown outcome and holds the session."""
+    """Move one text run to just before a later anchor, for example from the end of one paragraph to the start of the next. Before any edit the backend finds delete_match (its first match on delete_expected_page) and insert_before_match (its first match on insert_expected_page) and records both ranges. It refuses before any edit, with the caret put back, when the anchor lies before or inside the text to move (refusal_code insert_before_delete), when other visible text lies between them (not_adjacent) or when they are in different lists such as a table cell (different_list). Otherwise it types insert_text and a line break at the anchor, deletes exactly the recorded range and checks that the visible text (whitespace removed) is unchanged. A request the backend proves stale or impossible from its own exact reads before the first native edit is refused with a refusal_code; the document and caret are unchanged and the session stays usable. Any other backend error, and any failure after the edit started, is reported as an unknown outcome and holds the session."""
     op: Literal['paragraph_rehome_exact']
     label: Label = 'mcp:paragraph-rehome-exact'
     delete_match: Text1000
@@ -498,7 +499,7 @@ _LAYOUT_KIND_FIELDS = {
 
 
 class LayoutStep(Closed):
-    """Page setup, columns, section break insert/delete or hanging indent at the proven caret (expected_pos from hwpx_where). Not one of the backend's guarded exact engines: any backend error in this step, including a stale or wrong target, is reported as an unknown outcome and holds the session."""
+    """Page setup, columns, section break insert/delete or hanging indent at the proven caret (expected_pos from hwpx_where). Refusal codes before any edit: caret_moved, editor_not_normal, caret_in_table, stale_expected_before, nothing_to_change, not_section_start, marker_mismatch, layout_unsupported, proof_budget. A request the backend proves stale or impossible from its own exact reads before the first native edit is refused with a refusal_code; the document and caret are unchanged and the session stays usable. Any other backend error, and any failure after the edit started, is reported as an unknown outcome and holds the session."""
     op: Literal['layout_exact']
     label: Label = 'mcp:layout-exact'
     kind: Literal['page_setup', 'columns', 'section_insert', 'section_delete', 'hanging_indent']
@@ -577,7 +578,7 @@ ShapeMm = Annotated[float, Field(ge=0.0, le=1000.0)]
 
 
 class ObjectInsertStep(Closed):
-    """Insert one note, field, bookmark, equation, shape, header or footer at the proven caret (expected_pos from hwpx_where). Not one of the backend's guarded exact engines: any backend error in this step, including a stale or wrong target, is reported as an unknown outcome and holds the session."""
+    """Insert one note, field, bookmark, equation, shape, header or footer at the proven caret (expected_pos from hwpx_where). Refusal codes before any edit: caret_moved, editor_not_normal, selection_required, selection_text_mismatch, existing_header_footer, bookmark_exists, unverifiable_layout, proof_budget. A request the backend proves stale or impossible from its own exact reads before the first native edit is refused with a refusal_code; the document and caret are unchanged and the session stays usable. Any other backend error, and any failure after the edit started, is reported as an unknown outcome and holds the session."""
     op: Literal['object_insert_exact']
     label: Label = 'mcp:object-insert-exact'
     kind: Literal['footnote', 'endnote', 'memo', 'hyperlink', 'bookmark', 'equation', 'line', 'rectangle', 'ellipse',

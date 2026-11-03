@@ -131,7 +131,43 @@ HWPUNIT_PER_MM = 7200 / 25.4
 
 
 class ObjectInsertError(ValueError):
-    """A step, plan or readback cannot be accepted."""
+    """A step, plan or readback cannot be accepted; ``code`` is a fixed label (never document text)."""
+
+    def __init__(self, message: str, code: str = 'invalid_request') -> None:
+        super().__init__(message)
+        self.code = code
+
+
+# Fixed labels for the first reason an after-insert verification failed (journal and public failure_diagnostic).
+_REASON_CODES: tuple[tuple[str, str], ...] = (
+    ('text is not exactly the requested text', 'object_text_mismatch'),
+    ('hyperlink Command does not name exactly the url', 'hyperlink_command_mismatch'),
+    ('BOOKMARK Name differs', 'bookmark_name_mismatch'),
+    ('EQUATION script differs', 'equation_script_mismatch'),
+    ('HWPUNIT', 'shape_size_mismatch'),
+    ('TreatAsChar', 'shape_treat_as_char_mismatch'),
+    ('ApplyPageType', 'header_apply_mismatch'),
+    ('the change does not start with the new', 'change_not_object'),
+    ('is not closed by its own FIELDEND', 'field_end_missing'),
+    ('new FIELDEND Type', 'field_end_type'),
+    ('wraps something other than plain text', 'field_wraps_other'),
+    ('does not wrap exactly display_text', 'hyperlink_wrap_mismatch'),
+    ('document text outside the new object changed', 'text_changed'),
+    ('other controls changed', 'controls_changed'),
+    ('paragraph structure changed', 'paragraph_structure_changed'),
+    ('container structure or attributes changed', 'container_changed'),
+    ('content next to it changed', 'adjacent_content_changed'),
+    ('expected exactly +1', 'object_count_mismatch'),
+    ('count changed by', 'companion_count_mismatch'),
+)
+REASON_CODES = frozenset(code for _needle, code in _REASON_CODES) | {'other'}
+
+
+def reason_code(reason: str) -> str:
+    for needle, code in _REASON_CODES:
+        if needle in reason:
+            return code
+    return 'other'
 
 
 def mm_to_hwpunit(value: float) -> int:
@@ -466,7 +502,7 @@ def check_before(plan: Mapping[str, Any], before: ET.Element) -> dict[str, Any]:
     """Refuse plans the readback cannot verify. Returns the before summary."""
     summary = summarize(before)
     if summary['char_elements'] == 0 and _norm(''.join(_body(before).itertext())):
-        raise ObjectInsertError('document readback holds text outside CHAR runs; this HWPML layout cannot be verified')
+        raise ObjectInsertError('document readback holds text outside CHAR runs; this HWPML layout cannot be verified', 'unverifiable_layout')
     if plan['kind'] in ('header', 'footer'):
         tag = KIND_TAGS[plan['kind']][0]
         want = APPLY_PAGE_TYPES[plan['apply_to']]
@@ -475,12 +511,13 @@ def check_before(plan: Mapping[str, Any], before: ET.Element) -> dict[str, Any]:
             if apply in (None, want, APPLY_PAGE_TYPES['both']) or want == APPLY_PAGE_TYPES['both']:
                 raise ObjectInsertError(
                     f'document already has a {tag} that may cover {plan["apply_to"]} pages ({apply!r}); '
-                    'replacing an existing header/footer is not supported, delete it explicitly first'
+                    'replacing an existing header/footer is not supported, delete it explicitly first',
+                    'existing_header_footer',
                 )
     if plan['kind'] == 'bookmark':
         for element in _body(before).iter(KIND_TAGS['bookmark'][0]):
             if element.get(ATTRS['bookmark_name']) == plan['name']:
-                raise ObjectInsertError('a bookmark with this name already exists')
+                raise ObjectInsertError('a bookmark with this name already exists', 'bookmark_exists')
     return summary
 
 

@@ -104,7 +104,66 @@ _SECTION_COUNT_ATTRS = {'HEAD': ('SecCnt',)}
 
 
 class LayoutError(ValueError):
-    """A request, plan or readback cannot be accepted."""
+    """A request, plan or readback cannot be accepted; ``code`` is a fixed label (never document text)."""
+
+    def __init__(self, message: str, code: str = 'layout_unsupported') -> None:
+        super().__init__(message)
+        self.code = code
+
+
+# Fixed labels for the first reason a post-edit verification failed (journal and public failure_diagnostic).
+# Matched against the reason texts below by substring, in this order; anything else is 'other'.
+_REASON_CODES: tuple[tuple[str, str], ...] = (
+    ('reads back', 'requested_value_not_applied'),
+    ('although it was not requested', 'unrequested_value_changed'),
+    ('per-section PAGEDEF readback is unavailable', 'per_section_readback_unavailable'),
+    ('per-section PAGEDEF readback does not show exactly one new section', 'section_pagedef_count'),
+    ("does not inherit its neighbour's page setup", 'section_pagedef_inherit'),
+    ('did not give every section the same new page setup', 'scope_not_whole_document'),
+    ('sections (', 'scope_changed_other_sections'),
+    ('the changed section is', 'scope_wrong_section'),
+    ('readback is unavailable for HEAD/TAIL', 'head_tail_unavailable'),
+    ('readback is unavailable for the body token check', 'body_readback_unavailable'),
+    ('an embedded object', 'embedded_object_changed'),
+    ('document text changed', 'text_changed'),
+    ('embedded controls changed', 'controls_changed'),
+    ('SECDEF count is', 'secdef_count'),
+    ('SECTION count is', 'section_count'),
+    ('SECTION element count moved', 'section_count'),
+    ('COLDEF count is', 'coldef_count'),
+    ('column definition (COLDEF) changed', 'coldef_changed'),
+    ('per-section column readback moved', 'coldef_sections_moved'),
+    ('changed the column definitions of sections', 'coldef_wrong_section'),
+    ('cannot be proven from the readback', 'coldef_scope_unprovable'),
+    ('caret section is unknown', 'coldef_scope_unprovable'),
+    ('page definition (PAGEDEF) changed', 'pagedef_changed'),
+    ('paragraph count moved', 'paragraph_count'),
+    ('changed paragraph shape, expected at most', 'parashape_changed'),
+    ('section break is not exactly a paragraph split', 'section_break_shape'),
+    ("does not keep the split paragraph's attributes", 'section_break_attributes'),
+    ('section break is not at the caret', 'section_break_position'),
+    ('is not a copy of the split section', 'section_copy_mismatch'),
+    ('the removed section break belongs to section', 'section_delete_wrong'),
+    ('surviving sections', 'section_delete_pagedefs'),
+    ('new column definition is not at the caret', 'coldef_position'),
+    ('beyond one new column definition', 'body_changed'),
+    ('beyond one paragraph shape', 'body_changed'),
+    ('the body changed outside', 'body_changed'),
+    ('ParagraphShape readback has no numeric', 'parashape_readback'),
+    ('expected a negative (hanging) value', 'indent_not_hanging'),
+    ('Indentation did not change', 'indent_unchanged'),
+    ('LeftMargin moved by', 'left_margin_moved'),
+    ('paragraph shape ', 'parashape_changed'),
+    ('the paragraph text changed', 'text_changed'),
+)
+REASON_CODES = frozenset(code for _needle, code in _REASON_CODES) | {'other'}
+
+
+def reason_code(reason: str) -> str:
+    for needle, code in _REASON_CODES:
+        if needle in reason:
+            return code
+    return 'other'
 
 
 # ---------------------------------------------------------------- units
@@ -294,15 +353,15 @@ def parse_layout_xml(xml_text: Any) -> dict[str, Any]:
     * ``para_shapes``: ParaShape attribute of every P in document order.
     """
     if not isinstance(xml_text, str) or not xml_text.strip():
-        raise LayoutError('HWPML readback returned no text')
+        raise LayoutError('HWPML readback returned no text', 'readback_malformed')
     text = re.sub(r'^\s*<\?xml[^>]*\?>', '', xml_text, count=1)
     try:
         root = ET.fromstring(text)
     except ET.ParseError as exc:
-        raise LayoutError(f'HWPML readback is not well-formed: {exc}') from exc
+        raise LayoutError(f'HWPML readback is not well-formed: {exc}', 'readback_malformed') from exc
     body = root if root.tag == 'BODY' else root.find('.//BODY')
     if body is None:
-        raise LayoutError('HWPML readback has no BODY element')
+        raise LayoutError('HWPML readback has no BODY element', 'readback_malformed')
     secdefs = list(body.iter('SECDEF'))
     section_elements = len(body.findall('SECTION'))
     pagedefs: list[str] | None = []
@@ -325,7 +384,7 @@ def parse_layout_xml(xml_text: Any) -> dict[str, Any]:
     paragraphs = list(body.iter('P'))
     section_count = len(secdefs) if secdefs else section_elements
     if section_count < 1:
-        raise LayoutError('HWPML readback has no SECDEF or SECTION element')
+        raise LayoutError('HWPML readback has no SECDEF or SECTION element', 'readback_malformed')
     return {
         'section_count': section_count,
         'secdef_count': len(secdefs),
@@ -623,7 +682,7 @@ def _as_int_items(values: Mapping[str, Any], items: tuple[str, ...], what: str) 
     for item in items:
         value = values.get(item)
         if not _is_number(value):
-            raise LayoutError(f'{what} readback has no numeric {item} ({value!r})')
+            raise LayoutError(f'{what} readback has no numeric {item} ({value!r})', 'readback_malformed')
         out[item] = int(value)
     return out
 
@@ -668,12 +727,12 @@ def plan_page_setup(request: Mapping[str, Any], before_raw: Mapping[str, Any], d
         if not _field_matches(field, want, before[PAGE_FIELDS[field]])
     ]
     if stale:
-        raise LayoutError('page setup changed since it was probed (re-read it before editing): ' + '; '.join(stale))
+        raise LayoutError('page setup changed since it was probed (re-read it before editing): ' + '; '.join(stale), 'stale_expected_before')
     targets: dict[str, int] = {}
     for field, value in request['targets'].items():
         targets[PAGE_FIELDS[field]] = (1 if value else 0) if field == 'landscape' else mm_to_hwpunit(value)
     if all(_field_matches(field, value, before[PAGE_FIELDS[field]]) for field, value in request['targets'].items()):
-        raise LayoutError('every requested page setup value already holds; nothing to change')
+        raise LayoutError('every requested page setup value already holds; nothing to change', 'nothing_to_change')
     merged = {**before, **targets}
     width, height = text_area_mm(merged)
     if width <= 0 or height <= 0:
@@ -753,13 +812,13 @@ def plan_columns(request: Mapping[str, Any], before_raw: Mapping[str, Any], doc:
     if 'gap_mm' in expected and abs(hwpunit_to_mm(before['SameGap']) - expected['gap_mm']) > MM_TOLERANCE + 1e-9:
         stale.append(f'gap_mm is {hwpunit_to_mm(before["SameGap"])}, expected_before says {expected["gap_mm"]}')
     if stale:
-        raise LayoutError('column definition changed since it was probed: ' + '; '.join(stale))
+        raise LayoutError('column definition changed since it was probed: ' + '; '.join(stale), 'stale_expected_before')
     targets: dict[str, int] = {'Count': request['count'], 'SameSize': 1 if request['same_width'] else 0}
     if request.get('gap_mm') is not None:
         targets['SameGap'] = mm_to_hwpunit(request['gap_mm'])
     unchanged = targets['Count'] == before['Count'] and bool(targets['SameSize']) == bool(before['SameSize']) and targets.get('SameGap', before['SameGap']) == before['SameGap']
     if request['apply_to'] == 'current_section' and unchanged:
-        raise LayoutError('the current column definition already matches; nothing to change')
+        raise LayoutError('the current column definition already matches; nothing to change', 'nothing_to_change')
     return {
         'kind': 'columns',
         'apply_to': request['apply_to'],
@@ -875,7 +934,7 @@ def plan_hanging_indent(request: Mapping[str, Any], paragraph_text: str, before_
     marker = request['marker_text']
     if not isinstance(paragraph_text, str) or not paragraph_text.startswith(marker):
         preview = (paragraph_text or '')[: len(marker) + 10]
-        raise LayoutError(f'the current paragraph does not start with marker_text {marker!r} (it starts with {preview!r})')
+        raise LayoutError(f'the current paragraph does not start with marker_text {marker!r} (it starts with {preview!r})', 'marker_mismatch')
     shape = parashape_scalars(before_raw)
     _as_int_items(shape, ('Indentation', 'LeftMargin'), 'ParagraphShape')
     list_id, para, _pos = request['expected_pos']

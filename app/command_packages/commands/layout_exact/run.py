@@ -26,5 +26,6 @@ def validate_step(*, service: Any, index: int, step: dict[str, Any], manifest: d
 
 
 def run_step(*, service: Any, handle: Any, step: dict[str, Any], binding: Mapping[str, Any] | None, manifest: dict[str, Any]) -> tuple[dict[str, Any], bool, list[str]]:
-    result = service._bundle_layout_exact(handle.hwp, step)  # noqa: SLF001
+    from app.step_refusal import StepControl
+    result = service._bundle_layout_exact(handle.hwp, step, control=StepControl('layout_exact', on_mutating=getattr(handle, 'mark_mutating_intent', None), on_refusal=getattr(handle, 'register_step_refusal', None)))  # noqa: SLF001
     return result, True, list(result.get('warnings') or [])

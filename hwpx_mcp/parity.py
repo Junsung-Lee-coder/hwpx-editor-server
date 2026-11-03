@@ -95,9 +95,15 @@ BUNDLE_OPS: dict[str, dict[str, Any]] = {
 GUARDED = frozenset({'page_number_apply', 'official_numbering_apply', 'paragraph_insert_exact', 'paragraph_remove_exact',
                      'character_format_exact', 'paragraph_format_exact', 'table_inventory', 'table_read', 'table_edit_exact',
                      'table_style_exact', 'table_width_exact', 'table_create_exact'})
+# Ops that publish mutation intent at their first native edit (app.step_refusal.DEFERRED_INTENT_OPS): before it they
+# refuse with a fixed refusal_code only from their own exact reads; anything else holds the session.
+DEFERRED = frozenset({'layout_exact', 'object_insert_exact', 'paragraph_rehome_exact'})
+_DEFERRED = ('refused with a fixed refusal_code, document and caret unchanged and session usable, only when the backend proves the '
+             'request stale or impossible from its own exact reads before the first native edit; any other backend error, and any '
+             'failure after the edit started, is an unknown outcome that holds the session (app.step_refusal)')
 for _op, _row in BUNDLE_OPS.items():
     if _row['status'] == 'exposed' and _op not in GUARDED:
-        _row['error_hold'] = _UNGUARDED
+        _row['error_hold'] = _DEFERRED if _op in DEFERRED else _UNGUARDED
 
 EXCLUDED_FIELDS: dict[str, dict[str, str]] = {}
 

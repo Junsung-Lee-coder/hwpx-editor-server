@@ -41,6 +41,7 @@ from app.local_cli_service_support import (
     _MACRO_MAX_STRING_CHARS,
     LocalCliMutationError,
 )
+from app.step_refusal import LocalCliStepRefusal, StepControl, restore_caret, strict_pos, strict_selection
 
 
 class LocalCliBundleControlsMixin:
@@ -3227,128 +3228,162 @@ class LocalCliBundleControlsMixin:
             ],
         }
 
-    def _bundle_paragraph_rehome_exact(self, hwp: Any, step: dict[str, Any]) -> dict[str, Any]:
-        delete_match = self._bundle_require_text(step, 'delete_match', max_chars=1000)
-        insert_before_match = self._bundle_require_text(step, 'insert_before_match', max_chars=1000)
-        insert_text = self._bundle_require_text(step, 'insert_text', max_chars=1000)
-        delete_expected_page = int(step.get('delete_expected_page') or 0)
-        insert_expected_page = int(step.get('insert_expected_page') or 0)
-        if delete_expected_page <= 0 or insert_expected_page <= 0:
-            raise LocalCliRuntimeError('paragraph_rehome_exact requires positive expected pages')
-        if not bool(step.get('confirm_layout')):
-            raise LocalCliRuntimeError('paragraph_rehome_exact requires confirm_layout=true')
+    def _bundle_paragraph_rehome_exact(self, hwp: Any, step: dict[str, Any], control: StepControl | None = None) -> dict[str, Any]:
+        """Move one text run across the boundary to just before a later anchor (for example from the end of a paragraph
+        to the start of the next one).
+
+        Both ranges are located and bound before any edit: the delete range D (one paragraph) and the insert point I.
+        The move is accepted only when I comes after D in the same list and only whitespace or paragraph/line breaks
+        lie between them, which is exactly the set of moves that leave the visible text order unchanged. Then the
+        text and a line break are typed at I and exactly the recorded range D is deleted. An earlier, overlapping,
+        non-adjacent or other-list anchor is refused before any edit, and the caret is put back where it was.
+
+        Those refusals rest only on exact reads: the strict selection range of each hit, its selected text and the
+        selected text between them. A finder or read that fails or disagrees is a technical failure.
+        """
+        op = 'paragraph_rehome_exact'
+        control = control if control is not None else StepControl(op)
+
+        def refuse_input(message: str) -> LocalCliStepRefusal:
+            refusal = control.refuse('invalid_request', message)
+            control.register(refusal)
+            return refusal
+
+        try:
+            delete_match = self._bundle_require_text(step, 'delete_match', max_chars=1000)
+            insert_before_match = self._bundle_require_text(step, 'insert_before_match', max_chars=1000)
+            insert_text = self._bundle_require_text(step, 'insert_text', max_chars=1000)
+        except LocalCliRuntimeError as exc:
+            raise refuse_input(str(exc)) from exc
+        delete_expected_page = step.get('delete_expected_page')
+        insert_expected_page = step.get('insert_expected_page')
+        if type(delete_expected_page) is not int or type(insert_expected_page) is not int or delete_expected_page <= 0 or insert_expected_page <= 0:
+            raise refuse_input('paragraph_rehome_exact requires positive expected pages')
+        if step.get('confirm_layout') is not True:
+            raise refuse_input('paragraph_rehome_exact requires confirm_layout=true')
         if _remove_visible_spaces(delete_match) != _remove_visible_spaces(insert_text):
-            raise LocalCliRuntimeError('paragraph_rehome_exact requires delete_match and insert_text to preserve visible text')
+            raise refuse_input('paragraph_rehome_exact requires delete_match and insert_text to preserve visible text')
+        if '\n' in delete_match or '\r' in delete_match or '\n' in insert_text or '\r' in insert_text:
+            raise refuse_input('paragraph_rehome_exact moves text within one line: delete_match and insert_text are single-line')
 
-        before_text = ''
-        try:
-            if hasattr(hwp, 'get_text_file'):
-                before_text = str(hwp.get_text_file('UNICODE', '') or '')
-            elif hasattr(hwp, 'GetTextFile'):
-                before_text = str(hwp.GetTextFile('UNICODE', '') or '')
-        except Exception:
-            before_text = ''
+        def strict_text() -> str:
+            getter = getattr(hwp, 'get_text_file', None) or getattr(hwp, 'GetTextFile', None)
+            if not callable(getter):
+                raise LocalCliRuntimeError('paragraph_rehome_exact needs GetTextFile for the visible-text proof')
+            value = getter('UNICODE', '')
+            if type(value) is not str:
+                raise LocalCliRuntimeError('paragraph_rehome_exact: the document text could not be read')
+            return value
+
+        def selected_text() -> str:
+            value = _get_selected_text(hwp, keep_select=True)
+            if type(value) is not str:
+                raise LocalCliRuntimeError('paragraph_rehome_exact: the selected text could not be read')
+            return value
+
+        def select_exact(slist: int, spara: int, spos: int, epara: int, epos: int, what: str) -> str:
+            select = getattr(hwp, 'select_text', None)
+            if not callable(select):
+                raise LocalCliRuntimeError(f'paragraph_rehome_exact needs select_text for the {what}')
+            result = select(spara, spos, epara, epos, slist)
+            if result is not None and result is not True:
+                raise LocalCliRuntimeError(f'paragraph_rehome_exact: selecting the {what} was not confirmed')
+            if strict_selection(hwp, op) != (slist, spara, spos, slist, epara, epos):
+                raise LocalCliRuntimeError(f'paragraph_rehome_exact: the {what} selection is not the requested range')
+            return selected_text()
+
+        def located(match: str, page: int, what: str) -> tuple[dict[str, Any], tuple[int, int, int, int, int, int]]:
+            target = self._find_text_on_expected_page(hwp, match=match, expected_page=page)
+            selection = strict_selection(hwp, op)
+            if selection is None or selection[0] != selection[3] or selection[1] != selection[4] or selection[5] - selection[2] != len(match):
+                raise LocalCliRuntimeError(f'paragraph_rehome_exact: the {what} match is not one live selection of its text within a paragraph')
+            if selected_text() != match:
+                raise LocalCliRuntimeError(f'paragraph_rehome_exact: the selected {what} text is not the matched text')
+            return target, selection
+
+        original_pos = strict_pos(hwp, op)
+        before_text = strict_text()
         before_visible_no_space = _remove_visible_spaces(before_text)
-        before_delete_count = before_text.count(delete_match)
-        before_insert_anchor_count = before_text.count(insert_before_match)
+        try:
+            delete_target, d = located(delete_match, delete_expected_page, 'delete')
+            insert_target, i = located(insert_before_match, insert_expected_page, 'anchor')
+            dlist, dspara, dspos, delist, depara, depos = d
+            ilist, ispara, ispos, _ielist, _iepara, _iepos = i
+            if dlist != ilist:
+                raise control.refuse('different_list', 'paragraph_rehome_exact refused before any edit: the text and the anchor are in different lists (for example a table cell)')
+            if (ispara, ispos) <= (depara, depos):
+                raise control.refuse('insert_before_delete', 'paragraph_rehome_exact refused before any edit: the anchor comes before the text to move; '
+                                     'only a move to a later anchor keeps the visible text order')
+            between = select_exact(dlist, depara, depos, ispara, ispos, 'text between the move and the anchor')
+            if _remove_visible_spaces(between):
+                raise control.refuse('not_adjacent', 'paragraph_rehome_exact refused before any edit: other visible text lies between the text and the anchor')
+        except Exception as exc:
+            if control.is_pending(exc):
+                restore_caret(hwp, op, original_pos)
+                control.register(exc)
+            raise
 
-        original_pos = None
+        mutation_error: BaseException | None = None
+        raw_line_break = None
+        raw_delete_results: list[Any] = []
         try:
-            original_pos = _get_pos(hwp)
-        except Exception:
-            original_pos = None
-        try:
-            insert_target = self._find_text_on_expected_page(hwp, match=insert_before_match, expected_page=insert_expected_page)
-            selected = _get_selected_pos(hwp)
-            if not (selected and selected[0]):
-                raise LocalCliRuntimeError('paragraph_rehome_exact expected active selection for insert target')
-            _, slist, spara, spos, _elist, _epara, _epos = selected
-            _set_pos(hwp, int(slist), int(spara), int(spos))
-            insert_context_before = _capture_nearby_text_context(hwp)
+            restore_caret(hwp, op, (ilist, ispara, ispos))
+            control.begin_mutation()
             insert_text_at_caret(hwp, insert_text)
             insert_run = getattr(getattr(hwp, 'HAction', None), 'Run', None)
-            raw_line_break = None
-            if callable(insert_run):
-                raw_line_break = insert_run('BreakLine')
-            else:
+            if not callable(insert_run):
                 raise LocalCliRuntimeError('paragraph_rehome_exact requires HAction.Run BreakLine after insertion')
-
-            delete_target = self._find_text_on_expected_page(hwp, match=delete_match, expected_page=delete_expected_page)
-            selected = _get_selected_pos(hwp)
-            if not (selected and selected[0]):
-                raise LocalCliRuntimeError('paragraph_rehome_exact expected active selection for delete target')
-            selected_text = _get_selected_text(hwp, keep_select=True)
-            if _remove_visible_spaces(selected_text) != _remove_visible_spaces(delete_match):
-                raise LocalCliRuntimeError(f'paragraph_rehome_exact selected delete text mismatch: {selected_text!r}')
-            _, _dslist, _dspara, _dspos, del_elist, del_epara, del_epos = selected
-            _set_pos(hwp, int(del_elist), int(del_epara), int(del_epos))
-            delete_context_before = _capture_nearby_text_context(hwp)
-            delete_run = getattr(getattr(hwp, 'HAction', None), 'Run', None)
-            if not callable(delete_run):
-                raise LocalCliRuntimeError('paragraph_rehome_exact requires HAction.Run DeleteBack for exact text deletion')
-            raw_delete_results = []
+            raw_line_break = insert_run('BreakLine')
+            # D lies before I, so typing at I did not shift it: select exactly the recorded range and prove its text.
+            if select_exact(dlist, dspara, dspos, depara, depos, 'recorded range') != delete_match:
+                raise LocalCliRuntimeError('paragraph_rehome_exact: the recorded range no longer holds the text to move')
+            restore_caret(hwp, op, (delist, depara, depos))
             for _i in range(len(delete_match)):
-                raw_delete_results.append(delete_run('DeleteBack'))
-            raw_delete = all(bool(item) if item is not None else True for item in raw_delete_results)
-
-            after_text = ''
-            try:
-                if hasattr(hwp, 'get_text_file'):
-                    after_text = str(hwp.get_text_file('UNICODE', '') or '')
-                elif hasattr(hwp, 'GetTextFile'):
-                    after_text = str(hwp.GetTextFile('UNICODE', '') or '')
-            except Exception:
-                after_text = ''
+                raw_delete_results.append(insert_run('DeleteBack'))
+            after_text = strict_text()
             after_visible_no_space = _remove_visible_spaces(after_text)
-            if before_visible_no_space and after_visible_no_space != before_visible_no_space:
-                try:
-                    undo = getattr(getattr(hwp, 'HAction', None), 'Run', None)
-                    if callable(undo):
-                        undo('Undo')
-                        undo('Undo')
-                except Exception:
-                    pass
-                diff_at = next((i for i, (a, b) in enumerate(zip(before_visible_no_space, after_visible_no_space)) if a != b), min(len(before_visible_no_space), len(after_visible_no_space)))
-                before_frag = before_visible_no_space[max(0, diff_at-40):diff_at+80]
-                after_frag = after_visible_no_space[max(0, diff_at-40):diff_at+80]
-                raise LocalCliRuntimeError(
-                    'paragraph_rehome_exact changed visible text; undo attempted and mutation refused; '
-                    f'before_len={len(before_visible_no_space)} after_len={len(after_visible_no_space)} diff_at={diff_at} '
-                    f'before_frag={before_frag!r} after_frag={after_frag!r}'
-                )
-            after_delete_count = after_text.count(delete_match)
-            after_insert_anchor_count = after_text.count(insert_before_match)
-            return {
-                'schema_version': 'local-cli/paragraph-rehome-exact/v1',
-                'read_only': False,
-                'mutation': 'paragraph-rehome',
-                'delete_match_preview': _preview_text(delete_match, limit=80),
-                'insert_before_match_preview': _preview_text(insert_before_match, limit=80),
-                'delete_expected_page': delete_expected_page,
-                'insert_expected_page': insert_expected_page,
-                'insert_target': insert_target,
-                'delete_target': delete_target,
-                'insert_context_before': insert_context_before,
-                'delete_context_before': delete_context_before,
-                'raw_line_break_result': bool(raw_line_break) if raw_line_break is not None else None,
-                'raw_delete_result': bool(raw_delete) if raw_delete is not None else None,
-                'raw_delete_count': len(delete_match),
-                'text_counts': {
-                    'delete_match_before': before_delete_count,
-                    'delete_match_after': after_delete_count,
-                    'insert_before_match_before': before_insert_anchor_count,
-                    'insert_before_match_after': after_insert_anchor_count,
-                },
-                'visible_text_no_space_hash_before': self._text_proof_hash(before_visible_no_space),
-                'visible_text_no_space_hash_after': self._text_proof_hash(after_visible_no_space),
-                'warnings': ['Rendered proof is required before accepting the working copy.'],
-            }
-        finally:
-            if original_pos is not None and len(original_pos) >= 3:
-                try:
-                    _set_pos(hwp, int(original_pos[0]), int(original_pos[1]), int(original_pos[2]))
-                except Exception:
-                    pass
+            if after_visible_no_space != before_visible_no_space:
+                error = LocalCliRuntimeError('paragraph_rehome_exact changed visible text after the move; the outcome is held for review')
+                error.step_phase, error.step_reason = 'verify', 'text_changed'
+                raise error
+            if insert_text == delete_match and after_text.count(delete_match) != before_text.count(delete_match):
+                error = LocalCliRuntimeError('paragraph_rehome_exact did not move the text exactly once')
+                error.step_phase, error.step_reason = 'verify', 'text_changed'
+                raise error
+        except Exception as exc:
+            mutation_error = exc
+        if mutation_error is not None:
+            if not control.started:
+                raise mutation_error
+            error = LocalCliMutationError(f'paragraph_rehome_exact failed after its first edit: {mutation_error}', mutation_may_have_persisted=True,
+                                          rollback={'attempted': False})
+            verified = type(mutation_error) is LocalCliRuntimeError and getattr(mutation_error, 'step_phase', None) == 'verify'
+            error.step_phase, error.step_reason = ('verify', 'text_changed') if verified else ('after_mutation', 'other')
+            raise error from mutation_error
+        raw_delete = all(bool(item) if item is not None else True for item in raw_delete_results)
+        try:
+            _set_pos(hwp, int(original_pos[0]), int(original_pos[1]), int(original_pos[2]))
+        except Exception:
+            pass
+        return {
+            'schema_version': 'local-cli/paragraph-rehome-exact/v1',
+            'read_only': False,
+            'mutation': 'paragraph-rehome',
+            'delete_match_preview': _preview_text(delete_match, limit=80),
+            'insert_before_match_preview': _preview_text(insert_before_match, limit=80),
+            'delete_expected_page': delete_expected_page,
+            'insert_expected_page': insert_expected_page,
+            'delete_range': [dlist, dspara, dspos, delist, depara, depos],
+            'insert_at': [ilist, ispara, ispos],
+            'insert_target': insert_target,
+            'delete_target': delete_target,
+            'raw_line_break_result': bool(raw_line_break) if raw_line_break is not None else None,
+            'raw_delete_result': raw_delete,
+            'raw_delete_count': len(delete_match),
+            'visible_text_no_space_hash_before': self._text_proof_hash(before_visible_no_space),
+            'visible_text_no_space_hash_after': self._text_proof_hash(before_visible_no_space),
+            'warnings': ['Rendered proof is required before accepting the working copy.'],
+        }
 
     def _bundle_control_join_previous_exact(self, hwp: Any, step: dict[str, Any]) -> dict[str, Any]:
         target_id = self._bundle_require_text(step, 'target_id', max_chars=500)
