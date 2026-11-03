@@ -32,8 +32,11 @@ def _excluded(reason: str) -> dict[str, Any]:
     return {'status': 'excluded', 'reason': reason}
 
 
-_LEGACY = 'legacy native control-inventory path (target_id ctrl/..), not the exact table_id+hash engine'
+_LEGACY = 'legacy native control-inventory path (target_id ctrl/..), not the exact table_id+hash engine; any backend error holds the session'
 _UNDO_REFUSED = 'backend Undo policy refuses this step (local_cli_service._BUNDLE_UNDO_POLICY)'
+_UNGUARDED = ('not a guarded exact engine: any backend error in the step, including a stale or wrong target, is an unknown outcome '
+              'that holds the session (local_cli_service command_bundle; measured on Hancom 2024 with get_selected_text without a '
+              'selection and table_cell_structure_exact on a section control)')
 
 # --------------------------------------------------------------------------- command-bundle ops
 BUNDLE_OPS: dict[str, dict[str, Any]] = {
@@ -86,6 +89,15 @@ BUNDLE_OPS: dict[str, dict[str, Any]] = {
     'export_pdf': _equivalent('hwpx_proof', 'hwpx_proof page/review runs the same backend export, then downloads, renders and checks the PDF; a bare bundle export leaves the PDF unretrieved'),
     'save_document': _equivalent('hwpx_save', 'hwpx_save runs the backend save and copies, verifies and records the saved file that hwpx_close relies on; a bare bundle save bypasses that retrieval'),
 }
+
+# Backend ops with a semantic pre-edit refusal path (local_cli_service._GUARDED_BUNDLE_OPS); every other
+# exposed op reports a backend error as an unknown outcome that holds the session.
+GUARDED = frozenset({'page_number_apply', 'official_numbering_apply', 'paragraph_insert_exact', 'paragraph_remove_exact',
+                     'character_format_exact', 'paragraph_format_exact', 'table_inventory', 'table_read', 'table_edit_exact',
+                     'table_style_exact', 'table_width_exact', 'table_create_exact'})
+for _op, _row in BUNDLE_OPS.items():
+    if _row['status'] == 'exposed' and _op not in GUARDED:
+        _row['error_hold'] = _UNGUARDED
 
 EXCLUDED_FIELDS: dict[str, dict[str, str]] = {}
 

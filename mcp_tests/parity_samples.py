@@ -141,7 +141,17 @@ BUNDLE_REFUSALS: dict[str, list[dict]] = {
     'object_insert_exact': [{'kind': 'picture', 'expected_pos': [0, 0, 0], 'confirm_mutation': True},
                             {'kind': 'hyperlink', 'expected_pos': [0, 0, 0], 'url': 'javascript:alert(1)', 'display_text': 'x', 'confirm_mutation': True}],
     'set_text_file': [{'text': 'x', 'format': 'HWPML2X', 'option': 'insertfile'}],
+    # Table-only legacy engines fail on a non-table control with a runtime error, which holds the session
+    # (found on Hancom 2024 with a section-definition target); MCP refuses such a target before the backend.
+    'table_cell_structure_exact': [{**SCOPED, 'target_id': 'ctrl/0/secd/no-inst'}],
+    'table_split_exact': [{**SCOPED, 'target_id': 'ctrl/7/gso/1', 'down_rows': 1, 'confirm_layout': True}],
+    'table_column_width_exact': [{**SCOPED, 'target_id': 'ctrl/2/head/no-inst', 'expected_div0_count': 0, 'expected_total_width_mm': 1.0,
+                                  'expected_table_height_mm': 1.0, 'requested_widths_mm': [1.0], 'confirm_layout': True}],
 }
+for _op, _fields in (('cell_row_fit_exact', {'row_height_mm': 12.0, 'confirm_layout': True}),
+                     ('table_structure_exact', {'action': 'insert_row_below', 'row': 1, 'col': 1, 'expected_rows': 2, 'expected_cols': 2, 'confirm_layout': True}),
+                     ('cell_format_exact', {'section_anchor': 'x', 'vertical_align': 'top', 'confirm_layout': True})):
+    BUNDLE_REFUSALS.setdefault(_op, []).append({**SCOPED, 'target_id': 'ctrl/0/secd/no-inst', **_fields})
 
 # Direct (non-bundle) live-session REST routes exposed through hwpx_command.
 # Each value: (MCP op, sample request, backend path).

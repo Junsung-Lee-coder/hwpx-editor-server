@@ -350,6 +350,8 @@ Hancom 13.0.0.3457에서 측정한 결과이며, 결과의 `changes`와 `after`�
 | 저수준 | `hwp_action`, `pyhwpx_call` | 백엔드 명령 묶음 허용 목록의 이름만. `hwp_action`은 이동·셀 선택 12개, `pyhwpx_call`은 위치·선택·글 읽기와 캐럿 이동 15개 |
 | 기존 정확한 명령 | 위 "번호 문단 편집", "글자·문단 서식", "표" 절의 op | 변경 없음. `readback`의 `scope`는 백엔드와 같이 `caret`, `selection`, `page`, `document`를 받음(기본 `document`) |
 
+백엔드는 번호·문단 삽입/삭제·글자/문단 서식·`table_*` 정확한 명령에만 "변경 전 거부" 경로가 있습니다. 위 표의 다른 op(쪽·구역, 개체 넣기, 기존 컨트롤·표 방식, 문단 구조, 글 넣기, 저수준, `style_inspect`·`typography_overview` 같은 읽기 포함)는 백엔드 오류가 나면 잘못된 대상이나 오래된 해시였더라도 결과 불명으로 보고하고 세션을 보류합니다. 실제 한글 2024에서 선택 없이 `get_selected_text`를 부른 경우와 구역 정의 컨트롤을 `table_cell_structure_exact`에 준 경우가 그랬습니다. 그래서 MCP는 표 전용 기존 단계(`cell_format_exact`, `cell_row_fit_exact`, `table_split_exact`, `table_structure_exact`, `table_column_width_exact`, `table_cell_structure_exact`)에 표 컨트롤 ID(`ctrl/<n>/tbl/<id>`)만 받고, `get_selected_text`는 `select_target` 등으로 선택을 만든 뒤 부릅니다. 각 op의 입력 스키마 설명에도 같은 내용이 있습니다.
+
 `hwpx_command`만 받는 op(백엔드 직접 경로, 명령 묶음이 아님): `target_info`, `move_to_target`, `select_target`(대상 글 또는 직전 `hwpx_find`의 결과 번호), `cell_info`, `cell_move`·`cursor_move`(`direction`, `count`), `type_text`(`text`, `allow_insert_at_caret`), `figure_section`, `cell_replace`(`anchor` 또는 `cell`, `text`, 확인 값), `font_size`, `bold`, `font_family`, `bullet`, `table_insert`, `list_items`, `numbering_readback`, 그리고 기존 `undo`, `redo`, `command_reconcile`. 캐럿이나 선택에 따라 결과가 달라지는 기존 경로이므로 `hwpx_proof`의 `review`로 결과를 확인합니다.
 
 예: 2단으로 바꾸기

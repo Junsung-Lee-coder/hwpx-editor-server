@@ -458,5 +458,35 @@ class QueuedParity(unittest.TestCase):
         self.assertFalse(set(samples.QUEUED_REFUSALS) & set(models), 'escape hatch or queued-refused op reachable')
 
 
+class NativeFindings(unittest.TestCase):
+    """Behavior measured on Hancom 2024 through MCP, kept discoverable in the tool schemas."""
+
+    UNGUARDED_NOTE = 'holds the session'
+
+    def test_unguarded_ops_say_a_backend_error_holds_the_session(self):
+        tree = ast.parse((APP / 'local_cli_service.py').read_text(encoding='utf-8'))
+        guarded = _literal_set(tree, '_GUARDED_BUNDLE_OPS')
+        commands = command_models()
+        missing = []
+        for op in sorted(samples.BUNDLE_SAMPLES):
+            model = commands.get(op)
+            if model is None or op in guarded:
+                continue
+            read_only_never_fails = op in {'context', 'selection_proof', 'readback', 'where', 'layout_inspect'}
+            text = json.dumps(model.model_json_schema(), ensure_ascii=False)
+            if not read_only_never_fails and self.UNGUARDED_NOTE not in text:
+                missing.append(op)
+        self.assertEqual(missing, [], 'unguarded ops whose schema does not say a backend error holds the session')
+
+    def test_contract_names_the_backend_guarded_ops(self):
+        tree = ast.parse((APP / 'local_cli_service.py').read_text(encoding='utf-8'))
+        self.assertEqual(set(_contract('GUARDED')), _literal_set(tree, '_GUARDED_BUNDLE_OPS'))
+
+    def test_get_selected_text_needs_a_selection(self):
+        model = command_models().get('get_selected_text')
+        self.assertIsNotNone(model)
+        self.assertIn('active selection', json.dumps(model.model_json_schema(), ensure_ascii=False))
+
+
 if __name__ == '__main__':
     unittest.main()

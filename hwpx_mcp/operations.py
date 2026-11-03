@@ -29,9 +29,12 @@ Page = Annotated[int, Field(ge=1, le=10000)]
 Count = Annotated[int, Field(ge=1, le=4096)]
 CtrlId = Annotated[str, Field(min_length=6, max_length=500, pattern=r'^ctrl/\S+$',
                               description='A control identity from control_inventory or readback, such as ctrl/3/tbl/1.')]
+TableCtrlId = Annotated[str, Field(min_length=12, max_length=500, pattern=r'^ctrl/[0-9]+/tbl/[^/]+$',
+                                   description='A table control identity (ctrl/<n>/tbl/<id>) from control_inventory; other controls make the legacy table engines fail and hold the session.')]
 CtrlHash = Annotated[str, Field(pattern=r'^sha256:[a-f0-9]{24,64}$', description='The control proof hash from control_inventory or readback.')]
 Sha64 = Annotated[str, Field(pattern=r'^sha256:[a-f0-9]{64}$')]
 Rgb = Annotated[str, Field(pattern=r'^#[0-9A-Fa-f]{6}$')]
+HOLD_NOTE = "Not one of the backend's guarded exact engines: any backend error in this step, including a stale or wrong target, is reported as an unknown outcome and holds the session."
 Pos3 = Annotated[list[Annotated[int, Field(ge=0)]], Field(min_length=3, max_length=3,
                  description='The caret position [list, para, pos] exactly as hwpx_where or a where step reports it.')]
 CursorPos = Annotated[list[int], Field(min_length=3, max_length=3, description='[list, para, pos].')]
@@ -77,11 +80,13 @@ class _Inventory(_Scope):
 
 
 class ControlInventoryStep(_Inventory):
+    """Read-only list of native controls with target_id and proof hash. Not one of the backend's guarded exact engines: any backend error in this step, including a stale or wrong target, is reported as an unknown outcome and holds the session."""
     op: Literal['control_inventory']
     label: Label = 'mcp:control-inventory'
 
 
 class TableFrameInventoryStep(_Inventory):
+    """Read-only list of table frames. Not one of the backend's guarded exact engines: any backend error in this step, including a stale or wrong target, is reported as an unknown outcome and holds the session."""
     op: Literal['table_frame_inventory']
     label: Label = 'mcp:table-frame-inventory'
 
@@ -92,23 +97,31 @@ class _Control(_Scope):
     expected_page: Page
 
 
+class _TableControl(_Control):
+    target_id: TableCtrlId
+
+
 class ExactControlSelectProofStep(_Control):
+    """Read-only proof that one control can be selected. Not one of the backend's guarded exact engines: any backend error in this step, including a stale or wrong target, is reported as an unknown outcome and holds the session."""
     op: Literal['exact_control_select_proof']
     label: Label = 'mcp:exact-control-select-proof'
 
 
-class TableCellStructureStep(_Control):
+class TableCellStructureStep(_TableControl):
+    """Read-only cell structure of one table control. Not one of the backend's guarded exact engines: any backend error in this step, including a stale or wrong target, is reported as an unknown outcome and holds the session."""
     op: Literal['table_cell_structure_exact']
     label: Label = 'mcp:table-cell-structure-exact'
 
 
 class ControlDeleteStep(_Control):
+    """Delete one control found by its inventory identity. Not one of the backend's guarded exact engines: any backend error in this step, including a stale or wrong target, is reported as an unknown outcome and holds the session."""
     op: Literal['control_delete_exact']
     label: Label = 'mcp:control-delete-exact'
     confirm_remove: Literal[True]
 
 
 class ControlMoveResizeStep(_Control):
+    """Move and/or scale one control found by its inventory identity. Not one of the backend's guarded exact engines: any backend error in this step, including a stale or wrong target, is reported as an unknown outcome and holds the session."""
     op: Literal['control_move_resize_exact']
     label: Label = 'mcp:control-move-resize-exact'
     scale_percent: float | None = Field(default=None, ge=5.0, le=200.0, description='Scale the control to this percent of its size.')
@@ -124,6 +137,7 @@ class ControlMoveResizeStep(_Control):
 
 
 class ControlJoinPreviousStep(Closed):
+    """Join the paragraph holding one control to the previous paragraph. Not one of the backend's guarded exact engines: any backend error in this step, including a stale or wrong target, is reported as an unknown outcome and holds the session."""
     op: Literal['control_join_previous_exact']
     label: Label = 'mcp:control-join-previous-exact'
     target_id: CtrlId
@@ -137,7 +151,8 @@ class ControlJoinPreviousStep(Closed):
     confirm_layout: Literal[True]
 
 
-class CellRowFitStep(_Control):
+class CellRowFitStep(_TableControl):
+    """Set the row height of one table control by exactly one selector. Not one of the backend's guarded exact engines: any backend error in this step, including a stale or wrong target, is reported as an unknown outcome and holds the session."""
     op: Literal['cell_row_fit_exact']
     label: Label = 'mcp:cell-row-fit-exact'
     row_height_percent: float | None = Field(default=None, ge=20.0, le=120.0)
@@ -158,7 +173,8 @@ class CellRowFitStep(_Control):
         return self
 
 
-class TableSplitStep(_Control):
+class TableSplitStep(_TableControl):
+    """Split one table control in two below a row. Not one of the backend's guarded exact engines: any backend error in this step, including a stale or wrong target, is reported as an unknown outcome and holds the session."""
     op: Literal['table_split_exact']
     label: Label = 'mcp:table-split-exact'
     down_rows: int = Field(ge=1, le=200, description='Rows that stay in the first table; the rest become a new table below.')
@@ -169,7 +185,8 @@ StructureAction = Literal['insert_row_above', 'insert_row_below', 'insert_col_le
                           'delete_row', 'delete_col', 'merge_cells', 'split_cell']
 
 
-class TableStructureStep(_Control):
+class TableStructureStep(_TableControl):
+    """Insert or delete rows or columns, merge or split cells of one table control. Not one of the backend's guarded exact engines: any backend error in this step, including a stale or wrong target, is reported as an unknown outcome and holds the session."""
     op: Literal['table_structure_exact']
     label: Label = 'mcp:table-structure-exact'
     action: StructureAction
@@ -199,7 +216,8 @@ class TableStructureStep(_Control):
         return self
 
 
-class TableColumnWidthStep(_Control):
+class TableColumnWidthStep(_TableControl):
+    """Set column widths of one table control against a full set of expected values. Not one of the backend's guarded exact engines: any backend error in this step, including a stale or wrong target, is reported as an unknown outcome and holds the session."""
     op: Literal['table_column_width_exact']
     label: Label = 'mcp:table-column-width-exact'
     expected_preimage_sha256: Text500 | None = None
@@ -250,6 +268,7 @@ class _CellValues(Closed):
 
 
 class NativeTableInsertStep(_CellValues):
+    """Insert a native table at the caret. Not one of the backend's guarded exact engines: any backend error in this step, including a stale or wrong target, is reported as an unknown outcome and holds the session."""
     op: Literal['native_table_insert']
     label: Label = 'mcp:native-table-insert'
     field_name: Annotated[str, Field(pattern=r'^[A-Za-z_][A-Za-z0-9_:-]{0,79}$')]
@@ -266,6 +285,7 @@ class NativeTableInsertStep(_CellValues):
 
 
 class AnchorRangeReplaceStep(_CellValues):
+    """Replace a proven text range with a native 4-column table. Not one of the backend's guarded exact engines: any backend error in this step, including a stale or wrong target, is reported as an unknown outcome and holds the session."""
     op: Literal['anchor_range_replace_native_table']
     label: Label = 'mcp:anchor-range-replace-native-table'
     section_anchor: Text500
@@ -289,6 +309,7 @@ class AnchorRangeReplaceStep(_CellValues):
 
 
 class SelectedTextDeleteStep(Closed):
+    """Delete the exactly selected source text. Not one of the backend's guarded exact engines: any backend error in this step, including a stale or wrong target, is reported as an unknown outcome and holds the session."""
     op: Literal['selected_text_delete_exact']
     label: Label = 'mcp:selected-text-delete-exact'
     expected_text: Annotated[str, Field(min_length=1, max_length=50000)]
@@ -310,6 +331,7 @@ class _Match(Closed):
 
 
 class ParagraphStyleApplyStep(_Match):
+    """Set keep-with-next, widow/orphan control and page break before on one paragraph. Not one of the backend's guarded exact engines: any backend error in this step, including a stale or wrong target, is reported as an unknown outcome and holds the session."""
     op: Literal['paragraph_style_apply_exact']
     label: Label = 'mcp:paragraph-style-apply-exact'
     keep_with_next: bool | None = None
@@ -319,6 +341,7 @@ class ParagraphStyleApplyStep(_Match):
 
 
 class ParagraphDeleteStep(_Match):
+    """Delete one paragraph found by text on a page. Not one of the backend's guarded exact engines: any backend error in this step, including a stale or wrong target, is reported as an unknown outcome and holds the session."""
     op: Literal['paragraph_delete_exact']
     label: Label = 'mcp:paragraph-delete-exact'
     occurrence_on_page: int | None = Field(default=None, ge=1, le=200)
@@ -329,6 +352,7 @@ class ParagraphDeleteStep(_Match):
 
 
 class ParagraphJoinPreviousStep(_Match):
+    """Join one paragraph to the previous one. Not one of the backend's guarded exact engines: any backend error in this step, including a stale or wrong target, is reported as an unknown outcome and holds the session."""
     op: Literal['paragraph_join_previous_exact']
     label: Label = 'mcp:paragraph-join-previous-exact'
     expected_previous_contains: Text500 | None = None
@@ -338,6 +362,7 @@ class ParagraphJoinPreviousStep(_Match):
 
 
 class ParagraphJoinNextStep(_Match):
+    """Join the next paragraph into one paragraph. Not one of the backend's guarded exact engines: any backend error in this step, including a stale or wrong target, is reported as an unknown outcome and holds the session."""
     op: Literal['paragraph_join_next_exact']
     label: Label = 'mcp:paragraph-join-next-exact'
     expected_next_contains: Text500 | None = None
@@ -353,6 +378,7 @@ Text1000 = Annotated[str, Field(min_length=1, max_length=1000)]
 
 
 class ParagraphRehomeStep(Closed):
+    """Move one paragraph before another (delete and insert). Not one of the backend's guarded exact engines: any backend error in this step, including a stale or wrong target, is reported as an unknown outcome and holds the session."""
     op: Literal['paragraph_rehome_exact']
     label: Label = 'mcp:paragraph-rehome-exact'
     delete_match: Text1000
@@ -372,6 +398,7 @@ AnchorPosition = Literal['before-anchor', 'after-anchor', 'after-paragraph', 'be
 
 
 class AnchorInsertStep(Closed):
+    """Insert text next to anchor text found in one live operation. Not one of the backend's guarded exact engines: any backend error in this step, including a stale or wrong target, is reported as an unknown outcome and holds the session."""
     op: Literal['anchor_insert']
     label: Label = 'mcp:anchor-insert'
     target: Text500 = Field(description='The anchor text, found again in one live operation.')
@@ -389,6 +416,7 @@ class AnchorInsertStep(Closed):
 
 
 class SetTextFileStep(Closed):
+    """Insert UNICODE text at the caret through the native text-file insert. Not one of the backend's guarded exact engines: any backend error in this step, including a stale or wrong target, is reported as an unknown outcome and holds the session."""
     op: Literal['set_text_file']
     label: Label = 'mcp:set-text-file'
     text: Annotated[str, Field(min_length=1, max_length=10000)]
@@ -397,12 +425,14 @@ class SetTextFileStep(Closed):
 
 
 class GetSelectedTextStep(Closed):
+    """Read the text of the active selection; make one first (select_target). Without an active selection the backend read fails. Not one of the backend's guarded exact engines: any backend error in this step, including a stale or wrong target, is reported as an unknown outcome and holds the session."""
     op: Literal['get_selected_text']
     label: Label = 'mcp:get-selected-text'
     keep_select: bool | None = None
 
 
 class StyleInspectStep(Closed):
+    """Read-only style probe at a match. Not one of the backend's guarded exact engines: any backend error in this step, including a stale or wrong target, is reported as an unknown outcome and holds the session."""
     op: Literal['style_inspect']
     label: Label = 'mcp:style-inspect'
     match: Text500 | None = None
@@ -410,6 +440,7 @@ class StyleInspectStep(Closed):
 
 
 class TypographyOverviewStep(Closed):
+    """Read-only font, size and style overview of the document. Not one of the backend's guarded exact engines: any backend error in this step, including a stale or wrong target, is reported as an unknown outcome and holds the session."""
     op: Literal['typography_overview']
     label: Label = 'mcp:typography-overview'
     scope: Literal['document'] | None = None
@@ -465,6 +496,7 @@ _LAYOUT_KIND_FIELDS = {
 
 
 class LayoutStep(Closed):
+    """Page setup, columns, section break insert/delete or hanging indent at the proven caret (expected_pos from hwpx_where). Not one of the backend's guarded exact engines: any backend error in this step, including a stale or wrong target, is reported as an unknown outcome and holds the session."""
     op: Literal['layout_exact']
     label: Label = 'mcp:layout-exact'
     kind: Literal['page_setup', 'columns', 'section_insert', 'section_delete', 'hanging_indent']
@@ -543,6 +575,7 @@ ShapeMm = Annotated[float, Field(ge=0.0, le=1000.0)]
 
 
 class ObjectInsertStep(Closed):
+    """Insert one note, field, bookmark, equation, shape, header or footer at the proven caret (expected_pos from hwpx_where). Not one of the backend's guarded exact engines: any backend error in this step, including a stale or wrong target, is reported as an unknown outcome and holds the session."""
     op: Literal['object_insert_exact']
     label: Label = 'mcp:object-insert-exact'
     kind: Literal['footnote', 'endnote', 'memo', 'hyperlink', 'bookmark', 'equation', 'line', 'rectangle', 'ellipse',
@@ -599,6 +632,7 @@ SafePyhwpx = Literal['CurFieldState', 'get_pos', 'GetPos', 'get_selected_pos', '
 
 
 class HwpActionStep(Closed):
+    """One allowlisted navigation or selection action. Not one of the backend's guarded exact engines: any backend error in this step, including a stale or wrong target, is reported as an unknown outcome and holds the session."""
     op: Literal['hwp_action']
     label: Label = 'mcp:hwp-action'
     action_name: SafeAction = Field(description='Navigation or selection only; the backend command-bundle allowlist.')
@@ -620,6 +654,7 @@ def _json_ok(value: Any, depth: int = 0) -> bool:
 
 
 class PyhwpxCallStep(Closed):
+    """One allowlisted pyhwpx read or caret call. Not one of the backend's guarded exact engines: any backend error in this step, including a stale or wrong target, is reported as an unknown outcome and holds the session."""
     op: Literal['pyhwpx_call']
     label: Label = 'mcp:pyhwpx-call'
     method_path: SafePyhwpx = Field(description='Position, selection and text reads or caret moves; the backend command-bundle allowlist.')

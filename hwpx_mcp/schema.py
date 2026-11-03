@@ -67,11 +67,12 @@ class ReadbackStep(Closed):
 
 
 class CellFormatStep(Closed):
+    """Legacy cell alignment, margins, fill or border removal of one table control. Not one of the backend's guarded exact engines: any backend error in this step, including a stale or wrong target, is reported as an unknown outcome and holds the session."""
     # Deliberately a subset of cell_format_exact, not a generic COM/action escape.
     op: Literal['cell_format_exact']
     label: Label = 'mcp:cell-format-exact'
     section_anchor: Text
-    target_id: Text
+    target_id: ops.TableCtrlId
     # Native control inventory proofs are intentionally truncated to 24 hex
     # characters; retain acceptance of the full-width form for callers that
     # provide an independently computed proof.
