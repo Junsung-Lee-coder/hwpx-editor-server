@@ -83,6 +83,11 @@ class HeadReasonCodes(unittest.TestCase):
     def test_unknown_head_element(self):
         self.assertEqual(self.codes(doc(extra='<ZZUNKNOWN A="1"/>'), doc(extra='<ZZUNKNOWN A="2"/>')), ('head_changed', 'head_changed'))
 
+    def test_page_readback_reasons_name_the_item(self):
+        self.assertEqual(layout_ops.reason_code('PaperWidth changed from 59528 to 84189 although it was not requested'), 'unrequested_paperwidth_changed')
+        self.assertEqual(layout_ops.reason_code("landscape reads back False, requested True"), 'requested_landscape_not_applied')
+        self.assertTrue(step_diagnostic_allowed('verify', 'unrequested_paperheight_changed'))
+
     def test_column_count_moved(self):
         self.assertEqual(layout_ops.reason_code('COLDEF count moved by 2, expected 0 or 1'), 'coldef_count_moved')
 

@@ -6,7 +6,7 @@ import time
 from typing import Any
 
 from app.edit_ops import _get_pos, _get_selected_text
-from app.hwpml_invariants import before_budget_reason, readback_size_reason
+from app.hwpml_invariants import before_budget_reason, head_summary, readback_size_reason
 from app.local_cli_runtime import LocalCliRuntimeError, insert_text_at_caret
 from app.local_cli_service_support import LocalCliMutationError
 from app.step_refusal import STEP_REFUSAL_CODES, StepControl, strict_state
@@ -275,6 +275,8 @@ class LocalCliObjectInsertMixin:
                 'native_actions': actions,
                 'before_controls': public_counts(before),
                 'after_controls': public_counts(summarize(after_root)),
+                'head_before': head_summary(before_root),
+                'head_after': head_summary(after_root),
                 'verification': verification,
                 'undo': _undo_report(mutation),
                 'next_proof_required': 'Render the page (page-screenshot or export-proof-range) and review it before saving; re-run where before another caret-bound edit.',

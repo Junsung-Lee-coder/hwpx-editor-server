@@ -15,11 +15,13 @@ The attribute names here are HWPML 2.x names and are UNVERIFIED natively.
 
 from __future__ import annotations
 
+import hashlib
 import re
 from collections import Counter
 
 import xml.etree.ElementTree as ET
 from collections.abc import Iterable, Mapping
+from typing import Any
 
 # Attributes that may legitimately differ between two readbacks of an unchanged
 # element (per tag; '*' applies to every tag). UNVERIFIED natively: InstId is
@@ -219,6 +221,24 @@ def _head_growth_reasons(before: ET.Element, after: ET.Element, path: str, allow
                 out.append(f'{where}[{index}] existing {old.tag} changed')
         else:
             _head_growth_reasons(old, new, f'{where}[{index}]', allow, out, shrink)
+
+
+def head_summary(root: ET.Element) -> dict[str, Any]:
+    """Structure of the HEAD definition lists and of every SECDEF, for responses: element names, Count/Id values, entry
+    signature hashes (Id excluded) and SECDEF attribute values; never document text."""
+    head = root if root.tag == HEAD_TAG else root.find(HEAD_TAG)
+    mapping = head.find('MAPPINGTABLE') if head is not None else None
+    lists: dict[str, Any] = {}
+    for child in list(mapping) if mapping is not None else []:
+        entries = list(child)
+        lists[child.tag] = {
+            'count': child.get(LIST_COUNT_ATTR), 'entries': len(entries), 'entry_tags': sorted({entry.tag for entry in entries}),
+            'ids': [entry.get(ENTRY_ID_ATTR) for entry in entries[:64]],
+            'signatures': [hashlib.sha256(signature(entry, {entry.tag: frozenset({ENTRY_ID_ATTR})}).encode('utf-8')).hexdigest()[:12] for entry in entries[:64]],
+        }
+    body = root.find('.//BODY') if root.tag != 'BODY' else root
+    secdefs = [dict(sorted(element.attrib.items())) for element in (body.iter('SECDEF') if body is not None else [])]
+    return {'head_children': [child.tag for child in head] if head is not None else [], 'mapping_lists': lists, 'secdefs': secdefs[:16]}
 
 
 # Fixed diagnostic labels for a HEAD/TAIL reason: the deepest HWPML 2.x HEAD element the reason names, from this

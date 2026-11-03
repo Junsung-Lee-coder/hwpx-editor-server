@@ -30,7 +30,7 @@ import xml.etree.ElementTree as ET
 from collections import Counter
 from typing import Any, Mapping
 
-from app.hwpml_invariants import head_tail_reasons, signature, HEAD_REASON_CODES, head_reason_code
+from app.hwpml_invariants import head_tail_reasons, signature, HEAD_REASON_CODES, head_reason_code, head_summary
 from app.object_insert import CONTROL_TAGS, _middle, linearize
 
 OP = 'layout_exact'
@@ -176,13 +176,21 @@ _COPY_ATTRS = ('TextDirection', 'Spacing', 'TabStop', 'OutlineShape', 'LineGrid'
 _COPY_CODES = frozenset({f'section_copy_{tag.lower()}_{attr.lower()}' for tag in (*_COPY_TAGS, 'OTHER') for attr in (*_COPY_ATTRS, 'STRUCTURE', 'OTHER')})
 
 
-REASON_CODES = frozenset(code for _needle, code in _REASON_CODES) | {'other'} | HEAD_REASON_CODES | _COPY_CODES
+# Item-specific readback codes from fixed item/field names (page setup and columns).
+_READBACK_NAMES = tuple(PAGE_FIELDS) + PAGEDEF_ITEMS + COLDEF_ITEMS + ('count', 'same_width', 'gap_mm')
+_READBACK_CODES = frozenset({f'requested_{name.lower()}_not_applied' for name in _READBACK_NAMES}
+                            | {f'unrequested_{name.lower()}_changed' for name in _READBACK_NAMES})
+REASON_CODES = frozenset(code for _needle, code in _REASON_CODES) | {'other'} | HEAD_REASON_CODES | _COPY_CODES | _READBACK_CODES
 
 
 def reason_code(reason: str) -> str:
     head = head_reason_code(reason)
     if head is not None:
         return head
+    named = re.match(r'([A-Za-z_]+) (reads back|changed from) ', reason)
+    if named and named.group(1) in _READBACK_NAMES and ('requested ' in reason or 'although it was not requested' in reason):
+        name = named.group(1).lower()
+        return f'requested_{name}_not_applied' if named.group(2) == 'reads back' else f'unrequested_{name}_changed'
     copy = re.search(r"is not a copy of the split section's [A-Z]+: ([A-Z0-9]+)\.([A-Za-z0-9]+)", reason)
     if copy and f'section_copy_{copy.group(1).lower()}_{copy.group(2).lower()}' in _COPY_CODES:
         return f'section_copy_{copy.group(1).lower()}_{copy.group(2).lower()}'
@@ -676,6 +684,7 @@ def public_document(doc: Mapping[str, Any]) -> dict[str, Any]:
         'text_sha256': _digest(doc['text'])[:16],
         'pagedef_sha256': None if pagedefs is None else [_digest(item)[:16] for item in pagedefs],
         'controls': dict(doc['controls']),
+        'head': head_summary(doc['_root']),
     }
 
 
