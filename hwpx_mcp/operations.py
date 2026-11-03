@@ -729,8 +729,11 @@ class FigureSectionOp(Closed):
 
 class CellReplaceOp(Closed):
     op: Literal['cell_replace']
-    anchor: Text500 | None = Field(default=None, description='A sentence near the table.')
-    cell: CellAddr | None = None
+    anchor: Text500 | None = Field(default=None, description=(
+        'Text inside the target table, such as a cell\'s text: the backend finds it and moves the caret there. '
+        'With cell, the cell is then resolved within that table; without cell, the cell holding the anchor is replaced.'))
+    cell: CellAddr | None = Field(default=None, description=(
+        'A1-style cell of the table the caret is in after anchor. Without anchor the caret must already be inside the intended table.'))
     text: Annotated[str, Field(min_length=1, max_length=20000)]
     expect_cell: CellAddr | None = None
     expect_old: Annotated[str, Field(min_length=1, max_length=20000)] | None = None
