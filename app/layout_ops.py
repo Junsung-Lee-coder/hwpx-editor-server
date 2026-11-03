@@ -162,13 +162,26 @@ _REASON_CODES: tuple[tuple[str, str], ...] = (
     ('paragraph shape ', 'parashape_changed'),
     ('the paragraph text changed', 'text_changed'),
 )
-REASON_CODES = frozenset(code for _needle, code in _REASON_CODES) | {'other'} | HEAD_REASON_CODES
+# Fixed names for the section-copy diagnostic (HWPML 2.x section-definition elements and attributes); others are OTHER.
+_COPY_TAGS = ('SECDEF', 'STARTNUMBER', 'HIDE', 'PAGEDEF', 'PAGEMARGIN', 'FOOTNOTESHAPE', 'ENDNOTESHAPE', 'AUTONUMFORMAT', 'NOTELINE',
+              'NOTESPACING', 'NOTENUMBERING', 'NOTEPLACEMENT', 'PAGEBORDERFILL', 'PAGEOFFSET', 'MASTERPAGE', 'COLDEF', 'COLUMNLINE', 'COLUMNTABLE')
+_COPY_ATTRS = ('TextDirection', 'Spacing', 'TabStop', 'OutlineShape', 'LineGrid', 'CharGrid', 'FirstBorder', 'FirstFill', 'ExtMasterpageCount',
+               'MemoShapeId', 'TextVerticalWidthHead', 'PageStartsOn', 'Page', 'Figure', 'Table', 'Equation', 'Header', 'Footer', 'MasterPage',
+               'Border', 'Fill', 'PageNumPos', 'EmptyLine', 'Type', 'Count', 'Id', 'Width', 'Height', 'Landscape', 'GutterType', 'Layout',
+               'SameSize', 'SameGap', 'BorderFill', 'TextBorder', 'HeaderInside', 'FooterInside', 'FillArea')
+_COPY_CODES = frozenset({f'section_copy_{tag.lower()}_{attr.lower()}' for tag in (*_COPY_TAGS, 'OTHER') for attr in (*_COPY_ATTRS, 'STRUCTURE', 'OTHER')})
+
+
+REASON_CODES = frozenset(code for _needle, code in _REASON_CODES) | {'other'} | HEAD_REASON_CODES | _COPY_CODES
 
 
 def reason_code(reason: str) -> str:
     head = head_reason_code(reason)
     if head is not None:
         return head
+    copy = re.search(r"is not a copy of the split section's [A-Z]+: ([A-Z0-9]+)\.([A-Za-z0-9]+)", reason)
+    if copy and f'section_copy_{copy.group(1).lower()}_{copy.group(2).lower()}' in _COPY_CODES:
+        return f'section_copy_{copy.group(1).lower()}_{copy.group(2).lower()}'
     for needle, code in _REASON_CODES:
         if needle in reason:
             return code
@@ -484,6 +497,22 @@ _SECTION_BREAK_SHAPES = frozenset(
 )
 
 
+def _signature_difference(old: str, new: str) -> tuple[str, str]:
+    """(element, attribute) of the first difference between two signature() strings, from the fixed lists."""
+    pattern = re.compile(r"<([A-Z][A-Z0-9]*)((?: [A-Za-z0-9]+='[^']*')*)>")
+    olds, news = pattern.findall(old), pattern.findall(new)
+    for (old_tag, old_attrs), (new_tag, new_attrs) in zip(olds, news):
+        if old_tag != new_tag:
+            return (old_tag if old_tag in _COPY_TAGS else 'OTHER', 'STRUCTURE')
+        if old_attrs != new_attrs:
+            was = dict(re.findall(r" ([A-Za-z0-9]+)='([^']*)'", old_attrs))
+            now = dict(re.findall(r" ([A-Za-z0-9]+)='([^']*)'", new_attrs))
+            key = next(name for name in sorted(set(was) | set(now)) if was.get(name) != now.get(name))
+            return (old_tag if old_tag in _COPY_TAGS else 'OTHER', key if key in _COPY_ATTRS else 'OTHER')
+    tag = (olds[len(news)][0] if len(olds) > len(news) else news[len(olds)][0]) if len(olds) != len(news) else 'OTHER'
+    return (tag if tag in _COPY_TAGS else 'OTHER', 'STRUCTURE')
+
+
 def _body_tokens(doc: Mapping[str, Any], *, omit: frozenset[str] = frozenset(), mask: frozenset[str] = frozenset()) -> list[tuple[Any, ...]]:
     """Body tokens; ``omit`` drops those subtrees from control signatures and
     ``mask`` keeps those controls in place with their values blanked (their
@@ -575,7 +604,8 @@ def _section_break_reasons(before: list[Any], after: list[Any], *, inserted: boo
             new = [token for token in extra if token[:2] == ('C', key)]
             old = [token for token in head if token[:2] == ('C', key)]
             if new and (not old or new[0] != old[-1]):
-                reasons.append(f'the new section\'s {key} is not a copy of the split section\'s {key}')
+                tag, attr = _signature_difference(old[-1][2], new[0][2]) if old else ('OTHER', 'OTHER')
+                reasons.append(f'the new section\'s {key} is not a copy of the split section\'s {key}: {tag}.{attr}')
     else:
         removed = sum(1 for token in head if token[:2] == ('C', 'SECDEF')) + 1
         if section_index is None or removed != section_index:
