@@ -59,6 +59,7 @@ for name in (
     'insert_text_at_caret',
     'insert_text_at_caret_native',
     'insert_numbered_list_at_cursor',
+    'render_numbered_list_text',
     'save_document',
     'snapshot_live_location',
 ):

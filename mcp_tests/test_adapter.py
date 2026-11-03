@@ -236,7 +236,8 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(set(result['capabilities']), {'tools'})
         response, payload = await self.raw()
         tools = payload['result']['tools']
-        self.assertEqual([t['name'] for t in tools], sorted('hwpx_' + x for x in ['health','open','status','find','where','command','proof','save','close','cell_margins_get']))
+        self.assertEqual([t['name'] for t in tools], sorted('hwpx_' + x for x in ['health','open','status','find','where','command','proof','save','close','cell_margins_get',
+                                                                                  'bundle','image','job','artifact','capabilities']))
         for tool in tools:
             Draft202012Validator.check_schema(tool['inputSchema'])
             Draft202012Validator.check_schema(tool['outputSchema'])
@@ -582,10 +583,19 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
                 self.assertNotIn(word, path.lower())
 
     async def test_facade_has_no_queued_job_route_for_numbering(self):
+        # Queued jobs are exposed for backend parity (hwpx_job), but the queued runtime refuses native numbering,
+        # so no queued operation may carry page_number or official_numbering, and none reaches the backend.
         response, payload = await self.raw('tools/list')
-        text = json.dumps(payload)
-        self.assertNotIn('edit-and-convert', text)
-        self.assertNotIn('edit_and_convert', text)
+        job = next(tool for tool in payload['result']['tools'] if tool['name'] == 'hwpx_job')
+        text = json.dumps(job['inputSchema'])
+        self.assertNotIn('"const": "page_number"', text)
+        self.assertNotIn('"const": "official_numbering"', text)
+        for op in ({'op': 'page_number', 'position': 'bottom-center'}, {'op': 'official_numbering', 'find': 'x', 'level': 1}):
+            result = await self.sdk_call('hwpx_job', {'request': {'action': 'edit_and_convert', 'source_path': str(self.fixture),
+                                                                   'instructions': {'operations': [op]}}})
+            self.assertTrue(result.is_error)
+            self.assertEqual(result.structured_content['error']['code'], 'INVALID_ARGUMENTS')
+        self.assertEqual(Backend.calls, [])
 
     async def test_new_operations_are_advertised_without_the_removed_bypass(self):
         response, payload = await self.raw('tools/list')

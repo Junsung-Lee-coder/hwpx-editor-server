@@ -30,13 +30,18 @@ import xml.etree.ElementTree as ET
 from collections import Counter
 from typing import Any, Mapping
 
-from app.hwpml_invariants import head_tail_reasons, signature
+from app.hwpml_invariants import (DefinitionDelta, HEAD_REASON_CODES, SECDEF_REFERENCES, SECTION_REF_PROBLEMS, head_reason_code, head_summary,
+                                  head_tail_reasons, memo_field_problems, section_delete_definitions, section_insert_definitions, signature)
 from app.object_insert import CONTROL_TAGS, _middle, linearize
 
 OP = 'layout_exact'
 SCHEMA_VERSION = 'local-cli/layout-exact/v1'
 
 KINDS = ('page_setup', 'columns', 'section_insert', 'section_delete', 'hanging_indent')
+# Where a caret can stand at a section's start. On Hancom 2024 the first text of a new section's first paragraph is at
+# position 16, after its inline SECDEF and COLDEF (8 positions each); MoveLeft from there leaves the paragraph and
+# a caret set to position 0 was not kept there, so DeleteBack runs at the proven start as given.
+SECTION_START_POSITIONS = (0, 8, 16)
 
 # 1 mm in HWPUNIT (1 HWPUNIT = 1/7200 inch; 1 inch = 25.4 mm).
 HWPUNIT_PER_MM = 7200 / 25.4
@@ -104,7 +109,101 @@ _SECTION_COUNT_ATTRS = {'HEAD': ('SecCnt',)}
 
 
 class LayoutError(ValueError):
-    """A request, plan or readback cannot be accepted."""
+    """A request, plan or readback cannot be accepted; ``code`` is a fixed label (never document text)."""
+
+    def __init__(self, message: str, code: str = 'layout_unsupported') -> None:
+        super().__init__(message)
+        self.code = code
+
+
+# Fixed labels for the first reason a post-edit verification failed (journal and public failure_diagnostic).
+# Matched against the reason texts below by substring, in this order; anything else is 'other'.
+_REASON_CODES: tuple[tuple[str, str], ...] = (
+    ('reads back', 'requested_value_not_applied'),
+    ('although it was not requested', 'unrequested_value_changed'),
+    ('per-section PAGEDEF readback is unavailable', 'per_section_readback_unavailable'),
+    ('per-section PAGEDEF readback does not show exactly one new section', 'section_pagedef_count'),
+    ("does not inherit its neighbour's page setup", 'section_pagedef_inherit'),
+    ('did not give every section the same new page setup', 'scope_not_whole_document'),
+    ('sections (', 'scope_changed_other_sections'),
+    ('the changed section is', 'scope_wrong_section'),
+    ('readback is unavailable for HEAD/TAIL', 'head_tail_unavailable'),
+    ('readback is unavailable for the body token check', 'body_readback_unavailable'),
+    ('an embedded object', 'embedded_object_changed'),
+    ('document text changed', 'text_changed'),
+    ('embedded controls changed', 'controls_changed'),
+    ('SECDEF count is', 'secdef_count'),
+    ('SECTION count is', 'section_count'),
+    ('SECTION element count moved', 'section_count'),
+    ('COLDEF count is', 'coldef_count'),
+    ('COLDEF count moved by', 'coldef_count_moved'),
+    ('column definition (COLDEF) changed', 'coldef_changed'),
+    ('per-section column readback moved', 'coldef_sections_moved'),
+    ('changed the column definitions of sections', 'coldef_wrong_section'),
+    ('cannot be proven from the readback', 'coldef_scope_unprovable'),
+    ('caret section is unknown', 'coldef_scope_unprovable'),
+    ('page definition (PAGEDEF) changed', 'pagedef_changed'),
+    ('paragraph count moved', 'paragraph_count'),
+    ('changed paragraph shape, expected at most', 'parashape_changed'),
+    ('section break is not exactly a paragraph split', 'section_break_shape'),
+    ("does not keep the split paragraph's attributes: ParaShape", 'section_break_attr_parashape'),
+    ("does not keep the split paragraph's attributes: Style", 'section_break_attr_style'),
+    ("does not keep the split paragraph's attributes: PageBreak", 'section_break_attr_pagebreak'),
+    ("does not keep the split paragraph's attributes: ColumnBreak", 'section_break_attr_columnbreak'),
+    ("does not keep the split paragraph's attributes: other", 'section_break_attr_other'),
+    ("does not keep the split paragraph's attributes", 'section_break_attributes'),
+    ('section break is not at the caret', 'section_break_position'),
+    ('is not a copy of the split section', 'section_copy_mismatch'),
+    ('the removed section break belongs to section', 'section_delete_wrong'),
+    ('surviving sections', 'section_delete_pagedefs'),
+    ('new column definition is not at the caret', 'coldef_position'),
+    ('beyond one new column definition', 'body_changed'),
+    ('beyond one paragraph shape', 'body_changed'),
+    ('the body changed outside', 'body_changed'),
+    ('ParagraphShape readback has no numeric', 'parashape_readback'),
+    ('expected a negative (hanging) value', 'indent_not_hanging'),
+    ('Indentation did not change', 'indent_unchanged'),
+    ('LeftMargin moved by', 'left_margin_moved'),
+    ('paragraph shape ', 'parashape_changed'),
+    ('the paragraph text changed', 'text_changed'),
+)
+# Fixed names for the section-copy diagnostic (HWPML 2.x section-definition elements and attributes); others are OTHER.
+_COPY_TAGS = ('SECDEF', 'STARTNUMBER', 'HIDE', 'PAGEDEF', 'PAGEMARGIN', 'FOOTNOTESHAPE', 'ENDNOTESHAPE', 'AUTONUMFORMAT', 'NOTELINE',
+              'NOTESPACING', 'NOTENUMBERING', 'NOTEPLACEMENT', 'PAGEBORDERFILL', 'PAGEOFFSET', 'MASTERPAGE', 'COLDEF', 'COLUMNLINE', 'COLUMNTABLE')
+_COPY_ATTRS = ('TextDirection', 'Spacing', 'TabStop', 'OutlineShape', 'LineGrid', 'CharGrid', 'FirstBorder', 'FirstFill', 'ExtMasterpageCount',
+               'MemoShapeId', 'TextVerticalWidthHead', 'PageStartsOn', 'Page', 'Figure', 'Table', 'Equation', 'Header', 'Footer', 'MasterPage',
+               'Border', 'Fill', 'PageNumPos', 'EmptyLine', 'Type', 'Count', 'Id', 'Width', 'Height', 'Landscape', 'GutterType', 'Layout',
+               'SameSize', 'SameGap', 'BorderFill', 'TextBorder', 'HeaderInside', 'FooterInside', 'FillArea')
+_COPY_CODES = frozenset({f'section_copy_{tag.lower()}_{attr.lower()}' for tag in (*_COPY_TAGS, 'OTHER') for attr in (*_COPY_ATTRS, 'STRUCTURE', 'OTHER')})
+
+
+# Item-specific readback codes from fixed item/field names (page setup and columns).
+_READBACK_NAMES = tuple(PAGE_FIELDS) + PAGEDEF_ITEMS + COLDEF_ITEMS + ('count', 'same_width', 'gap_mm')
+_READBACK_CODES = frozenset({f'requested_{name.lower()}_not_applied' for name in _READBACK_NAMES}
+                            | {f'unrequested_{name.lower()}_changed' for name in _READBACK_NAMES})
+# A new section's HEAD reference that section_insert_definitions could not bind (section_ref_<attribute>_<problem>).
+_SECTION_REF_CODES = frozenset(f'section_ref_{attr.lower()}_{problem}' for attr in SECDEF_REFERENCES for problem in SECTION_REF_PROBLEMS)
+REASON_CODES = frozenset(code for _needle, code in _REASON_CODES) | {'other'} | HEAD_REASON_CODES | _COPY_CODES | _READBACK_CODES | _SECTION_REF_CODES
+
+
+def reason_code(reason: str) -> str:
+    head = head_reason_code(reason)
+    if head is not None:
+        return head
+    named = re.match(r'([A-Za-z_]+) (reads back|changed from) ', reason)
+    if named and named.group(1) in _READBACK_NAMES and ('requested ' in reason or 'although it was not requested' in reason):
+        name = named.group(1).lower()
+        return f'requested_{name}_not_applied' if named.group(2) == 'reads back' else f'unrequested_{name}_changed'
+    ref = re.match(r'section definition reference ([A-Za-z]+) ([a-z_]+): ', reason)
+    if ref and f'section_ref_{ref.group(1).lower()}_{ref.group(2)}' in _SECTION_REF_CODES:
+        return f'section_ref_{ref.group(1).lower()}_{ref.group(2)}'
+    copy = re.search(r"is not a copy of the split section's [A-Z]+: ([A-Z0-9]+)\.([A-Za-z0-9]+)", reason)
+    if copy and f'section_copy_{copy.group(1).lower()}_{copy.group(2).lower()}' in _COPY_CODES:
+        return f'section_copy_{copy.group(1).lower()}_{copy.group(2).lower()}'
+    for needle, code in _REASON_CODES:
+        if needle in reason:
+            return code
+    return 'other'
 
 
 # ---------------------------------------------------------------- units
@@ -241,8 +340,9 @@ def normalize_request(step: Mapping[str, Any]) -> dict[str, Any]:
         index = step.get('section_index')
         if not _is_int(index) or index < 2:
             raise LayoutError('section_delete requires section_index >= 2 (the section merged into its predecessor)')
-        if request['expected_pos'][2] != 0:
-            raise LayoutError('section_delete expected_pos must be at pos 0 (the very start of the section)')
+        if request['expected_pos'][2] not in SECTION_START_POSITIONS:
+            raise LayoutError('section_delete expected_pos must be at the start of the section: pos 0, or the first text position '
+                              'after its section and column definitions (8 or 16)')
         request['section_index'] = index
     elif kind == 'hanging_indent':
         marker = step.get('marker_text')
@@ -294,15 +394,15 @@ def parse_layout_xml(xml_text: Any) -> dict[str, Any]:
     * ``para_shapes``: ParaShape attribute of every P in document order.
     """
     if not isinstance(xml_text, str) or not xml_text.strip():
-        raise LayoutError('HWPML readback returned no text')
+        raise LayoutError('HWPML readback returned no text', 'readback_malformed')
     text = re.sub(r'^\s*<\?xml[^>]*\?>', '', xml_text, count=1)
     try:
         root = ET.fromstring(text)
     except ET.ParseError as exc:
-        raise LayoutError(f'HWPML readback is not well-formed: {exc}') from exc
+        raise LayoutError(f'HWPML readback is not well-formed: {exc}', 'readback_malformed') from exc
     body = root if root.tag == 'BODY' else root.find('.//BODY')
     if body is None:
-        raise LayoutError('HWPML readback has no BODY element')
+        raise LayoutError('HWPML readback has no BODY element', 'readback_malformed')
     secdefs = list(body.iter('SECDEF'))
     section_elements = len(body.findall('SECTION'))
     pagedefs: list[str] | None = []
@@ -325,7 +425,7 @@ def parse_layout_xml(xml_text: Any) -> dict[str, Any]:
     paragraphs = list(body.iter('P'))
     section_count = len(secdefs) if secdefs else section_elements
     if section_count < 1:
-        raise LayoutError('HWPML readback has no SECDEF or SECTION element')
+        raise LayoutError('HWPML readback has no SECDEF or SECTION element', 'readback_malformed')
     return {
         'section_count': section_count,
         'secdef_count': len(secdefs),
@@ -402,12 +502,43 @@ def _column_scope_reasons(plan: Mapping[str, Any], doc_before: Mapping[str, Any]
 # Style or PageBreak, object positions, other SECDEF attributes) must match.
 
 BODY_RULES = ('page_setup', 'columns', 'columns_new', 'hanging_indent', 'section_insert', 'section_delete')
+# HWPML P attributes named in the section-break diagnostic (fixed set). On Hancom 2024 the paragraph that opens the
+# new section reads back with its own ColumnBreak and PageBreak flags (section_break_attr_columnbreak, then
+# section_break_attr_pagebreak): a new section starts a new page, so those break flags belong to the break itself and
+# may differ there; nothing else may.
+_SECTION_START_FLAGS: frozenset[str] = frozenset({'ColumnBreak', 'PageBreak'})
+_SECTION_PARA_ATTRS = ('ParaShape', 'Style', 'PageBreak', 'ColumnBreak')
 _SECTION_BREAK_TOKENS = {('/E', 'P'), ('E', 'P'), ('/E', 'SECTION'), ('E', 'SECTION'), ('C', 'SECDEF'), ('C', 'COLDEF')}
 _SECTION_BREAK_SHAPES = frozenset(
     head + (('C', 'SECDEF'),) + tail
     for head in ((('/E', 'P'), ('E', 'P')), (('/E', 'P'), ('/E', 'SECTION'), ('E', 'SECTION'), ('E', 'P')))
     for tail in ((), (('C', 'COLDEF'),))
 )
+
+
+def _copy_form(sig: Any, bound: frozenset[str]) -> Any:
+    """A section definition's signature without the HEAD references ``bound`` names: references that
+    section_insert_definitions bound to an equal definition created with the new section (on Hancom 2024 its SECDEF
+    names a new outline numbering and memo shape). Every other attribute must be an exact copy."""
+    if not bound or not isinstance(sig, str):
+        return sig
+    return re.sub(r" (?:" + '|'.join(sorted(bound)) + r")='[^']*'", '', sig)
+
+
+def _signature_difference(old: str, new: str) -> tuple[str, str]:
+    """(element, attribute) of the first difference between two signature() strings, from the fixed lists."""
+    pattern = re.compile(r"<([A-Z][A-Z0-9]*)((?: [A-Za-z0-9]+='[^']*')*)>")
+    olds, news = pattern.findall(old), pattern.findall(new)
+    for (old_tag, old_attrs), (new_tag, new_attrs) in zip(olds, news):
+        if old_tag != new_tag:
+            return (old_tag if old_tag in _COPY_TAGS else 'OTHER', 'STRUCTURE')
+        if old_attrs != new_attrs:
+            was = dict(re.findall(r" ([A-Za-z0-9]+)='([^']*)'", old_attrs))
+            now = dict(re.findall(r" ([A-Za-z0-9]+)='([^']*)'", new_attrs))
+            key = next(name for name in sorted(set(was) | set(now)) if was.get(name) != now.get(name))
+            return (old_tag if old_tag in _COPY_TAGS else 'OTHER', key if key in _COPY_ATTRS else 'OTHER')
+    tag = (olds[len(news)][0] if len(olds) > len(news) else news[len(olds)][0]) if len(olds) != len(news) else 'OTHER'
+    return (tag if tag in _COPY_TAGS else 'OTHER', 'STRUCTURE')
 
 
 def _body_tokens(doc: Mapping[str, Any], *, omit: frozenset[str] = frozenset(), mask: frozenset[str] = frozenset()) -> list[tuple[Any, ...]]:
@@ -458,7 +589,8 @@ def _first_difference(before: list[Any], after: list[Any]) -> str:
     return f'length {len(before)} -> {len(after)}'
 
 
-def _section_break_reasons(before: list[Any], after: list[Any], *, inserted: bool, caret: Any = None, section_index: int | None = None) -> list[str]:
+def _section_break_reasons(before: list[Any], after: list[Any], *, inserted: bool, caret: Any = None, section_index: int | None = None,
+                           bound: frozenset[str] = frozenset()) -> list[str]:
     shorter, longer = (before, after) if inserted else (after, before)
     limit = len(shorter)
     prefix = 0
@@ -484,8 +616,15 @@ def _section_break_reasons(before: list[Any], after: list[Any], *, inserted: boo
     if inserted:
         opened = next(token for token in extra if token[:2] == ('E', 'P'))
         split = [token for token in head if token[:2] == ('E', 'P')]
-        if not split or split[-1] != opened:
+        if not split:
             reasons.append('the paragraph after the new section break does not keep the split paragraph\'s attributes')
+        else:
+            # Every other paragraph attribute must be the split paragraph's own; the first differing one is named.
+            was, now = dict(split[-1][2]), dict(opened[2])
+            differ = sorted(key for key in set(was) | set(now) if was.get(key) != now.get(key) and key not in _SECTION_START_FLAGS)
+            if differ:
+                named = [key for key in differ if key in _SECTION_PARA_ATTRS] or ['other']
+                reasons.append(f'the paragraph after the new section break does not keep the split paragraph\'s attributes: {named[0]}')
         where = _at_caret(before, prefix, caret)
         if where:
             reasons.append(f'the section break is not at the caret: {where}')
@@ -493,8 +632,10 @@ def _section_break_reasons(before: list[Any], after: list[Any], *, inserted: boo
         for key in ('SECDEF', 'COLDEF'):
             new = [token for token in extra if token[:2] == ('C', key)]
             old = [token for token in head if token[:2] == ('C', key)]
-            if new and (not old or new[0] != old[-1]):
-                reasons.append(f'the new section\'s {key} is not a copy of the split section\'s {key}')
+            drop = bound if key == 'SECDEF' else frozenset()
+            if new and (not old or _copy_form(new[0][2], drop) != _copy_form(old[-1][2], drop)):
+                tag, attr = _signature_difference(_copy_form(old[-1][2], drop), _copy_form(new[0][2], drop)) if old else ('OTHER', 'OTHER')
+                reasons.append(f'the new section\'s {key} is not a copy of the split section\'s {key}: {tag}.{attr}')
     else:
         removed = sum(1 for token in head if token[:2] == ('C', 'SECDEF')) + 1
         if section_index is None or removed != section_index:
@@ -502,11 +643,13 @@ def _section_break_reasons(before: list[Any], after: list[Any], *, inserted: boo
     return reasons
 
 
-def body_token_reasons(rule: str, before: Mapping[str, Any], after: Mapping[str, Any], *, caret: Any = None, section_index: int | None = None) -> list[str]:
+def body_token_reasons(rule: str, before: Mapping[str, Any], after: Mapping[str, Any], *, caret: Any = None, section_index: int | None = None,
+                       bound: frozenset[str] = frozenset()) -> list[str]:
     """Body changes that ``rule`` (one of ``BODY_RULES``) does not allow.
 
     ``caret`` (list, para, pos) ties a section break or a new column block to
-    the caret; ``section_index`` names the section whose break is deleted.
+    the caret; ``section_index`` names the section whose break is deleted;
+    ``bound`` names new-SECDEF references section_insert_definitions proved.
     """
     if '_body' not in before or '_body' not in after:
         return ['whole-document readback is unavailable for the body token check']
@@ -518,7 +661,7 @@ def body_token_reasons(rule: str, before: Mapping[str, Any], after: Mapping[str,
     else:
         old, new = _body_tokens(before), _body_tokens(after)
     if rule in ('section_insert', 'section_delete'):
-        return _section_break_reasons(old, new, inserted=rule == 'section_insert', caret=caret, section_index=section_index)
+        return _section_break_reasons(old, new, inserted=rule == 'section_insert', caret=caret, section_index=section_index, bound=bound)
     if rule == 'columns_new':
         prefix, removed, added = _middle(old, new)
         if removed or added != [('C', 'COLDEF', '')]:
@@ -556,6 +699,11 @@ def public_document(doc: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def head_pair(before: Mapping[str, Any], after: Mapping[str, Any]) -> dict[str, Any]:
+    """HEAD structure before and after the edit (head_summary), under keys a client's redaction of document fields keeps."""
+    return {'head_before': head_summary(before['_root']), 'head_after': head_summary(after['_root'])}
+
+
 def compare_documents(
     before: Mapping[str, Any],
     after: Mapping[str, Any],
@@ -568,6 +716,8 @@ def compare_documents(
     body_rule: str | None = None,
     caret: Any = None,
     section_index: int | None = None,
+    definitions: DefinitionDelta | None = None,
+    bound: frozenset[str] = frozenset(),
 ) -> list[str]:
     """Differences between two document summaries that the planned edit does not explain.
 
@@ -579,9 +729,10 @@ def compare_documents(
     if '_root' not in before or '_root' not in after:
         reasons.append('whole-document readback is unavailable for HEAD/TAIL checks')
     else:
-        reasons += head_tail_reasons(before['_root'], after['_root'], allow_head_attrs=_SECTION_COUNT_ATTRS if section_delta else None)
+        reasons += head_tail_reasons(before['_root'], after['_root'], allow_head_attrs=_SECTION_COUNT_ATTRS if section_delta else None,
+                                     definitions=definitions)
     if body_rule is not None:
-        reasons += body_token_reasons(body_rule, before, after, caret=caret, section_index=section_index)
+        reasons += body_token_reasons(body_rule, before, after, caret=caret, section_index=section_index, bound=bound)
     if after.get('control_signatures') != before.get('control_signatures'):
         reasons.append('an embedded object (picture, table, note, field) changed')
     if after['text'] != before['text']:
@@ -623,7 +774,7 @@ def _as_int_items(values: Mapping[str, Any], items: tuple[str, ...], what: str) 
     for item in items:
         value = values.get(item)
         if not _is_number(value):
-            raise LayoutError(f'{what} readback has no numeric {item} ({value!r})')
+            raise LayoutError(f'{what} readback has no numeric {item} ({value!r})', 'readback_malformed')
         out[item] = int(value)
     return out
 
@@ -668,12 +819,12 @@ def plan_page_setup(request: Mapping[str, Any], before_raw: Mapping[str, Any], d
         if not _field_matches(field, want, before[PAGE_FIELDS[field]])
     ]
     if stale:
-        raise LayoutError('page setup changed since it was probed (re-read it before editing): ' + '; '.join(stale))
+        raise LayoutError('page setup changed since it was probed (re-read it before editing): ' + '; '.join(stale), 'stale_expected_before')
     targets: dict[str, int] = {}
     for field, value in request['targets'].items():
         targets[PAGE_FIELDS[field]] = (1 if value else 0) if field == 'landscape' else mm_to_hwpunit(value)
     if all(_field_matches(field, value, before[PAGE_FIELDS[field]]) for field, value in request['targets'].items()):
-        raise LayoutError('every requested page setup value already holds; nothing to change')
+        raise LayoutError('every requested page setup value already holds; nothing to change', 'nothing_to_change')
     merged = {**before, **targets}
     width, height = text_area_mm(merged)
     if width <= 0 or height <= 0:
@@ -753,13 +904,13 @@ def plan_columns(request: Mapping[str, Any], before_raw: Mapping[str, Any], doc:
     if 'gap_mm' in expected and abs(hwpunit_to_mm(before['SameGap']) - expected['gap_mm']) > MM_TOLERANCE + 1e-9:
         stale.append(f'gap_mm is {hwpunit_to_mm(before["SameGap"])}, expected_before says {expected["gap_mm"]}')
     if stale:
-        raise LayoutError('column definition changed since it was probed: ' + '; '.join(stale))
+        raise LayoutError('column definition changed since it was probed: ' + '; '.join(stale), 'stale_expected_before')
     targets: dict[str, int] = {'Count': request['count'], 'SameSize': 1 if request['same_width'] else 0}
     if request.get('gap_mm') is not None:
         targets['SameGap'] = mm_to_hwpunit(request['gap_mm'])
     unchanged = targets['Count'] == before['Count'] and bool(targets['SameSize']) == bool(before['SameSize']) and targets.get('SameGap', before['SameGap']) == before['SameGap']
     if request['apply_to'] == 'current_section' and unchanged:
-        raise LayoutError('the current column definition already matches; nothing to change')
+        raise LayoutError('the current column definition already matches; nothing to change', 'nothing_to_change')
     return {
         'kind': 'columns',
         'apply_to': request['apply_to'],
@@ -809,13 +960,83 @@ def verify_columns(
 # ---------------------------------------------------------------- sections
 
 
-def plan_section_insert(doc: Mapping[str, Any]) -> dict[str, Any]:
+def section_insert_position_reason(doc: Mapping[str, Any], caret: Any) -> str | None:
+    """Why a section break at ``caret`` is outside the qualified shape, from the before-readback; None when interior.
+
+    Qualified: between two characters of one body paragraph's text. The caret position is located in its paragraph
+    under both accepted readings of an inline control's width (CONTROL_POSITION_WIDTH or none); at every place a
+    reading reaches the position, the nearest character-or-control token on each side must be a text character
+    (structural run tokens take no caret width and are skipped). Text elsewhere in the paragraph is not enough: a
+    caret directly before or after an inline control, a paragraph start (also after leading inline controls), its
+    end and a paragraph without text are not interior. A caret the readback cannot place is a malformed read.
+    """
+    try:
+        list_id, para, pos = (int(item) for item in caret)
+    except Exception as exc:
+        raise LayoutError('the caret position is not three integers', 'readback_malformed') from exc
+    tokens = _body_tokens(doc)
+    opens = [index for index, token in enumerate(tokens) if token[:2] == ('E', 'P')]
+    if list_id != 0 or not 0 <= para < len(opens):
+        raise LayoutError(f'the caret paragraph {para} of list {list_id} is not a body paragraph of the readback', 'readback_malformed')
+    start = opens[para] + 1
+    end = next((index for index in range(start, len(tokens)) if tokens[index][:2] in (('/E', 'P'), ('E', 'P'))), len(tokens))
+    segment = tokens[start:end]
+    placed = [index for index, token in enumerate(segment) if token[0] in ('T', 'C')]
+    reached = False
+    for width in (CONTROL_POSITION_WIDTH, 0):
+        position = 0
+        for cut in range(len(segment) + 1):
+            if position == pos:
+                reached = True
+                left = [segment[index][0] for index in placed if index < cut]
+                right = [segment[index][0] for index in placed if index >= cut]
+                if 'T' not in left:
+                    return 'the caret is at the start of its paragraph\'s text'
+                if 'T' not in right:
+                    return 'the caret is at the end of its paragraph\'s text'
+                if left[-1] != 'T' or right[0] != 'T':
+                    return 'the caret is directly before or after an inline control, not between two characters'
+            if cut < len(segment):
+                kind = segment[cut][0]
+                position += 1 if kind == 'T' else (width if kind == 'C' else 0)
+    if not reached:
+        raise LayoutError(f'caret position {pos} is not a position of paragraph {para} in the readback', 'readback_malformed')
+    return None
+
+
+def plan_section_insert(doc: Mapping[str, Any], *, caret: Any) -> dict[str, Any]:
+    reason = section_insert_position_reason(doc, caret)
+    if reason is not None:
+        raise LayoutError(f'{reason}; a section break is qualified only between two characters of one paragraph\'s text',
+                          'section_insert_position_unsupported')
     return {'kind': 'section_insert', 'section_count_before': doc['section_count']}
 
 
+def _inserted_secdef(doc_before: Mapping[str, Any], doc_after: Mapping[str, Any]) -> tuple[int, Any, Any] | None:
+    """(BODY-order index of the new SECDEF, the split section's SECDEF, the new SECDEF), from where the body tokens first
+    differ; None when the readbacks do not show one (the body check then refuses the edit)."""
+    if '_body' not in doc_before or '_body' not in doc_after:
+        return None
+    old, new = _body_tokens(doc_before), _body_tokens(doc_after)
+    prefix = 0
+    while prefix < min(len(old), len(new)) and old[prefix] == new[prefix]:
+        prefix += 1
+    index = sum(1 for token in old[:prefix] if token[:2] == ('C', 'SECDEF'))
+    before_defs, after_defs = list(doc_before['_body'].iter('SECDEF')), list(doc_after['_body'].iter('SECDEF'))
+    if not 0 < index < len(after_defs) or index > len(before_defs):
+        return None
+    return index, before_defs[index - 1], after_defs[index]
+
+
 def verify_section_insert(doc_before: Mapping[str, Any], doc_after: Mapping[str, Any], *, caret: Any = None) -> dict[str, Any]:
-    reasons = _section_coldef_reasons(doc_before, doc_after, 1)
-    reasons += compare_documents(doc_before, doc_after, section_delta=1, coldef_delta=len(doc_after['coldefs']) - len(doc_before['coldefs']), pagedefs='free', paragraphs='free', body_rule='section_insert', caret=caret)
+    pair = _inserted_secdef(doc_before, doc_after)
+    definitions, reasons, bound = DefinitionDelta(), [], frozenset()
+    if pair is not None and '_root' in doc_before and '_root' in doc_after:
+        index, split, new = pair
+        definitions, reasons, bound = section_insert_definitions(doc_before['_root'], doc_after['_root'], split, new, index)
+    reasons += _section_coldef_reasons(doc_before, doc_after, 1)
+    reasons += compare_documents(doc_before, doc_after, section_delta=1, coldef_delta=len(doc_after['coldefs']) - len(doc_before['coldefs']), pagedefs='free', paragraphs='free', body_rule='section_insert', caret=caret,
+                                 definitions=definitions, bound=bound)
     before_defs, after_defs = doc_before.get('pagedefs'), doc_after.get('pagedefs')
     if before_defs is not None:
         if after_defs is None or len(after_defs) != len(before_defs) + 1:
@@ -849,13 +1070,29 @@ def plan_section_delete(request: Mapping[str, Any], doc: Mapping[str, Any], *, k
     if index > doc['section_count']:
         raise LayoutError(f'section_index {index} is past the last section ({doc["section_count"]})')
     if key_indicator_sections is not None and key_indicator_sections != doc['section_count']:
-        raise LayoutError(f'KeyIndicator reports {key_indicator_sections} sections but HWPML has {doc["section_count"]}')
+        # Two strict reads that contradict each other describe an unknown editor state, not a stale request.
+        raise LayoutError(f'KeyIndicator reports {key_indicator_sections} sections but HWPML has {doc["section_count"]}', 'readback_malformed')
+    secdefs = list(doc['_body'].iter('SECDEF')) if '_body' in doc else []
+    removed = secdefs[index - 1] if 0 < index - 1 < len(secdefs) else None
+    if removed is None or removed.get('MemoShapeId') is not None:
+        # Hancom drops the memo shape only the removed section names; a memo field whose reference cannot be read might
+        # still use it.
+        problems = memo_field_problems(doc['_root']) if '_root' in doc else ['the document root was not read']
+        if problems:
+            raise LayoutError(f'deleting section {index} could drop a memo shape a memo field still uses: {problems[0]}')
     return {'kind': 'section_delete', 'section_index': index, 'section_count_before': doc['section_count']}
 
 
 def verify_section_delete(plan: Mapping[str, Any], doc_before: Mapping[str, Any], doc_after: Mapping[str, Any]) -> dict[str, Any]:
+    removed = plan['section_index'] - 1
+    secdefs = list(doc_before['_body'].iter('SECDEF')) if '_body' in doc_before else []
+    definitions = DefinitionDelta()
+    if 0 < removed < len(secdefs) and '_root' in doc_before and '_root' in doc_after:
+        # Only what the removed section's own SECDEF alone referenced may go with it.
+        definitions = section_delete_definitions(doc_before['_root'], doc_after['_root'], secdefs[removed], removed)
     reasons = _section_coldef_reasons(doc_before, doc_after, -1)
-    reasons += compare_documents(doc_before, doc_after, section_delta=-1, coldef_delta=len(doc_after['coldefs']) - len(doc_before['coldefs']), pagedefs='free', paragraphs='free', body_rule='section_delete', section_index=plan['section_index'])
+    reasons += compare_documents(doc_before, doc_after, section_delta=-1, coldef_delta=len(doc_after['coldefs']) - len(doc_before['coldefs']), pagedefs='free', paragraphs='free', body_rule='section_delete', section_index=plan['section_index'],
+                                 definitions=definitions)
     before_defs, after_defs = doc_before.get('pagedefs'), doc_after.get('pagedefs')
     if before_defs is not None:
         removed = plan['section_index'] - 1
@@ -875,7 +1112,7 @@ def plan_hanging_indent(request: Mapping[str, Any], paragraph_text: str, before_
     marker = request['marker_text']
     if not isinstance(paragraph_text, str) or not paragraph_text.startswith(marker):
         preview = (paragraph_text or '')[: len(marker) + 10]
-        raise LayoutError(f'the current paragraph does not start with marker_text {marker!r} (it starts with {preview!r})')
+        raise LayoutError(f'the current paragraph does not start with marker_text {marker!r} (it starts with {preview!r})', 'marker_mismatch')
     shape = parashape_scalars(before_raw)
     _as_int_items(shape, ('Indentation', 'LeftMargin'), 'ParagraphShape')
     list_id, para, _pos = request['expected_pos']

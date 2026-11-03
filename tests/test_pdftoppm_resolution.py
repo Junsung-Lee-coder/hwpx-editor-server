@@ -7,6 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from app.poppler import PopplerResolutionError, resolve_pdftoppm
+from tests.hermetic import resolver_env
 
 
 class _BoundedRendererProcess:
@@ -83,7 +84,8 @@ class PopplerResolutionTests(unittest.TestCase):
             candidate = self._executable(tmp, 'pdftoppm.exe')
             probe = _BoundedRendererProcess()
             with patch('app.poppler.subprocess.run', side_effect=probe):
-                result = resolve_pdftoppm(path_entries=[str(tmp)], platform='win32')
+                # Exactly this case's PATH: the temp directory holding its own candidate.
+                result = resolve_pdftoppm(path_entries=[str(tmp)], env=resolver_env(str(tmp)), platform='win32')
 
         self.assertEqual(result.path, candidate.resolve())
         self.assertEqual(result.source, 'path')
@@ -116,6 +118,7 @@ class PopplerResolutionTests(unittest.TestCase):
                     explicit=None,
                     path_entries=[],
                     winget_roots=[tmp],
+                    env=resolver_env(),
                     platform='win32',
                 )
 
@@ -153,6 +156,7 @@ class PopplerResolutionTests(unittest.TestCase):
                 explicit=None,
                 path_entries=[],
                 winget_roots=[Path(tmp_raw)],
+                env=resolver_env(),
                 platform='win32',
             )
 

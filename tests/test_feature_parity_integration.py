@@ -135,11 +135,13 @@ class _SelectingHwp(_FakeHwp):
 
 
 class WhereKeepsSelectionTests(unittest.TestCase):
-    def test_nearby_capture_is_what_drops_a_selection(self) -> None:
+    def test_nearby_capture_keeps_an_active_selection(self) -> None:
+        # Nearby paragraphs are read by selecting them, so with a live selection the standalone where skips them.
         hwp = _SelectingHwp()
         hwp.select(6, 11)
-        snapshot_live_location(hwp=hwp, source_filename='a.hwpx', working_copy_id='s')
-        self.assertIsNone(hwp.selection)
+        location = snapshot_live_location(hwp=hwp, source_filename='a.hwpx', working_copy_id='s')
+        self.assertEqual(hwp.selection, (6, 11))
+        self.assertEqual(location['nearby_context'], {'skipped': 'selection_kept'})
 
     def test_where_then_hyperlink_recipe_keeps_the_selection(self) -> None:
         hwp = _SelectingHwp()
@@ -310,7 +312,11 @@ class BundlePathUndoTests(unittest.TestCase):
                                                                        '--confirm-mutation']).server_payload()['steps']
                 service, store, second = self._run_bundle(hwp, steps, store)
                 self.assertTrue(second['dirty'], 'the document stays dirty from the first edit')
-                self.assertEqual(any(step.get('dirty') for step in second['steps']), label != 'where only')
+                # A stale expected_pos is refused from strict reads before the first native mutator, so no step of
+                # the second bundle is dirty; the undo state stays the refused one the first edit left.
+                self.assertFalse(any(step.get('dirty') for step in second['steps']))
+                if label != 'where only':
+                    self.assertEqual(second['steps'][-1].get('refusal_code'), 'caret_moved', second)
                 self.assertIsNone(store['binding']['pending_logical_undo_count'])
                 with self.assertRaisesRegex(LocalCliRuntimeError, 'undo refused'):
                     service.undo()
@@ -337,10 +343,12 @@ class BundlePathUndoTests(unittest.TestCase):
         steps = build_named_bundle('object-insert-exact', ['--kind', 'footnote', '--text', 'n', '--expected-pos', '0,0,5', '--confirm-mutation']).server_payload()['steps']
         _service_obj, store, result = self._run_bundle(hwp, steps)
         self.assertFalse(result['ok'])
-        # The package's conservative producer intent precedes its preflight;
-        # refusal is not runtime no-effect proof or permission to undo.
-        self.assertTrue(result['dirty'])
-        self.assertIsNotNone(store['binding'].get('logical_undo_unverified'))
+        # The stale expected_pos is the caller's view, refused from strict reads before the first native mutator:
+        # the step is not dirty and the bundle puts back the undo state it found.
+        self.assertEqual(result['steps'][-1].get('refusal_code'), 'caret_moved', result)
+        self.assertFalse(result['steps'][-1]['mutation_may_have_persisted'])
+        self.assertFalse(result['dirty'])
+        self.assertIsNone(store['binding'].get('logical_undo_unverified'))
 
 
 class ReadbackLimitTests(unittest.TestCase):

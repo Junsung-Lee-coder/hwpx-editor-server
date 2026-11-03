@@ -54,8 +54,8 @@ def pdf_bytes(pages):
 def hwpx_bytes(payload=b'image'):
     out = io.BytesIO()
     with zipfile.ZipFile(out, 'w') as archive:
-        archive.writestr('Contents/section0.xml', '<hs:sec xmlns:hs="s" xmlns:hp="p"><hp:p><hp:tbl/><hp:pic/></hp:p></hs:sec>')
-        archive.writestr('BinData/image1.png', payload)
+        archive.writestr(zipfile.ZipInfo('Contents/section0.xml', date_time=(2026, 1, 1, 0, 0, 0)), '<hs:sec xmlns:hs="s" xmlns:hp="p"><hp:p><hp:tbl/><hp:pic/></hp:p></hs:sec>')
+        archive.writestr(zipfile.ZipInfo('BinData/image1.png', date_time=(2026, 1, 1, 0, 0, 0)), payload)
     return out.getvalue()
 
 

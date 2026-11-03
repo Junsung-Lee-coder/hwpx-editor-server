@@ -40,6 +40,10 @@ BUNDLE_SERVER_OPS = frozenset(
         'table_create_exact',
         'paragraph_format_exact',
         'paragraph_delete_exact',
+        'paragraph_join_previous_exact',
+        'paragraph_join_next_exact',
+        'control_join_previous_exact',
+        'paragraph_rehome_exact',
         'control_delete_exact',
         'exact_control_select_proof',
         'control_move_resize_exact',
@@ -151,6 +155,23 @@ _STEP_KEYS: dict[str, frozenset[str]] = {
             'max_page_after',
         }
     ),
+    # The server accepts these four (app/local_cli_service_support._BUNDLE_ALLOWED_OPS and their command
+    # packages); keys follow each package manifest minus the server-only `operation` alias.
+    'paragraph_join_previous_exact': frozenset(
+        {'op', 'label', 'match', 'expected_page', 'expected_previous_contains', 'delete_back_count', 'max_page_after', 'confirm_layout'}
+    ),
+    'paragraph_join_next_exact': frozenset(
+        {'op', 'label', 'match', 'expected_page', 'expected_next_contains', 'delete_count', 'next_match', 'max_next_page_after',
+         'insert_line_break', 'move_to_line_end', 'confirm_layout'}
+    ),
+    'control_join_previous_exact': frozenset(
+        {'op', 'label', 'target_id', 'expected_hash', 'expected_page', 'page_from', 'page_to', 'max_controls', 'delete_back_count',
+         'max_page_after', 'confirm_layout'}
+    ),
+    'paragraph_rehome_exact': frozenset(
+        {'op', 'label', 'delete_match', 'delete_expected_page', 'insert_before_match', 'insert_expected_page', 'insert_text',
+         'expected_text_delta', 'confirm_layout'}
+    ),
     'control_delete_exact': frozenset(
         {
             'op',
@@ -239,6 +260,12 @@ _STEP_KEYS: dict[str, frozenset[str]] = {
             'non_empty_token_preview',
             'warnings',
             'next_proof_required',
+            'split_by_column',
+            'split_column_index',
+            'split_group_value',
+            'split_group_index',
+            'split_group_count',
+            'split_group_hash',
         }
     ),
 

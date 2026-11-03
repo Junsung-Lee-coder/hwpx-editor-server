@@ -1648,6 +1648,57 @@ def _load_compiled_plan_or_404(job_id: str) -> dict[str, Any]:
     return json.loads(path.read_text(encoding='utf-8'))
 
 
+def _shared_table_conflict_blocker(compiled: Any) -> str | None:
+    """Why approval must stay closed when the compiled plan has shared-table conflicts, else None.
+
+    The compiler lists authored claims on one shared table (`shared_table_conflict_groups`) and colliding
+    emitted table operations (`emitted_shared_table_collision_groups`) in `compile_readiness`.
+    """
+    readiness = compiled.get('compile_readiness') if isinstance(compiled, dict) else None
+    if not isinstance(readiness, dict):
+        return None
+    groups = [*(readiness.get('shared_table_conflict_groups') or []), *(readiness.get('emitted_shared_table_collision_groups') or [])]
+    if not groups:
+        return None
+    summaries = [str(group['summary']) for group in groups if isinstance(group, dict) and group.get('summary')]
+    detail = '; '.join(summaries) if summaries else f'{len(groups)} conflicting shared-table group(s)'
+    return f'shared_table_cell_conflict: {detail}. Resolve the conflicting table sections and resend before approval.'
+
+
+# Unbounded native actions are never queued through MCP, and the queued runtime refuses the numbering ops;
+# the compiler does not emit them, and a compiled plan that carries one is refused rather than forwarded.
+_COMPILED_PLAN_FORBIDDEN_OPS = frozenset({'native_action', 'page_number', 'official_numbering'})
+
+
+def _build_authoring_instruction_payload(compiled: Any) -> dict[str, Any]:
+    """The job instructions for a compiled authoring plan.
+
+    Same shape the placeholder routes write (`normalize_instruction_payload` of the edit plan), with the plan's
+    instruction metadata as `metadata` (read by the worker) and its template identity and compile status as
+    tracking keys.
+    """
+    edit_plan = compiled.get('edit_plan') if isinstance(compiled, dict) else None
+    if not isinstance(edit_plan, dict):
+        raise EditOperationError('compiled authoring plan has no edit_plan')
+    operations = edit_plan.get('operations')
+    for index, item in enumerate(operations if isinstance(operations, list) else [], start=1):
+        op = str(item.get('op', '')).strip() if isinstance(item, dict) else ''
+        if op in _COMPILED_PLAN_FORBIDDEN_OPS:
+            raise EditOperationError(f'compiled authoring plan operation #{index} uses {op}, which authoring plans may not carry')
+    raw: dict[str, Any] = {'operations': operations, 'validation': edit_plan.get('validation') or {}}
+    if isinstance(edit_plan.get('instruction_metadata'), dict):
+        raw['metadata'] = edit_plan['instruction_metadata']
+    for key in ('template_version', 'inspect_snapshot_id', 'template_fingerprint'):
+        if compiled.get(key) is not None:
+            raw[key] = compiled[key]
+    readiness = compiled.get('compile_readiness')
+    if isinstance(readiness, dict) and readiness.get('status') is not None:
+        raw['compile_status'] = readiness['status']
+    if edit_plan.get('failure_reason') is not None:
+        raw['failure_reason'] = edit_plan['failure_reason']
+    return normalize_instruction_payload(raw)
+
+
 def _default_confirm_state(job_id: str, compiled: dict[str, Any]) -> dict[str, Any]:
     confirm_policy = compiled.get('confirm_policy', {}) if isinstance(compiled, dict) else {}
     approval_packet = compiled.get('approval_packet', {}) if isinstance(compiled, dict) else {}

@@ -88,6 +88,11 @@ class RecoveryTests(unittest.TestCase):
             ('start_runtime_watchdog', lambda *a, **k: (None, None)),
             ('update_runtime_status', lambda *a, **k: None),
             ('current_windows_session_snapshot', lambda: {'interactive': True}),
+            # The fake Hwp has no native process or window to bind: run the portable constructor path on every OS
+            # (as custody.Owned does). On Windows the runtime otherwise binds the constructor's real window and
+            # process (XHwpWindows, XHwpDocuments, win32process), which a fake COM object cannot satisfy, and every
+            # test built on this double was held at startup.
+            ('_native_close_processes', lambda: None),
             ('collect_hwp_snapshot', lambda h: {}),
             ('snapshot_live_location', lambda **k: {}),
         ):

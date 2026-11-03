@@ -25,7 +25,7 @@ from collections import Counter
 from typing import Any, Mapping
 from urllib.parse import urlsplit
 
-from app.hwpml_invariants import attrs, head_tail_reasons, signature
+from app.hwpml_invariants import attrs, head_tail_reasons, signature, HEAD_REASON_CODES, head_reason_code
 
 OP = 'object_insert_exact'
 SCHEMA_VERSION = 'local-cli/object-insert-exact/v1'
@@ -86,7 +86,9 @@ NATIVE: dict[str, dict[str, Any]] = {
     'memo': {'mode': 'run', 'action': 'InsertFieldMemo', 'types_text': True, 'closes': True},
     'hyperlink': {'mode': 'execute', 'action': 'InsertHyperlink', 'pset': 'HHyperLink'},
     'bookmark': {'mode': 'execute', 'action': 'Bookmark', 'pset': 'HBookMark'},
-    'equation': {'mode': 'execute', 'action': 'EquationCreate', 'pset': 'HEqEdit'},
+    # The script goes in through the parameter-set property (pset.string), as pyhwpx 1.7.2 EquationRefresh does; on
+    # Hancom 2024 HSet.SetItem('string', ...) left the new equation's script different from the request.
+    'equation': {'mode': 'execute', 'action': 'EquationCreate', 'pset': 'HEqEdit', 'set_by': 'property'},
     'line': {'mode': 'execute', 'action': 'DrawObjCreatorLine', 'pset': 'HShapeObject'},
     'rectangle': {'mode': 'execute', 'action': 'DrawObjCreatorRectangle', 'pset': 'HShapeObject'},
     'ellipse': {'mode': 'execute', 'action': 'DrawObjCreatorEllipse', 'pset': 'HShapeObject'},
@@ -95,9 +97,11 @@ NATIVE: dict[str, dict[str, Any]] = {
 }
 CLOSE_ACTION = 'CloseEx'
 EQUATION_VERSION = 'Equation Version 60'
-# HeaderFooter parameter items (unverified; all "which one" aliases get the same value).
-HEADER_FOOTER_TYPE_ITEMS = ('Type', 'HeaderFooterCtrlType', 'CtrlType')
-HEADER_FOOTER_APPLY_ITEM = 'ApplyTo'
+# HeaderFooter parameter items. On Hancom 2024, with every item below set to the same value, a header with 0 read back
+# ApplyPageType Both and a footer with 1 read back Even, while ApplyTo had no effect: 'Type' carries the page type
+# (0 both, 1 even, 2 odd) and the other two choose header (0) or footer (1).
+HEADER_FOOTER_TYPE_ITEMS = ('HeaderFooterCtrlType', 'CtrlType')
+HEADER_FOOTER_APPLY_ITEM = 'Type'
 HEADER_FOOTER_APPLY_VALUES: dict[str, int] = {'both': 0, 'even': 1, 'odd': 2}
 
 # Per-kind parameters. None = required; anything else is the default.
@@ -117,6 +121,58 @@ KIND_PARAMS: dict[str, dict[str, Any]] = {
 KINDS = frozenset(KIND_PARAMS)
 PARAM_KEYS = tuple(sorted({key for params in KIND_PARAMS.values() for key in params}))
 SHAPE_KINDS = frozenset({'line', 'rectangle', 'ellipse'})
+
+# ---------------------------------------------------------------- drawing contract
+#
+# Characterized on Hancom Office 2024 for Windows in an owned run (each request saved, reopened and rendered). A
+# DrawObjCreator* action prepared with only the frame items (Width, Height, TreatAsChar) saves an object with no
+# outline and no drawn geometry, so nothing renders. It draws when, after GetDefault and the frame items, the
+# installed type library's typed subsets are filled as well:
+#   - HShapeObject.ShapeDrawLayOut: CreateItemArray('CreatePt', 2n), each coordinate through CreatePt.SetItem(i, v)
+#     (x0, y0, x1, y1, ... in HWPUNIT inside the object's own frame), then CreateNumPt = n;
+#   - HShapeObject.ShapeDrawLineAttr: the outline (without it Hancom saves LINESHAPE Style None).
+# The layouts follow Hancom's recorded drawing macros (rectangle: the four corners; ellipse: centre, end of the
+# first axis, end of the second axis); a line takes its two endpoints. Only horizontal and vertical lines were
+# characterized; a diagonal line is refused before any SDK call.
+DRAWING_VARIANTS: frozenset[str] = frozenset(f'{kind}:{place}' for kind in SHAPE_KINDS for place in ('inline', 'floating'))
+# ShapeDrawLineAttr items and values, as the type library names them (lowercase ``style``). The values are what the
+# installed converters returned on Hancom 2024: HwpLineType('Solid') = 1, MiliToHwpUnit(0.3) = 85,
+# RGBColor(0, 0, 0) = 0, HwpOutlineStyle('Normal') = 0; Alpha 0 is opaque.
+DRAWING_OUTLINE: tuple[tuple[str, int], ...] = (('style', 1), ('Width', 85), ('Color', 0), ('Alpha', 0), ('OutLineStyle', 0))
+DRAWING_LAYOUT_SUBSET = 'ShapeDrawLayOut'
+DRAWING_LINE_SUBSET = 'ShapeDrawLineAttr'
+DRAWING_POINT_ARRAY = 'CreatePt'
+DRAWING_POINT_COUNT = 'CreateNumPt'
+# Smallest drawn extent in HWPUNIT: an ellipse needs a half-axis of at least one unit.
+MIN_DRAWN_HU = {'line': 1, 'rectangle': 1, 'ellipse': 2}
+
+
+def shape_variant(plan: Mapping[str, Any]) -> str:
+    return f'{plan["kind"]}:{"inline" if plan["treat_as_char"] else "floating"}'
+
+
+def drawing_support_reason(plan: Mapping[str, Any]) -> str | None:
+    """Why this request has no characterized drawing contract, or None."""
+    if plan['kind'] not in SHAPE_KINDS:
+        return None
+    if shape_variant(plan) not in DRAWING_VARIANTS:
+        return f'a drawn {plan["kind"]} ({shape_variant(plan)}) has no characterized drawing contract'
+    if plan['kind'] == 'line' and plan['width_hu'] and plan['height_hu']:
+        return ('a diagonal line (both width_mm and height_mm non-zero) has no characterized drawing contract; '
+                'only horizontal and vertical lines are drawn')
+    return None
+
+
+def drawing_points(plan: Mapping[str, Any]) -> tuple[int, list[int]]:
+    """(CreateNumPt, CreatePt values) of the characterized layout for this shape."""
+    width, height, kind = plan['width_hu'], plan['height_hu'], plan['kind']
+    if kind == 'rectangle':
+        return 4, [0, 0, width, 0, width, height, 0, height]
+    if kind == 'ellipse':
+        return 3, [width // 2, height // 2, width, height // 2, width // 2, 0]
+    if kind == 'line' and not (width and height):
+        return 2, [0, 0, width, height]
+    raise ObjectInsertError(f'no drawing layout for {shape_variant(plan)}', 'unverifiable_layout')
 # 'none': strict normal edit state; 'required': a live selection; 'optional': either.
 SELECTION_POLICY: dict[str, str] = {kind: 'none' for kind in KINDS} | {'hyperlink': 'required', 'memo': 'optional'}
 
@@ -131,7 +187,60 @@ HWPUNIT_PER_MM = 7200 / 25.4
 
 
 class ObjectInsertError(ValueError):
-    """A step, plan or readback cannot be accepted."""
+    """A step, plan or readback cannot be accepted; ``code`` is a fixed label (never document text)."""
+
+    def __init__(self, message: str, code: str = 'invalid_request') -> None:
+        super().__init__(message)
+        self.code = code
+
+
+# Fixed labels for the first reason an after-insert verification failed (journal and public failure_diagnostic).
+_REASON_CODES: tuple[tuple[str, str], ...] = (
+    ('text is not exactly the requested text', 'object_text_mismatch'),
+    ('hyperlink Command does not name exactly the url', 'hyperlink_command_mismatch'),
+    ('BOOKMARK Name differs', 'bookmark_name_mismatch'),
+    ('EQUATION has no script element', 'equation_script_missing'),
+    ('EQUATION has more than one script element', 'equation_script_multiple'),
+    ('EQUATION script is empty', 'equation_script_empty'),
+    ('EQUATION script differs', 'equation_script_mismatch'),
+    ('outline is not visible', 'shape_outline_not_visible'),
+    ('transform is not', 'shape_transform_invalid'),
+    ('drawn geometry', 'shape_geometry_mismatch'),
+    ('frame', 'shape_size_mismatch'),
+    ('TreatAsChar', 'shape_treat_as_char_mismatch'),
+    ('ApplyPageType', 'header_apply_mismatch'),
+    ('the change does not start with the new', 'change_not_object'),
+    ('is not closed by its own FIELDEND', 'field_end_missing'),
+    ('new FIELDEND Type', 'field_end_type'),
+    ('wraps something other than plain text', 'field_wraps_other'),
+    ('does not wrap exactly display_text', 'hyperlink_wrap_mismatch'),
+    ('document text outside the new object changed', 'text_changed'),
+    ('other controls changed', 'controls_changed'),
+    ('paragraph structure changed', 'paragraph_structure_changed'),
+    ('container structure or attributes changed', 'container_changed'),
+    ('content next to it changed', 'adjacent_content_changed'),
+    ('expected exactly +1', 'object_count_mismatch'),
+    ('count changed by', 'companion_count_mismatch'),
+)
+_APPLY_OBSERVED = {'Both': 'header_apply_observed_both', 'Even': 'header_apply_observed_even', 'Odd': 'header_apply_observed_odd'}
+# Engine-side shape label outside the after-insert proof: the new drawing object stayed selected after Cancel.
+SHAPE_ENGINE_REASONS = frozenset({'shape_not_released'})
+REASON_CODES = (frozenset(code for _needle, code in _REASON_CODES) | {'other'} | HEAD_REASON_CODES | SHAPE_ENGINE_REASONS
+                | set(_APPLY_OBSERVED.values()) | {'header_apply_observed_absent', 'header_apply_observed_other'})
+
+
+def reason_code(reason: str) -> str:
+    head = head_reason_code(reason)
+    if head is not None:
+        return head
+    observed = re.search(r" ApplyPageType is (None|'([A-Za-z]*)')", reason)
+    if observed:
+        # Which page type Hancom wrote, from the fixed set; never other text.
+        return 'header_apply_observed_absent' if observed.group(1) == 'None' else _APPLY_OBSERVED.get(observed.group(2), 'header_apply_observed_other')
+    for needle, code in _REASON_CODES:
+        if needle in reason:
+            return code
+    return 'other'
 
 
 def mm_to_hwpunit(value: float) -> int:
@@ -221,6 +330,12 @@ def normalize_step(step: Mapping[str, Any]) -> dict[str, Any]:
             treat = True
         if not isinstance(treat, bool):
             raise ObjectInsertError('treat_as_char must be a boolean')
+        floor = MIN_DRAWN_HU[kind]
+        for key, value in (('width_mm', width), ('height_mm', height)):
+            # A positive size must stay a drawn extent after rounding to whole HWPUNIT (1/7200 inch).
+            if value > 0 and mm_to_hwpunit(value) < floor:
+                raise ObjectInsertError(f'{key} {value:g} rounds to {mm_to_hwpunit(value)} HWPUNIT; a drawn {kind} extent '
+                                        f'needs at least {floor} HWPUNIT ({floor / HWPUNIT_PER_MM:.4f} mm)')
         plan.update({'width_mm': width, 'height_mm': height, 'treat_as_char': treat,
                      'width_hu': mm_to_hwpunit(width), 'height_hu': mm_to_hwpunit(height)})
     elif kind in ('header', 'footer'):
@@ -430,6 +545,140 @@ def _field_command_target(command: str) -> str:
     return re.sub(r'\\(.)', r'\1', first)
 
 
+# HWPML2X names of a new drawing object, pinned from Hancom-authored readbacks (tests/fixtures/native_shapes):
+# <RECTANGLE X0..X3 Y0..Y3 Ratio> | <ELLIPSE CenterX/Y Axis1X/Y Axis2X/Y HasArcProperty> | <LINE StartX/Y EndX/Y
+# IsReverseHV>, each holding SHAPEOBJECT (SIZE = the frame, POSITION TreatAsChar) and DRAWINGOBJECT (SHAPECOMPONENT
+# with the original canvas OriWidth/OriHeight, the current size CurWidth/CurHeight and RENDERINGINFO's TRANSMATRIX,
+# SCAMATRIX and ROTMATRIX E1..E6; LINESHAPE = the outline).
+DRAWING_TAGS: dict[str, str] = {'object': 'SHAPEOBJECT', 'drawing': 'DRAWINGOBJECT', 'component': 'SHAPECOMPONENT',
+                                'rendering': 'RENDERINGINFO', 'outline': 'LINESHAPE'}
+DRAWING_MATRICES = ('TRANSMATRIX', 'SCAMATRIX', 'ROTMATRIX')
+_IDENTITY = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0]
+# The outline as HWPML2X reads back DRAWING_OUTLINE (Color 0 is written by omission).
+DRAWING_OUTLINE_READBACK: dict[str, str] = {'Style': 'Solid', 'Width': '85', 'Alpha': '0'}
+_INTEGER = re.compile(r'-?[0-9]+')
+
+
+def _only(parent: ET.Element | None, tag: str) -> ET.Element | None:
+    """The single direct child ``tag`` of ``parent``; None when absent or repeated."""
+    found = parent.findall(tag) if parent is not None else []
+    return found[0] if len(found) == 1 else None
+
+
+def _integer(element: ET.Element | None, name: str) -> int | None:
+    raw = element.get(name) if element is not None else None
+    return int(raw) if raw is not None and _INTEGER.fullmatch(raw) else None
+
+
+def _finite(element: ET.Element | None, name: str) -> float | None:
+    try:
+        value = float(element.get(name))  # type: ignore[arg-type, union-attr]
+    except (AttributeError, TypeError, ValueError):
+        return None
+    return value if math.isfinite(value) else None
+
+
+def _extent_reasons(tag: str, label: str, got: tuple[float, float], want: tuple[int, int]) -> list[str]:
+    """A drawn extent must be the request: within half a unit where drawn, exactly zero on a line's zero axis."""
+    for axis, have, need in (('width', got[0], want[0]), ('height', got[1], want[1])):
+        if (need == 0 and have != 0) or (need != 0 and not (have > 0 and abs(have - need) < 0.5)):
+            return [f'new {tag} drawn geometry: {label} {axis} is {have:g}, expected {need}']
+    return []
+
+
+def drawing_reasons(plan: Mapping[str, Any], element: ET.Element) -> list[str]:
+    """Prove the new drawing object is the prepared one and visibly drawn: the frame, the inline state, a solid
+    outline, finite and plain transforms, and the drawn geometry (points, axes or endpoints) scaled to the request."""
+    tag, kind = element.tag, plan['kind']
+    width, height = plan['width_hu'], plan['height_hu']
+    reasons: list[str] = []
+    shape_object = _only(element, DRAWING_TAGS['object'])
+    size = _only(shape_object, ATTRS['shape_size_tag'])
+    frame = (_integer(size, ATTRS['shape_width']), _integer(size, ATTRS['shape_height']))
+    if frame != (width, height):
+        shown = None if size is None else [size.get(ATTRS['shape_width']), size.get(ATTRS['shape_height'])]
+        reasons.append(f'new {tag} frame (SIZE) is {shown!r}, expected exactly {width} x {height} HWPUNIT')
+    position = _only(shape_object, ATTRS['shape_position_tag'])
+    treat = position.get(ATTRS['shape_treat_as_char']) if position is not None else None
+    if treat != ('true' if plan['treat_as_char'] else 'false'):
+        reasons.append(f'new {tag} TreatAsChar is {treat!r}, expected {plan["treat_as_char"]}')
+    drawing = _only(element, DRAWING_TAGS['drawing'])
+    outline = _only(drawing, DRAWING_TAGS['outline'])
+    shown_outline = None if outline is None else {name: outline.get(name) for name in ('Style', 'Width', 'Alpha', 'Color')}
+    if outline is None or any(outline.get(name) != value for name, value in DRAWING_OUTLINE_READBACK.items()) or outline.get('Color', '0') != '0':
+        reasons.append(f'new {tag} outline is not visible as prepared: LINESHAPE {shown_outline!r}')
+    component = _only(drawing, DRAWING_TAGS['component'])
+    rendering = _only(component, DRAWING_TAGS['rendering'])
+    matrices: dict[str, list[float | None]] = {}
+    for name in DRAWING_MATRICES:
+        matrix = _only(rendering, name)
+        matrices[name] = [_finite(matrix, f'E{index}') for index in range(1, 7)]
+        if any(value is None for value in matrices[name]):
+            reasons.append(f'new {tag} {name} transform is not finite (or missing)')
+    if reasons:
+        return reasons
+    for name in ('TRANSMATRIX', 'ROTMATRIX'):
+        if matrices[name] != _IDENTITY:
+            reasons.append(f'new {tag} {name} transform is not the identity of an unmoved, unrotated shape')
+    scale = matrices['SCAMATRIX']
+    if any(scale[index] != 0.0 for index in (1, 2, 3, 5)):
+        reasons.append(f'new {tag} SCAMATRIX transform is not a plain scale')
+    if reasons:
+        return reasons
+    sx, sy = float(scale[0]), float(scale[4])  # type: ignore[arg-type]
+    assert component is not None
+    if component.get('HorzFlip') != 'false' or component.get('VertFlip') != 'false':
+        reasons.append(f'new {tag} drawn geometry is flipped')
+    ori = (_integer(component, 'OriWidth'), _integer(component, 'OriHeight'))
+    cur = (_integer(component, 'CurWidth'), _integer(component, 'CurHeight'))
+    has_cur = 'CurWidth' in component.attrib or 'CurHeight' in component.attrib
+    _n, points = drawing_points(plan)
+    if kind == 'rectangle':
+        xs = [_integer(element, f'X{index}') for index in range(4)]
+        ys = [_integer(element, f'Y{index}') for index in range(4)]
+        if xs != points[0::2] or ys != points[1::2]:
+            reasons.append(f'new {tag} drawn geometry: corners are {xs!r} / {ys!r}, expected {points[0::2]!r} / {points[1::2]!r}')
+        if element.get('Ratio') != '0':
+            reasons.append(f'new {tag} drawn geometry: corner Ratio is {element.get("Ratio")!r}, expected square corners')
+        if ori != (width, height):
+            reasons.append(f'new {tag} drawn geometry: original canvas is {ori!r}, expected {(width, height)!r}')
+        if has_cur and cur != (width, height):
+            reasons.append(f'new {tag} drawn geometry: current size is {cur!r}, expected {(width, height)!r}')
+        if not reasons:
+            reasons.extend(_extent_reasons(tag, 'scaled canvas', (width * sx, height * sy), (width, height)))
+    elif kind == 'ellipse':
+        names = ('CenterX', 'CenterY', 'Axis1X', 'Axis1Y', 'Axis2X', 'Axis2Y')
+        got = [_integer(element, name) for name in names]
+        if got != points:
+            reasons.append(f'new {tag} drawn geometry: centre and axes are {got!r}, expected {points!r}')
+        if element.get('HasArcProperty') != 'false':
+            reasons.append(f'new {tag} drawn geometry: HasArcProperty is {element.get("HasArcProperty")!r}, expected a full ellipse')
+        if cur != (width, height):
+            reasons.append(f'new {tag} drawn geometry: current size is {cur!r}, expected {(width, height)!r}')
+        if not reasons:
+            half_x, half_y = points[2] - points[0], points[1] - points[5]
+            if half_x <= 0 or half_y <= 0 or ori != (2 * half_x, 2 * half_y):
+                reasons.append(f'new {tag} drawn geometry: original canvas {ori!r} does not span the axes ({half_x}, {half_y})')
+            else:
+                reasons.extend(_extent_reasons(tag, 'scaled axes', (2 * half_x * sx, 2 * half_y * sy), (width, height)))
+    else:
+        ends = [_integer(element, name) for name in ('StartX', 'StartY', 'EndX', 'EndY')]
+        if any(value is None for value in ends):
+            reasons.append(f'new {tag} drawn geometry: endpoints are {ends!r}')
+        if element.get('IsReverseHV') != 'false':
+            reasons.append(f'new {tag} drawn geometry: IsReverseHV is {element.get("IsReverseHV")!r}, expected false')
+        if cur != (width, height):
+            reasons.append(f'new {tag} drawn geometry: current size is {cur!r}, expected {(width, height)!r}')
+        if not reasons:
+            x0, y0, x1, y1 = ends  # type: ignore[misc]
+            if ori != (abs(x1 - x0), abs(y1 - y0)) or (x0, y0) == (x1, y1):
+                reasons.append(f'new {tag} drawn geometry: original canvas {ori!r} does not span the endpoints {ends!r}')
+            else:
+                reasons.extend(_extent_reasons(tag, 'start point', (x0 * sx, y0 * sy), (0, 0)))
+                reasons.extend(_extent_reasons(tag, 'scaled endpoints', ((x1 - x0) * sx, (y1 - y0) * sy), (width, height)))
+    return reasons
+
+
 def _element_reasons(plan: Mapping[str, Any], element: ET.Element) -> list[str]:
     kind = plan['kind']
     reasons: list[str] = []
@@ -441,22 +690,16 @@ def _element_reasons(plan: Mapping[str, Any], element: ET.Element) -> list[str]:
         reasons.append('new BOOKMARK Name differs from the requested name')
     if kind == 'equation':
         scripts = [child for tag in ATTRS['equation_script_tags'].split(',') for child in element.iter(tag)]
-        if len(scripts) != 1 or (scripts[0].text or '').strip() != plan['script'].strip():
+        if not scripts:
+            reasons.append('new EQUATION has no script element')
+        elif len(scripts) > 1:
+            reasons.append('new EQUATION has more than one script element')
+        elif not (scripts[0].text or '').strip():
+            reasons.append('new EQUATION script is empty')
+        elif (scripts[0].text or '').strip() != plan['script'].strip():
             reasons.append('new EQUATION script differs from the requested script')
     if kind in SHAPE_KINDS:
-        size = element.find(f'.//{ATTRS["shape_size_tag"]}')
-        for attr, want in ((ATTRS['shape_width'], plan['width_hu']), (ATTRS['shape_height'], plan['height_hu'])):
-            raw = size.get(attr) if size is not None else None
-            try:
-                got = int(raw) if raw is not None else None
-            except ValueError:
-                got = None
-            if got is None or abs(got - want) > max(2, want * 0.01):
-                reasons.append(f'new {element.tag} {attr} is {raw!r}, expected about {want} HWPUNIT')
-        position = element.find(f'.//{ATTRS["shape_position_tag"]}')
-        treat = (position.get(ATTRS['shape_treat_as_char']) if position is not None else None) or ''
-        if treat.lower() != ('true' if plan['treat_as_char'] else 'false'):
-            reasons.append(f'new {element.tag} TreatAsChar is {treat!r}, expected {plan["treat_as_char"]}')
+        reasons.extend(drawing_reasons(plan, element))
     if kind in ('header', 'footer') and element.get(ATTRS['header_apply']) != APPLY_PAGE_TYPES[plan['apply_to']]:
         reasons.append(f'new {element.tag} {ATTRS["header_apply"]} is {element.get(ATTRS["header_apply"])!r}, expected {APPLY_PAGE_TYPES[plan["apply_to"]]!r}')
     return reasons
@@ -466,7 +709,7 @@ def check_before(plan: Mapping[str, Any], before: ET.Element) -> dict[str, Any]:
     """Refuse plans the readback cannot verify. Returns the before summary."""
     summary = summarize(before)
     if summary['char_elements'] == 0 and _norm(''.join(_body(before).itertext())):
-        raise ObjectInsertError('document readback holds text outside CHAR runs; this HWPML layout cannot be verified')
+        raise ObjectInsertError('document readback holds text outside CHAR runs; this HWPML layout cannot be verified', 'unverifiable_layout')
     if plan['kind'] in ('header', 'footer'):
         tag = KIND_TAGS[plan['kind']][0]
         want = APPLY_PAGE_TYPES[plan['apply_to']]
@@ -475,12 +718,13 @@ def check_before(plan: Mapping[str, Any], before: ET.Element) -> dict[str, Any]:
             if apply in (None, want, APPLY_PAGE_TYPES['both']) or want == APPLY_PAGE_TYPES['both']:
                 raise ObjectInsertError(
                     f'document already has a {tag} that may cover {plan["apply_to"]} pages ({apply!r}); '
-                    'replacing an existing header/footer is not supported, delete it explicitly first'
+                    'replacing an existing header/footer is not supported, delete it explicitly first',
+                    'existing_header_footer',
                 )
     if plan['kind'] == 'bookmark':
         for element in _body(before).iter(KIND_TAGS['bookmark'][0]):
             if element.get(ATTRS['bookmark_name']) == plan['name']:
-                raise ObjectInsertError('a bookmark with this name already exists')
+                raise ObjectInsertError('a bookmark with this name already exists', 'bookmark_exists')
     return summary
 
 

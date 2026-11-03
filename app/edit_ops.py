@@ -181,6 +181,9 @@ def _require_native_numbering_target(item: dict[str, Any]) -> None:
         raise EditOperationError("field 'match_case' must be true or false")
 
 
+_KEEP_BREAK_OPS = frozenset({'replace_paragraph_safe', 'paragraph_replace_native'})
+
+
 def normalize_operations(raw: Any) -> list[dict[str, Any]]:
     if isinstance(raw, dict) and 'operations' in raw:
         raw = raw['operations']
@@ -199,6 +202,11 @@ def normalize_operations(raw: Any) -> list[dict[str, Any]]:
             raise EditOperationError(f'operation #{index} uses unsupported op={op!r}. Supported: {supported}')
         if op in NATIVE_NUMBERING_OPS:
             _validate_native_numbering_op(index, op, item)
+        if 'keep_paragraph_break' in item:
+            if op not in _KEEP_BREAK_OPS:
+                raise EditOperationError(f'operation #{index} {op} does not take keep_paragraph_break')
+            if type(item['keep_paragraph_break']) is not bool:
+                raise EditOperationError(f'operation #{index} keep_paragraph_break must be true or false')
         normalized.append(dict(item))
     return normalized
 
@@ -2182,6 +2190,7 @@ def _safe_replace_matches(
     allow_target_in_replace: bool = False,
     expected_present_after: str | None = None,
     expected_absent_after: str | None = None,
+    keep_paragraph_break: bool = False,
 ) -> int:
     if apply == 'all' and target and target in replace_text and not allow_target_in_replace:
         raise EditOperationError('safe replace with apply=all cannot use replacement text containing the find text')
@@ -2201,7 +2210,10 @@ def _safe_replace_matches(
             })
             original_selection = _get_selected_pos(hwp)
             if paragraph_mode:
-                working_selection = _select_paragraph_with_trailing_break_for_current_selection(hwp)
+                # Literal legacy mode selects the paragraph together with its break; keep_paragraph_break selects
+                # only its content, so the break and the next paragraph (with its shape) are not touched.
+                working_selection = (_select_whole_paragraph_for_current_selection(hwp) if keep_paragraph_break
+                                     else _select_paragraph_with_trailing_break_for_current_selection(hwp))
             else:
                 working_selection = original_selection
 
@@ -2374,31 +2386,6 @@ def _safe_replace_paragraph_range(
     whole_word: bool,
     allow_packed_paragraph: bool = False,
 ) -> int:
-    def _recover_current_paragraph_selection(find_text: str, label: str) -> tuple[Any, ...] | None:
-        before = _snapshot_cursor_context(hwp)
-        selected_before = _get_selected_pos(hwp)
-        if selected_before and selected_before[0]:
-            return _select_whole_paragraph_for_current_selection(hwp)
-        current_pos = _get_pos(hwp)
-        if len(current_pos) < 3:
-            return None
-        current_para_text = _get_current_paragraph_text_at_cursor(hwp)
-        if find_text not in current_para_text:
-            return None
-        _set_pos(hwp, int(current_pos[0]), int(current_pos[1]), 0)
-        if hasattr(hwp, 'select_text'):
-            hwp.select_text(int(current_pos[1]), 0, int(current_pos[1]), -1, int(current_pos[0]))
-        else:
-            raise EditOperationError('pyhwpx select_text is unavailable on this machine')
-        recovered = _get_selected_pos(hwp)
-        if recovered and recovered[0]:
-            return recovered
-        after = _snapshot_cursor_context(hwp)
-        raise EditOperationError(
-            f'{label} selection recovery failed after find-hit; '
-            f'before={before}, after={after}, current_para_text={current_para_text[:240]!r}'
-        )
-
     _move_doc_begin(hwp)
     count = 0
 
@@ -2426,12 +2413,7 @@ def _safe_replace_paragraph_range(
         ):
             raise EditOperationError(f'end paragraph for replace_paragraph_range_safe not found: {end_find!r}')
 
-        try:
-            end_selection = _select_whole_paragraph_for_current_selection(hwp)
-        except EditOperationError:
-            if not cluster_method_body:
-                raise
-            end_selection = _recover_current_paragraph_selection(end_find, 'method-p112 end')
+        end_selection = _select_whole_paragraph_for_current_selection(hwp)
         if not end_selection or not end_selection[0]:
             raise EditOperationError('expected selected text after finding range end paragraph')
         _, range_start_list, range_start_para, _range_start_pos, range_end_list, range_end_para, _range_end_pos = end_selection
@@ -2936,6 +2918,32 @@ def _normalize_scaffold_items(op: dict[str, Any]) -> list[dict[str, Any]]:
     return normalized
 
 
+def _empty_paragraph_at_caret(hwp: Any) -> tuple[int, int] | None:
+    """(list, para) when the caret's paragraph is provably empty, else None.
+
+    Both must hold: from its start MoveParaEnd stays at position 0, and selecting the whole paragraph gives no
+    selection (Hancom has no text to select there). The caret is left at the start of that paragraph.
+    """
+    run = getattr(getattr(hwp, 'HAction', None), 'Run', None)
+    select = getattr(hwp, 'select_text', None)
+    if not callable(run) or not callable(select):
+        return None
+    try:
+        list_id, para, _pos = (int(value) for value in _get_pos(hwp)[:3])
+        _set_pos(hwp, list_id, para, 0)
+        run('MoveParaEnd')
+        end = tuple(int(value) for value in _get_pos(hwp)[:3])
+        _set_pos(hwp, list_id, para, 0)
+        select(para, 0, para, -1, list_id)
+        selected = _get_selected_pos(hwp)
+        _set_pos(hwp, list_id, para, 0)
+    except Exception:
+        return None
+    if end != (list_id, para, 0) or (selected and selected[0]):
+        return None
+    return (list_id, para)
+
+
 def _apply_replace_empty_native_list_scaffold(hwp: Any, op: dict[str, Any]) -> dict[str, Any]:
     target = op.get('find')
     cursor_pos = _normalize_cursor_pos(op.get('cursor_pos'))
@@ -2962,8 +2970,15 @@ def _apply_replace_empty_native_list_scaffold(hwp: Any, op: dict[str, Any]) -> d
         if cursor_pos is not None:
             _set_pos(hwp, cursor_pos[0], cursor_pos[1], cursor_pos[2])
         before = _snapshot_cursor_context(hwp)
-        original_selection = _select_whole_paragraph_for_current_selection(hwp)
-        selected_text = _get_selected_text(hwp, keep_select=True)
+        # Hancom reports no selection for an empty paragraph (there is no text to select), so a caret-addressed
+        # scaffold is first proved empty by its end position; then the items are typed into it with nothing to delete.
+        empty = _empty_paragraph_at_caret(hwp) if cursor_pos is not None else None
+        if empty is not None:
+            original_selection = (True, empty[0], empty[1], 0, empty[0], empty[1], 0)
+            selected_text = ''
+        else:
+            original_selection = _select_whole_paragraph_for_current_selection(hwp)
+            selected_text = _get_selected_text(hwp, keep_select=True)
         if require_empty_scaffold and _normalize_visible_text(selected_text):
             raise EditOperationError(
                 'replace_empty_native_list_scaffold expected an empty native scaffold paragraph but selected non-empty text; '
@@ -2972,7 +2987,8 @@ def _apply_replace_empty_native_list_scaffold(hwp: Any, op: dict[str, Any]) -> d
         if not original_selection or not original_selection[0]:
             raise EditOperationError('replace_empty_native_list_scaffold could not select the scaffold paragraph')
         _, start_list, start_para, _start_pos, _end_list, _end_para, _end_pos = original_selection
-        _delete_selection(hwp)
+        if empty is None:
+            _delete_selection(hwp)
         insert_text = '\r\n'.join(str(item['text']) for item in items)
         if hasattr(hwp, 'insert_text'):
             hwp.insert_text(insert_text)
@@ -4178,6 +4194,7 @@ def apply_edit_operations(
                     allow_packed_paragraph=_bool(op, 'allow_packed_paragraph', False),
                     expected_present_after=str(op.get('expected_present_after')) if op.get('expected_present_after') is not None else None,
                     expected_absent_after=str(op.get('expected_absent_after')) if op.get('expected_absent_after') is not None else None,
+                    keep_paragraph_break=_bool(op, 'keep_paragraph_break', False),
                 )
                 _record_summary(index, op_type, {'matches': count})
                 continue

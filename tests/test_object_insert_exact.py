@@ -22,6 +22,7 @@ from app.object_insert import (
     normalize_step,
     parse_hwpml,
 )
+from tests.shape_forms import OUTLINE, drawn_xml, points_for
 
 MANIFEST_PATH = Path(__file__).resolve().parents[1] / 'app' / 'command_packages' / 'commands' / 'object_insert_exact' / 'manifest.json'
 MANIFEST = json.loads(MANIFEST_PATH.read_text(encoding='utf-8'))
@@ -41,9 +42,18 @@ def _footnote(text: str) -> str:
     return f'<FOOTNOTE><PARALIST><P><TEXT><AUTONUM Number="1" Type="Footnote"/>{_char(text)}</TEXT></P></PARALIST></FOOTNOTE>'
 
 
-def _shape(tag: str, width: int, height: int, treat: bool = True) -> str:
+def _frame_only_shape(tag: str, width: int, height: int, treat: bool = True) -> str:
+    """A shape with only its frame, as a frame-only SDK would read it back (nothing drawn)."""
     return (f'<{tag}><SHAPEOBJECT><SIZE Width="{width}" Height="{height}"/>'
             f'<POSITION TreatAsChar="{"true" if treat else "false"}"/></SHAPEOBJECT></{tag}>')
+
+
+def _shape(tag: str, width: int, height: int, treat: bool = True) -> str:
+    """The new drawing object in Hancom 2024's drawn HWPML2X form (tests/shape_forms.py)."""
+    name = tag.lower() if tag != 'LINE' else ('line_h' if height == 0 else 'line_v')
+    count, points = points_for(name, width, height)
+    return drawn_xml(tag, {'Width': width, 'Height': height, 'TreatAsChar': int(treat), 'CreateNumPt': count, 'CreatePt': points,
+                           'line': dict(OUTLINE)})
 
 
 def _plan(**fields: Any) -> dict[str, Any]:
@@ -140,14 +150,14 @@ class VerifierTests(unittest.TestCase):
             (_plan(kind='rectangle', text=None, width_mm=20, height_mm=10),
              _doc(rect(mm_to_hwpunit(20)) + _char('Hello world'), _char('Second')),
              _doc(rect(mm_to_hwpunit(20)) + _char('Hello') + rect(1000) + _char(' world'), _char('Second')),
-             'Width is'),
+             'frame (SIZE)'),
         )
         for plan, before, after, reason in cases:
             with self.subTest(kind=plan['kind']):
                 result = _evaluate(plan, before, after)
                 self.assertFalse(result['ok'], result)
                 self.assertIn(reason, ' '.join(result['reasons']))
-                twin_ok = after.replace('a over c', 'a over b').replace('Command=""', f'Command="{good_link}"').replace('Width="1000"', f'Width="{mm_to_hwpunit(20)}"')
+                twin_ok = after.replace('a over c', 'a over b').replace('Command=""', f'Command="{good_link}"').replace(rect(1000), rect(mm_to_hwpunit(20)))
                 self.assertTrue(_evaluate(plan, before, twin_ok)['ok'], _evaluate(plan, before, twin_ok))
 
     def test_hyperlink_must_wrap_exactly_display_text(self) -> None:
@@ -368,11 +378,24 @@ class ValidationTests(unittest.TestCase):
 
 
 class _Set:
+    """One parameter set: items come in through HSet.SetItem or a property.
+
+    As on Hancom 2024, the equation script reaches EquationCreate only through the HEqEdit property (pset.string, the
+    way pyhwpx 1.7.2 sets it); HSet.SetItem('string', ...) leaves the script out.
+    """
+
     def __init__(self, hwp: _FakeHwp, name: str) -> None:
-        self.hwp, self.name, self.items = hwp, name, {}
-        self.HSet = self
+        object.__setattr__(self, 'hwp', hwp)
+        object.__setattr__(self, 'name', name)
+        object.__setattr__(self, 'items', {})
+        object.__setattr__(self, 'HSet', self)
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        self.items[name] = value
 
     def SetItem(self, name: str, value: Any) -> None:  # noqa: N802
+        if self.name == 'HEqEdit' and name == 'string':
+            return
         self.items[name] = value
 
 
@@ -431,6 +454,8 @@ class _FakeHwp:
         self.eat_char = bool(faults.get('eat_char'))
         self.bad_readback = bool(faults.get('bad_readback'))
         self.snapshot_unknown = bool(faults.get('snapshot_unknown'))
+        if self.snapshot_unknown:
+            self.SelectionMode = None  # an unreadable mode: the strict state proof treats it as technical
         self.no_return = bool(faults.get('no_return'))
         if faults.get('no_readback'):
             self.GetTextFile = None  # type: ignore[assignment]
@@ -472,8 +497,9 @@ class _FakeHwp:
             self.pending = {'tag': 'ENDNOTE' if self.wrong_tag and tag == 'FOOTNOTE' else tag, 'text': '', 'body': list(self.caret)}
             self.caret = [1, 0, 0]
         elif name == 'HeaderFooter':
-            tag = 'HEADER' if items.get('Type') == 0 else 'FOOTER'
-            apply = {0: 'Both', 1: 'Even', 2: 'Odd'}[items['ApplyTo']]
+            # As read back on Hancom 2024: HeaderFooterCtrlType chooses header/footer, Type the page type.
+            tag = 'HEADER' if items.get('HeaderFooterCtrlType') == 0 else 'FOOTER'
+            apply = {0: 'Both', 1: 'Even', 2: 'Odd'}[items.get('Type', 0)]
             self.pending = {'tag': tag, 'text': '', 'apply': apply, 'body': list(self.caret)}
             self.caret = [2, 0, 0]
         elif name == 'CloseEx' and self.pending is not None:
@@ -485,10 +511,10 @@ class _FakeHwp:
         elif name == 'Bookmark':
             self.put(f'<BOOKMARK Name={quoteattr(items["Name"])}/>')
         elif name == 'EquationCreate':
-            self.put(f'<EQUATION><SHAPEOBJECT/><SCRIPT>{escape(items["string"])}</SCRIPT></EQUATION>')
+            self.put(f'<EQUATION><SHAPEOBJECT/><SCRIPT>{escape(items.get("string", ""))}</SCRIPT></EQUATION>')
         elif name.startswith('DrawObjCreator'):
             tag = name.removeprefix('DrawObjCreator').upper()
-            self.put(_shape(tag, items['Width'], items['Height'], bool(items['TreatAsChar'])))
+            self.put(_frame_only_shape(tag, items['Width'], items['Height'], bool(items['TreatAsChar'])))
             self.selection = (0, 0)  # the new object stays selected until Cancel
         elif name == 'Cancel':
             self.selection = None
@@ -565,12 +591,6 @@ SUCCESS_CASES: tuple[tuple[dict[str, Any], list[str], str], ...] = (
     ({'kind': 'memo', 'text': 'check this'}, ['InsertFieldMemo', 'insert_text', 'CloseEx'], 'Type="Memo"'),
     ({'kind': 'bookmark', 'text': None, 'name': '책갈피1'}, ['GetDefault(Bookmark)', 'Execute(Bookmark)'], 'Name="책갈피1"'),
     ({'kind': 'equation', 'text': None, 'script': 'a over b'}, ['GetDefault(EquationCreate)', 'Execute(EquationCreate)'], '<SCRIPT>a over b</SCRIPT>'),
-    ({'kind': 'line', 'text': None, 'width_mm': 30, 'height_mm': 0},
-     ['GetDefault(DrawObjCreatorLine)', 'Execute(DrawObjCreatorLine)', 'Cancel'], '<LINE>'),
-    ({'kind': 'rectangle', 'text': None, 'width_mm': 30, 'height_mm': 10},
-     ['GetDefault(DrawObjCreatorRectangle)', 'Execute(DrawObjCreatorRectangle)', 'Cancel'], '<RECTANGLE>'),
-    ({'kind': 'ellipse', 'text': None, 'width_mm': 30, 'height_mm': 10, 'treat_as_char': False},
-     ['GetDefault(DrawObjCreatorEllipse)', 'Execute(DrawObjCreatorEllipse)', 'Cancel'], 'TreatAsChar="false"'),
     ({'kind': 'header', 'text': 'Top', 'apply_to': 'even'},
      ['GetDefault(HeaderFooter)', 'Execute(HeaderFooter)', 'insert_text', 'CloseEx'], '<HEADER ApplyPageType="Even">'),
     ({'kind': 'footer', 'text': 'Bottom'},
@@ -620,8 +640,9 @@ class ServiceFlowTests(unittest.TestCase):
         cases = (
             (_FakeHwp(no_readback=True), {}, 'GetTextFile is unavailable'),
             (_FakeHwp(bad_readback=True), {}, 'not well-formed HWPML'),
-            (_FakeHwp(snapshot_unknown=True), {}, 'not provably in normal edit state'),
-            (_FakeHwp(snapshot_unknown=True), {'kind': 'memo'}, 'not provably known'),
+            # An unreadable selection mode is a technical failure (the bundle holds it), never a refusal.
+            (_FakeHwp(snapshot_unknown=True), {}, 'the selection mode could not be read'),
+            (_FakeHwp(snapshot_unknown=True), {'kind': 'memo'}, 'the selection mode could not be read'),
             (selected, {}, 'not provably in normal edit state'),
             (_FakeHwp(), {'expected_pos': [0, 0, 4]}, 'caret is at [0, 0, 5], expected [0, 0, 4]'),
             (_FakeHwp(), {'expected_pos': [0, 1, 5]}, 'expected [0, 1, 5]'),
@@ -655,7 +676,7 @@ class ServiceFlowTests(unittest.TestCase):
             ({'wrong_tag': True}, {}, 'FOOTNOTE count changed by 0'),
             ({'extra_control': True}, {}, "other controls changed: {'BOOKMARK': 1}"),
             ({'extra_control': True}, {'kind': 'equation', 'text': None, 'script': 'x'}, "other controls changed: {'BOOKMARK': 1}"),
-            ({'eat_char': True}, {'kind': 'rectangle', 'text': None, 'width_mm': 5, 'height_mm': 5}, 'document text outside the new object changed'),
+            ({'eat_char': True}, {'kind': 'equation', 'text': None, 'script': 'x'}, 'document text outside the new object changed'),
             ({'no_return': True}, {}, 'could not return to the original list'),
         )
         for faults, fields, reason in cases:
