@@ -16,6 +16,7 @@ The attribute names here are HWPML 2.x names and are UNVERIFIED natively.
 from __future__ import annotations
 
 import re
+from collections import Counter
 
 import xml.etree.ElementTree as ET
 from collections.abc import Iterable, Mapping
@@ -162,7 +163,8 @@ def _head_growth_reasons(before: ET.Element, after: ET.Element, path: str, allow
         out.append(f'{where} lost {len(old_children) - len(new_children)} entries')
         return
     if len(new_children) > len(old_children) and not entry_tag:
-        out.append(f'{where} gained children, but only {sorted(GROWABLE_HEAD_LISTS)} may gain entries')
+        added = sorted((Counter(child.tag for child in new_children) - Counter(child.tag for child in old_children)).elements())
+        out.append(f'{where} gained children {added}, but only {sorted(GROWABLE_HEAD_LISTS)} may gain entries')
         return
     if any(child.tag != entry_tag for child in appended):
         out.append(f'{where} gained entries other than {entry_tag}')
@@ -184,15 +186,34 @@ KNOWN_HEAD_TAGS = ('DOCSUMMARY', 'TITLE', 'SUBJECT', 'AUTHOR', 'DATE', 'KEYWORDS
                    'TABDEF', 'NUMBERINGLIST', 'NUMBERING', 'BULLETLIST', 'BULLET', 'PARASHAPELIST', 'PARASHAPE', 'STYLELIST', 'STYLE',
                    'MEMOSHAPELIST', 'MEMOSHAPE', 'COMPATIBLEDOCUMENT', 'LAYOUTCOMPATIBILITY', 'TRACKCHANGELIST',
                    'TRACKCHANGEAUTHORLIST', 'HEAD')
-HEAD_REASON_CODES = frozenset({f'head_{tag.lower()}_changed' for tag in KNOWN_HEAD_TAGS} | {'head_changed', 'tail_changed', 'hwpml_parts_changed'})
+_HEAD_CHANGE_KINDS = (('became', ' became '), ('attrs', ' attributes changed'), ('text', ' text changed'), ('lost', ' lost '),
+                      ('gained', ' gained children'), ('foreign', ' gained entries other than'), ('ids', ' appended '),
+                      ('entry', ' existing '))
+HEAD_REASON_CODES = frozenset({f'head_{tag.lower()}_{kind}' for tag in KNOWN_HEAD_TAGS for kind, _needle in _HEAD_CHANGE_KINDS}
+                              | {f'head_{tag.lower()}_gained_{child.lower()}' for tag in KNOWN_HEAD_TAGS for child in (*KNOWN_HEAD_TAGS, 'OTHER')}
+                              | {'head_changed', 'tail_changed', 'hwpml_parts_changed'})
 
 
 def head_reason_code(reason: str) -> str | None:
-    """The fixed label of a head_tail_reasons() reason, or None for any other reason."""
+    """The fixed label of a head_tail_reasons() reason, or None for any other reason.
+
+    head_<element>_<kind>: the deepest changed HEAD element and how it changed (became, attrs, text, lost, gained,
+    foreign, ids, entry); a gained child list is named too (head_<element>_gained_<child>). Names come only from the
+    closed KNOWN_HEAD_TAGS list.
+    """
     if reason.startswith('existing HEAD entry changed: '):
-        path = reason[len('existing HEAD entry changed: '):].split(' ', 1)[0]
+        path, _, rest = reason[len('existing HEAD entry changed: '):].partition(' ')
         tags = re.findall(r'/([A-Z][A-Z0-9]*)', path)
-        return f'head_{tags[-1].lower()}_changed' if tags and tags[-1] in KNOWN_HEAD_TAGS else 'head_changed'
+        if not tags or tags[-1] not in KNOWN_HEAD_TAGS:
+            return 'head_changed'
+        kind = next((name for name, needle in _HEAD_CHANGE_KINDS if needle in ' ' + rest), None)
+        if kind is None:
+            return 'head_changed'
+        if kind == 'gained':
+            added = re.findall(r"'([A-Z][A-Z0-9]*)'", rest.split(', but only', 1)[0])
+            child = added[0] if added and added[0] in KNOWN_HEAD_TAGS else 'OTHER'
+            return f'head_{tags[-1].lower()}_gained_{child.lower()}'
+        return f'head_{tags[-1].lower()}_{kind}'
     if 'changed (it holds embedded binary data' in reason:
         return 'tail_changed'
     if reason.startswith('top-level HWPML parts changed'):

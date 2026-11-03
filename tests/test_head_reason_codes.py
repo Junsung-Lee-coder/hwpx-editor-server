@@ -33,10 +33,15 @@ class HeadReasonCodes(unittest.TestCase):
         before = doc()
         after = doc()
         after.find('HEAD/DOCSETTING/BEGINNUMBER').set('Footnote', '2')
-        self.assertEqual(self.codes(before, after), ('head_beginnumber_changed', 'head_beginnumber_changed'))
+        self.assertEqual(self.codes(before, after), ('head_beginnumber_attrs', 'head_beginnumber_attrs'))
 
     def test_tail_change(self):
         self.assertEqual(self.codes(doc(), doc(tail='WFla')), ('tail_changed', 'tail_changed'))
+
+    def test_a_new_list_in_the_mapping_table_is_named(self):
+        before = doc(extra='<MAPPINGTABLE><CHARSHAPELIST Count="1"><CHARSHAPE Id="0"/></CHARSHAPELIST></MAPPINGTABLE>')
+        after = doc(extra='<MAPPINGTABLE><CHARSHAPELIST Count="1"><CHARSHAPE Id="0"/></CHARSHAPELIST><MEMOSHAPELIST Count="1"><MEMOSHAPE Id="0"/></MEMOSHAPELIST></MAPPINGTABLE>')
+        self.assertEqual(self.codes(before, after), ('head_mappingtable_gained_memoshapelist', 'head_mappingtable_gained_memoshapelist'))
 
     def test_unknown_head_element(self):
         self.assertEqual(self.codes(doc(extra='<ZZUNKNOWN A="1"/>'), doc(extra='<ZZUNKNOWN A="2"/>')), ('head_changed', 'head_changed'))
@@ -45,7 +50,7 @@ class HeadReasonCodes(unittest.TestCase):
         self.assertEqual(layout_ops.reason_code('COLDEF count moved by 2, expected 0 or 1'), 'coldef_count_moved')
 
     def test_codes_reach_the_diagnostic(self):
-        for code in ('head_caretpos_changed', 'head_beginnumber_changed', 'tail_changed', 'coldef_count_moved'):
+        for code in ('head_beginnumber_attrs', 'head_mappingtable_gained_memoshapelist', 'tail_changed', 'coldef_count_moved'):
             self.assertTrue(step_diagnostic_allowed('verify', code), code)
         self.assertFalse(step_diagnostic_allowed('verify', 'head_whatever_changed'))
 
