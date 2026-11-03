@@ -7313,7 +7313,7 @@ class LocalCliService(
                     # descriptors, metadata, metaclass name or representation.
                     error_text = 'Native command failed; outcome is unproven.'
                     if step_refused:
-                        error_text = f'Refused before any edit ({step_refusal_code}); the document and caret are unchanged.'
+                        error_text = f'Refused before any edit ({step_refusal_code}); the document is unchanged and the caret is put back; an existing selection may be cleared.'
                     elif target_refused:
                         error_text = ('Formatting refused before any edit; original state and preservation verified.' if step.get('op') in {'character_format_exact', 'paragraph_format_exact', 'table_inventory', 'table_read', 'table_edit_exact', 'table_style_exact', 'table_width_exact', 'table_create_exact'}
                                       else 'Numbering preflight refused; original state and preservation verified.')

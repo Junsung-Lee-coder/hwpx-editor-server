@@ -933,7 +933,48 @@ def verify_columns(
 # ---------------------------------------------------------------- sections
 
 
-def plan_section_insert(doc: Mapping[str, Any]) -> dict[str, Any]:
+def section_insert_position_reason(doc: Mapping[str, Any], caret: Any) -> str | None:
+    """Why a section break at ``caret`` is outside the qualified shape, from the before-readback; None when interior.
+
+    Qualified: between two characters of one body paragraph's text. The caret position is located in its paragraph
+    under both accepted readings of an inline control's width (CONTROL_POSITION_WIDTH or none); every reading that
+    reaches the position must have text before and after it. A paragraph start (also after leading inline controls),
+    its end and a paragraph without text are not interior. A caret the readback cannot place is a malformed read.
+    """
+    try:
+        list_id, para, pos = (int(item) for item in caret)
+    except Exception as exc:
+        raise LayoutError('the caret position is not three integers', 'readback_malformed') from exc
+    tokens = _body_tokens(doc)
+    opens = [index for index, token in enumerate(tokens) if token[:2] == ('E', 'P')]
+    if list_id != 0 or not 0 <= para < len(opens):
+        raise LayoutError(f'the caret paragraph {para} of list {list_id} is not a body paragraph of the readback', 'readback_malformed')
+    start = opens[para] + 1
+    end = next((index for index in range(start, len(tokens)) if tokens[index][:2] in (('/E', 'P'), ('E', 'P'))), len(tokens))
+    segment = tokens[start:end]
+    reached = False
+    for width in (CONTROL_POSITION_WIDTH, 0):
+        position = 0
+        for cut in range(len(segment) + 1):
+            if position == pos:
+                reached = True
+                before = sum(1 for token in segment[:cut] if token[0] == 'T')
+                after = sum(1 for token in segment[cut:] if token[0] == 'T')
+                if not before or not after:
+                    return ('the caret is at the start of its paragraph\'s text' if not before else 'the caret is at the end of its paragraph\'s text')
+            if cut < len(segment):
+                kind = segment[cut][0]
+                position += 1 if kind == 'T' else (width if kind == 'C' else 0)
+    if not reached:
+        raise LayoutError(f'caret position {pos} is not a position of paragraph {para} in the readback', 'readback_malformed')
+    return None
+
+
+def plan_section_insert(doc: Mapping[str, Any], *, caret: Any) -> dict[str, Any]:
+    reason = section_insert_position_reason(doc, caret)
+    if reason is not None:
+        raise LayoutError(f'{reason}; a section break is qualified only between two characters of one paragraph\'s text',
+                          'section_insert_position_unsupported')
     return {'kind': 'section_insert', 'section_count_before': doc['section_count']}
 
 
@@ -973,7 +1014,8 @@ def plan_section_delete(request: Mapping[str, Any], doc: Mapping[str, Any], *, k
     if index > doc['section_count']:
         raise LayoutError(f'section_index {index} is past the last section ({doc["section_count"]})')
     if key_indicator_sections is not None and key_indicator_sections != doc['section_count']:
-        raise LayoutError(f'KeyIndicator reports {key_indicator_sections} sections but HWPML has {doc["section_count"]}')
+        # Two strict reads that contradict each other describe an unknown editor state, not a stale request.
+        raise LayoutError(f'KeyIndicator reports {key_indicator_sections} sections but HWPML has {doc["section_count"]}', 'readback_malformed')
     return {'kind': 'section_delete', 'section_index': index, 'section_count_before': doc['section_count']}
 
 

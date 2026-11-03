@@ -329,7 +329,7 @@ class LocalCliLayoutMixin:
         expected_pos = request['expected_pos']
         self._layout_require(hwp, expected_pos, control, where='before section readback', body_only=True, initial=True)
         doc_before = self._layout_document(hwp, control, where='before edit', body_rule='section_insert')
-        plan = self._layout_plan(control, lambda: plan_section_insert(doc_before))
+        plan = self._layout_plan(control, lambda: plan_section_insert(doc_before, caret=expected_pos))
         self._layout_require(hwp, expected_pos, control, where='before BreakSection', body_only=True)
         result = self._layout_native_run(hwp, 'BreakSection', control)
         self._layout_raise_if_failed(result)

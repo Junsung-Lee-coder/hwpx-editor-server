@@ -810,12 +810,15 @@ class SectionFlowTests(unittest.TestCase):
             _run(hwp, {'kind': 'section_insert', 'expected_pos': [0, 0, 6], 'confirm_layout': True})
 
     def test_insert_noop_and_raise(self) -> None:
+        # An interior caret (a paragraph start is refused before BreakSection).
         hwp = _FakeLayoutHwp(noop={'BreakSection'})
+        hwp.caret = (0, 0, 3)
         with self.assertRaisesRegex(LocalCliMutationError, 'SECDEF count'):
-            _run(hwp, {'kind': 'section_insert', 'expected_pos': [0, 0, 0], 'confirm_layout': True})
+            _run(hwp, {'kind': 'section_insert', 'expected_pos': [0, 0, 3], 'confirm_layout': True})
         hwp = _FakeLayoutHwp(raising={'BreakSection'})
+        hwp.caret = (0, 0, 3)
         with self.assertRaises(LocalCliMutationError):
-            _run(hwp, {'kind': 'section_insert', 'expected_pos': [0, 0, 0], 'confirm_layout': True})
+            _run(hwp, {'kind': 'section_insert', 'expected_pos': [0, 0, 3], 'confirm_layout': True})
         self.assertEqual(hwp.mutations(), ['BreakSection'])
 
     def test_insert_refused_in_table_cell(self) -> None:

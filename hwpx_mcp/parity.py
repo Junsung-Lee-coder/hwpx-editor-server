@@ -105,7 +105,7 @@ GUARDED = frozenset({'page_number_apply', 'official_numbering_apply', 'paragraph
 # Ops that publish mutation intent at their first native edit (app.step_refusal.DEFERRED_INTENT_OPS): before it they
 # refuse with a fixed refusal_code only from their own exact reads; anything else holds the session.
 DEFERRED = frozenset({'layout_exact', 'object_insert_exact', 'paragraph_rehome_exact'})
-_DEFERRED = ('refused with a fixed refusal_code, document and caret unchanged and session usable, only when the backend proves the '
+_DEFERRED = ('refused with a fixed refusal_code, document unchanged, caret put back (an existing selection may be cleared) and session usable, only when the backend proves the '
              'request stale or impossible from its own exact reads before the first native edit; any other backend error, and any '
              'failure after the edit started, is an unknown outcome that holds the session (app.step_refusal)')
 for _op, _row in BUNDLE_OPS.items():
