@@ -385,6 +385,8 @@ Hancom 13.0.0.3457에서 측정한 결과이며, 결과의 `changes`와 `after`�
 
 대기열 편집 op: `replace_all`, `replace_text_safe`, `replace_paragraph_safe`, `paragraph_replace_native`, `replace_paragraph_range_safe`, `paragraph_range_replace_native`, `replace_between_anchors_safe`, `clone_text_style`, `clone_paragraph_shape`, `clone_paragraph_layout`, `insert_after_text`, `insert_before_text`, `insert_at_document_end`, `style_text`, `style_text_in_paragraph`, `align_paragraph`, `paragraph_shape`, `list_paragraph`, `replace_empty_native_list_scaffold`, `cursor_replace_text`, `cursor_delete_range`, `cursor_insert_text`, `cursor_snapshot`, `control_delete_by_anchor`, `table_cell_action`, `table_cell_clear_text`, `table_cell_replace_text`, `table_patch_cells`. 각 op의 필드는 `hwpx_job` 입력 스키마에 있습니다.
 
+`replace_paragraph_safe`와 `paragraph_replace_native`는 `find`가 든 문단을 문단 나눔까지 함께 지우고 `replace`를 입력합니다. 다음 문단과 나뉜 상태를 유지하려면 `replace`를 `"\r\n"`으로 끝내야 하며, 그러지 않으면 다음 문단이 바뀐 글에 붙고 작업은 성공으로 끝납니다(한글 2024에서 확인, 마지막 문단은 지울 문단 나눔이 없음). 작성 계획(`compile_authoring`, `author_and_convert`)은 두 줄 이상인 절에만 이 문단 나눔을 붙이므로, 한 줄짜리 절이 뒤에 다른 문단이 있는 문단을 바꾸면 다음 문단이 붙습니다(한글 2024에서 확인).
+
 작업 ID는 이 어댑터가 제출한 것만 조회·확인·회수할 수 있으며, 다른 ID는 백엔드에 보내지 않고 `JOB_NOT_OWNED`로 거부합니다. 성공하지 않은 작업은 `JOB_NOT_READY`로 거부하고 아무것도 받지 않습니다. 제출 중 연결이 끊기면 `BACKEND_OUTCOME_UNKNOWN`이며 다시 보내지 않습니다.
 
 ### 노출하지 않는 백엔드 기능

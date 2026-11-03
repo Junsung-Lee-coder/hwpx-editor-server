@@ -505,6 +505,25 @@ class NativeFindings(unittest.TestCase):
         self.assertIsNotNone(model)
         self.assertIn('active selection', json.dumps(model.model_json_schema(), ensure_ascii=False))
 
+    def test_paragraph_replace_schemas_say_the_paragraph_break_is_deleted(self):
+        # Queued paragraph mode selects the found paragraph with its trailing break (MoveSelNextParaBegin), deletes it
+        # and types `replace`; on Hancom 2024 the next paragraph joined a replacement without a trailing "\r\n".
+        tree = ast.parse((APP / 'edit_ops.py').read_text(encoding='utf-8'))
+        selector = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == '_select_paragraph_with_trailing_break_for_current_selection')
+        takes_break = any(isinstance(n, ast.Constant) and n.value == 'MoveSelNextParaBegin' for n in ast.walk(selector))
+        from hwpx_mcp import job_schema
+        for model in (job_schema.ReplaceParagraphSafe, job_schema.ParagraphReplaceNative):
+            text = json.dumps(model.model_json_schema(), ensure_ascii=False)
+            self.assertEqual('paragraph break' in text, takes_break, f'{model.__name__} must say whether the paragraph break is deleted')
+        # The authoring compiler appends that break only for sections of two or more rendered lines.
+        engine = ast.parse((APP / 'template_engine.py').read_text(encoding='utf-8'))
+        one_line_gap = any(isinstance(n, ast.Compare) and isinstance(n.left, ast.Call) and getattr(n.left.func, 'id', None) == 'len'
+                           and getattr(n.left.args[0], 'id', None) == 'rendered_lines' and isinstance(n.ops[0], ast.Gt)
+                           and isinstance(n.comparators[0], ast.Constant) and n.comparators[0].value == 1 for n in ast.walk(engine))
+        for model in (job_schema.JobCompileAuthoring, job_schema.JobAuthorAndConvert):
+            text = json.dumps(model.model_json_schema(), ensure_ascii=False)
+            self.assertEqual('one-line section' in text, one_line_gap, f'{model.__name__} must say what a one-line section does')
+
     def test_rehome_schema_says_what_the_insert_first_order_does(self):
         # The backend engine inserts the copy, then searches delete_match from the top of the page; moving a paragraph
         # before an earlier anchor deletes the new copy and still reports success (measured on Hancom 2024).
