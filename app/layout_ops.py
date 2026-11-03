@@ -497,6 +497,12 @@ _SECTION_BREAK_SHAPES = frozenset(
 )
 
 
+def _copy_form(sig: Any) -> Any:
+    """A section definition's signature without its memo-shape reference: on Hancom 2024 a new section's SECDEF
+    refers to the memo shape created with it (section_copy_secdef_memoshapeid); the rest must be an exact copy."""
+    return re.sub(r" MemoShapeId='[^']*'", '', sig) if isinstance(sig, str) else sig
+
+
 def _signature_difference(old: str, new: str) -> tuple[str, str]:
     """(element, attribute) of the first difference between two signature() strings, from the fixed lists."""
     pattern = re.compile(r"<([A-Z][A-Z0-9]*)((?: [A-Za-z0-9]+='[^']*')*)>")
@@ -603,8 +609,8 @@ def _section_break_reasons(before: list[Any], after: list[Any], *, inserted: boo
         for key in ('SECDEF', 'COLDEF'):
             new = [token for token in extra if token[:2] == ('C', key)]
             old = [token for token in head if token[:2] == ('C', key)]
-            if new and (not old or new[0] != old[-1]):
-                tag, attr = _signature_difference(old[-1][2], new[0][2]) if old else ('OTHER', 'OTHER')
+            if new and (not old or _copy_form(new[0][2]) != _copy_form(old[-1][2])):
+                tag, attr = _signature_difference(_copy_form(old[-1][2]), _copy_form(new[0][2])) if old else ('OTHER', 'OTHER')
                 reasons.append(f'the new section\'s {key} is not a copy of the split section\'s {key}: {tag}.{attr}')
     else:
         removed = sum(1 for token in head if token[:2] == ('C', 'SECDEF')) + 1
