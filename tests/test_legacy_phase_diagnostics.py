@@ -170,5 +170,31 @@ class TableSplitPhases(unittest.TestCase):
                 self.assertTrue(owner.session._native_custody_held)
 
 
+
+class CellAddressOrder(unittest.TestCase):
+    """pyhwpx get_cell_addr(as_='tuple') is zero-based (row, column); 'B3' is column 1, row 2."""
+
+    def reader(self, tuple_value, str_value='B3'):
+        from app.local_cli_service import LocalCliService
+
+        class Hwp:
+            def get_cell_addr(self, as_='str'):
+                if as_ == 'tuple':
+                    if tuple_value is None:
+                        raise OSError('no tuple form')
+                    return tuple_value
+                return str_value
+        return LocalCliService._bundle_current_cell_addr_tuple(LocalCliService.__new__(LocalCliService), Hwp())
+
+    def test_tuple_and_string_forms_agree(self):
+        self.assertEqual(self.reader((2, 1)), (1, 2))
+        self.assertEqual(self.reader(None), (1, 2))
+
+    def test_moving_down_raises_the_row(self):
+        upper, lower = self.reader((2, 1)), self.reader((3, 1))
+        self.assertGreater(lower[1], upper[1])
+        self.assertEqual(lower[0], upper[0])
+
+
 if __name__ == '__main__':
     unittest.main()

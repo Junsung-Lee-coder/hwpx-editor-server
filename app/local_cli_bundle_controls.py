@@ -84,6 +84,11 @@ class LocalCliBundleControlsMixin:
             return False
 
     def _bundle_current_cell_addr_tuple(self, hwp: Any) -> tuple[int, int] | None:
+        """The caret's cell as zero-based (column, row).
+
+        pyhwpx get_cell_addr(as_='tuple') returns zero-based (row, column) (excel_address_to_tuple_zero_based in the
+        locked pyhwpx 1.7.2); the 'A1' string form is converted here to the same (column, row).
+        """
         getter = getattr(hwp, 'get_cell_addr', None)
         if not callable(getter):
             return None
@@ -94,7 +99,7 @@ class LocalCliBundleControlsMixin:
                 continue
             if isinstance(value, tuple) and len(value) >= 2:
                 try:
-                    return (int(value[0]), int(value[1]))
+                    return (int(value[1]), int(value[0]))
                 except Exception:
                     continue
             if isinstance(value, str):
