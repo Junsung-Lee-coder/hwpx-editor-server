@@ -67,6 +67,15 @@ class HeadReasonCodes(unittest.TestCase):
 
 
 
+class HeaderApplyObserved(unittest.TestCase):
+    def test_the_written_page_type_is_named_from_a_fixed_set(self):
+        for value, code in (("'Both'", 'header_apply_observed_both'), ("'Odd'", 'header_apply_observed_odd'), ('None', 'header_apply_observed_absent'),
+                            ("'Weird'", 'header_apply_observed_other')):
+            reason = f"new HEADER ApplyPageType is {value}, expected 'Odd'"
+            self.assertEqual(object_insert.reason_code(reason), code)
+            self.assertTrue(step_diagnostic_allowed('verify', code))
+
+
 class InsertWithCaretInHead(unittest.TestCase):
     """The object engine over an HWPML readback whose HEAD records the caret, as Hancom 2024 writes it."""
 

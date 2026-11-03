@@ -165,13 +165,19 @@ _REASON_CODES: tuple[tuple[str, str], ...] = (
     ('expected exactly +1', 'object_count_mismatch'),
     ('count changed by', 'companion_count_mismatch'),
 )
-REASON_CODES = frozenset(code for _needle, code in _REASON_CODES) | {'other'} | HEAD_REASON_CODES
+_APPLY_OBSERVED = {'Both': 'header_apply_observed_both', 'Even': 'header_apply_observed_even', 'Odd': 'header_apply_observed_odd'}
+REASON_CODES = (frozenset(code for _needle, code in _REASON_CODES) | {'other'} | HEAD_REASON_CODES
+                | set(_APPLY_OBSERVED.values()) | {'header_apply_observed_absent', 'header_apply_observed_other'})
 
 
 def reason_code(reason: str) -> str:
     head = head_reason_code(reason)
     if head is not None:
         return head
+    observed = re.search(r" ApplyPageType is (None|'([A-Za-z]*)')", reason)
+    if observed:
+        # Which page type Hancom wrote, from the fixed set; never other text.
+        return 'header_apply_observed_absent' if observed.group(1) == 'None' else _APPLY_OBSERVED.get(observed.group(2), 'header_apply_observed_other')
     for needle, code in _REASON_CODES:
         if needle in reason:
             return code
