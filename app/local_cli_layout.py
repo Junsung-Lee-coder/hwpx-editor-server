@@ -32,6 +32,7 @@ from app.layout_ops import (
     plan_section_delete,
     plan_section_insert,
     public_document,
+    head_pair,
     reason_code,
     verify_columns,
     verify_hanging_indent,
@@ -301,7 +302,7 @@ class LocalCliLayoutMixin:
         self._layout_raise_if_unverified(verification)
         public_plan = {key: value for key, value in plan.items() if key != 'before'}
         return {'plan': public_plan, 'native_actions': [result], 'verification': verification,
-                'document_before': public_document(doc_before), 'document_after': public_document(doc_after)}
+                'document_before': public_document(doc_before), 'document_after': public_document(doc_after), **head_pair(doc_before, doc_after)}
 
     def _layout_columns(self, hwp: Any, request: dict[str, Any], control: StepControl) -> dict[str, Any]:
         expected_pos = request['expected_pos']
@@ -323,7 +324,7 @@ class LocalCliLayoutMixin:
         verification = verify_columns(plan, after, doc_before, doc_after, caret_section=caret_section, caret=expected_pos)
         self._layout_raise_if_unverified(verification)
         return {'plan': plan, 'native_actions': [result], 'verification': verification,
-                'document_before': public_document(doc_before), 'document_after': public_document(doc_after)}
+                'document_before': public_document(doc_before), 'document_after': public_document(doc_after), **head_pair(doc_before, doc_after)}
 
     def _layout_section_insert(self, hwp: Any, request: dict[str, Any], control: StepControl) -> dict[str, Any]:
         expected_pos = request['expected_pos']
@@ -337,7 +338,7 @@ class LocalCliLayoutMixin:
         verification = verify_section_insert(doc_before, doc_after, caret=expected_pos)
         self._layout_raise_if_unverified(verification)
         return {'plan': plan, 'native_actions': [result], 'verification': verification,
-                'document_before': public_document(doc_before), 'document_after': public_document(doc_after)}
+                'document_before': public_document(doc_before), 'document_after': public_document(doc_after), **head_pair(doc_before, doc_after)}
 
     def _layout_prove_section_start(self, hwp: Any, request: dict[str, Any], control: StepControl) -> dict[str, Any]:
         """Read-only proof that the caret opens section ``section_index``.
@@ -376,7 +377,7 @@ class LocalCliLayoutMixin:
         verification = verify_section_delete(plan, doc_before, doc_after)
         self._layout_raise_if_unverified(verification)
         return {'plan': plan, 'section_start_proof': proof, 'native_actions': [result], 'verification': verification,
-                'document_before': public_document(doc_before), 'document_after': public_document(doc_after)}
+                'document_before': public_document(doc_before), 'document_after': public_document(doc_after), **head_pair(doc_before, doc_after)}
 
     def _layout_marker_text(self, hwp: Any, list_id: int, para: int, length: int) -> str:
         select = getattr(hwp, 'select_text', None)
@@ -425,7 +426,7 @@ class LocalCliLayoutMixin:
         self._layout_raise_if_unverified(verification)
         public_plan = {'kind': plan['kind'], 'marker_chars': len(marker), 'marker_pos': list(marker_pos)}
         return {'plan': public_plan, 'native_actions': [result], 'verification': verification,
-                'document_before': public_document(doc_before), 'document_after': public_document(doc_after)}
+                'document_before': public_document(doc_before), 'document_after': public_document(doc_after), **head_pair(doc_before, doc_after)}
 
     # ------------------------------------------------------------ entry point
 

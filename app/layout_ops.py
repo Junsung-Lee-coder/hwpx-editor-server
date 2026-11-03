@@ -684,8 +684,12 @@ def public_document(doc: Mapping[str, Any]) -> dict[str, Any]:
         'text_sha256': _digest(doc['text'])[:16],
         'pagedef_sha256': None if pagedefs is None else [_digest(item)[:16] for item in pagedefs],
         'controls': dict(doc['controls']),
-        'head': head_summary(doc['_root']),
     }
+
+
+def head_pair(before: Mapping[str, Any], after: Mapping[str, Any]) -> dict[str, Any]:
+    """HEAD structure before and after the edit (head_summary), under keys a client's redaction of document fields keeps."""
+    return {'head_before': head_summary(before['_root']), 'head_after': head_summary(after['_root'])}
 
 
 def compare_documents(

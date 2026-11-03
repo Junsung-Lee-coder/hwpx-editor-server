@@ -223,9 +223,51 @@ def _head_growth_reasons(before: ET.Element, after: ET.Element, path: str, allow
             _head_growth_reasons(old, new, f'{where}[{index}]', allow, out, shrink)
 
 
+# HEAD definition lists that a section owns through its SECDEF. They change only with an edit that adds or removes a
+# section, and then only by the entries that section's own SECDEF references (see definition_references).
+REFERENCE_BOUND_LISTS: dict[str, str] = {'NUMBERINGLIST': 'NUMBERING', 'MEMOSHAPELIST': 'MEMOSHAPE'}
+# HWPML2X reference attributes, as read back on Hancom 2024 (tests/fixtures/native_ordinary): a SECDEF names its outline
+# numbering with OutlineShape and its memo shape with MemoShapeId (left out when 0); a PARASHAPE with HeadingType
+# "Number" names its numbering with Heading.
+SECDEF_REFERENCES: dict[str, str] = {'OutlineShape': 'NUMBERINGLIST', 'MemoShapeId': 'MEMOSHAPELIST'}
+# HeadingType values whose Heading names no NUMBERING (None, and Bullet, which names a BULLET). Every other value counts
+# as a NUMBERING reference, so an unknown heading type can only keep a definition, never let it go.
+_NOT_NUMBERING_HEADINGS = frozenset({'none', 'bullet', '0', '3'})
+
+
+def definition_references(root: ET.Element) -> dict[str, dict[str, list[str]]]:
+    """Every reference to a NUMBERINGLIST or MEMOSHAPELIST entry: list tag -> entry Id -> referrers in document order.
+
+    Referrers are ``SECDEF[n].<attribute>`` (n counts SECDEF elements in BODY order), ``PARASHAPE[Id=i].Heading``, or
+    ``<TAG>.<attribute>`` for any other attribute whose name contains ``MemoShape``, so a memo shape reference this
+    module does not know by name still keeps its definition.
+    """
+    refs: dict[str, dict[str, list[str]]] = {tag: {} for tag in REFERENCE_BOUND_LISTS}
+
+    def add(list_tag: str, value: str | None, who: str) -> None:
+        if value is not None:
+            refs[list_tag].setdefault(value.strip(), []).append(who)
+
+    secdef_index = 0
+    for element in root.iter():
+        tag = element.tag if isinstance(element.tag, str) else ''
+        if tag == 'SECDEF':
+            for attr, list_tag in SECDEF_REFERENCES.items():
+                add(list_tag, element.get(attr), f'SECDEF[{secdef_index}].{attr}')
+            secdef_index += 1
+            continue
+        if tag == 'PARASHAPE' and (element.get('HeadingType') or '').strip().lower() not in _NOT_NUMBERING_HEADINGS:
+            add('NUMBERINGLIST', element.get('Heading'), f'PARASHAPE[Id={element.get(ENTRY_ID_ATTR)}].Heading')
+        for attr, value in element.attrib.items():
+            if 'memoshape' in attr.lower():
+                add('MEMOSHAPELIST', value, f'{tag}.{attr}')
+    return refs
+
+
 def head_summary(root: ET.Element) -> dict[str, Any]:
     """Structure of the HEAD definition lists and of every SECDEF, for responses: element names, Count/Id values, entry
-    signature hashes (Id excluded) and SECDEF attribute values; never document text."""
+    signature hashes (Id excluded), SECDEF attribute values, the attributes of NUMBERING and MEMOSHAPE entries and what
+    references them; never document text."""
     head = root if root.tag == HEAD_TAG else root.find(HEAD_TAG)
     mapping = head.find('MAPPINGTABLE') if head is not None else None
     lists: dict[str, Any] = {}
@@ -236,9 +278,13 @@ def head_summary(root: ET.Element) -> dict[str, Any]:
             'ids': [entry.get(ENTRY_ID_ATTR) for entry in entries[:64]],
             'signatures': [hashlib.sha256(signature(entry, {entry.tag: frozenset({ENTRY_ID_ATTR})}).encode('utf-8')).hexdigest()[:12] for entry in entries[:64]],
         }
+        if child.tag in REFERENCE_BOUND_LISTS:
+            lists[child.tag]['entry_attrs'] = [dict(sorted(entry.attrib.items())) for entry in entries[:16]]
     body = root.find('.//BODY') if root.tag != 'BODY' else root
     secdefs = [dict(sorted(element.attrib.items())) for element in (body.iter('SECDEF') if body is not None else [])]
-    return {'head_children': [child.tag for child in head] if head is not None else [], 'mapping_lists': lists, 'secdefs': secdefs[:16]}
+    references = {tag: {key: who[:8] for key, who in list(found.items())[:16]} for tag, found in definition_references(root).items()}
+    return {'head_children': [child.tag for child in head] if head is not None else [], 'mapping_lists': lists, 'secdefs': secdefs[:16],
+            'references': references}
 
 
 # Fixed diagnostic labels for a HEAD/TAIL reason: the deepest HWPML 2.x HEAD element the reason names, from this
