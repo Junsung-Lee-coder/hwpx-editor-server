@@ -141,6 +141,11 @@ _REASON_CODES: tuple[tuple[str, str], ...] = (
     ('paragraph count moved', 'paragraph_count'),
     ('changed paragraph shape, expected at most', 'parashape_changed'),
     ('section break is not exactly a paragraph split', 'section_break_shape'),
+    ("does not keep the split paragraph's attributes: ParaShape", 'section_break_attr_parashape'),
+    ("does not keep the split paragraph's attributes: Style", 'section_break_attr_style'),
+    ("does not keep the split paragraph's attributes: PageBreak", 'section_break_attr_pagebreak'),
+    ("does not keep the split paragraph's attributes: ColumnBreak", 'section_break_attr_columnbreak'),
+    ("does not keep the split paragraph's attributes: other", 'section_break_attr_other'),
     ("does not keep the split paragraph's attributes", 'section_break_attributes'),
     ('section break is not at the caret', 'section_break_position'),
     ('is not a copy of the split section', 'section_copy_mismatch'),
@@ -465,6 +470,9 @@ def _column_scope_reasons(plan: Mapping[str, Any], doc_before: Mapping[str, Any]
 # Style or PageBreak, object positions, other SECDEF attributes) must match.
 
 BODY_RULES = ('page_setup', 'columns', 'columns_new', 'hanging_indent', 'section_insert', 'section_delete')
+# HWPML P attributes named in the section-break diagnostic (fixed set); none may differ.
+_SECTION_START_FLAGS: frozenset[str] = frozenset()
+_SECTION_PARA_ATTRS = ('ParaShape', 'Style', 'PageBreak', 'ColumnBreak')
 _SECTION_BREAK_TOKENS = {('/E', 'P'), ('E', 'P'), ('/E', 'SECTION'), ('E', 'SECTION'), ('C', 'SECDEF'), ('C', 'COLDEF')}
 _SECTION_BREAK_SHAPES = frozenset(
     head + (('C', 'SECDEF'),) + tail
@@ -547,8 +555,15 @@ def _section_break_reasons(before: list[Any], after: list[Any], *, inserted: boo
     if inserted:
         opened = next(token for token in extra if token[:2] == ('E', 'P'))
         split = [token for token in head if token[:2] == ('E', 'P')]
-        if not split or split[-1] != opened:
+        if not split:
             reasons.append('the paragraph after the new section break does not keep the split paragraph\'s attributes')
+        else:
+            # Every paragraph attribute must be the split paragraph's own; the first differing one is named.
+            was, now = dict(split[-1][2]), dict(opened[2])
+            differ = sorted(key for key in set(was) | set(now) if was.get(key) != now.get(key) and key not in _SECTION_START_FLAGS)
+            if differ:
+                named = [key for key in differ if key in _SECTION_PARA_ATTRS] or ['other']
+                reasons.append(f'the paragraph after the new section break does not keep the split paragraph\'s attributes: {named[0]}')
         where = _at_caret(before, prefix, caret)
         if where:
             reasons.append(f'the section break is not at the caret: {where}')
