@@ -773,8 +773,9 @@ class TableInsertOp(Closed):
 
 
 class ListItemsOp(Closed):
+    """Type one numbered item ('1. Item 1') at the caret. Only count=1: a longer list needs multi-line typing, which the backend disables, so it refuses larger counts before touching the session."""
     op: Literal['list_items']
-    count: int = Field(ge=1, le=100)
+    count: Literal[1]
 
 
 class NumberingReadbackOp(Closed):

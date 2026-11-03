@@ -66,6 +66,7 @@ from app.local_cli_runtime import (
     insert_multiline_text_at_caret_native,
     insert_text_at_caret,
     insert_numbered_list_at_cursor,
+    render_numbered_list_text,
     save_document,
     snapshot_live_location,
 )
@@ -6962,6 +6963,17 @@ class LocalCliService(
         }
 
     def list_items(self, *, count: int, session_id: str | None = None) -> dict[str, Any]:
+        # The list is typed as one text; a count that renders a line break can never be typed (insert_text_at_caret
+        # refuses multi-line text), so refuse it before the session binding or the owning worker is touched.
+        try:
+            text = render_numbered_list_text(count) if type(count) is int else None
+        except LocalCliRuntimeError:
+            text = None
+        if text is None:
+            raise LocalCliServiceError('list count must be a positive integer', status_code=400)
+        if '\r' in text or '\n' in text:
+            raise LocalCliServiceError('list supports count=1 only: more items need multi-line typing, which is disabled '
+                                       '(insert_text_at_caret refuses line breaks); nothing was sent to Hancom', status_code=400)
         binding = self._load_active_binding(session_id=session_id)
 
         def _handler(handle: LocalCliRuntimeHandle) -> dict[str, Any]:

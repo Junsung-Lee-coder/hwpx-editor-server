@@ -158,7 +158,8 @@ REST_ROUTES: dict[str, dict[str, Any]] = {
     'POST /local-cli/redo': _exposed('hwpx_command:redo', fields=_SID),
     'POST /local-cli/close': _exposed('hwpx_close', fields=_SID),
     'POST /local-cli/table': _cmd('table_insert', 'rows', 'cols'),
-    'POST /local-cli/list': _cmd('list_items', 'count'),
+    'POST /local-cli/list': {**_cmd('list_items', 'count'), 'backend_unsupported_variants': {
+        'count>1': 'the items are typed as one multi-line text and the backend disables multi-line typing; the service refuses it with 400 before the runtime'}},
     'POST /local-cli/pycall': _excluded('unbounded public pyhwpx method path and arguments (any attribute chain); the bounded '
                                         'command-bundle allowlist is exposed as hwpx_command pyhwpx_call'),
     'POST /local-cli/action': _excluded('unbounded HAction name (destructive actions included); the bounded command-bundle '

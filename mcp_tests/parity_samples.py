@@ -170,7 +170,7 @@ REST_SAMPLES: dict[str, tuple[dict, str]] = {
     'font_family': ({'face_name': '맑은 고딕', 'at_caret': True}, '/local-cli/font'),
     'bullet': ({'text': '글머리 항목'}, '/local-cli/bullet'),
     'table_insert': ({'rows': 2, 'cols': 3}, '/local-cli/table'),
-    'list_items': ({'count': 3}, '/local-cli/list'),
+    'list_items': ({'count': 1}, '/local-cli/list'),
     'numbering_readback': ({}, '/local-cli/numbering-readback'),
 }
 
