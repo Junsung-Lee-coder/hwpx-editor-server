@@ -1665,6 +1665,30 @@ def _shared_table_conflict_blocker(compiled: Any) -> str | None:
     return f'shared_table_cell_conflict: {detail}. Resolve the conflicting table sections and resend before approval.'
 
 
+def _build_authoring_instruction_payload(compiled: Any) -> dict[str, Any]:
+    """The job instructions for a compiled authoring plan.
+
+    Same shape the placeholder routes write (`normalize_instruction_payload` of the edit plan), with the plan's
+    instruction metadata as `metadata` (read by the worker) and its template identity and compile status as
+    tracking keys.
+    """
+    edit_plan = compiled.get('edit_plan') if isinstance(compiled, dict) else None
+    if not isinstance(edit_plan, dict):
+        raise EditOperationError('compiled authoring plan has no edit_plan')
+    raw: dict[str, Any] = {'operations': edit_plan.get('operations'), 'validation': edit_plan.get('validation') or {}}
+    if isinstance(edit_plan.get('instruction_metadata'), dict):
+        raw['metadata'] = edit_plan['instruction_metadata']
+    for key in ('template_version', 'inspect_snapshot_id', 'template_fingerprint'):
+        if compiled.get(key) is not None:
+            raw[key] = compiled[key]
+    readiness = compiled.get('compile_readiness')
+    if isinstance(readiness, dict) and readiness.get('status') is not None:
+        raw['compile_status'] = readiness['status']
+    if edit_plan.get('failure_reason') is not None:
+        raw['failure_reason'] = edit_plan['failure_reason']
+    return normalize_instruction_payload(raw)
+
+
 def _default_confirm_state(job_id: str, compiled: dict[str, Any]) -> dict[str, Any]:
     confirm_policy = compiled.get('confirm_policy', {}) if isinstance(compiled, dict) else {}
     approval_packet = compiled.get('approval_packet', {}) if isinstance(compiled, dict) else {}
