@@ -470,8 +470,10 @@ def _column_scope_reasons(plan: Mapping[str, Any], doc_before: Mapping[str, Any]
 # Style or PageBreak, object positions, other SECDEF attributes) must match.
 
 BODY_RULES = ('page_setup', 'columns', 'columns_new', 'hanging_indent', 'section_insert', 'section_delete')
-# HWPML P attributes named in the section-break diagnostic (fixed set); none may differ.
-_SECTION_START_FLAGS: frozenset[str] = frozenset()
+# HWPML P attributes named in the section-break diagnostic (fixed set). On Hancom 2024 the paragraph that opens the
+# new section reads back with a different ColumnBreak flag (section_break_attr_columnbreak), which belongs to the
+# break itself; that flag alone may differ there.
+_SECTION_START_FLAGS: frozenset[str] = frozenset({'ColumnBreak'})
 _SECTION_PARA_ATTRS = ('ParaShape', 'Style', 'PageBreak', 'ColumnBreak')
 _SECTION_BREAK_TOKENS = {('/E', 'P'), ('E', 'P'), ('/E', 'SECTION'), ('E', 'SECTION'), ('C', 'SECDEF'), ('C', 'COLDEF')}
 _SECTION_BREAK_SHAPES = frozenset(
@@ -558,7 +560,7 @@ def _section_break_reasons(before: list[Any], after: list[Any], *, inserted: boo
         if not split:
             reasons.append('the paragraph after the new section break does not keep the split paragraph\'s attributes')
         else:
-            # Every paragraph attribute must be the split paragraph's own; the first differing one is named.
+            # Every other paragraph attribute must be the split paragraph's own; the first differing one is named.
             was, now = dict(split[-1][2]), dict(opened[2])
             differ = sorted(key for key in set(was) | set(now) if was.get(key) != now.get(key) and key not in _SECTION_START_FLAGS)
             if differ:
