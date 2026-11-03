@@ -518,6 +518,14 @@ class NativeFindings(unittest.TestCase):
         text = json.dumps(command_models()['paragraph_rehome_exact'].model_json_schema(), ensure_ascii=False)
         says = 'deletes the copy it just inserted' in text
         self.assertEqual(says, insert_first, 'the rehome schema must describe the engine order: insert first, then search delete_match')
+        # The finder starts at the document start and takes the first match on the expected page.
+        finder_tree = ast.parse((APP / 'local_cli_bundle_paragraphs.py').read_text(encoding='utf-8'))
+        finder = next(n for n in ast.walk(finder_tree) if isinstance(n, ast.FunctionDef) and n.name == '_find_text_on_expected_page')
+        from_doc_start = any(isinstance(n, ast.Call) and getattr(n.func, 'id', None) == '_move_doc_begin' for n in ast.walk(finder))
+        self.assertEqual('start of the document' in text, from_doc_start, 'the rehome schema must say where the delete_match search starts')
+        # After deleting, the engine refuses (Undo, then an error that holds the session) when the visible text differs.
+        compares = any(isinstance(n, ast.Constant) and isinstance(n.value, str) and 'changed visible text' in n.value for n in ast.walk(engine))
+        self.assertEqual('visible text' in text, compares, 'the rehome schema must say that a change in visible text order is refused')
 
 
 if __name__ == '__main__':
