@@ -174,6 +174,23 @@ _EXTRA_REASONS = frozenset({'native_action_failed', 'native_outcome_unknown', 'r
                             'close_return_failed', 'other', 'failed', 'text_changed'})
 
 
+# Legacy engines that carry one fixed phase on every failure (their errors still hold the session).
+PHASE_DIAGNOSTIC_OPS = frozenset({'table_split_exact', 'paragraph_delete_exact'})
+
+
+def tag_phase(op: str, phase: str, exc: BaseException) -> BaseException:
+    """The exception to raise for a legacy engine failure in ``phase``: the engine's own runtime error keeps its
+    message and gains the phase; anything else (an SDK/COM or helper exception) is wrapped with only its class name,
+    so the journal's cause class still tells an explicit check from an SDK exception."""
+    if type(exc) is LocalCliRuntimeError:
+        if 'step_phase' not in exc.__dict__:
+            exc.step_phase, exc.step_reason = phase, 'failed'
+        return exc
+    error = LocalCliRuntimeError(f'{op} failed during {phase}: {type(exc).__name__}')
+    error.step_phase, error.step_reason = phase, 'failed'
+    return error
+
+
 def step_diagnostic_allowed(phase: str, reason: str) -> bool:
     from app.layout_ops import REASON_CODES as LAYOUT_REASONS
     from app.object_insert import REASON_CODES as OBJECT_REASONS

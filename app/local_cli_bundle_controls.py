@@ -41,7 +41,7 @@ from app.local_cli_service_support import (
     _MACRO_MAX_STRING_CHARS,
     LocalCliMutationError,
 )
-from app.step_refusal import LocalCliStepRefusal, StepControl, restore_caret, strict_pos, strict_selection
+from app.step_refusal import LocalCliStepRefusal, StepControl, restore_caret, strict_pos, strict_selection, tag_phase
 
 
 class LocalCliBundleControlsMixin:
@@ -2660,6 +2660,16 @@ class LocalCliBundleControlsMixin:
         return {'succeeded': False, 'method': None, 'attempts': attempts}
 
     def _bundle_table_split_exact(self, hwp: Any, step: dict[str, Any]) -> dict[str, Any]:
+        phase = ['pre_navigation']
+        try:
+            return self._table_split_exact_phases(hwp, step, phase)
+        except Exception as exc:
+            tagged = tag_phase('table_split_exact', phase[0], exc)
+            if tagged is exc:
+                raise
+            raise tagged from exc
+
+    def _table_split_exact_phases(self, hwp: Any, step: dict[str, Any], phase: list[str]) -> dict[str, Any]:
         resolved = self._bundle_resolve_control_target(hwp, step, op_name='table_split_exact', require_table=True)
         down_rows = int(step.get('down_rows') or 0)
         max_controls = int(step.get('max_controls') or 2048)
@@ -2693,6 +2703,7 @@ class LocalCliBundleControlsMixin:
                 else:
                     pre_navigation_state[key] = {'unavailable': method_name}
             navigation: list[dict[str, Any]] = []
+            phase[0] = 'navigation'
             lower = getattr(hwp, 'TableLowerCell', None)
             haction_run = getattr(getattr(hwp, 'HAction', None), 'Run', None)
             for move_index in range(down_rows):
@@ -2735,6 +2746,7 @@ class LocalCliBundleControlsMixin:
             split_cell_snapshot = self._bundle_compact_snapshot(hwp)
             if not split_cell_snapshot.get('is_cell'):
                 raise LocalCliRuntimeError('table_split_exact split point is not inside a table cell after navigation')
+            phase[0] = 'split_action'
             if split_cell_snapshot.get('has_selection') or int(split_cell_snapshot.get('selection_mode') or 0) != 0:
                 text_box_edit = getattr(hwp, 'ShapeObjTextBoxEdit', None)
                 if callable(text_box_edit):
@@ -2750,6 +2762,7 @@ class LocalCliBundleControlsMixin:
             split_result = self._run_table_split_action(hwp)
             if not split_result.get('succeeded'):
                 raise LocalCliRuntimeError(f'table_split_exact TableSplitTable did not succeed: {split_result.get("attempts")!r}')
+            phase[0] = 'post_inventory'
             after_snapshot = self._bundle_compact_snapshot(hwp)
             after_tables = self._bundle_page_table_items(hwp, page_from=page_from, page_to=page_to, max_controls=max_controls)
             changed = before_tables != after_tables

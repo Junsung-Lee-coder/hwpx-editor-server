@@ -26,6 +26,7 @@ from app.local_cli_runtime import (
 from app.local_cli_service_support import (
     _remove_visible_spaces,
 )
+from app.step_refusal import tag_phase
 
 
 class _NumberingTargetNotFound(LocalCliRuntimeError):
@@ -324,6 +325,16 @@ class LocalCliBundleParagraphsMixin:
         )
 
     def _bundle_paragraph_delete_exact(self, hwp: Any, step: dict[str, Any]) -> dict[str, Any]:
+        phase = ['exact_line_proof']
+        try:
+            return self._paragraph_delete_exact_phases(hwp, step, phase)
+        except Exception as exc:
+            tagged = tag_phase('paragraph_delete_exact', phase[0], exc)
+            if tagged is exc:
+                raise
+            raise tagged from exc
+
+    def _paragraph_delete_exact_phases(self, hwp: Any, step: dict[str, Any], phase: list[str]) -> dict[str, Any]:
         match = self._bundle_require_text(step, 'match', max_chars=500)
         expected_page = int(step.get('expected_page') or 0)
         if expected_page <= 0:
@@ -356,6 +367,7 @@ class LocalCliBundleParagraphsMixin:
                     f'paragraph_delete_exact could not prove an exact visible line {match!r} before mutation; refusing cleanup'
                 )
 
+            phase[0] = 'find_target'
             target = self._find_paragraph_delete_target(
                 hwp,
                 match=match,
@@ -364,7 +376,22 @@ class LocalCliBundleParagraphsMixin:
                 expected_previous_contains=expected_previous_contains,
                 expected_next_contains=expected_next_contains,
             )
+            phase[0] = 'select'
             context_before = _capture_nearby_text_context(hwp)
+            # Reading nearby text selects other paragraphs and puts back only the caret, and Hancom's SetPos drops a
+            # selection, so select the found match again from the selection the finder recorded right after find().
+            found = (target.get('snapshot') or {}).get('selected_pos')
+            try:
+                _flag, slist, spara, spos, elist, epara, epos = found
+                if not _flag or slist != elist:
+                    raise ValueError('no single-list selection')
+                slist, spara, spos, epara, epos = (int(slist), int(spara), int(spos), int(epara), int(epos))
+            except Exception as exc:
+                raise LocalCliRuntimeError('paragraph_delete_exact: the finder did not record the match selection') from exc
+            select = getattr(hwp, 'select_text', None)
+            if not callable(select):
+                raise LocalCliRuntimeError('paragraph_delete_exact needs select_text to select the found match again')
+            select(spara, spos, epara, epos, slist)
             _select_paragraph_with_trailing_break_for_current_selection(hwp)
             selected_range = _get_selected_pos(hwp)
             selected_text = _get_selected_text(hwp, keep_select=True)
@@ -376,7 +403,9 @@ class LocalCliBundleParagraphsMixin:
                 )
             if len(selected_text) > 5000:
                 raise LocalCliRuntimeError('paragraph_delete_exact selected more than 5,000 chars; refusing possible overselection')
+            phase[0] = 'delete'
             _delete_selection(hwp)
+            phase[0] = 'post_count'
 
             after_text = ''
             try:
@@ -399,6 +428,7 @@ class LocalCliBundleParagraphsMixin:
                     'paragraph_delete_exact post-proof failed: exact visible line count did not decrease by one; '
                     f'before={before_exact_line_count} after={after_exact_line_count}; undo attempted'
                 )
+            phase[0] = 'next_guard'
             if expected_next_contains:
                 after_next_target = self._find_text_on_expected_page(hwp, match=expected_next_contains, expected_page=min(max_page_after, expected_page))
                 if after_next_target.get('page') is None or int(after_next_target.get('page')) > max_page_after:

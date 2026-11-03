@@ -72,7 +72,7 @@ from app.local_cli_runtime import (
 )
 from app import native_format, native_numbering, native_numbering_census, native_paragraph_edit, native_table
 from app.local_cli_type_guard import type_insert_guard_reason
-from app.step_refusal import DEFERRED_INTENT_OPS, STEP_REFUSAL_CODES, LocalCliStepRefusal, StepControl
+from app.step_refusal import DEFERRED_INTENT_OPS, PHASE_DIAGNOSTIC_OPS, STEP_REFUSAL_CODES, LocalCliStepRefusal, StepControl
 from app.command_packages.runtime import get_command_package_registry
 from app.raw_readback import RawReadbackMismatch, build_raw_target_readback
 from app.readiness import (
@@ -7362,7 +7362,7 @@ class LocalCliService(
                             found_page = BaseException.__dict__['__dict__'].__get__(exc).get('found_page')
                             if type(found_page) is int:
                                 status['found_page'] = found_page
-                    if numbering or (deferred and not step_refused):
+                    if numbering or (deferred and not step_refused) or step.get('op') in PHASE_DIAGNOSTIC_OPS:
                         # Fixed labels only, so a caller can see the stopping phase without opening the journal.
                         from app.local_cli_runtime import _native_diagnostic
                         status['failure_diagnostic'] = _native_diagnostic('bundle_step', exc)
