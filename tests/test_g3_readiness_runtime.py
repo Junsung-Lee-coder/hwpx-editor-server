@@ -9,6 +9,7 @@ from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 from app import readiness
+from tests.hermetic import absent_modules
 
 
 def _raise_runtime_error() -> None:
@@ -110,7 +111,8 @@ class G3ReadinessRuntimeTests(unittest.TestCase):
         probe = CleanProbe()
         fake_pyhwpx = types.ModuleType("pyhwpx")
         setattr(fake_pyhwpx, "Hwp", object)
-        with patch.dict(sys.modules, {"pyhwpx": fake_pyhwpx}), patch.object(
+        # This case's contract: no COM runtime is installed, so the probe initializes nothing to tear down.
+        with patch.dict(sys.modules, {"pyhwpx": fake_pyhwpx, **absent_modules("pythoncom")}), patch.object(
             readiness, "_construct_probe_hwp", return_value=(probe, "fake")
         ):
             result = readiness._probe_hwp_automation()

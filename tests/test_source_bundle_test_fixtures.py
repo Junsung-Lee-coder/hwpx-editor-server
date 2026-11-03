@@ -21,6 +21,8 @@ import unittest
 import zipfile
 from pathlib import Path
 
+from tests.hermetic import write_exact
+
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -56,8 +58,8 @@ def git(repo: Path, *args: str) -> str:
 
 
 def write(path: Path, text: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(text, encoding="utf-8")
+    # The manifest and archive assertions compare these exact bytes.
+    write_exact(path, text)
 
 
 FIXTURE_TEXT = "<hs:sec>public synthetic fixture</hs:sec>\n"
