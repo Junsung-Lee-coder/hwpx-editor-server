@@ -964,9 +964,11 @@ def section_insert_position_reason(doc: Mapping[str, Any], caret: Any) -> str | 
     """Why a section break at ``caret`` is outside the qualified shape, from the before-readback; None when interior.
 
     Qualified: between two characters of one body paragraph's text. The caret position is located in its paragraph
-    under both accepted readings of an inline control's width (CONTROL_POSITION_WIDTH or none); every reading that
-    reaches the position must have text before and after it. A paragraph start (also after leading inline controls),
-    its end and a paragraph without text are not interior. A caret the readback cannot place is a malformed read.
+    under both accepted readings of an inline control's width (CONTROL_POSITION_WIDTH or none); at every place a
+    reading reaches the position, the nearest character-or-control token on each side must be a text character
+    (structural run tokens take no caret width and are skipped). Text elsewhere in the paragraph is not enough: a
+    caret directly before or after an inline control, a paragraph start (also after leading inline controls), its
+    end and a paragraph without text are not interior. A caret the readback cannot place is a malformed read.
     """
     try:
         list_id, para, pos = (int(item) for item in caret)
@@ -979,16 +981,21 @@ def section_insert_position_reason(doc: Mapping[str, Any], caret: Any) -> str | 
     start = opens[para] + 1
     end = next((index for index in range(start, len(tokens)) if tokens[index][:2] in (('/E', 'P'), ('E', 'P'))), len(tokens))
     segment = tokens[start:end]
+    placed = [index for index, token in enumerate(segment) if token[0] in ('T', 'C')]
     reached = False
     for width in (CONTROL_POSITION_WIDTH, 0):
         position = 0
         for cut in range(len(segment) + 1):
             if position == pos:
                 reached = True
-                before = sum(1 for token in segment[:cut] if token[0] == 'T')
-                after = sum(1 for token in segment[cut:] if token[0] == 'T')
-                if not before or not after:
-                    return ('the caret is at the start of its paragraph\'s text' if not before else 'the caret is at the end of its paragraph\'s text')
+                left = [segment[index][0] for index in placed if index < cut]
+                right = [segment[index][0] for index in placed if index >= cut]
+                if 'T' not in left:
+                    return 'the caret is at the start of its paragraph\'s text'
+                if 'T' not in right:
+                    return 'the caret is at the end of its paragraph\'s text'
+                if left[-1] != 'T' or right[0] != 'T':
+                    return 'the caret is directly before or after an inline control, not between two characters'
             if cut < len(segment):
                 kind = segment[cut][0]
                 position += 1 if kind == 'T' else (width if kind == 'C' else 0)
