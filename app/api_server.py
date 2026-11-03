@@ -1648,6 +1648,23 @@ def _load_compiled_plan_or_404(job_id: str) -> dict[str, Any]:
     return json.loads(path.read_text(encoding='utf-8'))
 
 
+def _shared_table_conflict_blocker(compiled: Any) -> str | None:
+    """Why approval must stay closed when the compiled plan has shared-table conflicts, else None.
+
+    The compiler lists authored claims on one shared table (`shared_table_conflict_groups`) and colliding
+    emitted table operations (`emitted_shared_table_collision_groups`) in `compile_readiness`.
+    """
+    readiness = compiled.get('compile_readiness') if isinstance(compiled, dict) else None
+    if not isinstance(readiness, dict):
+        return None
+    groups = [*(readiness.get('shared_table_conflict_groups') or []), *(readiness.get('emitted_shared_table_collision_groups') or [])]
+    if not groups:
+        return None
+    summaries = [str(group['summary']) for group in groups if isinstance(group, dict) and group.get('summary')]
+    detail = '; '.join(summaries) if summaries else f'{len(groups)} conflicting shared-table group(s)'
+    return f'shared_table_cell_conflict: {detail}. Resolve the conflicting table sections and resend before approval.'
+
+
 def _default_confirm_state(job_id: str, compiled: dict[str, Any]) -> dict[str, Any]:
     confirm_policy = compiled.get('confirm_policy', {}) if isinstance(compiled, dict) else {}
     approval_packet = compiled.get('approval_packet', {}) if isinstance(compiled, dict) else {}
