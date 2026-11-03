@@ -38,10 +38,21 @@ class HeadReasonCodes(unittest.TestCase):
     def test_tail_change(self):
         self.assertEqual(self.codes(doc(), doc(tail='WFla')), ('tail_changed', 'tail_changed'))
 
-    def test_a_new_list_in_the_mapping_table_is_named(self):
+    def test_a_new_growable_list_is_growth(self):
+        # As on Hancom 2024 after a section break: MAPPINGTABLE gains a MEMOSHAPELIST with one memo shape.
+        before = doc(extra='<MAPPINGTABLE><CHARSHAPELIST Count="1"><CHARSHAPE Id="0"/></CHARSHAPELIST><STYLELIST/></MAPPINGTABLE>')
+        after = doc(extra='<MAPPINGTABLE><CHARSHAPELIST Count="1"><CHARSHAPE Id="0"/></CHARSHAPELIST><STYLELIST/><MEMOSHAPELIST Count="1"><MEMOSHAPE Id="0"/></MEMOSHAPELIST></MAPPINGTABLE>')
+        self.assertEqual(head_tail_reasons(before, after), [])
+
+    def test_other_new_children_or_changed_lists_are_still_named(self):
         before = doc(extra='<MAPPINGTABLE><CHARSHAPELIST Count="1"><CHARSHAPE Id="0"/></CHARSHAPELIST></MAPPINGTABLE>')
-        after = doc(extra='<MAPPINGTABLE><CHARSHAPELIST Count="1"><CHARSHAPE Id="0"/></CHARSHAPELIST><MEMOSHAPELIST Count="1"><MEMOSHAPE Id="0"/></MEMOSHAPELIST></MAPPINGTABLE>')
-        self.assertEqual(self.codes(before, after), ('head_mappingtable_gained_memoshapelist', 'head_mappingtable_gained_memoshapelist'))
+        cases = (('<BULLETLIST Count="1"><BULLET Id="0"/></BULLETLIST>', 'head_mappingtable_gained_bulletlist'),
+                 ('<MEMOSHAPELIST Count="1"><CHARSHAPE Id="0"/></MEMOSHAPELIST>', 'head_mappingtable_gained_memoshapelist'))
+        for added, code in cases:
+            after = doc(extra=f'<MAPPINGTABLE><CHARSHAPELIST Count="1"><CHARSHAPE Id="0"/></CHARSHAPELIST>{added}</MAPPINGTABLE>')
+            self.assertEqual(self.codes(before, after), (code, code))
+        after = doc(extra='<MAPPINGTABLE><CHARSHAPELIST Count="1"><CHARSHAPE Id="9"/></CHARSHAPELIST><MEMOSHAPELIST Count="1"><MEMOSHAPE Id="0"/></MEMOSHAPELIST></MAPPINGTABLE>')
+        self.assertEqual(self.codes(before, after), ('head_charshapelist_entry', 'head_charshapelist_entry'))
 
     def test_unknown_head_element(self):
         self.assertEqual(self.codes(doc(extra='<ZZUNKNOWN A="1"/>'), doc(extra='<ZZUNKNOWN A="2"/>')), ('head_changed', 'head_changed'))

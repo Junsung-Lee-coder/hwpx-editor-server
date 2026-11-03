@@ -162,15 +162,27 @@ def _head_growth_reasons(before: ET.Element, after: ET.Element, path: str, allow
     if len(new_children) < len(old_children):
         out.append(f'{where} lost {len(old_children) - len(new_children)} entries')
         return
+    pairs = list(zip(old_children, new_children))
     if len(new_children) > len(old_children) and not entry_tag:
-        added = sorted((Counter(child.tag for child in new_children) - Counter(child.tag for child in old_children)).elements())
-        out.append(f'{where} gained children {added}, but only {sorted(GROWABLE_HEAD_LISTS)} may gain entries')
-        return
+        # A new list of a growable kind may appear (on Hancom 2024 a section break added MEMOSHAPELIST to MAPPINGTABLE);
+        # every existing child must still be there, in order and unchanged, and the new list may hold only its entries.
+        pairs, new_lists, index = [], [], 0
+        for child in new_children:
+            if index < len(old_children) and old_children[index].tag == child.tag:
+                pairs.append((old_children[index], child))
+                index += 1
+            else:
+                new_lists.append(child)
+        if index != len(old_children) or any(child.tag not in GROWABLE_HEAD_LISTS or child.tag in {old.tag for old in old_children}
+                                             or any(entry.tag != GROWABLE_HEAD_LISTS[child.tag] for entry in child) for child in new_lists):
+            added = sorted((Counter(child.tag for child in new_children) - Counter(child.tag for child in old_children)).elements())
+            out.append(f'{where} gained children {added}, but only {sorted(GROWABLE_HEAD_LISTS)} may gain entries')
+            return
     if any(child.tag != entry_tag for child in appended):
         out.append(f'{where} gained entries other than {entry_tag}')
     if appended:
         out.extend(_list_growth_reasons(where, before, after, len(old_children), appended))
-    for index, (old, new) in enumerate(zip(old_children, new_children)):
+    for index, (old, new) in enumerate(pairs):
         if entry_tag:
             if signature(old) != signature(new):
                 out.append(f'{where}[{index}] existing {old.tag} changed')
