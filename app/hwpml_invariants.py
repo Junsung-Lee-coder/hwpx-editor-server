@@ -134,7 +134,8 @@ def _list_growth_reasons(where: str, before: ET.Element, after: ET.Element, old_
 VIEW_STATE_HEAD_TAGS = frozenset({'CARETPOS'})
 
 
-def _head_growth_reasons(before: ET.Element, after: ET.Element, path: str, allow: Mapping[str, Iterable[str]], out: list[str]) -> None:
+def _head_growth_reasons(before: ET.Element, after: ET.Element, path: str, allow: Mapping[str, Iterable[str]], out: list[str],
+                         shrink: bool = False) -> None:
     """HEAD may change only by appending new entries to a ``GROWABLE_HEAD_LISTS`` list.
 
     Every existing element, list entries included, must keep its attributes,
@@ -154,7 +155,8 @@ def _head_growth_reasons(before: ET.Element, after: ET.Element, path: str, allow
         # The list's own entries name the entry element; the table above is only the fallback for an empty list.
         entry_tag = old_children[0].tag
     appended = new_children[len(old_children):] if entry_tag else []
-    free = set(allow.get(before.tag, ())) | ({LIST_COUNT_ATTR} if appended else set())
+    trimmed = bool(shrink and entry_tag and len(new_children) < len(old_children))
+    free = set(allow.get(before.tag, ())) | ({LIST_COUNT_ATTR} if appended or trimmed else set())
     old_attrs = {key: value for key, value in attrs(before) if key not in free}
     new_attrs = {key: value for key, value in attrs(after) if key not in free}
     if before.tag in VIEW_STATE_HEAD_TAGS:
@@ -164,10 +166,29 @@ def _head_growth_reasons(before: ET.Element, after: ET.Element, path: str, allow
         out.append(f'{where} attributes changed: {changed}')
     if (before.text or '').strip() != (after.text or '').strip():
         out.append(f'{where} text changed')
-    if len(new_children) < len(old_children):
-        out.append(f'{where} lost {len(old_children) - len(new_children)} entries')
-        return
     pairs = list(zip(old_children, new_children))
+    if len(new_children) < len(old_children):
+        # Only when removing a section (shrink): Hancom drops the definitions it created with that section (on Hancom
+        # 2024 a section delete lost the MEMOSHAPELIST its insert had added). A growable list may lose trailing entries;
+        # another element may lose whole growable lists; whatever remains must be unchanged and in order.
+        ok = False
+        if shrink and entry_tag:
+            ok = all(signature(old) == signature(new) for old, new in pairs)
+        elif shrink:
+            pairs, index = [], 0
+            for old in old_children:
+                if index < len(new_children) and new_children[index].tag == old.tag:
+                    pairs.append((old, new_children[index]))
+                    index += 1
+                elif old.tag not in GROWABLE_HEAD_LISTS:
+                    break
+            else:
+                ok = index == len(new_children)
+        if not ok:
+            out.append(f'{where} lost {len(old_children) - len(new_children)} entries')
+            return
+        if entry_tag:
+            return
     if len(new_children) > len(old_children) and not entry_tag:
         # A new list of a growable kind may appear (on Hancom 2024 a section break added MEMOSHAPELIST to MAPPINGTABLE);
         # every existing child must still be there, in order and unchanged, and the new list may hold only its entries.
@@ -197,7 +218,7 @@ def _head_growth_reasons(before: ET.Element, after: ET.Element, path: str, allow
             if signature(old) != signature(new):
                 out.append(f'{where}[{index}] existing {old.tag} changed')
         else:
-            _head_growth_reasons(old, new, f'{where}[{index}]', allow, out)
+            _head_growth_reasons(old, new, f'{where}[{index}]', allow, out, shrink)
 
 
 # Fixed diagnostic labels for a HEAD/TAIL reason: the deepest HWPML 2.x HEAD element the reason names, from this
@@ -248,7 +269,8 @@ def head_reason_code(reason: str) -> str | None:
     return None
 
 
-def head_tail_reasons(before_root: ET.Element, after_root: ET.Element, *, allow_head_attrs: Mapping[str, Iterable[str]] | None = None) -> list[str]:
+def head_tail_reasons(before_root: ET.Element, after_root: ET.Element, *, allow_head_attrs: Mapping[str, Iterable[str]] | None = None,
+                      allow_shrink: bool = False) -> list[str]:
     """Reasons HEAD did not only grow, or anything else outside BODY changed.
 
     ``allow_head_attrs`` names HEAD attributes an edit may legitimately change
@@ -262,7 +284,7 @@ def head_tail_reasons(before_root: ET.Element, after_root: ET.Element, *, allow_
     for old, new in zip(before_parts, after_parts):
         if old.tag == HEAD_TAG:
             found: list[str] = []
-            _head_growth_reasons(old, new, '', allow_head_attrs or {}, found)
+            _head_growth_reasons(old, new, '', allow_head_attrs or {}, found, allow_shrink)
             reasons.extend(f'existing HEAD entry changed: {item}' for item in found)
         elif signature(old) != signature(new):
             reasons.append(f'{old.tag} changed (it holds embedded binary data and document-level parts that must not change)')

@@ -93,6 +93,27 @@ class HeadReasonCodes(unittest.TestCase):
 
 
 
+class SectionDeleteShrink(unittest.TestCase):
+    MAP = '<MAPPINGTABLE><CHARSHAPELIST Count="1"><CHARSHAPE Id="0"/></CHARSHAPELIST>{}<NUMBERINGLIST Count="{}">{}</NUMBERINGLIST></MAPPINGTABLE>'
+
+    def head(self, memo, numbering):
+        return doc(extra=self.MAP.format('<MEMOSHAPELIST Count="1"><MEMOSHAPE Id="0"/></MEMOSHAPELIST>' if memo else '',
+                                         len(numbering), ''.join(f'<NUMBERING Id="{n}"/>' for n in numbering)))
+
+    def test_a_section_delete_may_drop_what_its_insert_added(self):
+        # As on Hancom 2024: deleting the section drops the memo-shape list and the numbering entry the insert added.
+        self.assertEqual(head_tail_reasons(self.head(True, [1, 2]), self.head(False, [1]), allow_shrink=True), [])
+
+    def test_only_a_section_delete_may_shrink_and_only_growable_lists(self):
+        self.assertTrue(head_tail_reasons(self.head(True, [1, 2]), self.head(False, [1])))
+        before = doc(extra='<MAPPINGTABLE><CHARSHAPELIST Count="1"><CHARSHAPE Id="0"/></CHARSHAPELIST><STYLELIST/></MAPPINGTABLE>')
+        after = doc(extra='<MAPPINGTABLE><CHARSHAPELIST Count="1"><CHARSHAPE Id="0"/></CHARSHAPELIST></MAPPINGTABLE>')
+        self.assertTrue(head_tail_reasons(before, after, allow_shrink=True))
+        changed = self.head(False, [1])
+        changed.find('HEAD/MAPPINGTABLE/NUMBERINGLIST/NUMBERING').set('Start', '3')
+        self.assertTrue(head_tail_reasons(self.head(True, [1, 2]), changed, allow_shrink=True))
+
+
 class HeaderApplyObserved(unittest.TestCase):
     def test_the_written_page_type_is_named_from_a_fixed_set(self):
         for value, code in (("'Both'", 'header_apply_observed_both'), ("'Odd'", 'header_apply_observed_odd'), ('None', 'header_apply_observed_absent'),

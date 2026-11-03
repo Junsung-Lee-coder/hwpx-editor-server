@@ -702,7 +702,8 @@ def compare_documents(
     if '_root' not in before or '_root' not in after:
         reasons.append('whole-document readback is unavailable for HEAD/TAIL checks')
     else:
-        reasons += head_tail_reasons(before['_root'], after['_root'], allow_head_attrs=_SECTION_COUNT_ATTRS if section_delta else None)
+        reasons += head_tail_reasons(before['_root'], after['_root'], allow_head_attrs=_SECTION_COUNT_ATTRS if section_delta else None,
+                                     allow_shrink=section_delta < 0)
     if body_rule is not None:
         reasons += body_token_reasons(body_rule, before, after, caret=caret, section_index=section_index)
     if after.get('control_signatures') != before.get('control_signatures'):
