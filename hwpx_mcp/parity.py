@@ -136,8 +136,8 @@ def _variant(kind: str, qualifier: str | None, scope: str, native: str, *, evide
     return row
 
 
-# Evidence cases are stable scenario ids of the final-source native campaign (saved, reopened and rendered outputs checked
-# from the saved bytes against the opened document).
+# Evidence cases are stable scenario ids of a native campaign (saved, reopened and rendered outputs checked from the saved
+# bytes against the opened document). qualified_unaffected rows rest on cases of an earlier source whose path is unchanged.
 # Drawn shapes go in with the characterized drawing contract (point layout and a solid 0.3 mm outline) and are verified
 # from the readback: frame, transforms, drawn geometry and visible outline. A diagonal line has no characterized
 # contract and is refused before any edit.
@@ -145,45 +145,45 @@ _SHAPE_DRAWN = 'drawn with its points and a solid 0.3 mm black outline'
 
 VARIANTS: dict[str, list[dict[str, Any]]] = {
     'layout_exact': [
-        _variant('page_setup', 'margins', 'margin fields, apply_to current_section', 'qualified', evidence=('layout_margins',)),
-        _variant('page_setup', 'landscape', 'landscape true, apply_to current_section', 'qualified', evidence=('layout_landscape',)),
+        _variant('page_setup', 'margins', 'margin fields, apply_to current_section', 'qualified_unaffected', evidence=('layout_margins',)),
+        _variant('page_setup', 'landscape', 'landscape true, apply_to current_section', 'qualified_unaffected', evidence=('layout_landscape',)),
         _variant('page_setup', 'paper_size', 'paper_width_mm/paper_height_mm', 'not_qualified'),
         _variant('page_setup', 'whole_document', 'apply_to whole_document', 'not_qualified'),
-        _variant('columns', 'current_section', 'count/gap_mm/same_width, apply_to current_section', 'qualified', evidence=('layout_columns',)),
+        _variant('columns', 'current_section', 'count/gap_mm/same_width, apply_to current_section', 'qualified_unaffected', evidence=('layout_columns',)),
         _variant('columns', 'from_caret_new', 'apply_to from_caret_new (new columns from the caret)', 'not_qualified'),
         _variant('section_insert', 'inside_paragraph', 'caret between two characters of one paragraph\'s text; the two-section '
-                 'document saved, reopened and rendered, outline numbering after the break kept', 'qualified', evidence=('layout_section_insert', 'section_refusal_continue',)),
+                 'document saved, reopened and rendered, outline numbering after the break kept', 'qualified_unaffected', evidence=('layout_section_insert', 'section_refusal_continue',)),
         _variant('section_insert', 'paragraph_start_or_end', 'caret at a paragraph\'s first text (also after its leading section '
                  'and column definitions), at its end, next to an inline control or in a paragraph without text', 'unsupported',
                  refusal_code='section_insert_position_unsupported'),
         _variant('section_delete', None, 'caret at the first text of section_index in a saved multi-section document opened on its own',
-                 'qualified', evidence=('layout_section_delete', 'layout_section_delete_memo_s1', 'layout_section_delete_memo_s2',)),
-        _variant('hanging_indent', None, 'marker_text at the paragraph start', 'qualified', evidence=('layout_hanging',)),
+                 'qualified_unaffected', evidence=('layout_section_delete', 'layout_section_delete_memo_s1', 'layout_section_delete_memo_s2',)),
+        _variant('hanging_indent', None, 'marker_text at the paragraph start', 'qualified_unaffected', evidence=('layout_hanging',)),
     ],
     'object_insert_exact': [
-        _variant('footnote', None, 'text at the caret', 'qualified', evidence=('object_footnote',)),
-        _variant('endnote', None, 'text at the caret', 'qualified', evidence=('object_endnote',)),
-        _variant('memo', None, 'text at the caret, no selection', 'qualified', evidence=('object_memo',)),
+        _variant('footnote', None, 'text at the caret', 'not_qualified'),
+        _variant('endnote', None, 'text at the caret', 'not_qualified'),
+        _variant('memo', None, 'text at the caret, no selection', 'not_qualified'),
         _variant('memo', 'selection', 'text on a live selection', 'not_qualified'),
-        _variant('hyperlink', None, 'url on the live selection of display_text', 'qualified', evidence=('object_hyperlink',)),
-        _variant('bookmark', None, 'new name at the caret', 'qualified', evidence=('object_bookmark',)),
-        _variant('equation', None, 'script at the caret', 'qualified', evidence=('object_equation',)),
-        _variant('line', 'horizontal_inline', f'height_mm 0, treat_as_char true; {_SHAPE_DRAWN}', 'qualified', evidence=('object_line_h_inline', 'line_diagonal_refusal_continue',)),
-        _variant('line', 'horizontal_floating', f'height_mm 0, treat_as_char false; {_SHAPE_DRAWN}', 'qualified', evidence=('object_line_h_floating',)),
-        _variant('line', 'vertical_inline', f'width_mm 0, treat_as_char true; {_SHAPE_DRAWN}', 'qualified', evidence=('object_line_v_inline',)),
-        _variant('line', 'vertical_floating', f'width_mm 0, treat_as_char false; {_SHAPE_DRAWN}', 'qualified', evidence=('object_line_v_floating',)),
+        _variant('hyperlink', None, 'url on the live selection of display_text', 'not_qualified'),
+        _variant('bookmark', None, 'new name at the caret', 'not_qualified'),
+        _variant('equation', None, 'script at the caret', 'not_qualified'),
+        _variant('line', 'horizontal_inline', f'height_mm 0, treat_as_char true; {_SHAPE_DRAWN}', 'not_qualified'),
+        _variant('line', 'horizontal_floating', f'height_mm 0, treat_as_char false; {_SHAPE_DRAWN}', 'not_qualified'),
+        _variant('line', 'vertical_inline', f'width_mm 0, treat_as_char true; {_SHAPE_DRAWN}', 'not_qualified'),
+        _variant('line', 'vertical_floating', f'width_mm 0, treat_as_char false; {_SHAPE_DRAWN}', 'not_qualified'),
         _variant('line', 'diagonal', 'width_mm and height_mm both non-zero: no characterized drawing contract, refused before any edit',
                  'unsupported', refusal_code='unverifiable_layout'),
-        _variant('rectangle', 'inline', f'treat_as_char true; {_SHAPE_DRAWN}', 'qualified', evidence=('object_rectangle_inline',)),
-        _variant('rectangle', 'floating', f'treat_as_char false; {_SHAPE_DRAWN}', 'qualified', evidence=('object_rectangle_floating',)),
-        _variant('ellipse', 'inline', f'treat_as_char true; {_SHAPE_DRAWN}', 'qualified', evidence=('object_ellipse_inline',)),
-        _variant('ellipse', 'floating', f'treat_as_char false; {_SHAPE_DRAWN}', 'qualified', evidence=('object_ellipse_floating',)),
-        _variant('header', 'both', 'apply_to both', 'qualified', evidence=('object_header_both', 'object_header_both_p1',)),
-        _variant('header', 'odd', 'apply_to odd', 'qualified', evidence=('object_header_odd', 'object_header_odd_p1',)),
+        _variant('rectangle', 'inline', f'treat_as_char true; {_SHAPE_DRAWN}', 'not_qualified'),
+        _variant('rectangle', 'floating', f'treat_as_char false; {_SHAPE_DRAWN}', 'not_qualified'),
+        _variant('ellipse', 'inline', f'treat_as_char true; {_SHAPE_DRAWN}', 'not_qualified'),
+        _variant('ellipse', 'floating', f'treat_as_char false; {_SHAPE_DRAWN}', 'not_qualified'),
+        _variant('header', 'both', 'apply_to both', 'not_qualified'),
+        _variant('header', 'odd', 'apply_to odd', 'not_qualified'),
         _variant('header', 'even', 'apply_to even', 'not_qualified'),
-        _variant('footer', 'both', 'apply_to both', 'qualified', evidence=('object_footer_both',)),
+        _variant('footer', 'both', 'apply_to both', 'not_qualified'),
         _variant('footer', 'odd', 'apply_to odd', 'not_qualified'),
-        _variant('footer', 'even', 'apply_to even', 'qualified', evidence=('object_footer_even',)),
+        _variant('footer', 'even', 'apply_to even', 'not_qualified'),
     ],
 }
 for _op, _variants in VARIANTS.items():
