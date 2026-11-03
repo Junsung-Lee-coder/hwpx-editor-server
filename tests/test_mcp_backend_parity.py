@@ -482,23 +482,17 @@ class NativeFindings(unittest.TestCase):
         tree = ast.parse((APP / 'local_cli_service.py').read_text(encoding='utf-8'))
         self.assertEqual(set(_contract('GUARDED')), _literal_set(tree, '_GUARDED_BUNDLE_OPS'))
 
-    def test_caret_routes_say_they_leave_a_possible_edit_for_close(self):
+    def test_caret_route_notes_match_the_runtime_navigation_exemption(self):
+        # Behavior lives in tests/test_navigation_close_debt.py; this keeps the notes tied to the runtime's exemption set.
         tree = ast.parse((APP / 'local_cli_runtime.py').read_text(encoding='utf-8'))
-        audited = None
-        for node in ast.walk(tree):
-            if (isinstance(node, ast.Compare) and isinstance(node.ops[0], ast.NotIn) and isinstance(node.comparators[0], ast.Set)
-                    and any(isinstance(e, ast.Constant) and e.value == 'health_probe' for e in node.comparators[0].elts)):
-                audited = {e.value for e in node.comparators[0].elts}
-        self.assertIsNotNone(audited, 'audited read command set not found in local_cli_runtime')
+        exempt = _literal_set(tree, '_EXACT_CLEAN_EXEMPT_COMMANDS')
         commands = command_models()
-        missing = []
-        for op in ('move_to_target', 'select_target', 'cell_info', 'cell_move', 'cursor_move', 'target_info', 'numbering_readback'):
+        for op in ('move_to_target', 'select_target', 'cell_info', 'cell_move', 'cursor_move'):
             route = samples.REST_SAMPLES[op][1].rsplit('/', 1)[1]
-            text = json.dumps(commands[op].model_json_schema(), ensure_ascii=False) if op in commands else ''
-            says = 'possible edit' in text
-            if (route not in audited) != says:
-                missing.append((op, route, route in audited, says))
-        self.assertEqual(missing, [], 'caret routes outside the audited read set must say so; audited ones must not')
+            text = json.dumps(commands[op].model_json_schema(), ensure_ascii=False)
+            self.assertIn(route, exempt, op)
+            self.assertIn('Navigation only', text, op)
+            self.assertNotIn('possible edit', text, op)
 
     def test_get_selected_text_needs_a_selection(self):
         model = command_models().get('get_selected_text')

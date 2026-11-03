@@ -113,9 +113,9 @@ def _cmd(op: str, *names: str) -> dict[str, Any]:
     return _exposed(f'hwpx_command:{op}', fields={**_SID, **_same(*names)})
 
 
-# Live commands outside the runtime's audited read set (local_cli_runtime) record a possible edit; a later close needs a
-# save that writes, and a clean no-op save does not settle it (measured on Hancom 2024 after move/select only).
-_CARET_DEBT = 'records a possible edit: hwpx_close then needs a save that writes; a save of an unchanged document does not settle it'
+# Navigation-only live commands (local_cli_runtime _EXACT_CLEAN_EXEMPT_COMMANDS): with no earlier debt and IsModified
+# exactly False before and after they add no close debt; earlier unsaved edits still need a writing save.
+_CARET_DEBT = 'navigation only: adds no close debt when the document is unchanged and had no unsaved edit; an earlier unsaved edit still needs a writing save'
 
 
 _LEDGER = ('operator ledger write: records caller-reported find/choose/lock/verify/apply/undo/close results without editing the document; '

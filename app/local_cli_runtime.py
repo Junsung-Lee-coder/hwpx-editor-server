@@ -107,6 +107,11 @@ _MUTATING_COMMANDS = {
 }
 
 
+# Live commands that add no close debt when IsModified is exactly False before and after and no earlier debt exists.
+# move/select/cell/cellmove/cursormove only find, set the caret, select and move (TableCellBlock, Table*Cell, Move*).
+_EXACT_CLEAN_EXEMPT_COMMANDS = frozenset({'export', 'undo', 'redo', 'move', 'select', 'cell', 'cellmove', 'cursormove'})
+
+
 def _native_diagnostic(site: object, error: BaseException) -> dict[str, str]:
     """Fixed labels from already available Python state; no exception callbacks/values.
 
@@ -2717,14 +2722,15 @@ class LocalCliLiveSession:
                     # here. Unknown callers fail conservatively. Only audited
                     # read commands avoid current intent; earlier intent stays.
                     if command.name not in {'health_probe', 'find', 'info', 'where', 'screenshot', 'command-bundle', 'numbering-readback'}:
-                        clean_export = command.name in {'export', 'undo', 'redo'} and not self._normal_close_requires_save and getattr(handle.hwp, 'IsModified', None) is False
+                        clean_export = command.name in _EXACT_CLEAN_EXEMPT_COMMANDS and not self._normal_close_requires_save and getattr(handle.hwp, 'IsModified', None) is False
                         self._mark_mutating_intent()
                     else:
                         clean_export = False
                     command.result = command.handler(handle)
                     handle.diagnostic_site = 'handler_returned'
                     if clean_export and handle.hwp.IsModified is False:
-                        # Exact-clean before and after with no earlier debt: an export or a history call that changed nothing adds no preservation debt.
+                        # Exact-clean before and after with no earlier debt: an export, a history call or a navigation-only
+                        # command that changed nothing adds no preservation debt.
                         # Earlier debt is never discharged here; only a proved ordinary Save does that.
                         self._normal_close_requires_save = False
                     self._apply_normalized_outcome(command, command.result)

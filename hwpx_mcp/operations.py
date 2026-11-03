@@ -34,7 +34,8 @@ TableCtrlId = Annotated[str, Field(min_length=12, max_length=500, pattern=r'^ctr
 CtrlHash = Annotated[str, Field(pattern=r'^sha256:[a-f0-9]{24,64}$', description='The control proof hash from control_inventory or readback.')]
 Sha64 = Annotated[str, Field(pattern=r'^sha256:[a-f0-9]{64}$')]
 Rgb = Annotated[str, Field(pattern=r'^#[0-9A-Fa-f]{6}$')]
-CARET_DEBT_NOTE = 'The backend counts this command as a possible edit: hwpx_close then needs a save that actually writes, and saving an unchanged document does not settle that. hwpx_find places the caret without it.'
+CARET_DEBT_NOTE = ('Navigation only: when the document has no unsaved edit and is unchanged before and after, hwpx_close works afterwards '
+                   'without a save. After an earlier unsaved edit, hwpx_close still needs a save that writes.')
 HOLD_NOTE = "Not one of the backend's guarded exact engines: any backend error in this step, including a stale or wrong target, is reported as an unknown outcome and holds the session."
 Pos3 = Annotated[list[Annotated[int, Field(ge=0)]], Field(min_length=3, max_length=3,
                  description='The caret position [list, para, pos] exactly as hwpx_where or a where step reports it.')]
@@ -682,31 +683,31 @@ class TargetInfoOp(Closed):
 
 
 class MoveToTargetOp(Closed):
-    """Move the caret to target text. The backend counts this command as a possible edit: hwpx_close then needs a save that actually writes, and saving an unchanged document does not settle that. hwpx_find places the caret without it."""
+    """Move the caret to target text. Navigation only: when the document has no unsaved edit and is unchanged before and after, hwpx_close works afterwards without a save. After an earlier unsaved edit, hwpx_close still needs a save that writes."""
     op: Literal['move_to_target']
     target: Text500
 
 
 class SelectTargetOp(Closed):
-    """Select target text. The backend counts this command as a possible edit: hwpx_close then needs a save that actually writes, and saving an unchanged document does not settle that. hwpx_find places the caret without it."""
+    """Select target text. Navigation only: when the document has no unsaved edit and is unchanged before and after, hwpx_close works afterwards without a save. After an earlier unsaved edit, hwpx_close still needs a save that writes."""
     op: Literal['select_target']
     target: Text500
 
 
 class CellInfoOp(Closed):
-    """Read the caret table cell. The backend counts this command as a possible edit: hwpx_close then needs a save that actually writes, and saving an unchanged document does not settle that. hwpx_find places the caret without it."""
+    """Read the caret table cell. Navigation only: when the document has no unsaved edit and is unchanged before and after, hwpx_close works afterwards without a save. After an earlier unsaved edit, hwpx_close still needs a save that writes."""
     op: Literal['cell_info']
 
 
 class CellMoveOp(Closed):
-    """Move the table cell selection. The backend counts this command as a possible edit: hwpx_close then needs a save that actually writes, and saving an unchanged document does not settle that. hwpx_find places the caret without it."""
+    """Move the table cell selection. Navigation only: when the document has no unsaved edit and is unchanged before and after, hwpx_close works afterwards without a save. After an earlier unsaved edit, hwpx_close still needs a save that writes."""
     op: Literal['cell_move']
     direction: Direction
     count: int = Field(ge=1, le=500)
 
 
 class CursorMoveOp(Closed):
-    """Move the caret. The backend counts this command as a possible edit: hwpx_close then needs a save that actually writes, and saving an unchanged document does not settle that. hwpx_find places the caret without it."""
+    """Move the caret. Navigation only: when the document has no unsaved edit and is unchanged before and after, hwpx_close works afterwards without a save. After an earlier unsaved edit, hwpx_close still needs a save that writes."""
     op: Literal['cursor_move']
     direction: Direction
     count: int = Field(ge=1, le=500)
