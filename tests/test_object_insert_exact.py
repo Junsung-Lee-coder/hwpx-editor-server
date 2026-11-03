@@ -581,12 +581,6 @@ SUCCESS_CASES: tuple[tuple[dict[str, Any], list[str], str], ...] = (
     ({'kind': 'memo', 'text': 'check this'}, ['InsertFieldMemo', 'insert_text', 'CloseEx'], 'Type="Memo"'),
     ({'kind': 'bookmark', 'text': None, 'name': '책갈피1'}, ['GetDefault(Bookmark)', 'Execute(Bookmark)'], 'Name="책갈피1"'),
     ({'kind': 'equation', 'text': None, 'script': 'a over b'}, ['GetDefault(EquationCreate)', 'Execute(EquationCreate)'], '<SCRIPT>a over b</SCRIPT>'),
-    ({'kind': 'line', 'text': None, 'width_mm': 30, 'height_mm': 0},
-     ['GetDefault(DrawObjCreatorLine)', 'Execute(DrawObjCreatorLine)', 'Cancel'], '<LINE>'),
-    ({'kind': 'rectangle', 'text': None, 'width_mm': 30, 'height_mm': 10},
-     ['GetDefault(DrawObjCreatorRectangle)', 'Execute(DrawObjCreatorRectangle)', 'Cancel'], '<RECTANGLE>'),
-    ({'kind': 'ellipse', 'text': None, 'width_mm': 30, 'height_mm': 10, 'treat_as_char': False},
-     ['GetDefault(DrawObjCreatorEllipse)', 'Execute(DrawObjCreatorEllipse)', 'Cancel'], 'TreatAsChar="false"'),
     ({'kind': 'header', 'text': 'Top', 'apply_to': 'even'},
      ['GetDefault(HeaderFooter)', 'Execute(HeaderFooter)', 'insert_text', 'CloseEx'], '<HEADER ApplyPageType="Even">'),
     ({'kind': 'footer', 'text': 'Bottom'},
@@ -672,7 +666,7 @@ class ServiceFlowTests(unittest.TestCase):
             ({'wrong_tag': True}, {}, 'FOOTNOTE count changed by 0'),
             ({'extra_control': True}, {}, "other controls changed: {'BOOKMARK': 1}"),
             ({'extra_control': True}, {'kind': 'equation', 'text': None, 'script': 'x'}, "other controls changed: {'BOOKMARK': 1}"),
-            ({'eat_char': True}, {'kind': 'rectangle', 'text': None, 'width_mm': 5, 'height_mm': 5}, 'document text outside the new object changed'),
+            ({'eat_char': True}, {'kind': 'equation', 'text': None, 'script': 'x'}, 'document text outside the new object changed'),
             ({'no_return': True}, {}, 'could not return to the original list'),
         )
         for faults, fields, reason in cases:

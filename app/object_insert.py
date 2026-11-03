@@ -121,6 +121,23 @@ KIND_PARAMS: dict[str, dict[str, Any]] = {
 KINDS = frozenset(KIND_PARAMS)
 PARAM_KEYS = tuple(sorted({key for params in KIND_PARAMS.values() for key in params}))
 SHAPE_KINDS = frozenset({'line', 'rectangle', 'ellipse'})
+# Drawn shapes. On Hancom 2024 a DrawObjCreator* action prepared with only Width/Height/TreatAsChar saves a frame with
+# no outline and a zero or degenerate drawn geometry (zero drawn size, zero or out-of-range points, non-finite
+# matrices), so nothing renders. A shape variant (kind:inline or kind:floating) is accepted only once it has a
+# qualified drawing contract; until then it is refused from the request alone, before any SDK call.
+QUALIFIED_DRAWINGS: frozenset[str] = frozenset()
+
+
+def shape_variant(plan: Mapping[str, Any]) -> str:
+    return f'{plan["kind"]}:{"inline" if plan["treat_as_char"] else "floating"}'
+
+
+def drawing_support_reason(plan: Mapping[str, Any]) -> str | None:
+    """Why this request cannot be drawn with a qualified contract, or None."""
+    if plan['kind'] not in SHAPE_KINDS or shape_variant(plan) in QUALIFIED_DRAWINGS:
+        return None
+    return (f'a drawn {plan["kind"]} ({shape_variant(plan)}) is not supported yet: without a qualified drawing contract Hancom '
+            'saves the object with no outline and no drawn geometry, so nothing would render')
 # 'none': strict normal edit state; 'required': a live selection; 'optional': either.
 SELECTION_POLICY: dict[str, str] = {kind: 'none' for kind in KINDS} | {'hyperlink': 'required', 'memo': 'optional'}
 

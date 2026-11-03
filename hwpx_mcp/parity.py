@@ -130,10 +130,10 @@ def _variant(kind: str, qualifier: str | None, scope: str, native: str, **extra:
     return {'variant': kind if qualifier is None else f'{kind}:{qualifier}', 'kind': kind, 'scope': scope, 'native': native, **extra}
 
 
-# What the reference run of the three shape kinds saved: the object with the requested frame size, inline, but with no
-# outline and (rectangle, ellipse) a zero drawn size, so the saved, reopened and rendered pages show nothing.
-_SHAPE_DRAWN = ('on the reference host the object is saved with the requested frame size, inline, but with no outline and (rectangle, '
-                'ellipse) a zero drawn size, so it does not show')
+# Drawn shapes are refused before any SDK call until a variant has a qualified drawing contract: prepared with only its
+# frame size, Hancom 2024 saved the object with no outline and no drawn geometry, so nothing rendered.
+_SHAPE_REFUSED = ('refused before any edit: without a qualified drawing contract Hancom saves the object with no outline and no '
+                  'drawn geometry')
 
 VARIANTS: dict[str, list[dict[str, str]]] = {
     'layout_exact': [
@@ -160,12 +160,12 @@ VARIANTS: dict[str, list[dict[str, str]]] = {
         _variant('hyperlink', None, 'url on the live selection of display_text', 'qualified'),
         _variant('bookmark', None, 'new name at the caret', 'qualified'),
         _variant('equation', None, 'script at the caret', 'qualified'),
-        _variant('line', 'inline', f'treat_as_char true; {_SHAPE_DRAWN}', 'not_qualified'),
-        _variant('line', 'floating', 'treat_as_char false or unset', 'not_qualified'),
-        _variant('rectangle', 'inline', f'treat_as_char true; {_SHAPE_DRAWN}', 'not_qualified'),
-        _variant('rectangle', 'floating', 'treat_as_char false or unset', 'not_qualified'),
-        _variant('ellipse', 'inline', f'treat_as_char true; {_SHAPE_DRAWN}', 'not_qualified'),
-        _variant('ellipse', 'floating', 'treat_as_char false or unset', 'not_qualified'),
+        _variant('line', 'inline', f'treat_as_char true; {_SHAPE_REFUSED}', 'unsupported', refusal_code='unverifiable_layout'),
+        _variant('line', 'floating', f'treat_as_char false; {_SHAPE_REFUSED}', 'unsupported', refusal_code='unverifiable_layout'),
+        _variant('rectangle', 'inline', f'treat_as_char true; {_SHAPE_REFUSED}', 'unsupported', refusal_code='unverifiable_layout'),
+        _variant('rectangle', 'floating', f'treat_as_char false; {_SHAPE_REFUSED}', 'unsupported', refusal_code='unverifiable_layout'),
+        _variant('ellipse', 'inline', f'treat_as_char true; {_SHAPE_REFUSED}', 'unsupported', refusal_code='unverifiable_layout'),
+        _variant('ellipse', 'floating', f'treat_as_char false; {_SHAPE_REFUSED}', 'unsupported', refusal_code='unverifiable_layout'),
         _variant('header', 'both', 'apply_to both', 'qualified'),
         _variant('header', 'odd', 'apply_to odd', 'qualified'),
         _variant('header', 'even', 'apply_to even', 'not_qualified'),

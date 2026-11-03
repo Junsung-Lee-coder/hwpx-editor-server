@@ -17,6 +17,7 @@ from app.object_insert import (
     SHAPE_KINDS,
     ObjectInsertError,
     check_before,
+    drawing_support_reason,
     dry_run_proof,
     evaluate_insert,
     native_items,
@@ -238,6 +239,11 @@ class LocalCliObjectInsertMixin:
             refusal = control.refuse('invalid_request', f'{OP} refused: {exc}')
             control.register(refusal)
             raise refusal from exc
+        unsupported = drawing_support_reason(plan)
+        if unsupported is not None:
+            refusal = control.refuse('unverifiable_layout', f'{OP} refused before any SDK call: {unsupported}')
+            control.register(refusal)
+            raise refusal
         mutation = _Mutation()
         try:
             proof = self._object_insert_require(hwp, plan, control, where='before the readback', initial=True)
