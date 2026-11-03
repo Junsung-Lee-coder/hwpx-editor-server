@@ -498,9 +498,10 @@ _SECTION_BREAK_SHAPES = frozenset(
 
 
 def _copy_form(sig: Any) -> Any:
-    """A section definition's signature without its memo-shape reference: on Hancom 2024 a new section's SECDEF
-    refers to the memo shape created with it (section_copy_secdef_memoshapeid); the rest must be an exact copy."""
-    return re.sub(r" MemoShapeId='[^']*'", '', sig) if isinstance(sig, str) else sig
+    """A section definition's signature without its references to HEAD entries created with it: on Hancom 2024 a new
+    section's SECDEF refers to a new memo shape (section_copy_secdef_memoshapeid) and a new outline numbering
+    (section_copy_secdef_outlineshape; NUMBERINGLIST gained an entry). The rest must be an exact copy."""
+    return re.sub(r" (?:MemoShapeId|OutlineShape)='[^']*'", '', sig) if isinstance(sig, str) else sig
 
 
 def _signature_difference(old: str, new: str) -> tuple[str, str]:
