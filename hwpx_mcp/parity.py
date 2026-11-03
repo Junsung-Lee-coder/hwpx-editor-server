@@ -113,6 +113,11 @@ def _cmd(op: str, *names: str) -> dict[str, Any]:
     return _exposed(f'hwpx_command:{op}', fields={**_SID, **_same(*names)})
 
 
+# Live commands outside the runtime's audited read set (local_cli_runtime) record a possible edit; a later close needs a
+# save that writes, and a clean no-op save does not settle it (measured on Hancom 2024 after move/select only).
+_CARET_DEBT = 'records a possible edit: hwpx_close then needs a save that writes; a save of an unchanged document does not settle it'
+
+
 _LEDGER = ('operator ledger write: records caller-reported find/choose/lock/verify/apply/undo/close results without editing the document; '
            'from MCP it could overwrite the managed session lifecycle record (for example a close outcome) that hwpx_* admission relies on')
 _VIEWER = 'live screen viewer UI/stream for a human operator, not a document operation; hwpx_proof frame returns the native frame'
@@ -128,11 +133,11 @@ REST_ROUTES: dict[str, dict[str, Any]] = {
     'POST /local-cli/open': _exposed('hwpx_open', fields={'file': 'source_path', 'session_label': 'session_label'}),
     'POST /local-cli/find': _exposed('hwpx_find', fields={**_SID, **_same('query', 'around', 'with_page', 'proof_match')}),
     'POST /local-cli/info': _cmd('target_info', 'target'),
-    'POST /local-cli/move': _cmd('move_to_target', 'target'),
-    'POST /local-cli/select': _cmd('select_target', 'target'),
-    'POST /local-cli/cell': _cmd('cell_info'),
-    'POST /local-cli/cellmove': _cmd('cell_move', 'direction', 'count'),
-    'POST /local-cli/cursormove': _cmd('cursor_move', 'direction', 'count'),
+    'POST /local-cli/move': _cmd('move_to_target', 'target') | {'close_note': _CARET_DEBT},
+    'POST /local-cli/select': _cmd('select_target', 'target') | {'close_note': _CARET_DEBT},
+    'POST /local-cli/cell': _cmd('cell_info') | {'close_note': _CARET_DEBT},
+    'POST /local-cli/cellmove': _cmd('cell_move', 'direction', 'count') | {'close_note': _CARET_DEBT},
+    'POST /local-cli/cursormove': _cmd('cursor_move', 'direction', 'count') | {'close_note': _CARET_DEBT},
     'POST /local-cli/type': _cmd('type_text', 'text', 'allow_insert_at_caret'),
     'POST /local-cli/anchor-insert': _equivalent('hwpx_command:anchor_insert', 'same _perform_anchor_insert primitive and fields (target, text, position) through the command bundle, which also accepts fragments'),
     'POST /local-cli/figure-section': _cmd('figure_section', 'target_heading', 'heading', 'intro', 'caption', 'body'),
