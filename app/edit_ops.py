@@ -181,6 +181,9 @@ def _require_native_numbering_target(item: dict[str, Any]) -> None:
         raise EditOperationError("field 'match_case' must be true or false")
 
 
+_KEEP_BREAK_OPS = frozenset({'replace_paragraph_safe', 'paragraph_replace_native'})
+
+
 def normalize_operations(raw: Any) -> list[dict[str, Any]]:
     if isinstance(raw, dict) and 'operations' in raw:
         raw = raw['operations']
@@ -199,6 +202,11 @@ def normalize_operations(raw: Any) -> list[dict[str, Any]]:
             raise EditOperationError(f'operation #{index} uses unsupported op={op!r}. Supported: {supported}')
         if op in NATIVE_NUMBERING_OPS:
             _validate_native_numbering_op(index, op, item)
+        if 'keep_paragraph_break' in item:
+            if op not in _KEEP_BREAK_OPS:
+                raise EditOperationError(f'operation #{index} {op} does not take keep_paragraph_break')
+            if type(item['keep_paragraph_break']) is not bool:
+                raise EditOperationError(f'operation #{index} keep_paragraph_break must be true or false')
         normalized.append(dict(item))
     return normalized
 
@@ -2182,6 +2190,7 @@ def _safe_replace_matches(
     allow_target_in_replace: bool = False,
     expected_present_after: str | None = None,
     expected_absent_after: str | None = None,
+    keep_paragraph_break: bool = False,
 ) -> int:
     if apply == 'all' and target and target in replace_text and not allow_target_in_replace:
         raise EditOperationError('safe replace with apply=all cannot use replacement text containing the find text')
@@ -2201,7 +2210,10 @@ def _safe_replace_matches(
             })
             original_selection = _get_selected_pos(hwp)
             if paragraph_mode:
-                working_selection = _select_paragraph_with_trailing_break_for_current_selection(hwp)
+                # Literal legacy mode selects the paragraph together with its break; keep_paragraph_break selects
+                # only its content, so the break and the next paragraph (with its shape) are not touched.
+                working_selection = (_select_whole_paragraph_for_current_selection(hwp) if keep_paragraph_break
+                                     else _select_paragraph_with_trailing_break_for_current_selection(hwp))
             else:
                 working_selection = original_selection
 
@@ -4148,6 +4160,7 @@ def apply_edit_operations(
                     allow_packed_paragraph=_bool(op, 'allow_packed_paragraph', False),
                     expected_present_after=str(op.get('expected_present_after')) if op.get('expected_present_after') is not None else None,
                     expected_absent_after=str(op.get('expected_absent_after')) if op.get('expected_absent_after') is not None else None,
+                    keep_paragraph_break=_bool(op, 'keep_paragraph_break', False),
                 )
                 _record_summary(index, op_type, {'matches': count})
                 continue

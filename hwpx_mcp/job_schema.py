@@ -63,15 +63,18 @@ class _ParagraphReplace(_Packed):
     replace: Annotated[str, Field(min_length=1, max_length=20000)]
     expected_present_after: Short | None = None
     expected_absent_after: Short | None = None
+    keep_paragraph_break: bool | None = Field(default=None, description=(
+        'true: replace only the paragraph\'s content, so its paragraph break and the next paragraph (with its shape) are kept. '
+        'Default (false): the paragraph is selected together with its break, as described above.'))
 
 
 class ReplaceParagraphSafe(_ParagraphReplace):
-    """Replace one whole paragraph. The backend selects the paragraph that contains `find` together with its paragraph break, deletes it and types `replace`. End `replace` with "\r\n" to keep that break; otherwise the next paragraph joins the replacement and the job still succeeds (measured on Hancom 2024; the last paragraph has no break to delete)."""
+    """Replace one whole paragraph. The backend selects the paragraph that contains `find` together with its paragraph break, deletes it and types `replace`. End `replace` with "\r\n" to keep that break, or set keep_paragraph_break=true to replace only the content; otherwise the next paragraph joins the replacement and the job still succeeds (measured on Hancom 2024; the last paragraph has no break to delete)."""
     op: Literal['replace_paragraph_safe']
 
 
 class ParagraphReplaceNative(_ParagraphReplace):
-    """Replace one whole paragraph through the native path. The backend selects the paragraph that contains `find` together with its paragraph break, deletes it and types `replace`. End `replace` with "\r\n" to keep that break; otherwise the next paragraph joins the replacement and the job still succeeds (measured on Hancom 2024; the last paragraph has no break to delete)."""
+    """Replace one whole paragraph through the native path. The backend selects the paragraph that contains `find` together with its paragraph break, deletes it and types `replace`. End `replace` with "\r\n" to keep that break, or set keep_paragraph_break=true to replace only the content; otherwise the next paragraph joins the replacement and the job still succeeds (measured on Hancom 2024; the last paragraph has no break to delete)."""
     op: Literal['paragraph_replace_native']
 
 
@@ -499,12 +502,12 @@ class _Authoring(Closed):
 
 
 class JobCompileAuthoring(_Authoring):
-    """Compile authoring markdown into a plan that waits for confirm_action. A one-line section that replaces a paragraph followed by another paragraph joins that next paragraph: the compiler adds the trailing paragraph break only for sections of two or more lines (measured on Hancom 2024 through confirm_action approve and author_and_convert)."""
+    """Compile authoring markdown into a plan that waits for confirm_action. An exact target paragraph is replaced in its content only, so the paragraph after it (for example the next heading) keeps its text and shape."""
     action: Literal['compile_authoring']
 
 
 class JobAuthorAndConvert(_Authoring):
-    """Compile authoring markdown and run it as one queued job. A one-line section that replaces a paragraph followed by another paragraph joins that next paragraph: the compiler adds the trailing paragraph break only for sections of two or more lines (measured on Hancom 2024 through confirm_action approve and author_and_convert)."""
+    """Compile authoring markdown and run it as one queued job. An exact target paragraph is replaced in its content only, so the paragraph after it (for example the next heading) keeps its text and shape."""
     action: Literal['author_and_convert']
 
 

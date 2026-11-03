@@ -5119,9 +5119,6 @@ def compile_markdown_to_edit_plan(
                 continue
             used_resolved_target_sections[resolution.resolved_target_id] = section.section_key
             rendered_text = _join_rendered_lines(rendered_lines)
-            rendered_text_for_replace = rendered_text
-            if len(rendered_lines) > 1 and not rendered_text_for_replace.endswith('\r\n'):
-                rendered_text_for_replace += '\r\n'
 
             boundary_start_paragraph, boundary_end_paragraph = _find_nonempty_range_boundaries(
                 template_map,
@@ -5557,10 +5554,13 @@ def compile_markdown_to_edit_plan(
                             'allow_packed_paragraph': True,
                         }
                     else:
+                        # Replace only the target paragraph's content: its break and the next paragraph (with its
+                        # shape) stay, whether or not another paragraph follows it in the list.
                         replace_payload = {
                             'op': 'paragraph_replace_native',
                             'find': boundary_start_paragraph.text,
-                            'replace': rendered_text_for_replace,
+                            'replace': rendered_text,
+                            'keep_paragraph_break': True,
                             'expected_present_after': rendered_text,
                             'expected_absent_after': boundary_start_paragraph.text,
                             'apply': 'first',
