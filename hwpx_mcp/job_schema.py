@@ -9,9 +9,10 @@ absent.
 """
 from __future__ import annotations
 
+import re
 from typing import Annotated, Any, Literal
 
-from pydantic import Field, model_validator
+from pydantic import AfterValidator, Field, model_validator
 
 from hwpx_mcp.operations import Closed, CursorPos
 
@@ -388,8 +389,12 @@ class EditInstructions(Closed):
     validation_run_id: Short | None = None
     compile_status: Short | None = None
     failure_reason: Short | None = None
-    precondition: dict[str, Any] | None = Field(default=None, description='Record-only object kept with the job instructions.')
-    metadata: dict[str, Any] | None = Field(default=None, description='Record-only object kept with the job instructions.')
+    precondition: dict[str, Any] | None = Field(default=None, description='Kept with the job instructions; the worker does not act on it.')
+    metadata: dict[str, Any] | None = Field(default=None, description=(
+        'Passed to the worker, which acts on known keys: post_serialization_proof or post_serialization_proofs run an extra check '
+        'after saving that can fail the job; compile_warning_badges is copied into the validation artifact; tracking keys '
+        '(request_id, intent_id, idempotency_key, template_version, inspect_snapshot_id, resolved_via, resolved_target_id, '
+        'execution_run_id, validation_run_id) are read from here when not given at the top level. Other keys are kept with the instructions.'))
 
 
 class PolicyOverride(Closed):
@@ -400,6 +405,31 @@ class PolicyOverride(Closed):
 
 
 FillValue = Annotated[str, Field(max_length=20000)] | int | float | bool | None
+# The backend's token rules (app/template_engine.py canonicalize_placeholder_token / canonicalize_placeholder_segment):
+# a key is a [[BR::...]] token or reduces to at least one ASCII letter/digit segment; a table name needs one too.
+_PLACEHOLDER_TOKEN = re.compile(r'\[\[BR::[A-Za-z0-9_:\-]+\]\]')
+_ASCII_ALNUM = re.compile(r'[A-Za-z0-9]')
+
+
+def _placeholder_key(value: str) -> str:
+    raw = value.strip()
+    candidate = raw
+    if candidate.startswith('[[BR::') and candidate.endswith(']]'):
+        candidate = candidate[6:-2]
+    elif candidate.startswith('BR::'):
+        candidate = candidate[4:]
+    if not raw or not (_PLACEHOLDER_TOKEN.fullmatch(raw) or _ASCII_ALNUM.search(candidate)):
+        raise ValueError('a placeholder key is a [[BR::NAME]] token or a name with at least one ASCII letter or digit (for example NAME)')
+    return value
+
+
+def _table_name(value: str | None, where: str) -> None:
+    if not value or not _ASCII_ALNUM.search(str(value).strip()):
+        raise ValueError(f'{where} needs a name with at least one ASCII letter or digit; the backend builds [[BR::TABLE::NAME::Rnn_Cnn]] from it')
+
+
+PlaceholderKey = Annotated[str, Field(min_length=1, max_length=500, description='[[BR::NAME]] or a name with ASCII letters/digits, such as NAME.'),
+                           AfterValidator(_placeholder_key)]
 CellKey = Annotated[str, Field(pattern=r'^[Rr]?(\d+)\s*[_\- ]?[Cc]?(\d+)$', description='r1c1, R01_C02 or similar.')]
 
 
@@ -413,6 +443,7 @@ class FillTable(Closed):
     def named(self):
         if not (self.name or self.table or self.scope):
             raise ValueError('a table needs name, table or scope')
+        _table_name(self.name or self.table or self.scope, 'a table')
         return self
 
 
@@ -428,11 +459,12 @@ class FillTableCell(Closed):
     def named(self):
         if not (self.name or self.table or self.scope):
             raise ValueError('a table cell needs name, table or scope')
+        _table_name(self.table or self.name or self.scope, 'a table cell')
         return self
 
 
 class PlaceholderFills(Closed):
-    placeholders: dict[Annotated[str, Field(min_length=1, max_length=500)], FillValue] | None = None
+    placeholders: dict[PlaceholderKey, FillValue] | None = None
     tables: Annotated[list[FillTable], Field(max_length=200)] | None = None
     table_cells: Annotated[list[FillTableCell], Field(max_length=5000)] | None = None
 
@@ -515,7 +547,14 @@ class JobConfirmAction(Closed):
     enqueue_convert: bool | None = None
 
     @model_validator(mode='after')
-    def regenerate_needs_markdown(self):
+    def fields_the_action_reads(self):
+        # /jobs/{job_id}/confirm-action reads these only for the named action and ignores them otherwise.
+        reads = {'regenerate': {'authoring_markdown', 'validation', 'cleanup_placeholders', 'policy_override'},
+                 'approve': {'enqueue_convert'}}.get(self.confirm, set())
+        stray = sorted(name for name in ('authoring_markdown', 'validation', 'cleanup_placeholders', 'policy_override', 'enqueue_convert')
+                       if getattr(self, name) is not None and name not in reads)
+        if stray:
+            raise ValueError(f'confirm={self.confirm} does not use: {", ".join(stray)}')
         if self.confirm == 'regenerate' and self.authoring_markdown is None:
             raise ValueError('regenerate requires authoring_markdown')
         return self

@@ -416,7 +416,7 @@ class ParityTransport(unittest.IsolatedAsyncioTestCase):
         approved = await self.call('hwpx_job', {'request': {'action': 'confirm_action', 'job_id': JOB, 'confirm': 'approve', 'enqueue_convert': True}})
         self.assertFalse(approved.is_error, approved.structured_content)
         self.assertEqual(self.posts(f'/jobs/{JOB}/confirm-action')[0][2], {'action': 'approve', 'enqueue_convert': True})
-        fills = {'placeholders': {'이름': '홍길동'}, 'tables': [{'name': '표1', 'cells': {'r2c2': '값'}}]}
+        fills = {'placeholders': {'NAME': '홍길동'}, 'tables': [{'name': '표1', 'cells': {'r2c2': '값'}}]}
         result = await self.call('hwpx_job', {'request': {'action': 'fill_placeholders_and_convert', 'source_path': str(self.fixture),
                                                            'placeholder_fills': fills, 'validation': {'max_page_count': 3}}})
         self.assertFalse(result.is_error, result.structured_content)
