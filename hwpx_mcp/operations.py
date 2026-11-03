@@ -379,7 +379,7 @@ Text1000 = Annotated[str, Field(min_length=1, max_length=1000)]
 
 
 class ParagraphRehomeStep(Closed):
-    """Move one paragraph before another (delete and insert). Not one of the backend's guarded exact engines: any backend error in this step, including a stale or wrong target, is reported as an unknown outcome and holds the session."""
+    """Move one paragraph's text to just before another (insert, then delete). The backend first types insert_text and a line break at the start of insert_before_match, then searches delete_match from the top of delete_expected_page. When insert_before_match comes earlier on that page than the text being moved, that search finds and deletes the copy it just inserted: the step reports success, the order is unchanged and a line break is left before insert_before_match (measured on Hancom 2024). Not one of the backend's guarded exact engines: any backend error in this step, including a stale or wrong target, is reported as an unknown outcome and holds the session."""
     op: Literal['paragraph_rehome_exact']
     label: Label = 'mcp:paragraph-rehome-exact'
     delete_match: Text1000

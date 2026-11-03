@@ -505,6 +505,20 @@ class NativeFindings(unittest.TestCase):
         self.assertIsNotNone(model)
         self.assertIn('active selection', json.dumps(model.model_json_schema(), ensure_ascii=False))
 
+    def test_rehome_schema_says_what_the_insert_first_order_does(self):
+        # The backend engine inserts the copy, then searches delete_match from the top of the page; moving a paragraph
+        # before an earlier anchor deletes the new copy and still reports success (measured on Hancom 2024).
+        tree = ast.parse((APP / 'local_cli_bundle_controls.py').read_text(encoding='utf-8'))
+        engine = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == '_bundle_paragraph_rehome_exact')
+        insert_line = min(n.lineno for n in ast.walk(engine) if isinstance(n, ast.Call) and getattr(n.func, 'id', None) == 'insert_text_at_caret')
+        finds = [n for n in ast.walk(engine) if isinstance(n, ast.Call) and getattr(n.func, 'attr', None) == '_find_text_on_expected_page'
+                 and any(k.arg == 'match' and getattr(k.value, 'id', None) == 'delete_match' for k in n.keywords)]
+        self.assertEqual(len(finds), 1, 'delete_match search not found in the rehome engine')
+        insert_first = insert_line < finds[0].lineno
+        text = json.dumps(command_models()['paragraph_rehome_exact'].model_json_schema(), ensure_ascii=False)
+        says = 'deletes the copy it just inserted' in text
+        self.assertEqual(says, insert_first, 'the rehome schema must describe the engine order: insert first, then search delete_match')
+
 
 if __name__ == '__main__':
     unittest.main()
