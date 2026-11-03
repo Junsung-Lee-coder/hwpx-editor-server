@@ -58,8 +58,11 @@ class VariantRows(unittest.TestCase):
         self.assertEqual(layout['columns:from_caret_new'], 'not_qualified')
         objects = {row['variant']: row['native'] for row in self.variants('object_insert_exact')}
         self.assertEqual(objects['memo'], 'qualified')
-        self.assertEqual(objects['line:inline'], 'qualified')
-        self.assertEqual(objects['line:floating'], 'not_qualified')
+        # On the reference host a shape is inserted with the requested frame size but Hancom draws no outline and (rectangle,
+        # ellipse) a zero drawn size, so nothing shows: no shape variant is qualified.
+        for shape in ('line', 'rectangle', 'ellipse'):
+            self.assertEqual((objects[f'{shape}:inline'], objects[f'{shape}:floating']), ('not_qualified', 'not_qualified'), shape)
+        self.assertIn('no outline', {row['variant']: row for row in self.variants('object_insert_exact')}['rectangle:inline']['scope'])
         self.assertEqual(objects['header:even'], 'not_qualified')
         self.assertNotIn('native', rows()['layout_exact'])
 

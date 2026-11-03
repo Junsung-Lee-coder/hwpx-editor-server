@@ -130,6 +130,11 @@ def _variant(kind: str, qualifier: str | None, scope: str, native: str, **extra:
     return {'variant': kind if qualifier is None else f'{kind}:{qualifier}', 'kind': kind, 'scope': scope, 'native': native, **extra}
 
 
+# What the reference run of the three shape kinds saved: the object with the requested frame size, inline, but with no
+# outline and (rectangle, ellipse) a zero drawn size, so the saved, reopened and rendered pages show nothing.
+_SHAPE_DRAWN = ('on the reference host the object is saved with the requested frame size, inline, but with no outline and (rectangle, '
+                'ellipse) a zero drawn size, so it does not show')
+
 VARIANTS: dict[str, list[dict[str, str]]] = {
     'layout_exact': [
         _variant('page_setup', 'margins', 'margin fields, apply_to current_section', 'qualified'),
@@ -155,11 +160,11 @@ VARIANTS: dict[str, list[dict[str, str]]] = {
         _variant('hyperlink', None, 'url on the live selection of display_text', 'qualified'),
         _variant('bookmark', None, 'new name at the caret', 'qualified'),
         _variant('equation', None, 'script at the caret', 'qualified'),
-        _variant('line', 'inline', 'treat_as_char true', 'qualified'),
+        _variant('line', 'inline', f'treat_as_char true; {_SHAPE_DRAWN}', 'not_qualified'),
         _variant('line', 'floating', 'treat_as_char false or unset', 'not_qualified'),
-        _variant('rectangle', 'inline', 'treat_as_char true', 'qualified'),
+        _variant('rectangle', 'inline', f'treat_as_char true; {_SHAPE_DRAWN}', 'not_qualified'),
         _variant('rectangle', 'floating', 'treat_as_char false or unset', 'not_qualified'),
-        _variant('ellipse', 'inline', 'treat_as_char true', 'qualified'),
+        _variant('ellipse', 'inline', f'treat_as_char true; {_SHAPE_DRAWN}', 'not_qualified'),
         _variant('ellipse', 'floating', 'treat_as_char false or unset', 'not_qualified'),
         _variant('header', 'both', 'apply_to both', 'qualified'),
         _variant('header', 'odd', 'apply_to odd', 'qualified'),

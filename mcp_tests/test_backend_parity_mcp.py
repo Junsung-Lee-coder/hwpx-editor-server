@@ -472,7 +472,8 @@ class ParityTransport(unittest.IsolatedAsyncioTestCase):
                          ('unsupported', 'section_insert_position_unsupported'))
         self.assertEqual(layout['section_insert:inside_paragraph']['native'], 'qualified')
         objects = {row['variant']: row['native'] for row in rows['object_insert_exact']['variants']}
-        self.assertEqual((objects['ellipse:inline'], objects['ellipse:floating']), ('qualified', 'not_qualified'))
+        self.assertEqual((objects['ellipse:inline'], objects['ellipse:floating']), ('not_qualified', 'not_qualified'))
+        self.assertEqual(objects['memo'], 'qualified')
 
 
 if __name__ == '__main__':
