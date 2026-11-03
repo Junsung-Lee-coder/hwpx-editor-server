@@ -59,7 +59,9 @@ class InsertWithCaretInHead(unittest.TestCase):
 
         class CaretHead(_FakeHwp):
             def xml(self):
-                head = f'<HEAD><DOCSETTING><BEGINNUMBER Page="1" Footnote="1"/><CARETPOS List="{self.caret[0]}" Para="{self.caret[1]}" Pos="{self.caret[2]}"/></DOCSETTING></HEAD>'
+                # As on Hancom 2024, the recorded caret differs after the insert (this fake returns the caret itself).
+                moved = int(any(entry.startswith('Insert') for entry in self.log))
+                head = f'<HEAD><DOCSETTING><BEGINNUMBER Page="1" Footnote="1"/><CARETPOS List="{self.caret[0]}" Para="{self.caret[1]}" Pos="{self.caret[2] + moved}"/></DOCSETTING></HEAD>'
                 return super().xml().replace('<HEAD/>', head, 1)
         hwp = CaretHead()
         result = _run(hwp, kind='footnote')
