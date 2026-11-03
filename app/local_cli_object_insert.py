@@ -228,12 +228,30 @@ class LocalCliObjectInsertMixin:
         except Exception:
             return None
 
-    def _object_insert_normal_after(self, hwp: Any) -> bool:
-        """After the mutator: is the editor back in normal state? (Unreadable counts as not normal.)"""
+    def _object_insert_state_after(self, hwp: Any) -> dict[str, Any]:
+        """The editor state after the native insert, from one exact read. A failed or malformed read leaves the state
+        unknown: it is a technical failure after the mutation, raised at once with nothing further on the SDK."""
         try:
-            return strict_state(hwp, OP)['normal']
-        except LocalCliRuntimeError:
-            return False
+            return strict_state(hwp, OP)
+        except LocalCliRuntimeError as exc:
+            error = LocalCliRuntimeError(f'{OP}: the editor state after the native insert could not be read; nothing further is attempted')
+            error.step_phase, error.step_reason = 'native', 'native_outcome_unknown'
+            raise error from exc
+
+    def _object_insert_release(self, hwp: Any, plan: dict[str, Any], actions: list[dict[str, Any]]) -> None:
+        """A new drawing object or equation may stay selected. Only an exact read decides: normal needs nothing; a
+        state that is exactly not normal gets one Cancel, after which a second exact read must be normal. Otherwise the
+        step stops there (the object would stay selected for the next step)."""
+        if self._object_insert_state_after(hwp)['normal']:
+            return
+        cancel = self._object_insert_run(hwp, 'Cancel')
+        actions.append(cancel)
+        if not cancel['succeeded'] or not self._object_insert_state_after(hwp)['normal']:
+            released = 'Cancel did not succeed' if not cancel['succeeded'] else 'it is still selected'
+            error = LocalCliRuntimeError(f'{OP}: the new {plan["kind"]} was not released after Cancel ({released})')
+            error.step_phase = 'native'
+            error.step_reason = 'shape_not_released' if plan['kind'] in SHAPE_KINDS else 'close_return_failed'
+            raise error
 
     def _object_insert_mutate(self, hwp: Any, plan: dict[str, Any], control: StepControl, mutation: _Mutation) -> list[dict[str, Any]]:
         native = plan['native']
@@ -281,14 +299,7 @@ class LocalCliObjectInsertMixin:
                 error.step_phase, error.step_reason = 'native', 'close_return_failed'
                 raise error
         elif plan['kind'] in SHAPE_KINDS or plan['kind'] == 'equation':
-            # A fresh drawing object may stay selected (or in drawing mode); Esc once.
-            if not self._object_insert_normal_after(hwp):
-                actions.append(self._object_insert_run(hwp, 'Cancel'))
-                # A drawn shape must be released: a later step must not act on a still-selected object.
-                if plan['kind'] in SHAPE_KINDS and not (actions[-1]['succeeded'] and self._object_insert_normal_after(hwp)):
-                    error = LocalCliRuntimeError(f'{OP} the new {plan["kind"]} is still selected after Cancel: {actions[-1]!r}')
-                    error.step_phase, error.step_reason = 'native', 'shape_not_released'
-                    raise error
+            self._object_insert_release(hwp, plan, actions)
         return actions
 
     def _bundle_object_insert_exact(self, hwp: Any, step: dict[str, Any], control: StepControl | None = None) -> dict[str, Any]:
