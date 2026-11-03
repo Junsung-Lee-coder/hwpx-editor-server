@@ -77,12 +77,10 @@ def require_bundle_op_drift_check() -> None:
     if missing_server_validation:
         raise SystemExit(f'local bundle ops missing from server allowed_keys validation: {missing_server_validation}')
     server_backlog = server_ops - local_ops
+    # The paragraph/control join and rehome ops are now in the local client (and MCP); a bare save step stays
+    # server-only because hwpx save / hwpx_save save and then retrieve the file.
     expected_server_backlog = {
         'save_document',
-        'paragraph_join_previous_exact',
-        'paragraph_join_next_exact',
-        'control_join_previous_exact',
-        'paragraph_rehome_exact',
     }
     if server_backlog != expected_server_backlog:
         raise SystemExit(
