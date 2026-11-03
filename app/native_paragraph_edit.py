@@ -39,6 +39,7 @@ from app.native_numbering import (
     _read_page_number_props,
     _read_protection,
     _read_target_state,
+    _sdk_read,
     _reject_unknown_keys,
     _require_complete,
     _require_confirm_layout,
@@ -185,11 +186,12 @@ def insert_paragraph(
         caret = _get_pos(hwp)
         if caret[:2] != (list_id, para) or _get_selection(hwp) != ():
             raise NativeNumberingRefusal('the caret is not at the requested paragraph edge', code='target_unlocatable')
-        hset = hwp.HParameterSet.HInsertText
-        default = haction.GetDefault('InsertText', hset.HSet)
+        hset = _sdk_read(lambda: hwp.HParameterSet.HInsertText)
+        default = _sdk_read(lambda: haction.GetDefault('InsertText', hset.HSet))
         if not _action_confirmed(default):
             raise NativeNumberingRefusal(f'native InsertText defaults returned {_status_text(default)}', code='native_defaults_unavailable')
-        hset.Text = ('\r\n' + text) if position == 'after' else (text + '\r\n')
+        inserted = ('\r\n' + text) if position == 'after' else (text + '\r\n')
+        _sdk_read(lambda: setattr(hset, 'Text', inserted))
         if _read_target_state(hwp) != (caret, ()):
             raise NativeNumberingRefusal('the caret moved while the insertion was prepared', code='target_moved')
         reach.issue()
@@ -250,7 +252,7 @@ def remove_paragraph(
             raise NativeNumberingRefusal('removing this paragraph would move a page or column break', code='neighbor_has_break')
         controls = _control_sequence(hwp)
         list_id, para = _located(hwp, match, paragraph)
-        selected = hwp.select_text(para, 0, para + 1, 0, list_id)
+        selected = _sdk_read(lambda: hwp.select_text(para, 0, para + 1, 0, list_id))
         expected = (list_id, para, 0, list_id, para + 1, 0)
         if selected is not True or _get_selection(hwp) != expected:
             raise NativeNumberingRefusal('the paragraph could not be selected exactly', code='target_unlocatable')
@@ -373,7 +375,7 @@ def _add_format(result: dict[str, Any], paragraphs: list[dict[str, Any]], format
         row['format'] = fact
 
 
-class _CensusUnusable(Exception):
+class _CensusUnusable(CensusError):
     """The native read returned, but the result does not have the shape of a document census."""
 
 

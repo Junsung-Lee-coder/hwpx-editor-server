@@ -69,7 +69,7 @@ from app.local_cli_runtime import (
     save_document,
     snapshot_live_location,
 )
-from app import native_format, native_numbering, native_paragraph_edit
+from app import native_format, native_numbering, native_numbering_census, native_paragraph_edit, native_table
 from app.local_cli_type_guard import type_insert_guard_reason
 from app.command_packages.runtime import get_command_package_registry
 from app.raw_readback import RawReadbackMismatch, build_raw_target_readback
@@ -113,6 +113,7 @@ from app.local_cli_service_support import (  # noqa: F401
 from app.local_cli_bundle_controls import LocalCliBundleControlsMixin
 from app.local_cli_bundle_numbering import LocalCliBundleNumberingMixin
 from app.local_cli_bundle_paragraphs import LocalCliBundleParagraphsMixin
+from app.local_cli_bundle_tables import LocalCliBundleTablesMixin
 from app.local_cli_cell_margins import LocalCliCellMarginsMixin
 from app.local_cli_table_structure import LocalCliTableStructureMixin
 from app.local_cli_layout import LocalCliLayoutMixin
@@ -128,6 +129,8 @@ from app.media_guard import MediaGuardError, media_change_reasons, media_invento
 #                          result reports exactly one native edit.
 #   'counted_native_edit' - one tracked edit of the one or two native edits the
 #                          successful step reports.
+#   'counted_any_native_edit' - one tracked edit of however many native edits the
+#                          successful step reports, each one proven by its block.
 # Ops not listed count one undo unit per changed step.
 _BUNDLE_UNDO_POLICY: dict[str, str] = {
     'layout_exact': 'refuse',
@@ -142,8 +145,23 @@ _BUNDLE_UNDO_POLICY: dict[str, str] = {
     # Keeping a number mark at a range's end takes one more native action, so character formatting counts what it issued.
     'character_format_exact': 'counted_native_edit',
     'paragraph_format_exact': 'single_native_edit',
+    # One command is one native action whatever its count; a command also writing fill is two, and a table created with text cannot be counted.
+    'table_edit_exact': 'single_native_edit',
+    'table_style_exact': 'counted_native_edit',
+    'table_create_exact': 'single_native_edit',
+    # One action per column, or per cell across a merge, as measured; the step reports how many it issued.
+    'table_width_exact': 'counted_any_native_edit',
 }
 _UNDO_UNVERIFIED_BUNDLE_OPS = frozenset(_BUNDLE_UNDO_POLICY)
+# These packages own strict target/preservation proofs. The bundle must not
+# surround them (or sibling steps in the same request) with best-effort SDK reads.
+_GUARDED_BUNDLE_OPS = frozenset({
+    'page_number_apply', 'official_numbering_apply',
+    'paragraph_insert_exact', 'paragraph_remove_exact',
+    'character_format_exact', 'paragraph_format_exact',
+    'table_inventory', 'table_read', 'table_edit_exact', 'table_style_exact',
+    'table_width_exact', 'table_create_exact',
+})
 
 
 class LocalCliUndoRefused(LocalCliRuntimeError):
@@ -175,9 +193,12 @@ def _bundle_step_single_undo(step: dict[str, Any]) -> bool:
     policy = _BUNDLE_UNDO_POLICY.get(str(step.get('op')))
     if policy is None:
         return True
-    if policy not in {'single_native_edit', 'counted_native_edit'}:
+    if policy not in {'single_native_edit', 'counted_native_edit', 'counted_any_native_edit'}:
         return False
-    return step.get('ok') is True and _reported_native_edits(step) in ({1, 2} if policy == 'counted_native_edit' else {1})
+    reported = _reported_native_edits(step)
+    if policy == 'counted_any_native_edit':
+        return step.get('ok') is True and type(reported) is int and reported >= 1
+    return step.get('ok') is True and reported in ({1, 2} if policy == 'counted_native_edit' else {1})
 
 
 def _reported_native_edits(step: dict[str, Any]) -> Any:
@@ -188,7 +209,7 @@ def _reported_native_edits(step: dict[str, Any]) -> Any:
 
 def _native_undo_steps(steps: list[dict[str, Any]]) -> int:
     """How many native Undo calls reverse these steps: what a counted step reported, one for any other."""
-    return sum(_reported_native_edits(step) if _BUNDLE_UNDO_POLICY.get(str(step.get('op'))) == 'counted_native_edit' else 1 for step in steps)
+    return sum(_reported_native_edits(step) if _BUNDLE_UNDO_POLICY.get(str(step.get('op'))) in {'counted_native_edit', 'counted_any_native_edit'} else 1 for step in steps)
 
 
 def _record_bundle_undo_state(binding: dict[str, Any], steps: list[Any], prior: dict[str, Any]) -> None:
@@ -234,12 +255,25 @@ def _track_history_edit(binding: dict[str, Any], native_steps: Any, states: dict
         binding['redo_states'] = []
 
 
-def _expected_state(states: Any, name: str, reached: Any) -> dict[str, Any]:
-    """Whether a history step reached the state its edit recorded; an edit that recorded none cannot be compared."""
+_MAX_HISTORY_DIFFERENCES = 30
+
+
+def _expected_state(states: Any, name: str, reached: Any, differences: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    """Whether a history step reached the state its edit recorded, and what differs by name when it did not; an edit that recorded none cannot be compared."""
     recorded = states.get(name) if isinstance(states, dict) else None
     if recorded is None or reached is None:
         return {'compared': False, 'matches': None}
-    return {'compared': True, 'matches': recorded == reached}
+    if recorded == reached:
+        return {'compared': True, 'matches': True}
+    if differences is None:
+        return {'compared': True, 'matches': False}
+    return {'compared': True, 'matches': False, 'differences': differences[:_MAX_HISTORY_DIFFERENCES], 'differences_total': len(differences)}
+
+
+def _recorded_sha(states: Any, name: str) -> Any:
+    """The state the newest edit on this history stack recorded."""
+    newest = states[-1] if isinstance(states, list) and states else None
+    return newest.get(name) if isinstance(newest, dict) else None
 
 
 _STYLE_SELECTION_CONSUMED_WARNING = (
@@ -252,6 +286,7 @@ class LocalCliService(
     LocalCliBundleControlsMixin,
     LocalCliBundleNumberingMixin,
     LocalCliBundleParagraphsMixin,
+    LocalCliBundleTablesMixin,
     LocalCliCellMarginsMixin,
     LocalCliTableStructureMixin,
     LocalCliObjectInsertMixin,
@@ -1488,6 +1523,9 @@ class LocalCliService(
                     )
                 if step.get('op') in {'character_format_exact', 'paragraph_format_exact'} and all(key in raw_result for key in ('target', 'requested', 'result')):
                     result.update(native_format.public_report(raw_result))
+                if step.get('op') in {'table_inventory', 'table_read', 'table_edit_exact', 'table_style_exact', 'table_width_exact', 'table_create_exact'}:
+                    # The caller asked for these values and they are bounded where they are built; the journal copy stays bounded and redacted.
+                    result.update(raw_result)
                 step['result'] = result
             if 'error' in step:
                 step['error'] = 'native command step failed'
@@ -2842,6 +2880,12 @@ class LocalCliService(
             },
             'paragraph_insert_exact': {'op', 'operation', 'label', 'match', 'expected_page', 'text', 'position', 'confirm_layout'},
             'paragraph_remove_exact': {'op', 'operation', 'label', 'match', 'expected_page', 'expected_text', 'confirm_remove'},
+            'table_inventory': {'op', 'label', 'operation'},
+            'table_read': {'max_cells', 'table_id', 'op', 'label', 'operation'},
+            'table_edit_exact': {'expected_cols', 'count', 'row', 'expected_rows', 'confirm_layout', 'end_cell', 'expected_removed_cells', 'expected_hash', 'table_id', 'action', 'cell', 'split_rows', 'split_cols', 'col', 'op', 'expected_page', 'label', 'operation'},
+            'table_style_exact': {'expected_cols', 'borders', 'expected_rows', 'confirm_layout', 'end_cell', 'expected_hash', 'table_id', 'cell', 'scope', 'over_wider_neighbour', 'fill', 'op', 'expected_page', 'label', 'operation'},
+            'table_width_exact': {'expected_cols', 'column_widths_mm', 'confirm_layout', 'expected_hash', 'expected_page', 'expected_rows', 'fit', 'label', 'op', 'operation', 'table_id'},
+            'table_create_exact': {'cells', 'cols', 'confirm_layout', 'operation', 'rows', 'op', 'expected_page', 'label', 'match'},
             'character_format_exact': {'op', 'operation', 'label', 'match', 'through_match', 'paragraph_index', 'expected_text', 'expected_page', 'confirm_layout', 'number_mark', 'font_family', 'size_pt', 'bold', 'italic', 'underline', 'text_color'},
             'paragraph_format_exact': {'op', 'operation', 'label', 'match', 'through_match', 'paragraph_index', 'expected_text', 'expected_page', 'confirm_layout', 'align', 'left_indent_pt', 'right_indent_pt', 'first_line_indent_pt', 'line_spacing_type', 'line_spacing_value'},
             'paragraph_delete_exact': {
@@ -3730,8 +3774,7 @@ class LocalCliService(
 
         # Numbering publishes intent at actual Execute boundaries. Other
         # packages are conservative before invocation, never error callbacks.
-        if op not in {'page_number_apply', 'official_numbering_apply', 'paragraph_insert_exact', 'paragraph_remove_exact', 'character_format_exact', 'paragraph_format_exact',
-                      'control_inventory', 'table_frame_inventory', 'style_inspect', 'where'}:
+        if op not in _GUARDED_BUNDLE_OPS | {'control_inventory', 'table_frame_inventory', 'style_inspect', 'where'}:
             if handle.mark_mutating_intent is not None:
                 handle.mark_mutating_intent()
         package = self.command_packages.get(op)
@@ -7152,12 +7195,15 @@ class LocalCliService(
     def command_bundle(self, *, steps: list[dict[str, Any]], session_id: str | None = None) -> dict[str, Any]:
         cleaned_steps = self._validate_command_bundle_steps(steps)
         binding = self._load_active_binding(session_id=session_id)
+        guarded = any(step['op'] in _GUARDED_BUNDLE_OPS for step in cleaned_steps)
+        omitted = {'observation_status': 'omitted_guarded_envelope'}
 
         def _handler(handle: LocalCliRuntimeHandle) -> dict[str, Any]:
+            handle.guarded_bundle = guarded
             # Bundle wrapper snapshots must not disturb live selection. Commands
             # that need rich nearby text/context should request it explicitly in
             # their own package; the wrapper is only envelope proof.
-            before_location = snapshot_live_location(
+            before_location = dict(omitted) if guarded else snapshot_live_location(
                 hwp=handle.hwp,
                 source_filename=handle.source_filename,
                 working_copy_id=handle.session_id,
@@ -7171,9 +7217,26 @@ class LocalCliService(
             custody_held = False
 
             for index, step in enumerate(cleaned_steps, start=1):
-                step_before = self._bundle_compact_snapshot(handle.hwp)
+                step_before = dict(omitted) if guarded else self._bundle_compact_snapshot(handle.hwp)
+                # Invocation is step-local; the owning worker's intent remains
+                # request-cumulative for escaped/report failures and save debt.
+                # Comparing the cumulative bool before/after loses a second
+                # invocation when an earlier step already set it True.
+                step_mutation_issued = False
+                mark_mutating_intent = getattr(handle, 'mark_mutating_intent', None)
+
+                def mark_step_mutating_intent() -> None:
+                    nonlocal step_mutation_issued
+                    step_mutation_issued = True
+                    if mark_mutating_intent is not None:
+                        mark_mutating_intent()
+
                 try:
-                    result, step_dirty, step_warnings = self._execute_command_bundle_step(handle, step, binding=binding)
+                    handle.mark_mutating_intent = mark_step_mutating_intent
+                    try:
+                        result, step_dirty, step_warnings = self._execute_command_bundle_step(handle, step, binding=binding)
+                    finally:
+                        handle.mark_mutating_intent = mark_mutating_intent
                     dirty = dirty or bool(step_dirty)
                     if isinstance(result, dict) and result.get('artifact_kind') and result.get('artifact_path'):
                         artifacts[f"latest_{result.get('artifact_kind')}_path"] = str(result.get('artifact_path'))
@@ -7184,7 +7247,7 @@ class LocalCliService(
                         'ok': True,
                         'dirty': bool(step_dirty),
                         'before': step_before,
-                        'after': self._bundle_compact_snapshot(handle.hwp),
+                        'after': dict(omitted) if guarded else self._bundle_compact_snapshot(handle.hwp),
                         'result': result,
                         'warnings': step_warnings,
                     }
@@ -7194,12 +7257,14 @@ class LocalCliService(
                     # Producer invocation intent is independent of error tags.
                     from app.native_numbering import NativeNumberingRefusal
                     from app.local_cli_bundle_numbering import _NumberingCleanRefusal, _NumberingSemanticRefusal
-                    numbering = step.get('op') in {'official_numbering_apply', 'page_number_apply', 'paragraph_insert_exact', 'paragraph_remove_exact', 'character_format_exact', 'paragraph_format_exact'}
+                    numbering = step.get('op') in _GUARDED_BUNDLE_OPS
                     target_refused = numbering and (type(exc) is NativeNumberingRefusal or type(exc) is _NumberingSemanticRefusal or type(exc) is _NumberingCleanRefusal)
-                    # Paragraph edits publish intent exactly when the native call is issued; numbering keeps its stricter projection.
-                    mutation_may_have_persisted = handle.mutation_intent or (step.get('op') == 'official_numbering_apply' and not target_refused)
+                    # Only an existing proved semantic refusal may disregard
+                    # confirmed earlier steps. Technical/unknown outcomes keep
+                    # the conservative cumulative projection and custody debt.
+                    mutation_may_have_persisted = (step_mutation_issued if target_refused else handle.mutation_intent) or (step.get('op') == 'official_numbering_apply' and not target_refused)
                     held = False
-                    if (mutation_may_have_persisted or (numbering and not target_refused)) and handle.hold_native_custody is not None:
+                    if (mutation_may_have_persisted or (guarded and not target_refused)) and handle.hold_native_custody is not None:
                         if mutation_may_have_persisted:
                             handle.hold_native_custody('Bundle mutator outcome unknown; session retained.', exc)
                         else:
@@ -7214,7 +7279,7 @@ class LocalCliService(
                     # descriptors, metadata, metaclass name or representation.
                     error_text = 'Native command failed; outcome is unproven.'
                     if target_refused:
-                        error_text = ('Formatting refused before any edit; original state and preservation verified.' if step.get('op') in {'character_format_exact', 'paragraph_format_exact'}
+                        error_text = ('Formatting refused before any edit; original state and preservation verified.' if step.get('op') in {'character_format_exact', 'paragraph_format_exact', 'table_inventory', 'table_read', 'table_edit_exact', 'table_style_exact', 'table_width_exact', 'table_create_exact'}
                                       else 'Numbering preflight refused; original state and preservation verified.')
                     rollback = {}
                     if type(exc) is LocalCliMutationError or type(exc) is LocalCliRuntimeError:
@@ -7236,7 +7301,7 @@ class LocalCliService(
                         'ok': False,
                         'dirty': mutation_may_have_persisted,
                         'before': step_before,
-                        'after': {} if held else self._bundle_compact_snapshot(handle.hwp),
+                        'after': {} if held else (dict(omitted) if guarded else self._bundle_compact_snapshot(handle.hwp)),
                         'error': ('LocalCliMutationError' if type(exc) is LocalCliMutationError else _exception_label(exc)) + ': ' + error_text,
                         'mutation_may_have_persisted': mutation_may_have_persisted,
                         'rollback': rollback,
@@ -7245,12 +7310,15 @@ class LocalCliService(
                             'rollback': rollback,
                         },
                     }
+                    if type(exc) is LocalCliMutationError and step.get('op') in {'table_edit_exact', 'table_style_exact', 'table_width_exact', 'table_create_exact'}:
+                        # These messages name cells and properties, never document text, and say why the outcome is not proven.
+                        status['outcome_detail'] = error_text[:800]
                     if target_refused and not mutation_may_have_persisted:
                         from app.local_cli_runtime import _native_diagnostic
                         status['refusal_code'] = (exc.code if type(exc) is _NumberingSemanticRefusal or type(exc) is _NumberingCleanRefusal
                                                   else _native_diagnostic('bundle_step', exc)['refusal_code'])
                         args = BaseException.__dict__['args'].__get__(exc)
-                        if step.get('op') in {'character_format_exact', 'paragraph_format_exact', 'page_number_apply'} and type(args) is tuple and len(args) == 1 and type(args[0]) is str:
+                        if step.get('op') in {'character_format_exact', 'paragraph_format_exact', 'page_number_apply', 'table_inventory', 'table_read', 'table_edit_exact', 'table_style_exact', 'table_width_exact', 'table_create_exact'} and type(args) is tuple and len(args) == 1 and type(args[0]) is str:
                             status['refusal_message'] = args[0][:400]
                         if type(exc) is NativeNumberingRefusal:
                             found_page = BaseException.__dict__['__dict__'].__get__(exc).get('found_page')
@@ -7267,7 +7335,7 @@ class LocalCliService(
                     break
                 step_results.append(status)
 
-            after_location = {} if custody_held else snapshot_live_location(
+            after_location = {} if custody_held else dict(omitted) if guarded else snapshot_live_location(
                 hwp=handle.hwp,
                 source_filename=handle.source_filename,
                 working_copy_id=handle.session_id,
@@ -7560,7 +7628,18 @@ class LocalCliService(
             'download_path': self._artifact_download_path(session_id=resolved_session_id, kind='export'),
         }
 
-    def _run_history_action(self, handle: LocalCliRuntimeHandle, name: str, native_steps: int) -> dict[str, Any]:
+    def _history_differences(self, expected_sha: Any, reached: Any, text: Any, evidence: Any) -> list[dict[str, Any]] | None:
+        """What differs from the state an edit recorded, from the text the history comparison already read. No native call."""
+        recorded = self.__dict__.get('_table_state_details', {}).get(expected_sha) if expected_sha else None
+        if recorded is None or reached == expected_sha or type(text) is not str:
+            return None
+        try:
+            now = native_table.state_detail(native_table.parse_table_model(text), evidence)
+        except native_numbering_census.CensusError:
+            return None
+        return native_table.detail_differences(recorded, now) if now is not None else None
+
+    def _run_history_action(self, handle: LocalCliRuntimeHandle, name: str, native_steps: int, expected_sha: Any = None) -> dict[str, Any]:
         """Undo or Redo with no second call once one may have been issued, compared with the document before and after."""
         hwp = handle.hwp
         protection = self._numbering_protection_reader(handle)
@@ -7582,11 +7661,14 @@ class LocalCliService(
                 return {'not_applied': True}
             raise LocalCliRuntimeError(f'Native {name} did not return True; its outcome is unknown.')
         after = native_paragraph_edit.history_evidence(hwp, protection)
+        reached = native_format.state_digest(after) if after is not None else None
+        differences = self._history_differences(expected_sha, reached, getattr(protection, 'last_text', None), after)
         # Native history gives a block back; it must not linger for whatever command comes next.
         if callable(getattr(hwp, 'get_selected_pos', None)) and native_numbering._get_selection(hwp):  # noqa: SLF001
             native_numbering._set_pos(hwp, native_numbering._get_pos(hwp))  # noqa: SLF001
         return {
-            'state_sha256': native_format.state_digest(after) if after is not None else None,
+            'state_sha256': reached,
+            'state_differences': differences,
             'confirmation': native_paragraph_edit.history_confirmation(before, after),
             'snapshot': _snapshot_cursor_context(hwp),
             'context': _capture_nearby_text_context(hwp),
@@ -7598,10 +7680,11 @@ class LocalCliService(
         binding = self._load_active_binding(session_id=session_id)
 
         def _handler(handle: LocalCliRuntimeHandle) -> dict[str, Any]:
-            return native_paragraph_edit.numbering_readback(
+            facts = native_paragraph_edit.numbering_readback(
                 handle.hwp, protection=self._numbering_protection_reader(handle),
                 format_model=native_format.live_model_reader(handle.hwp), format_rows=native_format.readback_format,
             )
+            return {**facts, **self._table_review_facts(handle.hwp, facts.get('paragraphs'))}
 
         result = self._execute_live(binding=binding, command_name='numbering-readback', task_label='local_cli.numbering_readback', handler=_handler)
         result.pop('_local_cli_command', None)
@@ -7668,7 +7751,7 @@ class LocalCliService(
             undo_count = int(undo_count_raw) if isinstance(undo_count_raw, int) and undo_count_raw > 1 else 1
 
         result = self._execute_live(binding=binding, command_name='undo', task_label='local_cli.undo',
-                                    handler=lambda handle: self._run_history_action(handle, 'Undo', undo_count))
+                                    handler=lambda handle: self._run_history_action(handle, 'Undo', undo_count, _recorded_sha(binding.get('undo_states'), 'pre')))
         if result.get('evidence_unavailable') is True:
             raise LocalCliUndoRefused('undo refused: the document cannot be compared before and after.', code='undo_evidence_unavailable')
         if result.get('not_applied') is True:
@@ -7682,7 +7765,7 @@ class LocalCliService(
         if isinstance(binding.get('undo_stack'), list) and binding['undo_stack']:
             binding.setdefault('redo_stack', []).append(binding['undo_stack'].pop())
             binding.setdefault('redo_states', []).append(states)
-        expected = _expected_state(states, 'pre', result.get('state_sha256'))
+        expected = _expected_state(states, 'pre', result.get('state_sha256'), result.get('state_differences'))
         confirmation = {**result['confirmation'], 'expected_state': expected} if expected['compared'] else result.get('confirmation')
         if expected['matches'] is False:
             self._stop_history(binding)
@@ -7705,7 +7788,7 @@ class LocalCliService(
             raise LocalCliUndoRefused('redo refused: no undone edit to reapply.', code='no_redo_available')
         redo_count = tracked[-1] if tracked is not None and type(tracked[-1]) is int else 1
         result = self._execute_live(binding=binding, command_name='redo', task_label='local_cli.redo',
-                                    handler=lambda handle: self._run_history_action(handle, 'Redo', redo_count))
+                                    handler=lambda handle: self._run_history_action(handle, 'Redo', redo_count, _recorded_sha(binding.get('redo_states'), 'post')))
         if result.get('evidence_unavailable') is True:
             raise LocalCliUndoRefused('redo refused: the document cannot be compared before and after.', code='redo_evidence_unavailable')
         if result.get('not_applied') is True:
@@ -7719,7 +7802,7 @@ class LocalCliService(
             binding.setdefault('undo_stack', []).append(binding['redo_stack'].pop())
             binding.setdefault('undo_states', []).append(states)
             binding = self._save_binding(binding)
-        expected = _expected_state(states, 'post', result.get('state_sha256'))
+        expected = _expected_state(states, 'post', result.get('state_sha256'), result.get('state_differences'))
         confirmation = {**result['confirmation'], 'expected_state': expected} if expected['compared'] else result.get('confirmation')
         if expected['matches'] is False:
             self._stop_history(binding)
@@ -7747,7 +7830,8 @@ class LocalCliService(
     def _history_mismatch(name: str, expected: dict[str, Any]) -> dict[str, Any]:
         if expected['matches'] is not False:
             return {}
-        return {'detail': f'{name}_state_mismatch: {name} ran, but the document is not in the state recorded for this edit; review it before saving.'}
+        named = '; '.join(f"{item['table_id'] or 'document'} {item['cell'] or ''} {item['field']}: {item['recorded']} -> {item['now']}".replace('  ', ' ') for item in expected.get('differences', [])[:6])
+        return {'detail': f'{name}_state_mismatch: {name} ran, but the document is not in the state recorded for this edit' + (f' ({named})' if named else '') + '; review it before saving.'}
 
     def artifact(self, *, kind: str, session_id: str | None = None) -> tuple[Path, str]:
         binding, path = self._resolve_artifact(kind=kind, session_id=session_id)

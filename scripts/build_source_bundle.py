@@ -13,9 +13,17 @@ from pathlib import Path, PurePosixPath
 from typing import Iterable
 
 try:
-    from scripts.source_bundle_policy import find_python_source_hygiene_violations, is_prohibited_member
+    from scripts.source_bundle_policy import (
+        find_python_source_hygiene_violations,
+        is_prohibited_member,
+        is_public_test_fixture_member,
+    )
 except ImportError:  # direct script execution
-    from source_bundle_policy import find_python_source_hygiene_violations, is_prohibited_member
+    from source_bundle_policy import (
+        find_python_source_hygiene_violations,
+        is_prohibited_member,
+        is_public_test_fixture_member,
+    )
 
 
 class SourceBundleError(RuntimeError):
@@ -361,6 +369,21 @@ def _is_excluded(source_root: Path, relative: Path, *, archive_path: Path, manif
     return False
 
 
+def _is_public_test_fixture(source_root: Path, relative: Path, *, archive_path: Path, manifest_path: Path) -> bool:
+    """Return whether an excluded member is a test fixture the bundle carries.
+
+    Exported tests read files under ``tests/fixtures/``. The shared policy
+    checks each one under every other member rule (its runtime directory names
+    and suffixes include this builder's), and the manifest lists them apart from
+    the runtime ``files``.
+    """
+
+    absolute = (source_root / relative).absolute()
+    if absolute in {archive_path.absolute(), manifest_path.absolute()}:
+        return False
+    return is_public_test_fixture_member(relative.as_posix())
+
+
 def _git_repository_root(source_root: Path) -> Path | None:
     try:
         completed = subprocess.run(
@@ -491,7 +514,9 @@ def _walk_source_paths(source_root: Path, *, archive_path: Path, manifest_path: 
         _assert_no_reparse_ancestors(source_root, relative)
         if (source_root / relative).is_symlink():
             raise SourceBundleError(f"symlinked source member is not allowed: {relative.as_posix()}")
-        if _is_excluded(source_root, relative, archive_path=archive_path, manifest_path=manifest_path):
+        if _is_excluded(source_root, relative, archive_path=archive_path, manifest_path=manifest_path) and not _is_public_test_fixture(
+            source_root, relative, archive_path=archive_path, manifest_path=manifest_path
+        ):
             continue
         name = _safe_member_name(relative.as_posix())
         key = name.casefold()
@@ -681,7 +706,9 @@ def build_source_bundle(
                 raise SourceBundleError(f"source identity field is not a valid Git object id: {field}")
         identity_source = "asserted-gitless"
         identity_verified = False
-    stage_root, files = _stage_source_paths(source_root, paths, git_commit=commit if identity_verified else None)
+    stage_root, members = _stage_source_paths(source_root, paths, git_commit=commit if identity_verified else None)
+    files = [entry for entry in members if not is_public_test_fixture_member(str(entry["path"]))]
+    test_fixture_files = [entry for entry in members if is_public_test_fixture_member(str(entry["path"]))]
     try:
         _write_deterministic_archive(stage_root, paths, archive_path)
         archive_size, archive_sha256 = _stable_file_hash(archive_path, 'source archive output')
@@ -700,6 +727,8 @@ def build_source_bundle(
         "identity_verified": identity_verified,
         "file_count": len(files),
         "files": files,
+        "test_fixture_file_count": len(test_fixture_files),
+        "test_fixture_files": test_fixture_files,
         "archive": archive_path.name,
         "archive_sha256": archive_sha256,
     }

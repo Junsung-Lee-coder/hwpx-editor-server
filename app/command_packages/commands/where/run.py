@@ -60,7 +60,28 @@ def _style_summary(service: Any, hwp: Any) -> tuple[dict[str, Any], list[str]]:
 
 
 def run_step(*, service: Any, handle: Any, step: dict[str, Any], binding: Mapping[str, Any] | None, manifest: dict[str, Any]) -> tuple[dict[str, Any], bool, list[str]]:
-    from app.local_cli_runtime import snapshot_live_location
+    from app.local_cli_runtime import snapshot_live_location, LocalCliRuntimeError
+
+    if getattr(handle, 'guarded_bundle', False):
+        # Numbering recipes include where -> edit -> where. Keep their explicit
+        # cursor observation strict too; omit optional style/context/doc getters.
+        from app import native_numbering as native
+        try:
+            state = native._read_target_state(handle.hwp)  # noqa: SLF001
+        except native.NativeNumberingReadFailure:
+            raise
+        except native.NativeNumberingRefusal as exc:
+            raise LocalCliRuntimeError('Guarded cursor observation is unproven.') from exc
+        if state is None:
+            raise LocalCliRuntimeError('Guarded cursor observation is not canonical.')
+        caret, selection = state
+        return {
+            'schema_version': manifest.get('version'), 'read_only': True,
+            'observation_status': 'partial_guarded_cursor',
+            'cursor': {'pos': list(caret), 'has_selection': bool(selection),
+                       'selected_pos': list(selection)},
+            'omitted_observations': ['style', 'nearby_context', 'document', 'page', 'cell'],
+        }, False, ['Guarded bundle reports only the strict cursor/selection observation; optional context and style are omitted.']
 
     location = snapshot_live_location(
         hwp=handle.hwp,

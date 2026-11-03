@@ -180,6 +180,10 @@ def _native_diagnostic(site: object, error: BaseException) -> dict[str, str]:
                             'target_has_invisible_controls', 'target_crosses_invisible_control', 'target_beside_unproven_control',
                             'target_not_found', 'target_not_in_body', 'target_unidentifiable', 'target_unlocatable',
                             'text_readback_unavailable',
+                            'table_not_found', 'table_identity_ambiguous', 'table_grid_mismatch', 'table_state_stale', 'table_too_large', 'table_would_be_empty', 'table_geometry_unknown',
+                            'cell_out_of_range', 'cell_covered_by_merge', 'cell_not_merged', 'range_cuts_merged_cell', 'range_too_small', 'merged_cell_crosses_lines', 'merged_split_rows_unsupported',
+                            'line_inside_merged_cell', 'removed_content_mismatch', 'edge_not_in_target', 'edge_held_by_wider_neighbour', 'cells_text_unsupported', 'table_would_overflow', 'column_widths_mismatch', 'column_too_narrow', 'fill_kind_unsupported', 'target_table_not_entered', 'target_cell_unreachable',
+                            'cells_shape_mismatch', 'target_numbered', 'preservation_unprovable', 'control_enumeration_unavailable',
                         ):
                             diagnostic['refusal_code'] = value
             if field == 'cause2_class':
@@ -1254,6 +1258,7 @@ class LocalCliRuntimeHandle:
     diagnostic_site: str = 'command_handler'
     mark_mutating_intent: Callable[[], None] | None = None
     mutation_intent: bool = False
+    guarded_bundle: bool = False
     observe_pre_save: Callable[[], dict[str, Any]] | None = None
 
 
@@ -2540,7 +2545,9 @@ class LocalCliLiveSession:
             )
             watchdog_stop, watchdog_thread = start_runtime_watchdog(
                 self.log_path,
-                lambda: hwp,
+                # Observers run off the owning STA. Never give them the SDK
+                # wrapper, including while a command is running or held.
+                lambda: None,
                 lambda: {
                     'job_id': self.session_id,
                     'execution_run_id': f'local-cli-open-{self.session_id}',

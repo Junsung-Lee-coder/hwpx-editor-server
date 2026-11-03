@@ -30,7 +30,10 @@ def capture(name):
 def captured_readback(case, name):
     owned = owned_doc(case)
     owned.hwp.hwpml_text = capture(name)
-    return readback(owned), owned
+    rb = readback(owned)
+    for table in rb.get('tables') or []:
+        table['page'] = 1  # This fake lists no table controls; a table's page is not what these tests are about.
+    return rb, owned
 
 
 def assembled(rb, texts, baseline=None):

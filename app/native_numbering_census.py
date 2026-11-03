@@ -12,6 +12,8 @@ lists are kept as id-independent item multisets. Small allowed-delta policies li
 """
 from __future__ import annotations
 
+import base64
+import binascii
 import hashlib
 import re
 import xml.etree.ElementTree as ET
@@ -297,6 +299,16 @@ def _has_other_content(paragraph: ET.Element) -> bool:
     return any(_name(child) != 'text' or not _run_is_empty(child) for child in paragraph)
 
 
+def payload_identity(text: str | None) -> str | None:
+    """The digest of embedded image data itself. Measured: the live text holds it in base64 and the saved package holds the same bytes,
+    so the two digests are one identity. Text that is not base64 has none."""
+    try:
+        data = base64.b64decode(''.join((text or '').split()), validate=True)
+    except (binascii.Error, ValueError):
+        return None
+    return hashlib.sha256(data).hexdigest() if data else None
+
+
 class _Resolver:
     """Digests elements with every definition reference replaced by the referenced definition's content."""
 
@@ -308,6 +320,8 @@ class _Resolver:
         self._active: set[tuple[str, int]] = set()
         self._collect(root, body, 0)
         self.fonts = self._font_table()
+        # Measured: when the last picture of an image goes, Hancom renumbers the image items of the rest. An item is its data, not its number.
+        self.payloads = {(_attr(item, 'id') or '').strip(): payload_identity(item.text) for item in root.iter() if _name(item) == 'bindata'}
 
     def _font_table(self) -> dict[tuple[str, str], str]:
         """Language-scoped font content by native Id; Hancom renumbers these Ids when it adds a font."""
@@ -429,6 +443,9 @@ class _Resolver:
                 continue
             if root_item and depth == 0 and key == 'id':
                 continue
+            if root_item and depth == 0 and name == 'binitem' and key == 'bindata' and self.payloads.get(value.strip()):
+                out.append(f'payload={self.payloads[value.strip()]}')
+                continue
             if mask_shape and root_item and depth == 0 and key in _MASKED_SHAPE_ATTRS:
                 continue
             if name == 'fontid' and (key, value.strip()) in self.fonts:
@@ -497,11 +514,15 @@ def live_protection_reader(hwp: Any) -> Callable[[], dict[str, Any]]:
     """Zero-argument reader of the live document's in-memory HWPML2X census; it never saves or rebinds the document."""
 
     def read() -> dict[str, Any]:
-        getter = getattr(hwp, 'get_text_file', None)
+        from app.native_numbering import _sdk_read
+        getter = _sdk_read(lambda: getattr(hwp, 'get_text_file', None))
         if not callable(getter):
             raise CensusError('get_text_file is unavailable on this machine')
-        return parse_hwpml2x_census(getter('HWPML2X', ''))
+        text = _sdk_read(lambda: getter('HWPML2X', ''))
+        read.last_text = text  # What was read can be looked at again with no other native call.
+        return parse_hwpml2x_census(text)
 
+    read.last_text = None
     return read
 
 

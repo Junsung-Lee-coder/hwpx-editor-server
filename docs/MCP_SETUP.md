@@ -83,6 +83,14 @@ $mcpProcess = Start-Process -FilePath '.mcp-venv\Scripts\python.exe' -ArgumentLi
 
 거부되면 세션은 보류되지 않고 저장하지 않은 이전 변경도 그대로 남습니다. 실제 인쇄된 번호는 `hwpx_proof`의 `review`가 PDF에서 확인합니다.
 
+공개 REST `/local-cli/command-bundle`과 CLI `bundle-run`의 한 요청 안에서도 같습니다. 앞 단계의 편집이 성공하고 뒤 단계가 변경 전의 정상 의미상 거부(예: `table_read`의 `table_not_found`)이면, 앞 단계와 전체 `dirty`는 유지하고 거부된 단계만 `mutation_may_have_persisted=false` 및 정확한 `refusal_code`로 반환합니다. 뒤 단계는 실행하지 않으며 이후 편집·저장·저장본 재열기가 가능합니다. 이 구분은 이미 성공한 편집을 취소하거나 미저장 문서 닫기를 허용하지 않습니다. 현재 단계가 mutator를 발행했거나 기술적 읽기/반환/보고 결과가 불명확한 경우의 보류와 저장 보호는 그대로입니다. MCP `hwpx_command`는 한 단계씩 보내므로 같은 요청의 이 경계를 검증하려면 REST/CLI 다단계 묶음을 사용해야 합니다.
+
+## 보호된 편집 묶음의 보조 관찰
+
+표 읽기·편집·생성, 정확한 글자·문단 서식, 문단 삽입·삭제와 번호 명령이 있는 묶음은 보조 커서/문서 snapshot을 추가로 읽지 않습니다. 응답의 `before`/`after`에 `observation_status=omitted_guarded_envelope`가 표시되며, 생략된 문서 변경 상태는 `null`이지 깨끗하다는 증거가 아닙니다. 명령 자체의 대상·변경 전후·문서 보존 증거는 그대로 제공됩니다. 이전 저장 전 변경도 유지합니다.
+
+이 묶음 안의 명시적 `where`는 엄격하게 읽은 커서·선택만 `partial_guarded_cursor`로 반환하며, 서식·주변 글·문서·쪽·셀 관찰의 생략을 명시합니다. 독립 `where`의 기존 상세 관찰은 유지됩니다. 기술 실패 뒤에는 다음 묶음 명령이나 진단용 SDK 읽기를 실행하지 않고 실제 편집 세션을 보류합니다.
+
 ## 번호 문단 편집
 
 번호 체계 `1.` → `가.` → `1)` → `가)`는 `official_numbering_apply`로 지정합니다. 번호는 Hancom이 매기므로 문단을 넣거나 지우면 뒤따르는 번호가 자동으로 다시 매겨집니다.
@@ -180,6 +188,139 @@ GUI에서 범위를 직접 선택해 둘 필요가 없습니다. 명령마다 �
 
 새 번호의 모양은 비교되지 않았으므로 `compared`로 세지 않으며, 요약과 `summary.md`에 새 번호 개수를 적습니다. 인쇄된 번호 글자·종류·수준 확인은 별개이며 `numbering`에 있습니다. 번호를 붙인 뒤의 확인을 기준으로 다시 확인하면 그 번호는 `compared`가 됩니다. 이 비교는 서식 값으로 계산한 것이며 인쇄된 모양은 미리보기로 확인합니다. 저장되지 않은 변경이 없고 저장본이 있으면 `persisted_format`이 Hancom을 거치지 않고 HWPX 파일을 직접 읽어 비교한 결과를 줍니다(`match`, `partial`, `mismatch`, `unverified`). `mismatch`이면 `review_status`도 `mismatch`입니다. 저장본 비교에는 번호 모양도 포함됩니다. `review.json`의 각 문단에는 `index`, `context`(`body`, `table_cell`, `other`)와 `format`(글자 묶음별 값, 문단 값, 번호 모양, 개체 목록)이 있습니다. 글자 묶음 값이 아주 많은 문서는 응답 크기 안에서 뒤쪽 문단의 묶음을 생략하고 `runs_truncated`로 알립니다.
 
+## 표
+
+표는 문서 안의 정확한 하나를 지정해서 편집합니다. GUI에서 표를 클릭해 둘 필요가 없습니다. 명령마다 표를 네이티브 식별자로 다시 찾아 들어가고, 셀로 이동하거나 셀 블록을 만든 뒤 블록이 요청한 셀과 정확히 같은지 확인하고 네이티브 동작을 실행합니다. 실행 후 대상 표의 모든 셀과 다른 표, 표 밖 문단, 머리말·꼬리말, 스타일, 그림 데이터를 비교합니다. 그래서 `review`, `context`, `find`를 사이에 끼워도 대상이 바뀌지 않습니다.
+
+### 표 찾기와 읽기
+
+- `{"op": "table_inventory"}`: 문서의 모든 표를 `table_id`(예: `tbl:1011`), `page`, `rows`, `cols`, `merged_cells`, `expected_hash`, 표 앞 문장(`before_text`), 앞쪽 셀 글(`first_cells`), 표 너비와 쪽의 관계(`layout`), 표에 저장된 크기(`stored_size`의 `width_hu`, `height_hu`), 중첩 표면 `nested_in`과 `nested_cell`로 돌려줍니다. 내용이 같은 표도 식별자가 다르므로 구별됩니다. 본문의 표만 나옵니다. 머리말·꼬리말의 표는 이 명령들로 편집하지 않으며(`target_in_header_footer`), 확인(`review`)에서 값을 비교합니다.
+- `{"op": "table_read", "table_id": "tbl:1011", "max_cells": 500}`: 셀마다 `address`, `row`, `col`, `row_span`, `col_span`, `text`(문단은 줄바꿈으로 잇고 탭과 연속 공백을 그대로 유지), `paragraphs`(글자 묶음별 글꼴·크기·굵기·기울임·밑줄·글자색과 문단 값), `objects`(중첩 표 안의 개체까지), `content_sha256`, `border`(`left`, `right`, `top`, `bottom`마다 `line`, `width_mm`, `color`), `fill`을 돌려줍니다. 글은 2000자까지 나오고, 더 길면 `text_truncated=true`입니다. `max_cells`는 1~2000(기본 2000)이고, 잘리면 `cells_truncated=true`입니다.
+
+병합된 셀은 첫 칸의 주소로 부릅니다. A1:B1을 합친 셀은 `A1`이고, `B1`을 지정하면 `cell_covered_by_merge`로 거부합니다.
+
+### 공통 입력
+
+편집 명령에는 읽은 값을 그대로 넣습니다: `table_id`, `expected_hash`, `expected_page`, `expected_rows`, `expected_cols`, `confirm_layout=true`. 읽은 뒤 표가 바뀌었으면 `table_state_stale`로 편집 전에 거부합니다. 해시는 격자, 셀 위치와 너비, 글과 서식, 선, 채우기를 포함하며, 렌더링에 따라 달라지는 셀 높이는 뺍니다. 편집 결과의 `after.expected_hash`를 다음 명령에 쓸 수 있습니다.
+
+### 행·열·병합·나누기
+
+`table_edit_exact`의 `action`은 다음과 같습니다. 주소와 번호는 1부터 셉니다.
+
+| `action` | 입력 | 동작 |
+|---|---|---|
+| `insert_row_above`, `insert_row_below` | `row`, 선택 `count`(1~50) | 그 행 위나 아래에 행 추가. 수가 몇이든 네이티브 동작 하나, Undo 하나 |
+| `insert_col_left`, `insert_col_right` | `col`, 선택 `count` | 그 열 왼쪽이나 오른쪽에 열 추가 |
+| `delete_row`, `delete_col` | `row` 또는 `col`, 선택 `count`, `expected_removed_cells` | 정확히 그 줄 삭제 |
+| `merge_cells` | `cell`, `end_cell` | 사각 범위 병합 |
+| `split_cell` | `cell`, `split_rows`, `split_cols`(1~20) | 셀 나누기 |
+| `unmerge_cell` | `cell` | 병합 셀을 합쳐진 칸 수대로 나누기 |
+
+삭제할 때는 지워지는 셀 중 내용이 있는 셀을 모두 적어야 합니다: `"expected_removed_cells": [{"address": "A2", "text": "전체 글"}, {"address": "B2", "text": "그림 옆 글", "objects": ["picture"]}]`. `table_read`의 `text`, `objects`와 정확히 같아야 하며 다르면 `removed_content_mismatch`로 거부합니다. `text`가 잘린 셀은 글 대신 `{"address": "A2", "content_sha256": "..."}`로 적습니다. 이 값은 그 셀의 글, 글자 모양과 개체를 함께 가리키고, 표 해시와 주소에 묶입니다. 중첩 표에 든 그림도 `objects`에 적습니다. 다른 곳에서 함께 쓰는 그림 데이터는 그대로 남고, 마지막으로 쓰던 그림이 지워지면 데이터도 함께 빠집니다. 빈 줄을 지울 때는 비워 둡니다. 결과의 `changes.removed_cells`와 `removed_blank_cells`에 지워진 셀이 나옵니다.
+
+Hancom 13.0.0.3457에서 측정한 결과이며, 결과의 `changes`와 `after`로 그대로 알려 줍니다.
+
+- **병합:** 각 셀의 문단을 읽는 순서대로 이으며 글자·문단 서식과 그림을 유지합니다. 문단 하나가 비어 있기만 한 셀은 문단을 보태지 않고(`dropped_blank_cells`), 문단이 여럿인 셀의 빈 문단은 남습니다. 합쳐진 셀의 왼쪽·위 선과 채우기는 첫 셀에서, 오른쪽·아래 선은 범위 반대쪽 모서리 셀에서 옵니다. 어떤 셀도 시작하지 않게 된 격자선은 사라지므로 행이나 열 수가 줄 수 있습니다(`removed_grid_lines`).
+- **나누기:** 내용은 전부 첫 칸에 남고 다른 칸은 비어 있습니다. 원래 셀별로 다시 나눠 주지 않습니다. 너비는 똑같이 나뉩니다. 그래서 너비가 다른 열을 합친 셀을 풀면 원래 경계로 돌아가지 않고 격자선이 하나 늘어납니다(`added_grid_lines`). 같은 줄의 다른 셀은 병합 범위가 넓어집니다. 나뉜 칸의 채우기는 같고, 칸 사이 선은 원래 셀의 오른쪽·아래 선, 그쪽이 표 가장자리이면 왼쪽·위 선입니다.
+- **행·열 삽입:** 새 줄은 기준 줄의 병합 모양과 채우기와 선을 물려받고 글은 비어 있습니다. 새 줄을 가로지르는 병합 셀은 넓어집니다(`widened_cells`).
+- **표 가장자리:** 표 바깥쪽으로 줄을 더하면 테두리 값은 새 줄로 가고 옛 줄의 그쪽 선은 자기 반대쪽 값이 됩니다. 가장자리 줄을 지우면 새로 가장자리가 되는 셀이 그 값을 받습니다. 바뀐 값은 `outer_edge_moved`에 있습니다.
+- **병합 셀을 지나는 삭제:** 병합 셀이 삭제 줄을 지나면 줄어들고 내용은 남습니다(`shortened_cells`). 줄 여러 개를 한 번에 지울 때 병합 셀이 그 묶음의 경계를 가로지르면 `merged_cell_crosses_lines`로 거부합니다. 한 줄씩 지우거나 먼저 푸세요.
+
+### 선
+
+`table_style_exact`의 `scope`는 `cell`(`cell`), `range`(`cell`, `end_cell`), `table`입니다. `borders`에 다음 묶음을 하나 이상 넣습니다.
+
+```json
+{"op": "table_style_exact", "table_id": "tbl:1011", "expected_hash": "sha256:...", "expected_page": 1, "expected_rows": 5, "expected_cols": 4, "scope": "range", "cell": "B2", "end_cell": "C3",
+ "borders": [{"edges": ["outline"], "line": "double", "width_mm": 0.5, "color": "#1F3864"},
+             {"edges": ["inner_horizontal"], "line": "dot", "width_mm": 0.2, "color": "#808080"},
+             {"edges": ["inner_vertical"], "line": "none"}],
+ "fill": "#FFF2CC", "confirm_layout": true}
+```
+
+- `edges`: 대상의 바깥 변 `top`, `bottom`, `left`, `right`, 네 변을 함께 `outline`, 안쪽 선 `inner_horizontal`, `inner_vertical`, 둘을 함께 `inner`, 전부 `all`. 한 변은 한 번만 지정합니다. `all`과 `inner`는 그 대상에 있는 선만 뜻합니다. 한 셀의 `all`은 네 변이고, 한 행의 `all`은 네 변과 세로 안쪽 선입니다. 묶음 하나가 가리키는 선이 대상에 하나도 없으면 `edge_not_in_target`입니다. `inner_horizontal`이나 `inner_vertical`을 이름으로 적었는데 대상에 그 선이 없으면, `top` 같은 다른 변과 한 묶음이어도 편집 전에 `edge_not_in_target`으로 거부합니다.
+- `line`: `solid`, `dash`, `dot`, `dash_dot`, `dash_dot_dot`, `long_dash`, `circle`, `double`, `slim_thick`, `thick_slim`, `slim_thick_slim`, 그리고 선을 지우는 `none`. 이 열두 값은 Hancom 공식 선 종류 표의 0~11입니다.
+- `width_mm`: 0.1, 0.12, 0.15, 0.2, 0.25, 0.3, 0.4, 0.5, 0.6, 0.7, 1, 1.5, 2, 3, 4, 5. `color`는 `#RRGGBB`입니다. `none`에는 두 값을 주지 않으며, Hancom은 저장된 굵기와 색을 그대로 두고 종류만 없음으로 합니다.
+
+**공유 변.** 맞닿은 두 셀의 경계는 두 셀이 각각 값을 가집니다. 바깥 변을 바꾸면 Hancom이 맞은편 셀의 마주 보는 변도 함께 씁니다. 결과의 `changes.edges`에 행마다 `cell`, `side`, `before`, `after`, `role`(`requested` 또는 `shared_neighbour`)이 있어 어느 셀의 어느 변이 바뀌었는지 볼 수 있습니다. 예외가 하나 있습니다. 맞은편 셀이 그 변보다 넓은 병합 셀이면 그 셀의 값은 그대로이고 `changes.neighbours_not_written`에 나옵니다. 범위가 그 셀의 변 전체를 덮으면 그 셀도 함께 씁니다. 이 밖의 셀이나 변이 바뀌면 성공으로 보고하지 않습니다.
+
+**더 넓은 이웃 아래의 선.** 더 넓은 병합 셀과 마주 보는 변은 두 셀의 선이 겹쳐 인쇄됩니다. 측정한 결과는 다음과 같습니다.
+
+| 요청한 선 (이웃은 0.12mm 실선) | 인쇄 결과 | 처리 |
+|---|---|---|
+| `none` | 이웃의 선이 그대로 보임 | `edge_held_by_wider_neighbour`로 거부 |
+| 이웃보다 가는 실선 (0.1mm) | 요청한 선 옆으로 이웃의 선이 보임 | 거부, `over_wider_neighbour: true`면 실행 |
+| 점선 계열 | 끊긴 곳으로 이웃의 선이 보임 | 거부, `over_wider_neighbour: true`면 실행 |
+| 이웃과 같거나 더 굵은 실선 | 요청한 선만 보임 | 실행 |
+
+선을 지우려면 넓은 셀의 그 변을 대상으로 합니다. 그러면 그 변을 마주 보는 셀 전체의 선이 함께 지워지며, 일부 구간만 지우는 방법은 없습니다. 이웃의 선이 `none`이면 거부하지 않습니다. `over_wider_neighbour`로 실행하면 결과의 `changes.prints_over`에 함께 인쇄되는 이웃과 그 선이 나옵니다.
+
+### 채우기
+
+`fill`은 `#RRGGBB` 또는 `none`입니다. 흰색 `#FFFFFF`는 채우기이고 `none`은 채우기 없음이며, `table_read`와 저장 파일에서 구별됩니다. 대상 셀의 글, 서식, 선은 그대로입니다. 무늬·그러데이션·그림 채우기가 있는 셀에는 `fill_kind_unsupported`로 거부합니다. `borders`와 `fill`을 함께 주면 네이티브 동작 두 번이고 Undo 한 번으로 둘 다 되돌아갑니다. 요청한 값이 이미 있으면 네이티브 호출 없이 `result.status`가 `already_set`이고 `dirty=false`입니다.
+
+### 표 너비
+
+표의 `layout`은 너비(`width_hu`, `width_mm`), 본문 폭(`text_width_hu`), 왼쪽 시작(`left_hu`), 오른쪽 끝(`right_edge_hu`), 쪽 폭(`page_width_hu`), 넘친 값(`overflow_hu`, `overflow_mm`, `off_page_mm`), 판정(`status`)을 담습니다. `status`는 `fits`, `past_margin`(본문 오른쪽 여백을 넘음), `off_page`(쪽 밖으로 나가 인쇄에서 잘림), `wider_than_parent`(중첩 표가 담긴 셀의 안쪽 폭보다 넓음), `unverified`(`reason`에 이유)입니다. 글자처럼 취급하지 않는 표, 다단, 제본 여백, 셀 간격, 상대 너비, 표 앞에 글이 있는 문단, 가운데·오른쪽 정렬 문단은 `unverified`입니다.
+
+**열을 넣으면 표가 넓어집니다.** 새 열은 옆 열과 같은 너비로 생기고 다른 열은 줄지 않으므로, 본문 폭을 다 쓰는 표는 쪽 밖으로 나갈 수 있습니다. 응답의 `after.layout`과 `warnings`, 그리고 확인 결과가 표와 쪽을 밝힙니다. 너비는 요청이 있을 때만 바꿉니다.
+
+```json
+{"op": "table_width_exact", "table_id": "tbl:1011", "expected_hash": "sha256:...", "expected_page": 1, "expected_rows": 2, "expected_cols": 5, "fit": "text_width", "confirm_layout": true}
+{"op": "table_width_exact", "table_id": "tbl:1011", "expected_hash": "sha256:...", "expected_page": 1, "expected_rows": 2, "expected_cols": 3, "column_widths_mm": [30, 60, 50], "confirm_layout": true}
+```
+
+- `fit: "text_width"`: 열 비율을 유지한 채 표를 본문 폭에 맞춥니다. `unverified`인 표와 중첩 표는 `table_geometry_unknown`으로 거부합니다.
+- `column_widths_mm`: 모든 격자 열의 너비를 왼쪽부터 줍니다. 병합 셀은 그 열들의 합이 됩니다. 열 수가 다르면 `column_widths_mismatch`, 합이 본문 폭을 넘으면 `table_would_overflow`, 5mm보다 좁은 열은 `column_too_narrow`입니다.
+- 일반 표는 바뀌는 열마다, 병합 셀이 가로지르는 표는 바뀌는 셀마다 네이티브 동작 하나입니다. 응답의 `undo.native_editing_actions`에 개수가 있고, Undo·Redo 한 번으로 전부 되돌립니다. 같은 값이면 호출 없이 `already_set`입니다. 표 전체 너비를 한 번에 바꾸는 네이티브 값은 Hancom이 무시하므로 쓰지 않습니다.
+
+### 새 표
+
+`{"op": "table_create_exact", "match": "기준 문단의 고유한 문구", "expected_page": 1, "rows": 2, "cols": 3, "confirm_layout": true}`는 그 본문 문단 뒤에 표 문단과 빈 문단 하나를 만듭니다. 결과의 `table`에 다음 편집에 쓸 값이 있습니다. 선택 항목 `cells`로 행별 글을 넣을 수 있습니다. 빈 글은 빈 셀이고, 줄바꿈은 새 문단이 되며, 탭과 연속 공백은 그대로입니다. 그 밖의 제어 문자는 편집 전에 `cells_text_unsupported`로 거부합니다. 표 문단은 기준 문단의 문단 모양을 물려받으므로 번호 문단 뒤에는 `target_numbered`로 거부합니다. 표 안, 머리말·꼬리말, 없는 문구, 여러 문단에 있는 문구, 다른 쪽도 거부합니다.
+
+### 되돌리기
+
+명령 하나가 Undo·Redo 한 번입니다. 결과의 `confirmation.expected_state`가 `{"compared": true, "matches": true}`이면 명령 전후 상태와 같습니다. 측정된 예외는 다음과 같습니다.
+
+- 병합 셀을 가로지르는 삽입을 되돌리면 격자, 글, 선, 표 해시와 인쇄 결과는 돌아오지만 그 병합 셀에 저장된 높이가 달라 `undo_state_mismatch`로 알립니다.
+- 빈 새 표의 Redo는 표가 돌아오지만 Hancom이 겹침 순서 값을 새로 주어 `redo_state_mismatch`로 알립니다.
+- 줄을 넣거나 지운 뒤의 Undo·Redo에서 표의 저장 크기 값이 셀보다 뒤처지는 일이 간혹 있습니다. 한 번은 Redo 뒤 `width_hu`가 54000이 아니라 45000이었습니다. 언제 일어나는지는 밝히지 못했고, 일어나면 `redo_state_mismatch`로 알립니다.
+- 이렇게 알릴 때 `confirmation.expected_state.differences`에 표, 셀, 항목, 기록된 값, 현재 값이 나옵니다. 비교에 이미 읽은 내용으로 만들며 네이티브 호출을 더하지 않습니다. 기록된 값이 없는 편집(문서가 아주 크거나 오래전 편집)에는 `differences`가 없습니다.
+- 이렇게 알린 뒤에는 그 지점 너머로 되돌리지 않습니다(`undo_not_counted`). 문서와 세션은 그대로 쓸 수 있습니다.
+- `cells`를 준 새 표는 Undo 단위를 셀 수 없어 `undo_not_counted`로 거부합니다.
+
+### 표 확인 결과
+
+`hwpx_proof`의 `review`에서 표에 관해 읽을 값입니다.
+
+- `coverage.layout`: 넘치는 표(`overflow`)와 확인하지 못한 표(`unverified`)를 표와 쪽으로 밝힙니다. 어느 쪽이든 있으면 `review_status`는 `complete`가 아니고 첫 줄에 이름이 나옵니다.
+- `comparison.tables.changed`: 선, 채우기, 글, 병합, 표 너비(`width`), 셀 너비(`width_changes`), 표 속성(`frame_changes`), 셀 여백·세로 정렬 등(`cell_properties`)을 전후 값으로 보여 줍니다. 표 해시가 바뀌었는데 이름 붙일 값이 없으면 `other_properties=true`이고 `partial`입니다.
+- `comparison.tables.stored_sizes`: 해시가 같은 표에서 저장된 표 크기만 바뀐 경우를 표와 전후 값으로 보여 줍니다. 한글은 편집 뒤 레이아웃에 따라 다른 표의 저장 높이도 다시 계산하므로 이런 표가 여럿 나올 수 있고, 내용·선·채우기가 같다는 뜻입니다. 바뀐 표의 저장 높이는 `stored_height`입니다. 되돌리기가 `size.height`를 차이로 알리면 이 항목으로 값을 볼 수 있습니다.
+- `persisted_tables`: 저장 파일을 직접 읽어 격자, 병합, 전체 글, 선, 채우기, 표·셀 너비를 비교합니다. 저장된 표 높이는 내용 비교와 따로 `stored_size_differences`에 적고, 다르면 `partial`입니다. 실제 한글에서 저장 직후에는 둘이 같았습니다. 머리말·꼬리말의 표도 비교합니다. 실행 중 문서가 알리지 않은 머리말·꼬리말 표는 `unverified_tables`로 이름을 밝히고 `partial`입니다. 무늬와 그러데이션은 양쪽에서 읽은 값으로 비교하고, 그림 채우기처럼 양쪽 값을 맞출 수 없으면 `fills_not_compared`로 세고 `partial`입니다.
+- `coverage.package_media`: 저장 파일과 원본 파일의 그림 데이터입니다. `complete`, `partial`(어떤 그림도 쓰지 않던 원본 이미지가 저장본에 없음), `removed_by_edit`(이 세션의 삭제로 빠진 그림), `unverified`(빠진 그림 데이터를 어느 삭제와도 대조하지 못함), `mismatch`(아직 문서에 있는 그림의 데이터가 빠짐, 데이터 없는 참조), `not_compared`, `not_saved`입니다. 대조는 개수가 아니라 그림 데이터 자체의 SHA-256으로 합니다. 이전 확인과 지금 사이에 지워진 그림의 데이터이고, 남은 그림 중 그 데이터를 쓰는 것이 없을 때만 삭제로 빠졌다고 봅니다. 실행 중 문서의 Base64 데이터를 풀어 얻은 값이 저장 파일의 BinData와 같은 것을 실제 한글에서 확인했습니다. 빠진 데이터는 `unexplained_lost`(문서에 남은 그림)와 `untraceable_lost`(대조할 수 없음)로도 나옵니다. Hancom은 어떤 그림도 쓰지 않는 이미지를 문서를 열 때 읽어 들이지 않으므로, 열린 문서만 비교하는 `보존 확인`은 이를 알 수 없습니다.
+
+선과 채우기를 값과 인쇄로 볼 때 다음을 구별합니다. 흰색 `#FFFFFF`와 `none`은 저장 값으로 구별되지만 흰 종이에서는 같게 인쇄됩니다. 이중선과 삼중선은 0.4mm 이하 굵기를 100dpi 미리보기로 보면 한 줄처럼 보일 수 있으므로, 모양을 눈으로 확인하려면 1mm 이상으로 그리거나 PDF를 확대합니다. 이 값들은 저장 값으로 확인합니다.
+
+### 거부와 결과 불명
+
+| `refusal_code` | 뜻 |
+|---|---|
+| `table_not_found`, `table_identity_ambiguous` | 이 식별자의 표가 없거나 둘 이상 |
+| `table_state_stale`, `table_grid_mismatch`, `target_wrong_page` | 읽은 뒤 표가 바뀌었거나 행·열·쪽이 다름. 쪽은 `found_page`로 알림 |
+| `cell_out_of_range`, `cell_covered_by_merge`, `range_too_small`, `range_cuts_merged_cell` | 주소나 범위가 맞지 않음 |
+| `cell_not_merged`, `merged_split_rows_unsupported` | 병합 셀이 아니거나, 병합 셀을 그 칸 수와 다른 행 수로 나누려 함. 이 경우는 렌더링 높이에 따라 결과가 달라 예측할 수 없음 |
+| `removed_content_mismatch`, `table_would_be_empty`, `merged_cell_crosses_lines`, `line_inside_merged_cell` | 삭제·삽입 줄 문제 |
+| `edge_not_in_target`, `fill_kind_unsupported` | 선·채우기 입력 문제 |
+| `table_too_large`, `table_geometry_unknown`, `cells_shape_mismatch` | 500줄 초과, 열 너비를 셀에서 계산할 수 없음, `cells` 모양이 다름 |
+| `target_table_not_entered`, `target_cell_unreachable`, `selection_unverified`, `preservation_unprovable`, `control_enumeration_unavailable` | 대상에 들어가지 못했거나 비교 근거를 읽지 못함 |
+| `target_numbered`, `target_not_found`, `target_ambiguous`, `target_not_in_body`, `target_in_header_footer` | 새 표의 기준 문단 문제 |
+
+거부되면 캐럿과 선택을 되돌리고 문서가 그대로임을 확인합니다. 세션은 보류되지 않고 저장하지 않은 이전 변경도 남습니다. 네이티브 동작이 시작된 뒤 결과가 예측과 다르면 되돌리거나 다시 시도하지 않고 세션을 보류하며, `error.details.message`에 어느 셀의 어느 값이 달랐는지 알려 줍니다. 문서 글은 넣지 않습니다.
+
+### 확인
+
+`hwpx_proof`의 `review`는 표를 식별자로 비교합니다. `comparison.tables`의 `changed`에 표마다 `grid`(행·열 전후), `added_cells`, `removed_cells`, `moved_cells`, `span_changes`, `content_changes`, `edges`, `fills`가 전후 값과 함께 있고, `unchanged`에 해시가 같은 표가, `added`, `removed`에 새로 생기거나 없어진 표가 있습니다. `summary.md`의 "표 변경" 표는 표(쪽), 셀, 항목, 이전, 이후를 보여 줍니다. 표 편집으로 표 문단의 개체 값이 바뀐 것은 이 비교가 설명하므로 알 수 없는 서식 변경으로 세지 않습니다. `coverage.tables.state`는 `complete`, 표가 없으면 `none`, 값을 읽지 못하면 `unverified`, 크기 한도로 잘렸거나 이름 없는 값이 바뀌었으면 `partial`이며 뒤의 두 경우 `review_status`도 낮아집니다. 저장본이 있으면 `persisted_tables`가 HWPX 파일을 Hancom 없이 직접 읽어 표마다 격자, 병합, 글, 너비, 선, 채우기를 비교합니다(`match`, `partial`, `mismatch`, `unverified`). `mismatch`이면 `review_status`도 `mismatch`입니다. HWPX 파일은 인쇄가 긴 점선인 선 `dash`를 `DOT`로, 점선인 `dot`을 `DASH`로 적습니다. 이 비교는 그 이름을 맞춰 읽습니다.
+
 ## 크기 제한
 
 - 열기: `hwpx_open`은 25 MiB 이하의 파일만 받고, 넘으면 `SOURCE_SIZE_LIMIT`로 거부합니다. 산출물 폴더의 저장본을 다시 열 때도 같은 제한입니다.
@@ -193,7 +334,7 @@ GUI에서 범위를 직접 선택해 둘 필요가 없습니다. 명령마다 �
 
 다운로드 경로는 관리 세션 바인딩과 해당 산출물의 크기·SHA-256 기록이 모두 있고, 산출물이 같은 관리 루트의 일반 파일임을 확인한 경우에만 상태에 표시됩니다. 서버의 절대 파일 경로는 응답에 포함하지 않습니다. 전송 직전에 경로를 다시 여는 대신 관리 루트와 파일을 안전하게 확인한 파일 스트림을 먼저 열고 custody hash를 재검증하므로, 검증 뒤 파일을 바꾸거나 경로를 심은 경우에는 전송하지 않습니다. Windows에서는 응답이 끝날 때까지 열린 파일에 대한 교체도 운영체제가 막습니다.
 
-`hwpx_command`는 `context`, `selection_proof`, `readback`, `cell_format_exact`, `page_number_apply`, `official_numbering_apply`, `paragraph_insert_exact`, `paragraph_remove_exact`, `character_format_exact`, `paragraph_format_exact`, `undo`, `redo`, `command_reconcile`만 받습니다. `page_number_apply`는 `position`(`top-left`, `top-center`, `top-right`, `bottom-left`, `bottom-center`, `bottom-right`)과 `confirm_layout=true`를 요구하고, 선택 항목으로 `start_number`(1~65535, 기본 1), `side_char`(`none` 또는 `dash`, 기본 `none`)를 받습니다. 앞·뒤 문구는 네이티브 대시(`-`) 장식(`dash`)만 지원하고 임의의 앞·뒤 문구와 머리말·꼬리말 확인 우회 항목은 받지 않습니다. 실행 중인 문서의 메모리 상 HWPML2X 구조 스냅샷(본문, 글자·문단·표·그림 서식, 머리말·꼬리말, 스타일, 번호 정의, 바이너리 데이터 참조)을 읽을 수 있을 때만 변경하고, 읽을 수 없으면 변경 전에 거부하며, 실행 후 새 쪽 번호 컨트롤과 그 설정 외의 구조가 달라지거나 스냅샷을 읽을 수 없으면 정리(되돌리기) 없이 결과 불명으로 보고합니다(inserted로 보고하지 않음). `official_numbering_apply`는 `match`, `expected_page`, `level`(1~4), `confirm_layout=true`를 모두 요구하며 일치하는 문단 하나에 네이티브 개요 번호 수준을 적용합니다. 현재 구역의 개요 번호 정의가 `1.` → `가.` → `1)` → `가)` 4수준과 일치하는지 읽어서 확인하고, 일치하지 않으면 그 구역에 다른 개요 문단이 없다는 것을 증명할 수 있을 때만 4수준을 정의하며, 확인하지 못한 형식은 성공으로 보고하지 않습니다. 이미 확인된 정의가 있으면 네이티브 ParagraphShape 동작 한 번(HeadingType, Level)으로 적용하고, 같은 구조 스냅샷을 변경 전에 읽을 수 없거나 대상 문단을 하나로 식별할 수 없으면 변경 전에 거부하며, 변경 후 대상 문단의 번호 외 구조가 달라지면 결과 불명으로 보고합니다. 두 명령 모두 자동 저장하지 않으며, 저장 전에 렌더링 증명이 필요합니다. 두 동작은 보호된 대화형 `command_bundle`(CLI/MCP)과 호출자가 SDK 수명을 소유하는 라이브러리에서만 지원합니다. 대기열 편집 작업(`/edit-and-convert`, `/edit-and-convert-from-path`, 작업자 `edit_and_convert_with_pyhwpx`)은 실패 시 SDK를 종료하고 COM을 해제하므로 결과 불명 상태에서 문서를 유지할 수 없어, `page_number`/`official_numbering` 작업 연산이 하나라도 있으면 `edit_and_convert_with_pyhwpx`가 자신의 COM 초기화·SDK 생성·열기·편집 이전에 작업 전체를 거부합니다(`/capabilities`의 `queued_job_unsupported_ops`). 다만 이를 감싸는 `process_one_command`는 그 전에 네이티브 내보내기 사전 점검을 수행하며, 이 점검이 빈 탐침 인스턴스를 생성하고 종료하므로 자식 프로세스 전체가 SDK 작업을 전혀 하지 않는다는 뜻은 아닙니다. 그러므로 API·CLI·MCP 동일 입력 동등성은 충족되지 않습니다. 또한 결과 불명이 된 뒤에는 캐럿을 이동하지 않으며, 자동 Undo·닫기·종료를 하지 않습니다. `page_number_apply`와 `official_numbering_apply`에서 네이티브 변경 호출(`PageNumPos`, `OutlineNumber`, `ParagraphShape`)이 시작된 뒤 발생한 일반 예외(읽기·집계·비교 오류 포함)는 원인을 유지한 채 결과 불명(`mutation_may_have_persisted=true`)으로 보고합니다. `KeyboardInterrupt`·`SystemExit` 같은 종료 신호는 호출자가 소유한 라이브러리에서는 삼키지 않고 그대로 전파합니다. 정확한 내장 종료 신호에만 호환용 결과 불명 표시를 붙이고 사용자 하위 클래스의 속성은 읽거나 변경하지 않습니다. 소유 런타임의 trusted producer intent가 결과 불명과 STA 보존을 별도로 결정합니다. 보호된 라이브러리 소유 실행 경계(실시간 세션의 소유 스레드에서 실행되는 `command_bundle`)에서는 이런 결과 불명(반환된 결과든 종료 신호든)이 해당 세션을 보류 상태로 만듭니다. 명령은 `failed`(`may_have_mutated=true`, 원래 신호 종류는 원인 체인에 보존)로 기록되고, 호출자는 `ok=false`, `dirty=true`, `native_custody_held=true`인 미완료 결과를 받으며, 같은 소유 스레드와 세션 등록은 유지됩니다. 이 경로에서는 Clear·Quit·CoUninitialize, 캐럿 이동, Undo, 저장·내보내기, 재시도, 새 네이티브 호출을 하지 않고, 시간 초과로 표시하지도 않으며, 이후의 실행·닫기(강제 포함)·정리·증거 없는 reconcile/acknowledge는 보류를 해제하지 못합니다. 상태 조회는 읽기 전용으로 남습니다. 운영자 승인에 의한 해제 절차는 이 저장소에 구현되어 있지 않으므로 보류된 세션은 해당 프로세스가 끝날 때까지 유지됩니다. Linux 어댑터 테스트는 어댑터 계약만 확인합니다. `cell_format_exact`는 기존 대상 ID, 해시, 페이지, 구역 앵커와 `confirm_layout=true`를 요구하며, 형식 선택자는 `vertical_align`, `cell_margin_mm`, `cell_margin_hu` 중 하나만 지정합니다. 셀 여백 변경은 선언된 단위로 네 변(left/right/top/bottom)을 모두 명시한 단일 네이티브 호출을 사용하고, 요청에서 독립적으로 계산한 네 변의 값과 네이티브 전후 getter가 정확히 일치해야 성공으로 기록됩니다. 유효하지 않거나 신선하지 않은 네이티브 getter, 같은 값을 다시 요청한 no-op, 요청값과 다른 여백은 거부되며, 동작 후 판정 실패는 변경 가능성을 보존합니다. 셀 정렬은 별도의 네이티브 전후 readback을 확보하지 못하면 성공으로 기록하지 않습니다. `pyhwpx_call`, `hwp_action`, 임의 Python·셸·명령 이름은 허용하지 않습니다. 이 어댑터는 기존 비변경용 `safe-schema` 자체를 확장하거나 쓰기 권한으로 해석하지 않습니다.
+`hwpx_command`는 `context`, `selection_proof`, `readback`, `cell_format_exact`, `page_number_apply`, `official_numbering_apply`, `paragraph_insert_exact`, `paragraph_remove_exact`, `character_format_exact`, `paragraph_format_exact`, `table_inventory`, `table_read`, `table_edit_exact`, `table_style_exact`, `table_create_exact`, `undo`, `redo`, `command_reconcile`만 받습니다. `page_number_apply`는 `position`(`top-left`, `top-center`, `top-right`, `bottom-left`, `bottom-center`, `bottom-right`)과 `confirm_layout=true`를 요구하고, 선택 항목으로 `start_number`(1~65535, 기본 1), `side_char`(`none` 또는 `dash`, 기본 `none`)를 받습니다. 앞·뒤 문구는 네이티브 대시(`-`) 장식(`dash`)만 지원하고 임의의 앞·뒤 문구와 머리말·꼬리말 확인 우회 항목은 받지 않습니다. 실행 중인 문서의 메모리 상 HWPML2X 구조 스냅샷(본문, 글자·문단·표·그림 서식, 머리말·꼬리말, 스타일, 번호 정의, 바이너리 데이터 참조)을 읽을 수 있을 때만 변경하고, 읽을 수 없으면 변경 전에 거부하며, 실행 후 새 쪽 번호 컨트롤과 그 설정 외의 구조가 달라지거나 스냅샷을 읽을 수 없으면 정리(되돌리기) 없이 결과 불명으로 보고합니다(inserted로 보고하지 않음). `official_numbering_apply`는 `match`, `expected_page`, `level`(1~4), `confirm_layout=true`를 모두 요구하며 일치하는 문단 하나에 네이티브 개요 번호 수준을 적용합니다. 현재 구역의 개요 번호 정의가 `1.` → `가.` → `1)` → `가)` 4수준과 일치하는지 읽어서 확인하고, 일치하지 않으면 그 구역에 다른 개요 문단이 없다는 것을 증명할 수 있을 때만 4수준을 정의하며, 확인하지 못한 형식은 성공으로 보고하지 않습니다. 이미 확인된 정의가 있으면 네이티브 ParagraphShape 동작 한 번(HeadingType, Level)으로 적용하고, 같은 구조 스냅샷을 변경 전에 읽을 수 없거나 대상 문단을 하나로 식별할 수 없으면 변경 전에 거부하며, 변경 후 대상 문단의 번호 외 구조가 달라지면 결과 불명으로 보고합니다. 두 명령 모두 자동 저장하지 않으며, 저장 전에 렌더링 증명이 필요합니다. 두 동작은 보호된 대화형 `command_bundle`(CLI/MCP)과 호출자가 SDK 수명을 소유하는 라이브러리에서만 지원합니다. 대기열 편집 작업(`/edit-and-convert`, `/edit-and-convert-from-path`, 작업자 `edit_and_convert_with_pyhwpx`)은 실패 시 SDK를 종료하고 COM을 해제하므로 결과 불명 상태에서 문서를 유지할 수 없어, `page_number`/`official_numbering` 작업 연산이 하나라도 있으면 `edit_and_convert_with_pyhwpx`가 자신의 COM 초기화·SDK 생성·열기·편집 이전에 작업 전체를 거부합니다(`/capabilities`의 `queued_job_unsupported_ops`). 다만 이를 감싸는 `process_one_command`는 그 전에 네이티브 내보내기 사전 점검을 수행하며, 이 점검이 빈 탐침 인스턴스를 생성하고 종료하므로 자식 프로세스 전체가 SDK 작업을 전혀 하지 않는다는 뜻은 아닙니다. 그러므로 API·CLI·MCP 동일 입력 동등성은 충족되지 않습니다. 또한 결과 불명이 된 뒤에는 캐럿을 이동하지 않으며, 자동 Undo·닫기·종료를 하지 않습니다. `page_number_apply`와 `official_numbering_apply`에서 네이티브 변경 호출(`PageNumPos`, `OutlineNumber`, `ParagraphShape`)이 시작된 뒤 발생한 일반 예외(읽기·집계·비교 오류 포함)는 원인을 유지한 채 결과 불명(`mutation_may_have_persisted=true`)으로 보고합니다. `KeyboardInterrupt`·`SystemExit` 같은 종료 신호는 호출자가 소유한 라이브러리에서는 삼키지 않고 그대로 전파합니다. 정확한 내장 종료 신호에만 호환용 결과 불명 표시를 붙이고 사용자 하위 클래스의 속성은 읽거나 변경하지 않습니다. 소유 런타임의 trusted producer intent가 결과 불명과 STA 보존을 별도로 결정합니다. 보호된 라이브러리 소유 실행 경계(실시간 세션의 소유 스레드에서 실행되는 `command_bundle`)에서는 이런 결과 불명(반환된 결과든 종료 신호든)이 해당 세션을 보류 상태로 만듭니다. 명령은 `failed`(`may_have_mutated=true`, 원래 신호 종류는 원인 체인에 보존)로 기록되고, 호출자는 `ok=false`, `dirty=true`, `native_custody_held=true`인 미완료 결과를 받으며, 같은 소유 스레드와 세션 등록은 유지됩니다. 이 경로에서는 Clear·Quit·CoUninitialize, 캐럿 이동, Undo, 저장·내보내기, 재시도, 새 네이티브 호출을 하지 않고, 시간 초과로 표시하지도 않으며, 이후의 실행·닫기(강제 포함)·정리·증거 없는 reconcile/acknowledge는 보류를 해제하지 못합니다. 상태 조회는 읽기 전용으로 남습니다. 운영자 승인에 의한 해제 절차는 이 저장소에 구현되어 있지 않으므로 보류된 세션은 해당 프로세스가 끝날 때까지 유지됩니다. Linux 어댑터 테스트는 어댑터 계약만 확인합니다. `cell_format_exact`는 기존 대상 ID, 해시, 페이지, 구역 앵커와 `confirm_layout=true`를 요구하며, 형식 선택자는 `vertical_align`, `cell_margin_mm`, `cell_margin_hu` 중 하나만 지정합니다. 셀 여백 변경은 선언된 단위로 네 변(left/right/top/bottom)을 모두 명시한 단일 네이티브 호출을 사용하고, 요청에서 독립적으로 계산한 네 변의 값과 네이티브 전후 getter가 정확히 일치해야 성공으로 기록됩니다. 유효하지 않거나 신선하지 않은 네이티브 getter, 같은 값을 다시 요청한 no-op, 요청값과 다른 여백은 거부되며, 동작 후 판정 실패는 변경 가능성을 보존합니다. 셀 정렬은 별도의 네이티브 전후 readback을 확보하지 못하면 성공으로 기록하지 않습니다. `pyhwpx_call`, `hwp_action`, 임의 Python·셸·명령 이름은 허용하지 않습니다. 이 어댑터는 기존 비변경용 `safe-schema` 자체를 확장하거나 쓰기 권한으로 해석하지 않습니다.
 
 `hwpx_cell_margins_get`는 셀 서식을 바꾸지 않고 표 셀 네 변의 여백을 읽는 독립 도구입니다. `hwpx_find`가 돌려준 문서 생성 값, `hwpx_command`의 `readback`이 돌려준 컨트롤 목록의 대상 ID·해시·앵커 페이지, 그리고 같은 세션에서 새로 확인한 셀 위치를 `request`에 모두 담아야 합니다. 요청 필드는 `document_id`(세션 ID와 같은 32자리 소문자 16진수), `expected_document_generation`, `target_id`, `expected_hash`, `expected_page`, `expected_cell_page`, `page_from`, `page_to`, `cell_pos`, `cell_addr`, `section_anchor`이며 `max_controls`(기본 100)만 선택 항목입니다. 값은 JSON 배열로 직접 전달합니다. `cell_pos`는 네이티브 위치 3개 값, `cell_addr`는 0부터 시작하는 `[열, 행]`이고 A1이 `[0, 0]`입니다. A1 표기 문자열, 숫자 문자열, 다른 필드, 기본값 대체는 모두 거부합니다. `section_anchor`는 요청한 셀 문단에 문자 그대로 한 번만 나타나는 문장 조각이어야 합니다. 찾기 결과의 `section` 표시(`live-text`)는 메타데이터일 뿐 앵커 문구가 아니므로 그대로 쓰면 거부됩니다.
 

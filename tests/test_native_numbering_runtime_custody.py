@@ -92,9 +92,15 @@ def chain(exc):
 
 
 class Owned:
-    """A real manager + real owning thread over a fake SDK, with the real command_bundle bound to it."""
+    """A real manager + real owning thread over a fake SDK, with the real command_bundle bound to it.
 
-    def __init__(self, case, hwp, *, protection=None, session_id='custody-session-0001', real_execute_live=False):
+    Construction is not what these tests are about. Windows reads the real process list as a constructor baseline, which a fake SDK cannot
+    satisfy, so the harness takes the path of a runtime with no native process baseline, as every portable run does. The production guard
+    is unchanged; tests/test_owned_harness_constructor.py shows it still refuses this fake constructor once a baseline is present."""
+
+    native_baseline = staticmethod(lambda: None)
+
+    def __init__(self, case, hwp, *, protection=None, session_id='custody-session-0001', real_execute_live=False, watchdog=None):
         self.case = case
         self.hwp = hwp
         hwp.cursor = (0, 2, 0)
@@ -120,9 +126,10 @@ class Owned:
         for name, value in (
             ('create_hwp_instance_with_recovery', lambda Hwp, **kw: Hwp()),
             ('open_document_with_recovery', lambda *, Hwp, hwp, **kw: hwp),
-            ('start_runtime_watchdog', lambda *a, **k: (None, None)),
+            ('start_runtime_watchdog', watchdog or (lambda *a, **k: (None, None))),
             ('update_runtime_status', lambda *a, **k: None),
             ('current_windows_session_snapshot', lambda: {'interactive': True, 'session_id': 1, 'session_name': 'fake'}),
+            ('_native_close_processes', type(self).native_baseline),
             ('collect_hwp_snapshot', lambda h: {}),
             ('snapshot_live_location', lambda **kw: {}),
         ):
@@ -130,10 +137,13 @@ class Owned:
         (root / 'session').mkdir()
         self.root = root / 'session'
         self.manager = rt.LocalCliRuntimeManager()
-        self.manager.open_session(session_id=session_id, session_root=self.root, working_copy_path=root / 'wc.hwpx', source_filename='document.hwpx')
-        self.session = self.manager._sessions[session_id]
-        # Registered after stack.close so the final-release adapter runs while the fakes are still patched.
+        # Register before start: a refused constructor deliberately retains its
+        # owning thread too. Release only this fake SDK after all assertions.
         case.addCleanup(self.final_release)
+        try:
+            self.manager.open_session(session_id=session_id, session_root=self.root, working_copy_path=root / 'wc.hwpx', source_filename='document.hwpx')
+        finally:
+            self.session = self.manager._sessions.get(session_id)
         self.service = self._make_service(protection, real_execute_live)
 
     def arm(self, action, make_exc=None, exploding=False, ret=_UNSET):
@@ -143,6 +153,8 @@ class Owned:
     def final_release(self):
         """TEST-ONLY adapter, run after every assertion, so the fake owning thread can settle. Not a production path."""
         session = self.session
+        if session is None:
+            return
         if session._thread.is_alive():
             session._allow_native_cleanup = True
             # Fake-only release after assertions. The real wrapper has no

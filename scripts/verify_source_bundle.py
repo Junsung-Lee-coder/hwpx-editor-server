@@ -11,9 +11,19 @@ from pathlib import Path, PurePosixPath
 from typing import Any, BinaryIO
 
 try:
-    from scripts.source_bundle_policy import find_python_source_hygiene_violations, is_prohibited_member
+    from scripts.source_bundle_policy import (
+        find_python_source_hygiene_violations,
+        is_prohibited_member,
+        is_public_test_fixture_member,
+        public_test_fixture_policy_name,
+    )
 except ImportError:  # direct script execution
-    from source_bundle_policy import find_python_source_hygiene_violations, is_prohibited_member
+    from source_bundle_policy import (
+        find_python_source_hygiene_violations,
+        is_prohibited_member,
+        is_public_test_fixture_member,
+        public_test_fixture_policy_name,
+    )
 
 
 class SourceBundleVerificationError(RuntimeError):
@@ -129,6 +139,23 @@ def _safe_member_name(raw: str) -> str:
     if is_prohibited_member(normalized):
         raise SourceBundleVerificationError(f"prohibited private or generated source member: {raw!r}")
     return normalized
+
+
+def _safe_test_fixture_member_name(raw: str) -> str:
+    """Validate a ``tests/fixtures/`` member; only that ``fixtures`` name is exempt.
+
+    The rest of the path must pass every unsafe-path, runtime and private-name
+    check of an ordinary member.
+    """
+
+    name = str(raw).replace("\\", "/")
+    policy_name = public_test_fixture_policy_name(name)
+    if policy_name is None or not is_public_test_fixture_member(name):
+        raise SourceBundleVerificationError(f"not an allowed test fixture member: {raw!r}")
+    _safe_member_name(policy_name)
+    if PurePosixPath(name).as_posix() != name:
+        raise SourceBundleVerificationError(f"unsafe archive member path: {raw!r}")
+    return name
 
 
 def _is_symlink_or_reparse(info: zipfile.ZipInfo) -> bool:
@@ -310,6 +337,13 @@ def _parse_manifest_bytes(payload: bytes, path: Path) -> dict[str, Any]:
     if not isinstance(raw, dict) or not isinstance(raw.get("files"), list):
         raise SourceBundleVerificationError("source manifest must contain a files list")
     if len(raw["files"]) > MAX_MANIFEST_ENTRIES:
+        raise SourceBundleVerificationError(
+            f"source manifest contains more than the bounded limit of {MAX_MANIFEST_ENTRIES} entries"
+        )
+    test_fixture_files = raw.get("test_fixture_files", [])
+    if not isinstance(test_fixture_files, list):
+        raise SourceBundleVerificationError("source manifest test_fixture_files must be a list")
+    if len(raw["files"]) + len(test_fixture_files) > MAX_MANIFEST_ENTRIES:
         raise SourceBundleVerificationError(
             f"source manifest contains more than the bounded limit of {MAX_MANIFEST_ENTRIES} entries"
         )
@@ -573,6 +607,37 @@ def _verify_source_bundle_open(
         raise SourceBundleVerificationError(
             f"manifest file_count mismatch: declared={declared_file_count!r}, entries={len(expected_files)}"
         )
+    # Test fixtures are listed apart from the runtime files that installers
+    # consume; a bundle without the section carries none.
+    expected_fixtures: dict[str, dict[str, Any]] = {}
+    for item in manifest.get("test_fixture_files", []):
+        if not isinstance(item, dict) or not item.get("path"):
+            raise SourceBundleVerificationError("source manifest contains an invalid test fixture entry")
+        name = _safe_test_fixture_member_name(str(item["path"]))
+        key = name.casefold()
+        if key in expected_files or key in expected_fixtures:
+            raise SourceBundleVerificationError(f"duplicate manifest member path: {name}")
+        size = item.get("size")
+        if (
+            isinstance(size, bool)
+            or not isinstance(size, int)
+            or size < 0
+            or size > MAX_MEMBER_BYTES
+            or not _is_sha256_hex(item.get("sha256"))
+        ):
+            raise SourceBundleVerificationError(f"source manifest contains invalid metadata for: {name}")
+        expected_fixtures[key] = {"path": name, "size": size, "sha256": str(item["sha256"])}
+    declared_fixture_count = manifest.get("test_fixture_file_count", 0)
+    if (
+        not isinstance(declared_fixture_count, int)
+        or isinstance(declared_fixture_count, bool)
+        or declared_fixture_count != len(expected_fixtures)
+    ):
+        raise SourceBundleVerificationError(
+            "manifest test_fixture_file_count mismatch: "
+            f"declared={declared_fixture_count!r}, entries={len(expected_fixtures)}"
+        )
+    expected_members = {**expected_files, **expected_fixtures}
 
     unsafe_members: list[str] = []
     duplicate_members: list[str] = []
@@ -585,8 +650,11 @@ def _verify_source_bundle_open(
             try:
                 name = _safe_member_name(info.filename)
             except SourceBundleVerificationError:
-                unsafe_members.append(info.filename)
-                continue
+                try:
+                    name = _safe_test_fixture_member_name(info.filename)
+                except SourceBundleVerificationError:
+                    unsafe_members.append(info.filename)
+                    continue
             if _is_symlink_or_reparse(info):
                 unsafe_members.append(name)
                 continue
@@ -599,9 +667,9 @@ def _verify_source_bundle_open(
             raise SourceBundleVerificationError(
                 f"unsafe archive members: {len(unsafe_members)}; duplicate members: {len(duplicate_members)}"
             )
-        expected_keys = set(expected_files)
+        expected_keys = set(expected_members)
         actual_keys = set(actual_by_key)
-        missing = sorted(expected_files[key]["path"] for key in expected_keys - actual_keys)
+        missing = sorted(expected_members[key]["path"] for key in expected_keys - actual_keys)
         unexpected = sorted(actual_by_key[key].filename for key in actual_keys - expected_keys)
         if missing or unexpected:
             raise SourceBundleVerificationError(
@@ -620,7 +688,7 @@ def _verify_source_bundle_open(
             extracted_bytes = 0
             for key in sorted(actual_by_key):
                 info = actual_by_key[key]
-                expected = expected_files[key]
+                expected = expected_members[key]
                 name = expected["path"]
                 target = staging.joinpath(*PurePosixPath(name).parts)
                 target.parent.mkdir(parents=True, exist_ok=True)
@@ -646,8 +714,8 @@ def _verify_source_bundle_open(
             os.replace(staging, destination)
 
     mismatches: list[dict[str, Any]] = []
-    for key in sorted(expected_files):
-        expected = expected_files[key]
+    for key in sorted(expected_members):
+        expected = expected_members[key]
         path = _validate_extracted_path(destination, expected["path"])
         try:
             actual_size, actual_sha = _sha256_file(path)
@@ -677,6 +745,7 @@ def _verify_source_bundle_open(
         "archive_sha256": actual_archive_sha,
         "archive_bytes": archive_bytes,
         "file_count": len(expected_files),
+        "test_fixture_file_count": len(expected_fixtures),
         "uncompressed_bytes": total_uncompressed,
         "compressed_bytes": total_compressed,
         "maximum_compression_ratio": maximum_ratio,

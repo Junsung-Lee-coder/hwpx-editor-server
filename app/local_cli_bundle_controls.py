@@ -110,6 +110,7 @@ class LocalCliBundleControlsMixin:
         if not isinstance(location, dict):
             return {}
         return {
+            **({'observation_status': location['observation_status']} if 'observation_status' in location else {}),
             'cursor_summary': location.get('cursor_summary'),
             'selection_summary': location.get('selection_summary'),
             'current_paragraph_preview': None,
@@ -130,7 +131,7 @@ class LocalCliBundleControlsMixin:
                 else:
                     if not callable(member):
                         raise LocalCliRuntimeError('Numbering page API is unproven.')
-                    value = member()  # An entered getter failure is never a fallback.
+                    value = native_numbering._sdk_read(member)  # noqa: SLF001 — never a fallback after entry
                 if name == 'KeyIndicator':
                     if (type(value) is not list and type(value) is not tuple) or len(value) <= 3:
                         raise LocalCliRuntimeError('Numbering page tuple is unproven.')

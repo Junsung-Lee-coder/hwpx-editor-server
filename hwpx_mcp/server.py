@@ -121,7 +121,7 @@ def rejection_summary(value: dict[str, Any]) -> dict[str, Any]:
     coded = re.match(r'([a-z_]+): ', detail) if detail else None
     summary = {
         'reason': failed.get('refusal_code') or diagnostic.get('numbering_reason') or (coded.group(1) if coded else detail),
-        'message': failed.get('refusal_message') or (detail if coded else None),
+        'message': failed.get('refusal_message') or failed.get('outcome_detail') or (detail if coded else None),
         'stopped_before_edit': failed.get('mutation_may_have_persisted') is False if failed else None,
         'found_page': failed.get('found_page'),
         'session_held': value.get('native_custody_held') is True or (coded is not None and coded.group(1) == 'native_custody_held'),
@@ -563,14 +563,31 @@ class Facade:
             pdf={'path': str(pdf), 'sha256': await asyncio.to_thread(file_sha256, pdf)} if pdf.is_file() else None,
             pages=page_rows, texts=texts, baseline=baseline, saved_output=saved_record, render_error=render_error,
             persisted_format=await self.persisted_format(folder, readback, saved_record),
+            persisted_tables=await self.persisted_tables(folder, readback, saved_record),
         )
         summary = destination / 'summary.md'
         current['summary_path'] = str(summary)
         current['json_path'] = str(destination / 'review.json')
         summary.write_text(review_rules.to_markdown(current), encoding='utf-8')
         write_json_atomic(destination / 'review.json', current)
-        # The structured result stays small; the full paragraph list is in review.json.
-        return {'ok': True, 'session_id': sid, **{key: value for key, value in current.items() if key != 'paragraphs'}}
+        # The structured result stays small; the full paragraph and table lists are in review.json.
+        return {'ok': True, 'session_id': sid, **{key: value for key, value in current.items() if key not in {'paragraphs', 'tables'}}}
+
+    async def persisted_tables(self, folder, readback, saved_record):
+        """The tables a saved file itself holds against the unmodified live document: the latest copy, or the saved copy this session reopened."""
+        tables = readback.get('tables')
+        if readback.get('document_is_modified') is not False or tables is None:
+            return None
+        kept = saved_record.get('path') if saved_record and saved_record.get('retrieved') is True else None
+        compared_with = 'saved_output'
+        if kept is None:
+            opened = (self.read_json(folder / 'source.json') or {}).get('path')
+            kept = opened if opened and Path(opened).is_relative_to(self.settings.artifact_root.resolve()) else None
+            compared_with = 'reopened_saved_file'
+        if kept is None or Path(kept).suffix.lower() != '.hwpx':
+            return None
+        value = await asyncio.to_thread(review_rules.persisted_tables, Path(kept), tables, truncated=readback.get('tables_truncated') is True)
+        return {**value, 'compared_with': compared_with, 'path': str(kept)}
 
     async def persisted_format(self, folder, readback, saved_record):
         """The formatting a saved file itself holds against the unmodified live document: the latest copy, or the saved copy this session reopened."""
@@ -703,7 +720,7 @@ def build_app(settings: Settings | None = None):
                 'hwpx_status': 'Inspect explicit session and reconciliation status. May repair stale backend status; not a rollback claim.',
                 'hwpx_find': 'Find text in the explicit managed copy; may move the live cursor or create proof.',
                 'hwpx_where': 'Read native cursor/location; runs work in the existing serialized backend lane.',
-                'hwpx_command': 'Bounded context/readback/selection, guarded cell alignment or margin formatting, native page-number insertion, native outline numbering of one proven paragraph, insertion or removal of one proven body paragraph (removal also requires its full text), character formatting (font family, size, bold, italic, underline, text color; a printed number mark stays as it was unless number_mark=follow) or paragraph formatting (alignment, indents, line spacing) of one exact range or paragraph found again before each command, undo or redo within the tracked edits of this session with a report of what changed, or command reconciliation. No arbitrary COM, Python or shell.',
+                'hwpx_command': 'Bounded context/readback/selection, guarded cell alignment or margin formatting, native page-number insertion, native outline numbering of one proven paragraph, insertion or removal of one proven body paragraph (removal also requires its full text), character formatting (font family, size, bold, italic, underline, text color; a printed number mark stays as it was unless number_mark=follow) or paragraph formatting (alignment, indents, line spacing) of one exact range or paragraph found again before each command, tables (table_inventory and table_read to list and read them; table_edit_exact to insert or delete rows and columns, merge, split or unmerge cells; table_style_exact to set border line type, width and color on edges and set or clear the cell fill of one cell, a range or the whole table; table_width_exact to set column widths or fit a table to the text width on request; table_create_exact to add a table after a paragraph), undo or redo within the tracked edits of this session with a report of what changed, or command reconciliation. No arbitrary COM, Python or shell.',
                 'hwpx_proof': 'Native frame, one PDF-rendered page, or kind=review: first how much could be checked (complete, partial, unverified or mismatch), then numbering as printed in the native PDF, changes and preservation against an earlier review, page previews, the PDF and the saved file. Does not edit or save.',
                 'hwpx_save': 'Save the managed working copy and copy the saved file to the artifact root; the result gives its path, hash and a comparison with the opened file. If the copy fails the result says so, and calling hwpx_save again retries it.',
                 'hwpx_close': 'Close the explicit clean managed session and remove its managed files, after confirming its saved content exists under the artifact root. Refused, with nothing deleted, while unsaved changes remain or the saved file cannot be copied.',

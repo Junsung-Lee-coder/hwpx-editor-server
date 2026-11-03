@@ -47,6 +47,28 @@ class NativeNumberingReadFailure(NativeNumberingRefusal):
     """A native read raised, so nothing is known: never a clean refusal, and no further SDK call or restoration follows."""
 
 
+def _sdk_read(read: Callable[[], Any]) -> Any:
+    """Only an external SDK expression, never its returned-data validation.
+
+    Exception identity does not establish semantic provenance. Keep classified
+    failures intact and retain the first external cause without inspecting it.
+    """
+    try:
+        return read()
+    except NativeNumberingReadFailure:
+        raise
+    except Exception as exc:
+        # Only classes consumed as semantic/returned-evidence refusals collide.
+        # Ordinary errors retain their original type and direct causal labels.
+        from app.native_numbering_census import CensusError
+        from app.local_cli_runtime import LocalCliRuntimeError
+        semantic = (NativeNumberingRefusal, ControlEnumerationUnproven, CensusError, LocalCliRuntimeError)
+        mro = type.__dict__['__mro__'].__get__(type(exc))
+        if any(base is known for base in mro for known in semantic):
+            raise NativeNumberingReadFailure('Required native SDK read failed.', code='preservation_unprovable') from exc
+        raise
+
+
 class NativeNumberingMutationError(EditOperationError):
     """A native mutation call was issued and the final document state is not proven."""
 
@@ -209,22 +231,22 @@ def _status_text(result: Any) -> str:
 
 
 def _require_haction(hwp: Any, *methods: str) -> Any:
-    haction = getattr(hwp, 'HAction', None)
+    haction = _sdk_read(lambda: getattr(hwp, 'HAction', None))
     if haction is None:
         raise NativeNumberingRefusal('native HAction is unavailable on this machine', code='native_unavailable')
     for method in methods:
-        if not callable(getattr(haction, method, None)):
+        if not callable(_sdk_read(lambda: getattr(haction, method, None))):
             raise NativeNumberingRefusal(f'native HAction.{method} is unavailable on this machine', code='native_unavailable')
-    if getattr(hwp, 'HParameterSet', None) is None:
+    if _sdk_read(lambda: getattr(hwp, 'HParameterSet', None)) is None:
         raise NativeNumberingRefusal('native HParameterSet is unavailable on this machine', code='native_unavailable')
     return haction
 
 
 def _read_text_hash(hwp: Any) -> str:
-    reader = getattr(hwp, 'get_text_file', None)
+    reader = _sdk_read(lambda: getattr(hwp, 'get_text_file', None))
     if not callable(reader):
         raise RuntimeError('get_text_file is unavailable')
-    text = reader('UNICODE', '')
+    text = _sdk_read(lambda: reader('UNICODE', ''))
     if type(text) is not str:
         raise RuntimeError('get_text_file returned a non-text value')
     return hashlib.sha256(text.encode('utf-8')).hexdigest()
@@ -239,23 +261,25 @@ class ControlEnumerationLimit(ControlEnumerationUnproven):
 
 
 def _control_ids(hwp: Any) -> list[tuple[Any, str]]:
-    head = hwp.HeadCtrl
+    head = _sdk_read(lambda: hwp.HeadCtrl)
     controls: list[tuple[Any, str]] = []
     ctrl = head
     for _ in range(_MAX_CONTROLS):
         if ctrl is None:
             return controls
-        ctrl_id = ctrl.CtrlID
+        ctrl_id = _sdk_read(lambda: ctrl.CtrlID)
         if type(ctrl_id) is not str or not ctrl_id:
             raise ControlEnumerationUnproven('control identifier is not exact text')
         controls.append((ctrl, ctrl_id))
-        ctrl = ctrl.Next
+        ctrl = _sdk_read(lambda: ctrl.Next)
     raise ControlEnumerationLimit(f'control enumeration exceeded {_MAX_CONTROLS} controls')
 
 
 def _preflight_census(hwp: Any) -> tuple[str, list[tuple[Any, str]]]:
     try:
         text_hash = _read_text_hash(hwp)
+    except NativeNumberingReadFailure:
+        raise
     except Exception as exc:
         raise NativeNumberingRefusal(
             f'document text could not be read back before editing: exception of class {_exception_class_label(exc)}',
@@ -263,6 +287,8 @@ def _preflight_census(hwp: Any) -> tuple[str, list[tuple[Any, str]]]:
         ) from exc
     try:
         controls = _control_ids(hwp)
+    except NativeNumberingReadFailure:
+        raise
     except Exception as exc:
         raise NativeNumberingRefusal(
             f'main-list control enumeration is unavailable: exception of class {_exception_class_label(exc)}',
@@ -281,8 +307,8 @@ _NATIVE_ABSENT = object()
 def _native_member(hwp: Any, name: str) -> Any:
     """Missing API is distinct from a declared descriptor that throws on entry."""
     try:
-        return getattr(hwp, name)
-    except AttributeError:
+        return _sdk_read(lambda: getattr(hwp, name))
+    except AttributeError as exc:
         # Builtin descriptors bypass metaclass metadata proxies. Do not turn
         # a declared property's AttributeError into authority for another API.
         mro = type.__dict__['__mro__'].__get__(type(hwp))
@@ -300,7 +326,9 @@ def _native_method(hwp: Any, *names: str) -> Any:
         if method is _NATIVE_ABSENT:
             continue
         if callable(method):
-            return method
+            def invoke(*args: Any, **kwargs: Any) -> Any:
+                return _sdk_read(lambda: method(*args, **kwargs))
+            return invoke
         break
     raise NativeNumberingRefusal('required native API is unavailable', code='native_unavailable')
 
@@ -310,6 +338,8 @@ def _get_pos(hwp: Any) -> tuple[int, int, int]:
     getter = _native_method(hwp, 'get_pos', 'GetPos')
     try:
         value = getter()
+    except NativeNumberingReadFailure:
+        raise
     except Exception as exc:
         raise NativeNumberingReadFailure('native caret read failed', code='target_unlocatable') from exc
     if (type(value) is list or type(value) is tuple) and len(value) == 3 and all(_exact_index(item) for item in value):
@@ -338,6 +368,8 @@ def _get_selection(hwp: Any) -> tuple[int, ...] | None:
     getter = _native_method(hwp, 'get_selected_pos', 'GetSelectedPos')
     try:
         value = getter()
+    except NativeNumberingReadFailure:
+        raise
     except Exception as exc:
         raise NativeNumberingReadFailure('native selection read failed', code='target_unlocatable') from exc
     return _parse_selected_pos(value)
@@ -446,8 +478,11 @@ def _read_page_number_props(ctrl: Any, *, allow_unset_new_number: bool = False) 
     """None only for values the native getter returned; a getter that raised stays a typed technical failure."""
     diagnostic: list[tuple[str, str, Any]] = []
     values = _page_number_props(ctrl, _diagnostic=diagnostic, allow_unset_new_number=allow_unset_new_number)
-    if values is None and any(stage != 'validate' for stage, _name, _value in diagnostic):
-        raise NativeNumberingReadFailure('document already has a page number control and its settings could not be read', code='existing_page_number')
+    for stage, _name, cause in diagnostic:
+        if stage != 'validate':
+            if isinstance(cause, NativeNumberingReadFailure):
+                raise cause
+            raise NativeNumberingReadFailure('document already has a page number control and its settings could not be read', code='existing_page_number') from cause
     return values
 
 
@@ -1119,8 +1154,8 @@ def apply_page_number(hwp: Any, request: Any, *, protection: Callable[[], Any] |
 def _apply_page_number(hwp: Any, request: Any, *, protection: Callable[[], Any] | None, reach: '_MutationReach') -> dict[str, Any]:
     req = normalize_page_number_request(request)
     haction = _require_haction(hwp, 'GetDefault', 'Execute')
-    page_set_root = getattr(hwp.HParameterSet, 'HPageNumPos', None)
-    if page_set_root is None or getattr(page_set_root, 'HSet', None) is None:
+    page_set_root = _sdk_read(lambda: getattr(hwp.HParameterSet, 'HPageNumPos', None))
+    if page_set_root is None or _sdk_read(lambda: getattr(page_set_root, 'HSet', None)) is None:
         raise NativeNumberingRefusal('native HParameterSet.HPageNumPos is unavailable on this machine', code='native_unavailable')
 
     text_hash, controls = _preflight_census(hwp)
@@ -1184,7 +1219,7 @@ def _apply_page_number(hwp: Any, request: Any, *, protection: Callable[[], Any] 
     else:
         first_number = 'new_restart'
 
-    mover = getattr(hwp, 'MoveDocBegin', None)
+    mover = _sdk_read(lambda: getattr(hwp, 'MoveDocBegin', None))
     if not callable(mover):
         raise NativeNumberingRefusal('MoveDocBegin is unavailable on this machine', code='native_unavailable')
 
@@ -1194,8 +1229,10 @@ def _apply_page_number(hwp: Any, request: Any, *, protection: Callable[[], Any] 
         # A single-section PageNumPos default is independent of paragraph.
         # Read/validate it before temporary navigation, so a failed getter
         # leaves the original caret intact without any post-fault SDK call.
-        hset = hwp.HParameterSet.HPageNumPos
-        defaults_result = haction.GetDefault('PageNumPos', hset.HSet)
+        hset = _sdk_read(lambda: hwp.HParameterSet.HPageNumPos)
+        defaults_result = _sdk_read(lambda: haction.GetDefault('PageNumPos', hset.HSet))
+    except NativeNumberingReadFailure:
+        raise
     except Exception as exc:
         raise NativeNumberingRefusal(
             f'native PageNumPos defaults could not be read: exception of class {_exception_class_label(exc)}',
@@ -1218,7 +1255,7 @@ def _apply_page_number(hwp: Any, request: Any, *, protection: Callable[[], Any] 
             code='native_parameters_unavailable',
         ) from exc
 
-    _require_motion_result(mover())
+    _require_motion_result(_sdk_read(lambda: mover()))
     # From here the outcome may be unknown, so no failure path below moves the caret.
     reach.issue()
     try:
@@ -1281,6 +1318,9 @@ def _apply_page_number(hwp: Any, request: Any, *, protection: Callable[[], Any] 
             error.args = (_page_number_readback_detail(readback_diagnostic) + '; ' + error.args[0],)
         except BaseException:
             pass  # The typed mutation-unknown error already exists; diagnostics cannot release it.
+        cause = next((value for stage, _name, value in readback_diagnostic if stage != 'validate'), None)
+        if cause is not None:
+            raise error from cause
         raise error
     new_number_unset = values['NewNumber'] is None
     if new_number_unset:
@@ -1368,9 +1408,11 @@ def _page_number_result(
 
 
 def _read_paragraph_shape(hwp: Any, haction: Any) -> tuple[Any, int, int | None]:
-    hset = hwp.HParameterSet.HParaShape
+    hset = _sdk_read(lambda: hwp.HParameterSet.HParaShape)
     try:
-        result = haction.GetDefault('ParagraphShape', hset.HSet)
+        result = _sdk_read(lambda: haction.GetDefault('ParagraphShape', hset.HSet))
+    except NativeNumberingReadFailure:
+        raise
     except Exception as exc:
         raise NativeNumberingRefusal(
             f'current paragraph shape could not be read: exception of class {_exception_class_label(exc)}',
@@ -1380,18 +1422,18 @@ def _read_paragraph_shape(hwp: Any, haction: Any) -> tuple[Any, int, int | None]
         raise NativeNumberingRefusal(
             f'current paragraph shape could not be read (GetDefault returned {_status_text(result)})', code='paragraph_shape_unreadable'
         )
-    heading = getattr(hset, 'HeadingType', None)
+    heading = _sdk_read(lambda: getattr(hset, 'HeadingType', None))
     if type(heading) is not int or heading not in {0, 1, 2, 3}:
         raise NativeNumberingRefusal('current paragraph HeadingType could not be read', code='paragraph_shape_unreadable')
-    level = getattr(hset, 'Level', None)
+    level = _sdk_read(lambda: getattr(hset, 'Level', None))
     if type(level) is not int or level < 0 or level > 255:
         raise NativeNumberingRefusal('current paragraph Level could not be read', code='paragraph_shape_unreadable')
     return hset, heading, level
 
 
 def _outline_hset(hwp: Any) -> Any:
-    root = getattr(hwp.HParameterSet, 'HSecDef', None)
-    if root is None or getattr(root, 'HSet', None) is None:
+    root = _sdk_read(lambda: getattr(hwp.HParameterSet, 'HSecDef', None))
+    if root is None or _sdk_read(lambda: getattr(root, 'HSet', None)) is None:
         raise NativeNumberingRefusal('native HParameterSet.HSecDef is unavailable on this machine', code='native_unavailable')
     return root
 
@@ -1400,7 +1442,9 @@ def _read_outline_definition(hwp: Any, haction: Any) -> list[dict[str, Any]]:
     """Read the first four outline levels of the caret section; only documented str/UI1 values count."""
     hset = _outline_hset(hwp)
     try:
-        result = haction.GetDefault('OutlineNumber', hset.HSet)
+        result = _sdk_read(lambda: haction.GetDefault('OutlineNumber', hset.HSet))
+    except NativeNumberingReadFailure:
+        raise
     except Exception as exc:
         raise NativeNumberingRefusal(
             f'the section outline definition could not be read: exception of class {_exception_class_label(exc)}',
@@ -1411,14 +1455,14 @@ def _read_outline_definition(hwp: Any, haction: Any) -> list[dict[str, Any]]:
             f'the section outline definition could not be read (GetDefault returned {_status_text(result)})',
             code='outline_definition_unreadable',
         )
-    shape = getattr(hset, 'OutlineShape', None)
+    shape = _sdk_read(lambda: getattr(hset, 'OutlineShape', None))
     levels: list[dict[str, Any]] = []
     for spec in OFFICIAL_OUTLINE_LEVELS:
         index = spec['native_level']
-        text = getattr(shape, f'StrFormatLevel{index}', None)
+        text = _sdk_read(lambda: getattr(shape, f'StrFormatLevel{index}', None))
         if type(text) is not str:
             raise NativeNumberingRefusal('outline level text could not be read', code='outline_definition_unreadable')
-        number_format = getattr(shape, f'NumFormatLevel{index}', None)
+        number_format = _sdk_read(lambda: getattr(shape, f'NumFormatLevel{index}', None))
         if (
             type(number_format) is not int
             or number_format < 0
@@ -1895,6 +1939,8 @@ def _locate_unique_body_paragraph(hwp: Any, find: str, *, match_case: bool,
             break
         try:
             selected_value = selected_getter()
+        except NativeNumberingReadFailure:
+            raise
         except Exception as exc:
             raise NativeNumberingReadFailure('native selection read failed during the text search', code='target_unlocatable') from exc
         selected = _parse_selected_pos(selected_value)
