@@ -25,8 +25,15 @@ class HeadReasonCodes(unittest.TestCase):
         self.assertTrue(reasons)
         return layout_ops.reason_code(reasons[0]), object_insert.reason_code(reasons[0])
 
-    def test_caret_position_change(self):
-        self.assertEqual(self.codes(doc('0'), doc('1')), ('head_caretpos_changed', 'head_caretpos_changed'))
+    def test_a_caret_move_is_not_a_document_change(self):
+        # DOCSETTING/CARETPOS is the caret's position (view state); a footnote or section break moves it.
+        self.assertEqual(head_tail_reasons(doc('0'), doc('1')), [])
+
+    def test_other_document_settings_still_count(self):
+        before = doc()
+        after = doc()
+        after.find('HEAD/DOCSETTING/BEGINNUMBER').set('Footnote', '2')
+        self.assertEqual(self.codes(before, after), ('head_beginnumber_changed', 'head_beginnumber_changed'))
 
     def test_tail_change(self):
         self.assertEqual(self.codes(doc(), doc(tail='WFla')), ('tail_changed', 'tail_changed'))
@@ -41,6 +48,23 @@ class HeadReasonCodes(unittest.TestCase):
         for code in ('head_caretpos_changed', 'head_beginnumber_changed', 'tail_changed', 'coldef_count_moved'):
             self.assertTrue(step_diagnostic_allowed('verify', code), code)
         self.assertFalse(step_diagnostic_allowed('verify', 'head_whatever_changed'))
+
+
+
+class InsertWithCaretInHead(unittest.TestCase):
+    """The object engine over an HWPML readback whose HEAD records the caret, as Hancom 2024 writes it."""
+
+    def test_footnote_succeeds_when_only_the_caret_moved(self):
+        from tests.test_object_insert_exact import _FakeHwp, _run
+
+        class CaretHead(_FakeHwp):
+            def xml(self):
+                head = f'<HEAD><DOCSETTING><BEGINNUMBER Page="1" Footnote="1"/><CARETPOS List="{self.caret[0]}" Para="{self.caret[1]}" Pos="{self.caret[2]}"/></DOCSETTING></HEAD>'
+                return super().xml().replace('<HEAD/>', head, 1)
+        hwp = CaretHead()
+        result = _run(hwp, kind='footnote')
+        self.assertTrue(result['succeeded'])
+        self.assertTrue(result['verification']['ok'], result['verification'])
 
 
 if __name__ == '__main__':

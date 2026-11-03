@@ -125,6 +125,12 @@ def _list_growth_reasons(where: str, before: ET.Element, after: ET.Element, old_
     return reasons
 
 
+# HEAD elements that record editor view state, not document content: DOCSETTING/CARETPOS holds the caret's list,
+# paragraph and position, so it follows every caret move (on Hancom 2024 a footnote insert and a section break both
+# changed only CARETPOS in HEAD). Their attributes are not compared; their structure still is.
+VIEW_STATE_HEAD_TAGS = frozenset({'CARETPOS'})
+
+
 def _head_growth_reasons(before: ET.Element, after: ET.Element, path: str, allow: Mapping[str, Iterable[str]], out: list[str]) -> None:
     """HEAD may change only by appending new entries to a ``GROWABLE_HEAD_LISTS`` list.
 
@@ -145,6 +151,8 @@ def _head_growth_reasons(before: ET.Element, after: ET.Element, path: str, allow
     free = set(allow.get(before.tag, ())) | ({LIST_COUNT_ATTR} if appended else set())
     old_attrs = {key: value for key, value in attrs(before) if key not in free}
     new_attrs = {key: value for key, value in attrs(after) if key not in free}
+    if before.tag in VIEW_STATE_HEAD_TAGS:
+        old_attrs = new_attrs = {}
     if old_attrs != new_attrs:
         changed = sorted(key for key in set(old_attrs) | set(new_attrs) if old_attrs.get(key) != new_attrs.get(key))
         out.append(f'{where} attributes changed: {changed}')
