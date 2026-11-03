@@ -88,9 +88,11 @@ BUNDLE_OPS: dict[str, dict[str, Any]] = {
     'get_selected_text': _exposed(SESSION_TOOLS),
     'style_inspect': _exposed(SESSION_TOOLS),
     'typography_overview': _exposed(SESSION_TOOLS),
-    'layout_exact': _exposed(SESSION_TOOLS, note=f'page_setup, columns, section_insert, section_delete, hanging_indent; {_UNDO_REFUSED}'),
+    'layout_exact': _exposed(SESSION_TOOLS, note=f'page_setup, columns, section_insert (only between two characters of one paragraph\'s text), '
+                                                f'section_delete, hanging_indent; native qualification per variant in variants; {_UNDO_REFUSED}'),
     'layout_inspect': _exposed(SESSION_TOOLS, note='read-only page and column definition at the caret'),
-    'object_insert_exact': _exposed(SESSION_TOOLS, note=f'footnote, endnote, memo, hyperlink, bookmark, equation, line, rectangle, ellipse, header, footer; {_UNDO_REFUSED}'),
+    'object_insert_exact': _exposed(SESSION_TOOLS, note=f'footnote, endnote, memo, hyperlink, bookmark, equation, line, rectangle, ellipse, header, footer; '
+                                                       f'native qualification per variant in variants; {_UNDO_REFUSED}'),
     'hwp_action': _exposed(SESSION_TOOLS, note='only the backend command-bundle navigation/selection allowlist'),
     'pyhwpx_call': _exposed(SESSION_TOOLS, note='only the backend command-bundle read/caret allowlist'),
     'export_pdf': _equivalent('hwpx_proof', 'hwpx_proof page/review runs the same backend export, then downloads, renders and checks the PDF; a bare bundle export leaves the PDF unretrieved'),
@@ -111,6 +113,64 @@ _DEFERRED = ('refused with a fixed refusal_code, document unchanged, caret put b
 for _op, _row in BUNDLE_OPS.items():
     if _row['status'] == 'exposed' and _op not in GUARDED:
         _row['error_hold'] = _DEFERRED if _op in DEFERRED else _UNGUARDED
+
+# --------------------------------------------------------------------------- native qualification per variant
+# Reference qualification on Hancom Office 2024 for Windows: what the saved-output evidence for this source covers. It
+# does not say that another host, Hancom version or document behaves the same.
+NATIVE_REFERENCE = ('Reference native qualification on Hancom Office 2024 (Windows) for this source: qualified = a saved, reopened and '
+                    'rendered output of the variant was checked from the saved bytes against the opened document; qualified_unaffected = '
+                    'that evidence comes from an earlier source and nothing on the variant\'s code path changed since; not_qualified = '
+                    'the backend runs the variant but no such evidence exists; unsupported = refused before any edit with the named '
+                    'refusal_code. It does not cover other hosts, Hancom versions or documents.')
+NATIVE_STATUSES = ('qualified', 'qualified_unaffected', 'not_qualified', 'unsupported')
+
+
+def _variant(kind: str, qualifier: str | None, scope: str, native: str, **extra: str) -> dict[str, str]:
+    assert native in NATIVE_STATUSES
+    return {'variant': kind if qualifier is None else f'{kind}:{qualifier}', 'kind': kind, 'scope': scope, 'native': native, **extra}
+
+
+VARIANTS: dict[str, list[dict[str, str]]] = {
+    'layout_exact': [
+        _variant('page_setup', 'margins', 'margin fields, apply_to current_section', 'qualified'),
+        _variant('page_setup', 'landscape', 'landscape true, apply_to current_section', 'qualified'),
+        _variant('page_setup', 'paper_size', 'paper_width_mm/paper_height_mm', 'not_qualified'),
+        _variant('page_setup', 'whole_document', 'apply_to whole_document', 'not_qualified'),
+        _variant('columns', 'current_section', 'count/gap_mm/same_width, apply_to current_section', 'qualified'),
+        _variant('columns', 'from_caret_new', 'apply_to from_caret_new (new columns from the caret)', 'not_qualified'),
+        _variant('section_insert', 'inside_paragraph', 'caret between two characters of one paragraph\'s text; the two-section '
+                 'document saved, reopened and rendered, outline numbering after the break kept', 'qualified'),
+        _variant('section_insert', 'paragraph_start_or_end', 'caret at a paragraph\'s first text (also after its leading section '
+                 'and column definitions), at its end or in a paragraph without text', 'unsupported',
+                 refusal_code='section_insert_position_unsupported'),
+        _variant('section_delete', None, 'caret at the first text of section_index in a saved multi-section document opened on its own',
+                 'qualified'),
+        _variant('hanging_indent', None, 'marker_text at the paragraph start', 'qualified'),
+    ],
+    'object_insert_exact': [
+        _variant('footnote', None, 'text at the caret', 'qualified'),
+        _variant('endnote', None, 'text at the caret', 'qualified'),
+        _variant('memo', None, 'text at the caret, no selection', 'qualified'),
+        _variant('memo', 'selection', 'text on a live selection', 'not_qualified'),
+        _variant('hyperlink', None, 'url on the live selection of display_text', 'qualified'),
+        _variant('bookmark', None, 'new name at the caret', 'qualified'),
+        _variant('equation', None, 'script at the caret', 'qualified'),
+        _variant('line', 'inline', 'treat_as_char true', 'qualified'),
+        _variant('line', 'floating', 'treat_as_char false or unset', 'not_qualified'),
+        _variant('rectangle', 'inline', 'treat_as_char true', 'qualified'),
+        _variant('rectangle', 'floating', 'treat_as_char false or unset', 'not_qualified'),
+        _variant('ellipse', 'inline', 'treat_as_char true', 'qualified'),
+        _variant('ellipse', 'floating', 'treat_as_char false or unset', 'not_qualified'),
+        _variant('header', 'both', 'apply_to both', 'qualified'),
+        _variant('header', 'odd', 'apply_to odd', 'qualified'),
+        _variant('header', 'even', 'apply_to even', 'not_qualified'),
+        _variant('footer', 'both', 'apply_to both', 'qualified'),
+        _variant('footer', 'odd', 'apply_to odd', 'not_qualified'),
+        _variant('footer', 'even', 'apply_to even', 'qualified'),
+    ],
+}
+for _op, _variants in VARIANTS.items():
+    BUNDLE_OPS[_op]['variants'] = _variants
 
 EXCLUDED_FIELDS: dict[str, dict[str, str]] = {}
 
@@ -275,4 +335,4 @@ def matrix() -> dict[str, Any]:
     counts = {name: {status: sum(1 for row in value if row['status'] == status) for status in
                      ('exposed', 'equivalent', 'excluded', 'backend_unsupported')} for name, value in tables.items()}
     return {**tables, 'counts': counts, 'excluded_fields': {'bundle': EXCLUDED_FIELDS, 'queued': QUEUED_EXCLUDED_FIELDS},
-            'cli_only': CLI_ONLY}
+            'cli_only': CLI_ONLY, 'native_reference': NATIVE_REFERENCE}

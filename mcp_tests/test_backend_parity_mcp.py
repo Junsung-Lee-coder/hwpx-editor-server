@@ -463,6 +463,16 @@ class ParityTransport(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(value['backend']['capabilities']['queued_job_unsupported_ops'], ['official_numbering', 'page_number'])
         self.assertTrue(value['backend']['runtime_readiness']['ready'])
         self.assertIn('hwpx_command:anchor_insert', json.dumps(value['matrix']))
+        # Native qualification is reported per variant, not once per op.
+        self.assertIn('native_reference', value['matrix'])
+        self.assertIn('Hancom Office 2024', value['matrix']['native_reference'])
+        self.assertIn('variants', rows['layout_exact'])
+        layout = {row['variant']: row for row in rows['layout_exact']['variants']}
+        self.assertEqual((layout['section_insert:paragraph_start_or_end']['native'], layout['section_insert:paragraph_start_or_end']['refusal_code']),
+                         ('unsupported', 'section_insert_position_unsupported'))
+        self.assertEqual(layout['section_insert:inside_paragraph']['native'], 'qualified')
+        objects = {row['variant']: row['native'] for row in rows['object_insert_exact']['variants']}
+        self.assertEqual((objects['ellipse:inline'], objects['ellipse:floating']), ('qualified', 'not_qualified'))
 
 
 if __name__ == '__main__':
