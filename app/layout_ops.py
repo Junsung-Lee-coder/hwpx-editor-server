@@ -30,7 +30,8 @@ import xml.etree.ElementTree as ET
 from collections import Counter
 from typing import Any, Mapping
 
-from app.hwpml_invariants import head_tail_reasons, signature, HEAD_REASON_CODES, head_reason_code, head_summary
+from app.hwpml_invariants import (DefinitionDelta, HEAD_REASON_CODES, SECDEF_REFERENCES, SECTION_REF_PROBLEMS, head_reason_code, head_summary,
+                                  head_tail_reasons, section_delete_definitions, section_insert_definitions, signature)
 from app.object_insert import CONTROL_TAGS, _middle, linearize
 
 OP = 'layout_exact'
@@ -180,7 +181,9 @@ _COPY_CODES = frozenset({f'section_copy_{tag.lower()}_{attr.lower()}' for tag in
 _READBACK_NAMES = tuple(PAGE_FIELDS) + PAGEDEF_ITEMS + COLDEF_ITEMS + ('count', 'same_width', 'gap_mm')
 _READBACK_CODES = frozenset({f'requested_{name.lower()}_not_applied' for name in _READBACK_NAMES}
                             | {f'unrequested_{name.lower()}_changed' for name in _READBACK_NAMES})
-REASON_CODES = frozenset(code for _needle, code in _REASON_CODES) | {'other'} | HEAD_REASON_CODES | _COPY_CODES | _READBACK_CODES
+# A new section's HEAD reference that section_insert_definitions could not bind (section_ref_<attribute>_<problem>).
+_SECTION_REF_CODES = frozenset(f'section_ref_{attr.lower()}_{problem}' for attr in SECDEF_REFERENCES for problem in SECTION_REF_PROBLEMS)
+REASON_CODES = frozenset(code for _needle, code in _REASON_CODES) | {'other'} | HEAD_REASON_CODES | _COPY_CODES | _READBACK_CODES | _SECTION_REF_CODES
 
 
 def reason_code(reason: str) -> str:
@@ -191,6 +194,9 @@ def reason_code(reason: str) -> str:
     if named and named.group(1) in _READBACK_NAMES and ('requested ' in reason or 'although it was not requested' in reason):
         name = named.group(1).lower()
         return f'requested_{name}_not_applied' if named.group(2) == 'reads back' else f'unrequested_{name}_changed'
+    ref = re.match(r'section definition reference ([A-Za-z]+) ([a-z_]+): ', reason)
+    if ref and f'section_ref_{ref.group(1).lower()}_{ref.group(2)}' in _SECTION_REF_CODES:
+        return f'section_ref_{ref.group(1).lower()}_{ref.group(2)}'
     copy = re.search(r"is not a copy of the split section's [A-Z]+: ([A-Z0-9]+)\.([A-Za-z0-9]+)", reason)
     if copy and f'section_copy_{copy.group(1).lower()}_{copy.group(2).lower()}' in _COPY_CODES:
         return f'section_copy_{copy.group(1).lower()}_{copy.group(2).lower()}'
@@ -510,11 +516,13 @@ _SECTION_BREAK_SHAPES = frozenset(
 )
 
 
-def _copy_form(sig: Any) -> Any:
-    """A section definition's signature without its references to HEAD entries created with it: on Hancom 2024 a new
-    section's SECDEF refers to a new memo shape (section_copy_secdef_memoshapeid) and a new outline numbering
-    (section_copy_secdef_outlineshape; NUMBERINGLIST gained an entry). The rest must be an exact copy."""
-    return re.sub(r" (?:MemoShapeId|OutlineShape)='[^']*'", '', sig) if isinstance(sig, str) else sig
+def _copy_form(sig: Any, bound: frozenset[str]) -> Any:
+    """A section definition's signature without the HEAD references ``bound`` names: references that
+    section_insert_definitions bound to an equal definition created with the new section (on Hancom 2024 its SECDEF
+    names a new outline numbering and memo shape). Every other attribute must be an exact copy."""
+    if not bound or not isinstance(sig, str):
+        return sig
+    return re.sub(r" (?:" + '|'.join(sorted(bound)) + r")='[^']*'", '', sig)
 
 
 def _signature_difference(old: str, new: str) -> tuple[str, str]:
@@ -581,7 +589,8 @@ def _first_difference(before: list[Any], after: list[Any]) -> str:
     return f'length {len(before)} -> {len(after)}'
 
 
-def _section_break_reasons(before: list[Any], after: list[Any], *, inserted: bool, caret: Any = None, section_index: int | None = None) -> list[str]:
+def _section_break_reasons(before: list[Any], after: list[Any], *, inserted: bool, caret: Any = None, section_index: int | None = None,
+                           bound: frozenset[str] = frozenset()) -> list[str]:
     shorter, longer = (before, after) if inserted else (after, before)
     limit = len(shorter)
     prefix = 0
@@ -623,8 +632,9 @@ def _section_break_reasons(before: list[Any], after: list[Any], *, inserted: boo
         for key in ('SECDEF', 'COLDEF'):
             new = [token for token in extra if token[:2] == ('C', key)]
             old = [token for token in head if token[:2] == ('C', key)]
-            if new and (not old or _copy_form(new[0][2]) != _copy_form(old[-1][2])):
-                tag, attr = _signature_difference(_copy_form(old[-1][2]), _copy_form(new[0][2])) if old else ('OTHER', 'OTHER')
+            drop = bound if key == 'SECDEF' else frozenset()
+            if new and (not old or _copy_form(new[0][2], drop) != _copy_form(old[-1][2], drop)):
+                tag, attr = _signature_difference(_copy_form(old[-1][2], drop), _copy_form(new[0][2], drop)) if old else ('OTHER', 'OTHER')
                 reasons.append(f'the new section\'s {key} is not a copy of the split section\'s {key}: {tag}.{attr}')
     else:
         removed = sum(1 for token in head if token[:2] == ('C', 'SECDEF')) + 1
@@ -633,11 +643,13 @@ def _section_break_reasons(before: list[Any], after: list[Any], *, inserted: boo
     return reasons
 
 
-def body_token_reasons(rule: str, before: Mapping[str, Any], after: Mapping[str, Any], *, caret: Any = None, section_index: int | None = None) -> list[str]:
+def body_token_reasons(rule: str, before: Mapping[str, Any], after: Mapping[str, Any], *, caret: Any = None, section_index: int | None = None,
+                       bound: frozenset[str] = frozenset()) -> list[str]:
     """Body changes that ``rule`` (one of ``BODY_RULES``) does not allow.
 
     ``caret`` (list, para, pos) ties a section break or a new column block to
-    the caret; ``section_index`` names the section whose break is deleted.
+    the caret; ``section_index`` names the section whose break is deleted;
+    ``bound`` names new-SECDEF references section_insert_definitions proved.
     """
     if '_body' not in before or '_body' not in after:
         return ['whole-document readback is unavailable for the body token check']
@@ -649,7 +661,7 @@ def body_token_reasons(rule: str, before: Mapping[str, Any], after: Mapping[str,
     else:
         old, new = _body_tokens(before), _body_tokens(after)
     if rule in ('section_insert', 'section_delete'):
-        return _section_break_reasons(old, new, inserted=rule == 'section_insert', caret=caret, section_index=section_index)
+        return _section_break_reasons(old, new, inserted=rule == 'section_insert', caret=caret, section_index=section_index, bound=bound)
     if rule == 'columns_new':
         prefix, removed, added = _middle(old, new)
         if removed or added != [('C', 'COLDEF', '')]:
@@ -704,6 +716,8 @@ def compare_documents(
     body_rule: str | None = None,
     caret: Any = None,
     section_index: int | None = None,
+    definitions: DefinitionDelta | None = None,
+    bound: frozenset[str] = frozenset(),
 ) -> list[str]:
     """Differences between two document summaries that the planned edit does not explain.
 
@@ -716,9 +730,9 @@ def compare_documents(
         reasons.append('whole-document readback is unavailable for HEAD/TAIL checks')
     else:
         reasons += head_tail_reasons(before['_root'], after['_root'], allow_head_attrs=_SECTION_COUNT_ATTRS if section_delta else None,
-                                     allow_shrink=section_delta < 0)
+                                     definitions=definitions)
     if body_rule is not None:
-        reasons += body_token_reasons(body_rule, before, after, caret=caret, section_index=section_index)
+        reasons += body_token_reasons(body_rule, before, after, caret=caret, section_index=section_index, bound=bound)
     if after.get('control_signatures') != before.get('control_signatures'):
         reasons.append('an embedded object (picture, table, note, field) changed')
     if after['text'] != before['text']:
@@ -991,9 +1005,31 @@ def plan_section_insert(doc: Mapping[str, Any], *, caret: Any) -> dict[str, Any]
     return {'kind': 'section_insert', 'section_count_before': doc['section_count']}
 
 
+def _inserted_secdef(doc_before: Mapping[str, Any], doc_after: Mapping[str, Any]) -> tuple[int, Any, Any] | None:
+    """(BODY-order index of the new SECDEF, the split section's SECDEF, the new SECDEF), from where the body tokens first
+    differ; None when the readbacks do not show one (the body check then refuses the edit)."""
+    if '_body' not in doc_before or '_body' not in doc_after:
+        return None
+    old, new = _body_tokens(doc_before), _body_tokens(doc_after)
+    prefix = 0
+    while prefix < min(len(old), len(new)) and old[prefix] == new[prefix]:
+        prefix += 1
+    index = sum(1 for token in old[:prefix] if token[:2] == ('C', 'SECDEF'))
+    before_defs, after_defs = list(doc_before['_body'].iter('SECDEF')), list(doc_after['_body'].iter('SECDEF'))
+    if not 0 < index < len(after_defs) or index > len(before_defs):
+        return None
+    return index, before_defs[index - 1], after_defs[index]
+
+
 def verify_section_insert(doc_before: Mapping[str, Any], doc_after: Mapping[str, Any], *, caret: Any = None) -> dict[str, Any]:
-    reasons = _section_coldef_reasons(doc_before, doc_after, 1)
-    reasons += compare_documents(doc_before, doc_after, section_delta=1, coldef_delta=len(doc_after['coldefs']) - len(doc_before['coldefs']), pagedefs='free', paragraphs='free', body_rule='section_insert', caret=caret)
+    pair = _inserted_secdef(doc_before, doc_after)
+    definitions, reasons, bound = DefinitionDelta(), [], frozenset()
+    if pair is not None and '_root' in doc_before and '_root' in doc_after:
+        index, split, new = pair
+        definitions, reasons, bound = section_insert_definitions(doc_before['_root'], doc_after['_root'], split, new, index)
+    reasons += _section_coldef_reasons(doc_before, doc_after, 1)
+    reasons += compare_documents(doc_before, doc_after, section_delta=1, coldef_delta=len(doc_after['coldefs']) - len(doc_before['coldefs']), pagedefs='free', paragraphs='free', body_rule='section_insert', caret=caret,
+                                 definitions=definitions, bound=bound)
     before_defs, after_defs = doc_before.get('pagedefs'), doc_after.get('pagedefs')
     if before_defs is not None:
         if after_defs is None or len(after_defs) != len(before_defs) + 1:
@@ -1033,8 +1069,15 @@ def plan_section_delete(request: Mapping[str, Any], doc: Mapping[str, Any], *, k
 
 
 def verify_section_delete(plan: Mapping[str, Any], doc_before: Mapping[str, Any], doc_after: Mapping[str, Any]) -> dict[str, Any]:
+    removed = plan['section_index'] - 1
+    secdefs = list(doc_before['_body'].iter('SECDEF')) if '_body' in doc_before else []
+    definitions = DefinitionDelta()
+    if 0 < removed < len(secdefs) and '_root' in doc_before and '_root' in doc_after:
+        # Only what the removed section's own SECDEF alone referenced may go with it.
+        definitions = section_delete_definitions(doc_before['_root'], doc_after['_root'], secdefs[removed], removed)
     reasons = _section_coldef_reasons(doc_before, doc_after, -1)
-    reasons += compare_documents(doc_before, doc_after, section_delta=-1, coldef_delta=len(doc_after['coldefs']) - len(doc_before['coldefs']), pagedefs='free', paragraphs='free', body_rule='section_delete', section_index=plan['section_index'])
+    reasons += compare_documents(doc_before, doc_after, section_delta=-1, coldef_delta=len(doc_after['coldefs']) - len(doc_before['coldefs']), pagedefs='free', paragraphs='free', body_rule='section_delete', section_index=plan['section_index'],
+                                 definitions=definitions)
     before_defs, after_defs = doc_before.get('pagedefs'), doc_after.get('pagedefs')
     if before_defs is not None:
         removed = plan['section_index'] - 1

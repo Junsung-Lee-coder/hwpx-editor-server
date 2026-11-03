@@ -15,7 +15,7 @@ from tests.test_object_insert_exact import _FakeHwp, _run as _run_object
 DOC = ('<HWPML><HEAD SecCnt="1"><MAPPINGTABLE><NUMBERINGLIST Count="2"><NUMBERING Id="1" Start="1"><PARAHEAD Level="1">^1.</PARAHEAD>'
        '</NUMBERING><NUMBERING Id="2" Start="1"><PARAHEAD Level="1">^1.</PARAHEAD></NUMBERING></NUMBERINGLIST>'
        '<PARASHAPELIST Count="2"><PARASHAPE Id="0" HeadingType="None" Heading="0"/><PARASHAPE Id="1" HeadingType="Number" Heading="2"/>'
-       '</PARASHAPELIST><MEMOSHAPELIST Count="1"><MEMOSHAPE Id="1" Width="15591"/></MEMOSHAPELIST></MAPPINGTABLE></HEAD>'
+       '</PARASHAPELIST><MEMOSHAPELIST Count="1"><MEMO Id="1" Width="15591"/></MEMOSHAPELIST></MAPPINGTABLE></HEAD>'
        '<BODY><SECTION><P><TEXT><SECDEF OutlineShape="1" MemoShapeId="0"/><CHAR>비밀 본문</CHAR></TEXT></P></SECTION>'
        '<SECTION><P><TEXT><SECDEF OutlineShape="2" MemoShapeId="1"/></TEXT></P></SECTION></BODY></HWPML>')
 
@@ -27,8 +27,8 @@ class HeadSummary(unittest.TestCase):
         self.assertEqual((numbering['count'], numbering['entries'], numbering['entry_tags'], numbering['ids']), ('2', 2, ['NUMBERING'], ['1', '2']))
         self.assertEqual(numbering['signatures'][0], numbering['signatures'][1])  # equal apart from Id
         self.assertEqual(summary['secdefs'], [{'MemoShapeId': '0', 'OutlineShape': '1'}, {'MemoShapeId': '1', 'OutlineShape': '2'}])
-        self.assertEqual(numbering['entry_attrs'], [{'Id': '1', 'Start': '1'}, {'Id': '2', 'Start': '1'}])
-        self.assertEqual(summary['mapping_lists']['MEMOSHAPELIST']['entry_attrs'], [{'Id': '1', 'Width': '15591'}])
+        self.assertEqual(numbering['entry_attrs'], ['Id=1 Start=1', 'Id=2 Start=1'])
+        self.assertEqual(summary['mapping_lists']['MEMOSHAPELIST']['entry_attrs'], ['Id=1 Width=15591'])
         self.assertEqual(summary['references'], {
             'NUMBERINGLIST': {'1': ['SECDEF[0].OutlineShape'], '2': ['PARASHAPE[Id=1].Heading', 'SECDEF[1].OutlineShape']},
             'MEMOSHAPELIST': {'0': ['SECDEF[0].MemoShapeId'], '1': ['SECDEF[1].MemoShapeId']}})

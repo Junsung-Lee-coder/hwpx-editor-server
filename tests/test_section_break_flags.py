@@ -48,11 +48,16 @@ class SectionCopyDifference(unittest.TestCase):
         return parse_layout_xml(f'<HWPML><BODY><SECTION><P ParaShape="1" Style="0"><TEXT>{SECDEF}<CHAR>a</CHAR></TEXT></P></SECTION>'
                                 f'<SECTION><P ParaShape="1" Style="0"><TEXT>{new_secdef}<CHAR>b</CHAR></TEXT></P></SECTION></BODY></HWPML>')
 
-    def test_the_memo_shape_and_outline_references_of_the_new_section_may_differ(self):
-        # As read back on Hancom 2024: the new section's SECDEF refers to the memo shape and outline numbering created with it.
-        for secdef in ('<SECDEF MemoShapeId="1">', '<SECDEF OutlineShape="2">', '<SECDEF MemoShapeId="1" OutlineShape="2">'):
-            self.assertEqual(body_token_reasons('section_insert', one(), self.after(f'{secdef}<PAGEDEF Width="1"/></SECDEF><COLDEF Count="1"/>'),
-                                                caret=[0, 0, 1]), [])
+    def test_the_memo_shape_and_outline_references_may_differ_only_when_bound(self):
+        # As read back on Hancom 2024: the new section's SECDEF names the memo shape and outline numbering created with it.
+        # The copy check leaves out only references section_insert_definitions bound to an equal created definition.
+        bound = frozenset({'MemoShapeId', 'OutlineShape'})
+        for secdef, code in (('<SECDEF MemoShapeId="1">', 'section_copy_secdef_memoshapeid'), ('<SECDEF OutlineShape="2">', 'section_copy_secdef_outlineshape'),
+                             ('<SECDEF MemoShapeId="1" OutlineShape="2">', 'section_copy_secdef_memoshapeid')):
+            after = self.after(f'{secdef}<PAGEDEF Width="1"/></SECDEF><COLDEF Count="1"/>')
+            self.assertEqual(body_token_reasons('section_insert', one(), after, caret=[0, 0, 1], bound=bound), [])
+            reasons = body_token_reasons('section_insert', one(), after, caret=[0, 0, 1])
+            self.assertEqual(reason_code(reasons[0]), code)
 
     def test_the_first_differing_definition_attribute_is_named(self):
         old = f'<HWPML><BODY><SECTION><P ParaShape="1" Style="0"><TEXT>{SECDEF}<CHAR>ab</CHAR></TEXT></P></SECTION></BODY></HWPML>'

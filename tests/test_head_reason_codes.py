@@ -10,7 +10,7 @@ import unittest
 import xml.etree.ElementTree as ET
 
 from app import layout_ops, object_insert
-from app.hwpml_invariants import head_tail_reasons
+from app.hwpml_invariants import DefinitionDelta, head_tail_reasons
 from app.step_refusal import step_diagnostic_allowed
 
 
@@ -38,47 +38,54 @@ class HeadReasonCodes(unittest.TestCase):
     def test_tail_change(self):
         self.assertEqual(self.codes(doc(), doc(tail='WFla')), ('tail_changed', 'tail_changed'))
 
-    def test_a_new_list_with_an_unlisted_entry_name_is_growth(self):
-        # The entry element name of a new list is not assumed; one name throughout is enough.
+    def test_a_new_list_needs_its_native_entry_name(self):
+        # On Hancom 2024 a memo shape list holds MEMO entries; any other entry name is refused even when created.
         before = doc(extra='<MAPPINGTABLE><CHARSHAPELIST Count="1"><CHARSHAPE Id="0"/></CHARSHAPELIST></MAPPINGTABLE>')
-        after = doc(extra='<MAPPINGTABLE><CHARSHAPELIST Count="1"><CHARSHAPE Id="0"/></CHARSHAPELIST><MEMOSHAPELIST Count="1"><MEMOPR Id="0"/></MEMOSHAPELIST></MAPPINGTABLE>')
-        self.assertEqual(head_tail_reasons(before, after), [])
+        after = doc(extra='<MAPPINGTABLE><CHARSHAPELIST Count="1"><CHARSHAPE Id="0"/></CHARSHAPELIST><MEMOSHAPELIST Count="1"><MEMOPR Id="1"/></MEMOSHAPELIST></MAPPINGTABLE>')
+        created = DefinitionDelta(created={'MEMOSHAPELIST': frozenset({'1'})})
+        reasons = head_tail_reasons(before, after, definitions=created)
+        self.assertEqual(layout_ops.reason_code(reasons[0]), 'head_mappingtable_newlist_malformed')
 
     def test_a_new_list_that_reorders_existing_children_is_named(self):
         before = doc(extra='<MAPPINGTABLE><CHARSHAPELIST Count="0"/><STYLELIST/></MAPPINGTABLE>')
         after = doc(extra='<MAPPINGTABLE><STYLELIST/><CHARSHAPELIST Count="0"/><MEMOSHAPELIST Count="0"/></MAPPINGTABLE>')
         self.assertEqual(self.codes(before, after), ('head_mappingtable_newlist_misaligned', 'head_mappingtable_newlist_misaligned'))
 
-    def test_a_numbering_list_may_gain_a_definition(self):
-        # As on Hancom 2024 after a section break: NUMBERINGLIST gains one entry and its Count follows.
+    def test_a_numbering_list_gains_only_a_created_definition(self):
+        # As on Hancom 2024 after a section break: NUMBERINGLIST gains the entry the new section names; Count follows.
         before = doc(extra='<MAPPINGTABLE><NUMBERINGLIST Count="1"><NUMBERING Id="1"/></NUMBERINGLIST></MAPPINGTABLE>')
         after = doc(extra='<MAPPINGTABLE><NUMBERINGLIST Count="2"><NUMBERING Id="1"/><NUMBERING Id="2"/></NUMBERINGLIST></MAPPINGTABLE>')
-        self.assertEqual(head_tail_reasons(before, after), [])
+        self.assertEqual(head_tail_reasons(before, after, definitions=DefinitionDelta(created={'NUMBERINGLIST': frozenset({'2'})})), [])
+        self.assertEqual(self.codes(before, after), ('head_numberinglist_unbound', 'head_numberinglist_unbound'))
         changed = doc(extra='<MAPPINGTABLE><NUMBERINGLIST Count="2"><NUMBERING Id="1" Start="5"/><NUMBERING Id="2"/></NUMBERINGLIST></MAPPINGTABLE>')
         self.assertEqual(self.codes(before, changed), ('head_numberinglist_entry', 'head_numberinglist_entry'))
 
-    def test_appended_entries_follow_the_lists_own_entry_name(self):
-        before = doc(extra='<MAPPINGTABLE><MEMOSHAPELIST Count="1"><MEMOPR Id="0"/></MEMOSHAPELIST></MAPPINGTABLE>')
-        after = doc(extra='<MAPPINGTABLE><MEMOSHAPELIST Count="2"><MEMOPR Id="0"/><MEMOPR Id="1"/></MEMOSHAPELIST></MAPPINGTABLE>')
-        self.assertEqual(head_tail_reasons(before, after), [])
-        mixed = doc(extra='<MAPPINGTABLE><MEMOSHAPELIST Count="2"><MEMOPR Id="0"/><MEMOSHAPE Id="1"/></MEMOSHAPELIST></MAPPINGTABLE>')
-        self.assertEqual(self.codes(before, mixed), ('head_memoshapelist_foreign', 'head_memoshapelist_foreign'))
+    def test_appended_memo_shapes_are_memo_entries(self):
+        before = doc(extra='<MAPPINGTABLE><MEMOSHAPELIST Count="1"><MEMO Id="1"/></MEMOSHAPELIST></MAPPINGTABLE>')
+        after = doc(extra='<MAPPINGTABLE><MEMOSHAPELIST Count="2"><MEMO Id="1"/><MEMO Id="2"/></MEMOSHAPELIST></MAPPINGTABLE>')
+        created = DefinitionDelta(created={'MEMOSHAPELIST': frozenset({'2'})})
+        self.assertEqual(head_tail_reasons(before, after, definitions=created), [])
+        mixed = doc(extra='<MAPPINGTABLE><MEMOSHAPELIST Count="2"><MEMO Id="1"/><MEMOSHAPE Id="2"/></MEMOSHAPELIST></MAPPINGTABLE>')
+        reasons = head_tail_reasons(before, mixed, definitions=created)
+        self.assertEqual(layout_ops.reason_code(reasons[0]), 'head_memoshapelist_malformed')
 
-    def test_a_new_growable_list_is_growth(self):
-        # As on Hancom 2024 after a section break: MAPPINGTABLE gains a MEMOSHAPELIST with one memo shape.
+    def test_a_new_memo_shape_list_needs_a_section_edit(self):
+        # As on Hancom 2024 after a section break: MAPPINGTABLE gains a MEMOSHAPELIST after STYLELIST with one memo shape.
         before = doc(extra='<MAPPINGTABLE><CHARSHAPELIST Count="1"><CHARSHAPE Id="0"/></CHARSHAPELIST><STYLELIST/></MAPPINGTABLE>')
-        after = doc(extra='<MAPPINGTABLE><CHARSHAPELIST Count="1"><CHARSHAPE Id="0"/></CHARSHAPELIST><STYLELIST/><MEMOSHAPELIST Count="1"><MEMOSHAPE Id="0"/></MEMOSHAPELIST></MAPPINGTABLE>')
-        self.assertEqual(head_tail_reasons(before, after), [])
+        after = doc(extra='<MAPPINGTABLE><CHARSHAPELIST Count="1"><CHARSHAPE Id="0"/></CHARSHAPELIST><STYLELIST/><MEMOSHAPELIST Count="1"><MEMO Id="1"/></MEMOSHAPELIST></MAPPINGTABLE>')
+        self.assertEqual(head_tail_reasons(before, after, definitions=DefinitionDelta(created={'MEMOSHAPELIST': frozenset({'1'})})), [])
+        self.assertEqual(self.codes(before, after), ('head_mappingtable_newlist_unbound', 'head_mappingtable_newlist_unbound'))
 
     def test_other_new_children_or_changed_lists_are_still_named(self):
         before = doc(extra='<MAPPINGTABLE><CHARSHAPELIST Count="1"><CHARSHAPE Id="0"/></CHARSHAPELIST></MAPPINGTABLE>')
         cases = (('<BULLETLIST Count="1"><BULLET Id="0"/></BULLETLIST>', 'head_mappingtable_gained_bulletlist'),
-                 ('<MEMOSHAPELIST Count="2"><MEMOSHAPE Id="0"/><CHARSHAPE Id="1"/></MEMOSHAPELIST>', 'head_mappingtable_newlist_entries'))
+                 ('<MEMOSHAPELIST Count="2"><MEMO Id="1"/><CHARSHAPE Id="2"/></MEMOSHAPELIST>', 'head_mappingtable_newlist_malformed'))
         for added, code in cases:
             after = doc(extra=f'<MAPPINGTABLE><CHARSHAPELIST Count="1"><CHARSHAPE Id="0"/></CHARSHAPELIST>{added}</MAPPINGTABLE>')
             self.assertEqual(self.codes(before, after), (code, code))
-        after = doc(extra='<MAPPINGTABLE><CHARSHAPELIST Count="1"><CHARSHAPE Id="9"/></CHARSHAPELIST><MEMOSHAPELIST Count="1"><MEMOSHAPE Id="0"/></MEMOSHAPELIST></MAPPINGTABLE>')
-        self.assertEqual(self.codes(before, after), ('head_charshapelist_entry', 'head_charshapelist_entry'))
+        after = doc(extra='<MAPPINGTABLE><CHARSHAPELIST Count="1"><CHARSHAPE Id="9"/></CHARSHAPELIST><MEMOSHAPELIST Count="1"><MEMO Id="1"/></MEMOSHAPELIST></MAPPINGTABLE>')
+        reasons = head_tail_reasons(before, after, definitions=DefinitionDelta(created={'MEMOSHAPELIST': frozenset({'1'})}))
+        self.assertEqual(layout_ops.reason_code(reasons[0]), 'head_charshapelist_entry')
 
     def test_unknown_head_element(self):
         self.assertEqual(self.codes(doc(extra='<ZZUNKNOWN A="1"/>'), doc(extra='<ZZUNKNOWN A="2"/>')), ('head_changed', 'head_changed'))
@@ -99,24 +106,26 @@ class HeadReasonCodes(unittest.TestCase):
 
 
 class SectionDeleteShrink(unittest.TestCase):
-    MAP = '<MAPPINGTABLE><CHARSHAPELIST Count="1"><CHARSHAPE Id="0"/></CHARSHAPELIST>{}<NUMBERINGLIST Count="{}">{}</NUMBERINGLIST></MAPPINGTABLE>'
+    MAP = '<MAPPINGTABLE><CHARSHAPELIST Count="1"><CHARSHAPE Id="0"/></CHARSHAPELIST><NUMBERINGLIST Count="{}">{}</NUMBERINGLIST><STYLELIST/>{}</MAPPINGTABLE>'
+    REMOVABLE = DefinitionDelta(removable={'MEMOSHAPELIST': frozenset({'1'}), 'NUMBERINGLIST': frozenset({'2'})})
 
     def head(self, memo, numbering):
-        return doc(extra=self.MAP.format('<MEMOSHAPELIST Count="1"><MEMOSHAPE Id="0"/></MEMOSHAPELIST>' if memo else '',
-                                         len(numbering), ''.join(f'<NUMBERING Id="{n}"/>' for n in numbering)))
+        return doc(extra=self.MAP.format(len(numbering), ''.join(f'<NUMBERING Id="{n}"/>' for n in numbering),
+                                         '<MEMOSHAPELIST Count="1"><MEMO Id="1"/></MEMOSHAPELIST>' if memo else ''))
 
-    def test_a_section_delete_may_drop_what_its_insert_added(self):
-        # As on Hancom 2024: deleting the section drops the memo-shape list and the numbering entry the insert added.
-        self.assertEqual(head_tail_reasons(self.head(True, [1, 2]), self.head(False, [1]), allow_shrink=True), [])
+    def test_a_section_delete_may_drop_what_only_the_removed_section_used(self):
+        # As on Hancom 2024: deleting the section drops the memo-shape list and the numbering entry only it referenced.
+        self.assertEqual(head_tail_reasons(self.head(True, [1, 2]), self.head(False, [1]), definitions=self.REMOVABLE), [])
 
-    def test_only_a_section_delete_may_shrink_and_only_growable_lists(self):
+    def test_nothing_else_may_go(self):
         self.assertTrue(head_tail_reasons(self.head(True, [1, 2]), self.head(False, [1])))
+        self.assertTrue(head_tail_reasons(self.head(True, [1, 2]), self.head(False, [2]), definitions=self.REMOVABLE))
         before = doc(extra='<MAPPINGTABLE><CHARSHAPELIST Count="1"><CHARSHAPE Id="0"/></CHARSHAPELIST><STYLELIST/></MAPPINGTABLE>')
         after = doc(extra='<MAPPINGTABLE><CHARSHAPELIST Count="1"><CHARSHAPE Id="0"/></CHARSHAPELIST></MAPPINGTABLE>')
-        self.assertTrue(head_tail_reasons(before, after, allow_shrink=True))
+        self.assertTrue(head_tail_reasons(before, after, definitions=self.REMOVABLE))
         changed = self.head(False, [1])
         changed.find('HEAD/MAPPINGTABLE/NUMBERINGLIST/NUMBERING').set('Start', '3')
-        self.assertTrue(head_tail_reasons(self.head(True, [1, 2]), changed, allow_shrink=True))
+        self.assertTrue(head_tail_reasons(self.head(True, [1, 2]), changed, definitions=self.REMOVABLE))
 
 
 class HeaderApplyObserved(unittest.TestCase):
