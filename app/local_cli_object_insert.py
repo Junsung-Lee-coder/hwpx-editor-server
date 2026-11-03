@@ -12,11 +12,17 @@ from app.local_cli_service_support import LocalCliMutationError
 from app.step_refusal import STEP_REFUSAL_CODES, StepControl, strict_state
 from app.object_insert import (
     CLOSE_ACTION,
+    DRAWING_LAYOUT_SUBSET,
+    DRAWING_LINE_SUBSET,
+    DRAWING_OUTLINE,
+    DRAWING_POINT_ARRAY,
+    DRAWING_POINT_COUNT,
     OP,
     SCHEMA_VERSION,
     SHAPE_KINDS,
     ObjectInsertError,
     check_before,
+    drawing_points,
     drawing_support_reason,
     dry_run_proof,
     evaluate_insert,
@@ -34,6 +40,10 @@ _UNDO_NOTE = (
     'hwpx undo refuses after object_insert_exact (_BUNDLE_UNDO_POLICY): Hancom may record each native editing action '
     'as its own undo unit and the grouping is not verified natively. Retain the working copy and owning STA; full native close is unsupported for this unproved or held session. Separately authorized exact-owned operator closure is required to discard the edit.'
 )
+
+
+class _PrepareMismatch(Exception):
+    """A prepared drawing value did not read back exactly (raised before Execute)."""
 
 
 class _Mutation:
@@ -80,9 +90,10 @@ class LocalCliObjectInsertMixin:
         return {'action': action_name, 'succeeded': raw is None or bool(raw), 'method': label, 'result': bool(raw) if raw is not None else None}
 
     def _object_insert_prepare_pset(self, hwp: Any, action_name: str, pset_name: str, items: dict[str, Any], *,
-                                    by_property: bool = False) -> tuple[Any, Any]:
+                                    by_property: bool = False, drawing: dict[str, Any] | None = None) -> tuple[Any, Any]:
         """GetDefault, then each item through HSet.SetItem (or the parameter-set property when ``by_property``), for an
-        Execute action. Not mutating; raises LocalCliRuntimeError."""
+        Execute action; with ``drawing``, also the typed drawing subsets, all read back exactly. Not mutating; raises
+        LocalCliRuntimeError."""
         haction = getattr(hwp, 'HAction', None)
         get_default = getattr(haction, 'GetDefault', None)
         execute = getattr(haction, 'Execute', None)
@@ -91,22 +102,61 @@ class LocalCliObjectInsertMixin:
         if not callable(get_default) or not callable(execute) or hset is None:
             raise LocalCliRuntimeError(f'{OP} needs HAction.GetDefault/Execute and HParameterSet.{pset_name} for {action_name}')
         try:
-            get_default(action_name, hset)
+            defaulted = get_default(action_name, hset)
+            if drawing is not None and defaulted is not True:
+                raise _PrepareMismatch(f'GetDefault returned {type(defaulted).__name__}, not True')
             for name, value in items.items():
                 if by_property:
                     setattr(pset, name, value)
                 else:
                     hset.SetItem(name, value)
+            if drawing is not None:
+                self._object_insert_prepare_drawing(pset, items, drawing)
+        except _PrepareMismatch as exc:
+            # Technical, before any mutation: the session is held and nothing is executed.
+            raise LocalCliRuntimeError(f'{OP} did not draw: the prepared {pset_name} did not read back exactly before {action_name}: {exc}') from exc
         except Exception as exc:
             raise LocalCliRuntimeError(f'{OP} could not prepare {pset_name} for {action_name}: {type(exc).__name__}: {exc}') from exc
         return execute, hset
 
-    def _object_insert_execute(self, execute: Any, hset: Any, action_name: str) -> dict[str, Any]:
+    def _object_insert_prepare_drawing(self, pset: Any, items: dict[str, Any], drawing: dict[str, Any]) -> None:
+        """Fill the typed ShapeDrawLayOut and ShapeDrawLineAttr subsets (fetched after GetDefault), then read every
+        prepared value back through its typed getter: each must be exactly the int that was set (never a bool, a float
+        or a coerced value), and the point array exactly as long as prepared."""
+        layout = getattr(pset, DRAWING_LAYOUT_SUBSET)
+        line = getattr(pset, DRAWING_LINE_SUBSET)
+        points = drawing['points']
+        layout.CreateItemArray(DRAWING_POINT_ARRAY, len(points))
+        array = getattr(layout, DRAWING_POINT_ARRAY)
+        for index, value in enumerate(points):
+            array.SetItem(index, value)
+        setattr(layout, DRAWING_POINT_COUNT, drawing['count'])
+        for name, value in drawing['outline']:
+            setattr(line, name, value)
+
+        def exact(label: str, got: Any, want: int) -> None:
+            if type(got) is not int or got != want:
+                raise _PrepareMismatch(f'{label} read back as {type(got).__name__}, expected the int that was set')
+
+        for name, value in items.items():
+            exact(name, getattr(pset, name), value)
+        array = getattr(layout, DRAWING_POINT_ARRAY)
+        exact(f'{DRAWING_POINT_ARRAY}.Count', array.Count, len(points))
+        for index, value in enumerate(points):
+            exact(f'{DRAWING_POINT_ARRAY}[{index}]', array.Item(index), value)
+        exact(DRAWING_POINT_COUNT, getattr(layout, DRAWING_POINT_COUNT), drawing['count'])
+        for name, value in drawing['outline']:
+            exact(f'{DRAWING_LINE_SUBSET}.{name}', getattr(line, name), value)
+
+    def _object_insert_execute(self, execute: Any, hset: Any, action_name: str, *, strict: bool = False) -> dict[str, Any]:
+        """One Execute. ``strict``: only the boolean True counts as success (Hancom's Execute returns VT_BOOL)."""
         label = f'HAction.Execute({action_name})'
         try:
             raw = execute(action_name, hset)
         except Exception as exc:
             return {'action': action_name, 'succeeded': False, 'method': label, 'outcome_unknown': True, 'error': f'{type(exc).__name__}: {exc}'}
+        if strict:
+            return {'action': action_name, 'succeeded': raw is True, 'method': label, 'result': raw if type(raw) is bool else type(raw).__name__}
         return {'action': action_name, 'succeeded': raw is None or bool(raw), 'method': label, 'result': bool(raw) if raw is not None else None}
 
     def _object_insert_readback(self, hwp: Any, control: StepControl, *, where: str) -> Any:
@@ -195,13 +245,18 @@ class LocalCliObjectInsertMixin:
             mutation.editing_actions += 1
             result = self._object_insert_run(hwp, native['action'])
         else:
+            shape = plan['kind'] in SHAPE_KINDS
+            drawing = None
+            if shape:
+                count, points = drawing_points(plan)
+                drawing = {'count': count, 'points': points, 'outline': DRAWING_OUTLINE}
             execute, hset = self._object_insert_prepare_pset(hwp, native['action'], native['pset'], native_items(plan),
-                                                             by_property=native.get('set_by') == 'property')
+                                                             by_property=native.get('set_by') == 'property', drawing=drawing)
             self._object_insert_require(hwp, plan, control, where=f'before {native["action"]}')
             control.begin_mutation()
             mutation.started = True
             mutation.editing_actions += 1
-            result = self._object_insert_execute(execute, hset, native['action'])
+            result = self._object_insert_execute(execute, hset, native['action'], strict=shape)
         actions.append(result)
         if not result['succeeded']:
             error = LocalCliRuntimeError(f'{OP} native action did not succeed: {result!r}')
@@ -229,6 +284,11 @@ class LocalCliObjectInsertMixin:
             # A fresh drawing object may stay selected (or in drawing mode); Esc once.
             if not self._object_insert_normal_after(hwp):
                 actions.append(self._object_insert_run(hwp, 'Cancel'))
+                # A drawn shape must be released: a later step must not act on a still-selected object.
+                if plan['kind'] in SHAPE_KINDS and not (actions[-1]['succeeded'] and self._object_insert_normal_after(hwp)):
+                    error = LocalCliRuntimeError(f'{OP} the new {plan["kind"]} is still selected after Cancel: {actions[-1]!r}')
+                    error.step_phase, error.step_reason = 'native', 'shape_not_released'
+                    raise error
         return actions
 
     def _bundle_object_insert_exact(self, hwp: Any, step: dict[str, Any], control: StepControl | None = None) -> dict[str, Any]:

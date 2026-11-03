@@ -3,8 +3,9 @@
 layout_exact and object_insert_exact each run several distinct variants. Their matrix rows carry one native status per
 variant instead of one status for the whole op: qualified (reference saved-output evidence on this source),
 qualified_unaffected (evidence from an earlier source whose path did not change), not_qualified (the backend runs it
-without such evidence) or unsupported (refused before any edit, with the refusal code named). The statuses describe
-the reference qualification host, not every installed host, and carry no private paths, tokens or work labels.
+without such evidence) or unsupported (refused before any edit, with the refusal code named). A qualified or
+qualified_unaffected row names the evidence cases (stable scenario ids) it rests on; no other row names any. The statuses
+describe the reference qualification host, not every installed host, and carry no private paths, tokens or work labels.
 """
 from __future__ import annotations
 
@@ -49,22 +50,38 @@ class VariantRows(unittest.TestCase):
                         self.assertIn(row.get('refusal_code'), STEP_REFUSAL_CODES[op], row)
                     else:
                         self.assertNotIn('refusal_code', row, row)
+                    if row['native'] in ('qualified', 'qualified_unaffected'):
+                        evidence = row.get('evidence')
+                        self.assertIsInstance(evidence, list, row)
+                        self.assertTrue(evidence, row)
+                        for case in evidence:
+                            self.assertRegex(case, r'^[a-z][a-z0-9_]*$', row)
+                    else:
+                        self.assertNotIn('evidence', row, row)
+
+    def test_a_qualified_variant_without_evidence_cases_cannot_be_declared(self):
+        for native in ('qualified', 'qualified_unaffected'):
+            with self.subTest(native), self.assertRaises(AssertionError):
+                parity._variant('footnote', None, 'text at the caret', native)
+        with self.assertRaises(AssertionError):
+            parity._variant('footnote', None, 'text at the caret', 'not_qualified', evidence=('object_footnote',))
+        row = parity._variant('footnote', None, 'text at the caret', 'qualified', evidence=('object_footnote',))
+        self.assertEqual(row['evidence'], ['object_footnote'])
 
     def test_the_statuses_are_per_variant_not_per_op(self):
         layout = {row['variant']: row['native'] for row in self.variants('layout_exact')}
-        self.assertEqual(layout['section_insert:inside_paragraph'], 'qualified')
         self.assertEqual(layout['section_insert:paragraph_start_or_end'], 'unsupported')
-        self.assertEqual(layout['page_setup:landscape'], 'qualified')
         self.assertEqual(layout['columns:from_caret_new'], 'not_qualified')
         objects = {row['variant']: row['native'] for row in self.variants('object_insert_exact')}
-        self.assertEqual(objects['memo'], 'qualified')
-        # Prepared with only its frame size, Hancom saves a shape with no outline and no drawn geometry; until a variant
-        # has a qualified drawing contract it is refused before any edit, never reported as inserted.
-        shape_rows = {row['variant']: row for row in self.variants('object_insert_exact')}
-        for shape in ('line', 'rectangle', 'ellipse'):
-            for place in ('inline', 'floating'):
-                row = shape_rows[f'{shape}:{place}']
-                self.assertEqual((row['native'], row.get('refusal_code')), ('unsupported', 'unverifiable_layout'), row)
+        # Shapes are drawn with the characterized contract, one row per drawn variant; a diagonal line has no
+        # characterized contract and is refused before any edit, never reported as inserted.
+        shape_rows = {row['variant']: row for row in self.variants('object_insert_exact') if row['kind'] in ('line', 'rectangle', 'ellipse')}
+        drawn = {f'{shape}:{place}' for shape in ('rectangle', 'ellipse') for place in ('inline', 'floating')}
+        drawn |= {f'line:{axis}_{place}' for axis in ('horizontal', 'vertical') for place in ('inline', 'floating')}
+        self.assertEqual(set(shape_rows), drawn | {'line:diagonal'})
+        self.assertEqual((shape_rows['line:diagonal']['native'], shape_rows['line:diagonal'].get('refusal_code')), ('unsupported', 'unverifiable_layout'))
+        for name in drawn:
+            self.assertIn(shape_rows[name]['native'], ('qualified', 'not_qualified'), shape_rows[name])
         self.assertEqual(objects['header:even'], 'not_qualified')
         self.assertNotIn('native', rows()['layout_exact'])
 

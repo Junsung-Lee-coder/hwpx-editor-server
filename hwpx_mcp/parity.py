@@ -118,60 +118,70 @@ for _op, _row in BUNDLE_OPS.items():
 # Reference qualification on Hancom Office 2024 for Windows: what the saved-output evidence for this source covers. It
 # does not say that another host, Hancom version or document behaves the same.
 NATIVE_REFERENCE = ('Reference native qualification on Hancom Office 2024 (Windows) for this source: qualified = a saved, reopened and '
-                    'rendered output of the variant was checked from the saved bytes against the opened document; qualified_unaffected = '
-                    'that evidence comes from an earlier source and nothing on the variant\'s code path changed since; not_qualified = '
-                    'the backend runs the variant but no such evidence exists; unsupported = refused before any edit with the named '
-                    'refusal_code. It does not cover other hosts, Hancom versions or documents.')
+                    'rendered output of the variant was checked from the saved bytes against the opened document, in the evidence '
+                    'cases the row names; qualified_unaffected = that evidence comes from an earlier source and nothing on the '
+                    'variant\'s code path changed since; not_qualified = the backend runs the variant but no such evidence exists for '
+                    'this source; unsupported = refused before any edit with the named refusal_code. It does not cover other hosts, '
+                    'Hancom versions or documents.')
 NATIVE_STATUSES = ('qualified', 'qualified_unaffected', 'not_qualified', 'unsupported')
 
 
-def _variant(kind: str, qualifier: str | None, scope: str, native: str, **extra: str) -> dict[str, str]:
+def _variant(kind: str, qualifier: str | None, scope: str, native: str, *, evidence: tuple[str, ...] = (), **extra: str) -> dict[str, Any]:
+    """One variant row. A qualified or qualified_unaffected row names its evidence cases (stable scenario ids)."""
     assert native in NATIVE_STATUSES
-    return {'variant': kind if qualifier is None else f'{kind}:{qualifier}', 'kind': kind, 'scope': scope, 'native': native, **extra}
+    assert bool(evidence) == (native in ('qualified', 'qualified_unaffected')), (kind, qualifier, native, evidence)
+    row: dict[str, Any] = {'variant': kind if qualifier is None else f'{kind}:{qualifier}', 'kind': kind, 'scope': scope, 'native': native, **extra}
+    if evidence:
+        row['evidence'] = list(evidence)
+    return row
 
 
-# Drawn shapes are refused before any SDK call until a variant has a qualified drawing contract: prepared with only its
-# frame size, Hancom 2024 saved the object with no outline and no drawn geometry, so nothing rendered.
-_SHAPE_REFUSED = ('refused before any edit: without a qualified drawing contract Hancom saves the object with no outline and no '
-                  'drawn geometry')
+# Drawn shapes go in with the characterized drawing contract (point layout and a solid 0.3 mm outline) and are verified
+# from the readback: frame, transforms, drawn geometry and visible outline. A diagonal line has no characterized
+# contract and is refused before any edit.
+_SHAPE_DRAWN = 'drawn with its points and a solid 0.3 mm black outline'
 
-VARIANTS: dict[str, list[dict[str, str]]] = {
+VARIANTS: dict[str, list[dict[str, Any]]] = {
     'layout_exact': [
-        _variant('page_setup', 'margins', 'margin fields, apply_to current_section', 'qualified'),
-        _variant('page_setup', 'landscape', 'landscape true, apply_to current_section', 'qualified'),
+        _variant('page_setup', 'margins', 'margin fields, apply_to current_section', 'not_qualified'),
+        _variant('page_setup', 'landscape', 'landscape true, apply_to current_section', 'not_qualified'),
         _variant('page_setup', 'paper_size', 'paper_width_mm/paper_height_mm', 'not_qualified'),
         _variant('page_setup', 'whole_document', 'apply_to whole_document', 'not_qualified'),
-        _variant('columns', 'current_section', 'count/gap_mm/same_width, apply_to current_section', 'qualified'),
+        _variant('columns', 'current_section', 'count/gap_mm/same_width, apply_to current_section', 'not_qualified'),
         _variant('columns', 'from_caret_new', 'apply_to from_caret_new (new columns from the caret)', 'not_qualified'),
         _variant('section_insert', 'inside_paragraph', 'caret between two characters of one paragraph\'s text; the two-section '
-                 'document saved, reopened and rendered, outline numbering after the break kept', 'qualified'),
+                 'document saved, reopened and rendered, outline numbering after the break kept', 'not_qualified'),
         _variant('section_insert', 'paragraph_start_or_end', 'caret at a paragraph\'s first text (also after its leading section '
-                 'and column definitions), at its end or in a paragraph without text', 'unsupported',
+                 'and column definitions), at its end, next to an inline control or in a paragraph without text', 'unsupported',
                  refusal_code='section_insert_position_unsupported'),
         _variant('section_delete', None, 'caret at the first text of section_index in a saved multi-section document opened on its own',
-                 'qualified'),
-        _variant('hanging_indent', None, 'marker_text at the paragraph start', 'qualified'),
+                 'not_qualified'),
+        _variant('hanging_indent', None, 'marker_text at the paragraph start', 'not_qualified'),
     ],
     'object_insert_exact': [
-        _variant('footnote', None, 'text at the caret', 'qualified'),
-        _variant('endnote', None, 'text at the caret', 'qualified'),
-        _variant('memo', None, 'text at the caret, no selection', 'qualified'),
+        _variant('footnote', None, 'text at the caret', 'not_qualified'),
+        _variant('endnote', None, 'text at the caret', 'not_qualified'),
+        _variant('memo', None, 'text at the caret, no selection', 'not_qualified'),
         _variant('memo', 'selection', 'text on a live selection', 'not_qualified'),
-        _variant('hyperlink', None, 'url on the live selection of display_text', 'qualified'),
-        _variant('bookmark', None, 'new name at the caret', 'qualified'),
-        _variant('equation', None, 'script at the caret', 'qualified'),
-        _variant('line', 'inline', f'treat_as_char true; {_SHAPE_REFUSED}', 'unsupported', refusal_code='unverifiable_layout'),
-        _variant('line', 'floating', f'treat_as_char false; {_SHAPE_REFUSED}', 'unsupported', refusal_code='unverifiable_layout'),
-        _variant('rectangle', 'inline', f'treat_as_char true; {_SHAPE_REFUSED}', 'unsupported', refusal_code='unverifiable_layout'),
-        _variant('rectangle', 'floating', f'treat_as_char false; {_SHAPE_REFUSED}', 'unsupported', refusal_code='unverifiable_layout'),
-        _variant('ellipse', 'inline', f'treat_as_char true; {_SHAPE_REFUSED}', 'unsupported', refusal_code='unverifiable_layout'),
-        _variant('ellipse', 'floating', f'treat_as_char false; {_SHAPE_REFUSED}', 'unsupported', refusal_code='unverifiable_layout'),
-        _variant('header', 'both', 'apply_to both', 'qualified'),
-        _variant('header', 'odd', 'apply_to odd', 'qualified'),
+        _variant('hyperlink', None, 'url on the live selection of display_text', 'not_qualified'),
+        _variant('bookmark', None, 'new name at the caret', 'not_qualified'),
+        _variant('equation', None, 'script at the caret', 'not_qualified'),
+        _variant('line', 'horizontal_inline', f'height_mm 0, treat_as_char true; {_SHAPE_DRAWN}', 'not_qualified'),
+        _variant('line', 'horizontal_floating', f'height_mm 0, treat_as_char false; {_SHAPE_DRAWN}', 'not_qualified'),
+        _variant('line', 'vertical_inline', f'width_mm 0, treat_as_char true; {_SHAPE_DRAWN}', 'not_qualified'),
+        _variant('line', 'vertical_floating', f'width_mm 0, treat_as_char false; {_SHAPE_DRAWN}', 'not_qualified'),
+        _variant('line', 'diagonal', 'width_mm and height_mm both non-zero: no characterized drawing contract, refused before any edit',
+                 'unsupported', refusal_code='unverifiable_layout'),
+        _variant('rectangle', 'inline', f'treat_as_char true; {_SHAPE_DRAWN}', 'not_qualified'),
+        _variant('rectangle', 'floating', f'treat_as_char false; {_SHAPE_DRAWN}', 'not_qualified'),
+        _variant('ellipse', 'inline', f'treat_as_char true; {_SHAPE_DRAWN}', 'not_qualified'),
+        _variant('ellipse', 'floating', f'treat_as_char false; {_SHAPE_DRAWN}', 'not_qualified'),
+        _variant('header', 'both', 'apply_to both', 'not_qualified'),
+        _variant('header', 'odd', 'apply_to odd', 'not_qualified'),
         _variant('header', 'even', 'apply_to even', 'not_qualified'),
-        _variant('footer', 'both', 'apply_to both', 'qualified'),
+        _variant('footer', 'both', 'apply_to both', 'not_qualified'),
         _variant('footer', 'odd', 'apply_to odd', 'not_qualified'),
-        _variant('footer', 'even', 'apply_to even', 'qualified'),
+        _variant('footer', 'even', 'apply_to even', 'not_qualified'),
     ],
 }
 for _op, _variants in VARIANTS.items():

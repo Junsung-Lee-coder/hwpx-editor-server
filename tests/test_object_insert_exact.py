@@ -22,6 +22,7 @@ from app.object_insert import (
     normalize_step,
     parse_hwpml,
 )
+from tests.shape_forms import OUTLINE, drawn_xml, points_for
 
 MANIFEST_PATH = Path(__file__).resolve().parents[1] / 'app' / 'command_packages' / 'commands' / 'object_insert_exact' / 'manifest.json'
 MANIFEST = json.loads(MANIFEST_PATH.read_text(encoding='utf-8'))
@@ -41,9 +42,18 @@ def _footnote(text: str) -> str:
     return f'<FOOTNOTE><PARALIST><P><TEXT><AUTONUM Number="1" Type="Footnote"/>{_char(text)}</TEXT></P></PARALIST></FOOTNOTE>'
 
 
-def _shape(tag: str, width: int, height: int, treat: bool = True) -> str:
+def _frame_only_shape(tag: str, width: int, height: int, treat: bool = True) -> str:
+    """A shape with only its frame, as a frame-only SDK would read it back (nothing drawn)."""
     return (f'<{tag}><SHAPEOBJECT><SIZE Width="{width}" Height="{height}"/>'
             f'<POSITION TreatAsChar="{"true" if treat else "false"}"/></SHAPEOBJECT></{tag}>')
+
+
+def _shape(tag: str, width: int, height: int, treat: bool = True) -> str:
+    """The new drawing object in Hancom 2024's drawn HWPML2X form (tests/shape_forms.py)."""
+    name = tag.lower() if tag != 'LINE' else ('line_h' if height == 0 else 'line_v')
+    count, points = points_for(name, width, height)
+    return drawn_xml(tag, {'Width': width, 'Height': height, 'TreatAsChar': int(treat), 'CreateNumPt': count, 'CreatePt': points,
+                           'line': dict(OUTLINE)})
 
 
 def _plan(**fields: Any) -> dict[str, Any]:
@@ -140,14 +150,14 @@ class VerifierTests(unittest.TestCase):
             (_plan(kind='rectangle', text=None, width_mm=20, height_mm=10),
              _doc(rect(mm_to_hwpunit(20)) + _char('Hello world'), _char('Second')),
              _doc(rect(mm_to_hwpunit(20)) + _char('Hello') + rect(1000) + _char(' world'), _char('Second')),
-             'Width is'),
+             'frame (SIZE)'),
         )
         for plan, before, after, reason in cases:
             with self.subTest(kind=plan['kind']):
                 result = _evaluate(plan, before, after)
                 self.assertFalse(result['ok'], result)
                 self.assertIn(reason, ' '.join(result['reasons']))
-                twin_ok = after.replace('a over c', 'a over b').replace('Command=""', f'Command="{good_link}"').replace('Width="1000"', f'Width="{mm_to_hwpunit(20)}"')
+                twin_ok = after.replace('a over c', 'a over b').replace('Command=""', f'Command="{good_link}"').replace(rect(1000), rect(mm_to_hwpunit(20)))
                 self.assertTrue(_evaluate(plan, before, twin_ok)['ok'], _evaluate(plan, before, twin_ok))
 
     def test_hyperlink_must_wrap_exactly_display_text(self) -> None:
@@ -504,7 +514,7 @@ class _FakeHwp:
             self.put(f'<EQUATION><SHAPEOBJECT/><SCRIPT>{escape(items.get("string", ""))}</SCRIPT></EQUATION>')
         elif name.startswith('DrawObjCreator'):
             tag = name.removeprefix('DrawObjCreator').upper()
-            self.put(_shape(tag, items['Width'], items['Height'], bool(items['TreatAsChar'])))
+            self.put(_frame_only_shape(tag, items['Width'], items['Height'], bool(items['TreatAsChar'])))
             self.selection = (0, 0)  # the new object stays selected until Cancel
         elif name == 'Cancel':
             self.selection = None

@@ -1,0 +1,227 @@
+{
+ "origin": "Hancom Office 2024 (Windows): each element is the new drawing object exactly as GetTextFile('HWPML2X', '') read it back after one Execute on a copy of a plain fixture; each document was then saved, reopened and rendered",
+ "cases": {
+  "ellipse_floating": {
+   "tag": "ELLIPSE",
+   "width_hu": 11339,
+   "height_hu": 5669,
+   "treat_as_char": false,
+   "points": [
+    5669,
+    2834,
+    11339,
+    2834,
+    5669,
+    0
+   ],
+   "line_attr": {
+    "style": 1,
+    "Width": 85,
+    "Color": 0,
+    "Alpha": 0,
+    "OutLineStyle": 0
+   },
+   "basis": "recorded macro t/3252 layout, unequal axes",
+   "source_after_hwpml2x_sha256": "868921c61b09e21a60974ba252355fee5c1b27c419e9070f153af0a865d0ab97"
+  },
+  "ellipse_floating_recorded_equal": {
+   "tag": "ELLIPSE",
+   "width_hu": 5669,
+   "height_hu": 5669,
+   "treat_as_char": false,
+   "points": [
+    2834,
+    2834,
+    5669,
+    2834,
+    2834,
+    0
+   ],
+   "line_attr": {
+    "style": 1,
+    "Width": 85,
+    "Color": 0,
+    "Alpha": 0,
+    "OutLineStyle": 0
+   },
+   "basis": "recorded macro t/3252 values verbatim",
+   "source_after_hwpml2x_sha256": "c55c1cb83f9d7faf64ee2049979b07d94d2bf62f2b13759dcb0c2d737d188a31"
+  },
+  "ellipse_inline": {
+   "tag": "ELLIPSE",
+   "width_hu": 11339,
+   "height_hu": 5669,
+   "treat_as_char": true,
+   "points": [
+    5669,
+    2834,
+    11339,
+    2834,
+    5669,
+    0
+   ],
+   "line_attr": {
+    "style": 1,
+    "Width": 85,
+    "Color": 0,
+    "Alpha": 0,
+    "OutLineStyle": 0
+   },
+   "basis": "recorded macro t/3252 layout, unequal axes",
+   "source_after_hwpml2x_sha256": "a4bb05477913784ec44bf87171427b2843866b64bff398f26fe6524536e93e5d"
+  },
+  "line_h_floating": {
+   "tag": "LINE",
+   "width_hu": 11339,
+   "height_hu": 0,
+   "treat_as_char": false,
+   "points": [
+    0,
+    0,
+    11339,
+    0
+   ],
+   "line_attr": {
+    "style": 1,
+    "Width": 85,
+    "Color": 0,
+    "Alpha": 0,
+    "OutLineStyle": 0
+   },
+   "basis": "hypothesis: start point, end point",
+   "source_after_hwpml2x_sha256": "b20f7722e2757bfd8508fd3482b3df6d9eb874a9842e5bb4de5434385da99ac8"
+  },
+  "line_h_inline": {
+   "tag": "LINE",
+   "width_hu": 11339,
+   "height_hu": 0,
+   "treat_as_char": true,
+   "points": [
+    0,
+    0,
+    11339,
+    0
+   ],
+   "line_attr": {
+    "style": 1,
+    "Width": 85,
+    "Color": 0,
+    "Alpha": 0,
+    "OutLineStyle": 0
+   },
+   "basis": "hypothesis: start point, end point",
+   "source_after_hwpml2x_sha256": "5446d9dc015acff1e5d4dfb885e2239a8b4ba923eccb7789561b48a6e5ec0093"
+  },
+  "line_v_floating": {
+   "tag": "LINE",
+   "width_hu": 0,
+   "height_hu": 8504,
+   "treat_as_char": false,
+   "points": [
+    0,
+    0,
+    0,
+    8504
+   ],
+   "line_attr": {
+    "style": 1,
+    "Width": 85,
+    "Color": 0,
+    "Alpha": 0,
+    "OutLineStyle": 0
+   },
+   "basis": "hypothesis: start point, end point",
+   "source_after_hwpml2x_sha256": "e83c3ec969de768b5207891d37ea7a5eaf7018b482fbfa38fe7cc22eec5e896f"
+  },
+  "line_v_inline": {
+   "tag": "LINE",
+   "width_hu": 0,
+   "height_hu": 8504,
+   "treat_as_char": true,
+   "points": [
+    0,
+    0,
+    0,
+    8504
+   ],
+   "line_attr": {
+    "style": 1,
+    "Width": 85,
+    "Color": 0,
+    "Alpha": 0,
+    "OutLineStyle": 0
+   },
+   "basis": "hypothesis: start point, end point",
+   "source_after_hwpml2x_sha256": "c42cd18eebfa834948ca2a5573b593c6e1cfb6fdffd58e10a7b35090ebc12451"
+  },
+  "rectangle_floating": {
+   "tag": "RECTANGLE",
+   "width_hu": 8504,
+   "height_hu": 3402,
+   "treat_as_char": false,
+   "points": [
+    0,
+    0,
+    8504,
+    0,
+    8504,
+    3402,
+    0,
+    3402
+   ],
+   "line_attr": {
+    "style": 1,
+    "Width": 85,
+    "Color": 0,
+    "Alpha": 0,
+    "OutLineStyle": 0
+   },
+   "basis": "recorded macro t/685 corner order",
+   "source_after_hwpml2x_sha256": "c5e2e5a2296d60097a0157c4f6d5ceb146e6f0f161b9f63fb8aa619cb7aae746"
+  },
+  "rectangle_floating_no_line_attr": {
+   "tag": "RECTANGLE",
+   "width_hu": 8504,
+   "height_hu": 3402,
+   "treat_as_char": false,
+   "points": [
+    0,
+    0,
+    8504,
+    0,
+    8504,
+    3402,
+    0,
+    3402
+   ],
+   "line_attr": {},
+   "basis": "discriminator: points without ShapeDrawLineAttr",
+   "source_after_hwpml2x_sha256": "3e5f4c26cf0d889b0f0a36b88bbed8f8c24c493484646e5c7f0aef4296a59304"
+  },
+  "rectangle_inline": {
+   "tag": "RECTANGLE",
+   "width_hu": 8504,
+   "height_hu": 3402,
+   "treat_as_char": true,
+   "points": [
+    0,
+    0,
+    8504,
+    0,
+    8504,
+    3402,
+    0,
+    3402
+   ],
+   "line_attr": {
+    "style": 1,
+    "Width": 85,
+    "Color": 0,
+    "Alpha": 0,
+    "OutLineStyle": 0
+   },
+   "basis": "recorded macro t/685 corner order",
+   "source_after_hwpml2x_sha256": "4679e37c84386462ab8ba2ccefba7d703f57bf6af0cbba3077158ab09adb7df9"
+  }
+ }
+}

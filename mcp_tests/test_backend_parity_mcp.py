@@ -470,10 +470,14 @@ class ParityTransport(unittest.IsolatedAsyncioTestCase):
         layout = {row['variant']: row for row in rows['layout_exact']['variants']}
         self.assertEqual((layout['section_insert:paragraph_start_or_end']['native'], layout['section_insert:paragraph_start_or_end']['refusal_code']),
                          ('unsupported', 'section_insert_position_unsupported'))
-        self.assertEqual(layout['section_insert:inside_paragraph']['native'], 'qualified')
-        objects = {row['variant']: row['native'] for row in rows['object_insert_exact']['variants']}
-        self.assertEqual((objects['ellipse:inline'], objects['ellipse:floating']), ('unsupported', 'unsupported'))
-        self.assertEqual(objects['memo'], 'qualified')
+        objects = {row['variant']: row for row in rows['object_insert_exact']['variants']}
+        self.assertIn('line:diagonal', objects)
+        self.assertIn('line:vertical_floating', objects)
+        self.assertEqual((objects['line:diagonal']['native'], objects['line:diagonal']['refusal_code']), ('unsupported', 'unverifiable_layout'))
+        # Every qualified variant names the evidence cases it rests on; the others name none.
+        for row in [*layout.values(), *objects.values()]:
+            qualified = row['native'] in ('qualified', 'qualified_unaffected')
+            self.assertEqual(bool(row.get('evidence')), qualified, row)
 
 
 if __name__ == '__main__':
