@@ -37,6 +37,10 @@ OP = 'layout_exact'
 SCHEMA_VERSION = 'local-cli/layout-exact/v1'
 
 KINDS = ('page_setup', 'columns', 'section_insert', 'section_delete', 'hanging_indent')
+# Where a caret can stand at a section's start. On Hancom 2024 the first text of a new section's first paragraph is at
+# position 16, after its inline SECDEF and COLDEF (8 positions each), and MoveLeft from there leaves the paragraph, so
+# position 0 cannot be reached by navigation; the engine moves there itself after proving the section start.
+SECTION_START_POSITIONS = (0, 8, 16)
 
 # 1 mm in HWPUNIT (1 HWPUNIT = 1/7200 inch; 1 inch = 25.4 mm).
 HWPUNIT_PER_MM = 7200 / 25.4
@@ -322,8 +326,9 @@ def normalize_request(step: Mapping[str, Any]) -> dict[str, Any]:
         index = step.get('section_index')
         if not _is_int(index) or index < 2:
             raise LayoutError('section_delete requires section_index >= 2 (the section merged into its predecessor)')
-        if request['expected_pos'][2] != 0:
-            raise LayoutError('section_delete expected_pos must be at pos 0 (the very start of the section)')
+        if request['expected_pos'][2] not in SECTION_START_POSITIONS:
+            raise LayoutError('section_delete expected_pos must be at the start of the section: pos 0, or the first text position '
+                              'after its section and column definitions (8 or 16)')
         request['section_index'] = index
     elif kind == 'hanging_indent':
         marker = step.get('marker_text')

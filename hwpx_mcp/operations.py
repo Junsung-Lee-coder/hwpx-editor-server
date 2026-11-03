@@ -493,7 +493,9 @@ class LayoutStep(Closed):
     same_width: bool | None = None
     apply_to: Literal['current_section', 'whole_document', 'from_caret_new'] | None = Field(
         default=None, description='page_setup: current_section or whole_document; columns: current_section or from_caret_new.')
-    section_index: int | None = Field(default=None, ge=2, description='section_delete: the section merged into its predecessor.')
+    section_index: int | None = Field(default=None, ge=2, description='section_delete: the section merged into its predecessor. Put the caret on the '
+                                      "first text of that section's first paragraph (hwpx_where then reports pos 16, after the section and column definitions, or 0); "
+                                      'the backend proves the section start and deletes the break from the paragraph start itself.')
     marker_text: Annotated[str, Field(min_length=1, max_length=40)] | None = None
     expected_before: LayoutExpectedBefore | None = None
     confirm_layout: Literal[True]
@@ -529,8 +531,8 @@ class LayoutStep(Closed):
         elif self.kind == 'section_delete':
             if self.section_index is None:
                 raise ValueError('section_delete requires section_index >= 2')
-            if self.expected_pos[2] != 0:
-                raise ValueError('section_delete expected_pos must be at pos 0')
+            if self.expected_pos[2] not in (0, 8, 16):
+                raise ValueError('section_delete expected_pos must be at the start of the section: pos 0, or the first text position after its section and column definitions (8 or 16)')
         elif self.kind == 'hanging_indent':
             if self.marker_text is None or not self.marker_text.strip() or any(c in self.marker_text for c in '\r\n\t'):
                 raise ValueError('hanging_indent requires visible marker_text without line breaks or tabs')
