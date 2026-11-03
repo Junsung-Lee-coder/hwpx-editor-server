@@ -232,7 +232,7 @@ class ReplaceEmptyNativeListScaffold(_Search):
     kind: ListKind | None = None
     level: int | None = Field(default=None, ge=1, le=10)
     allow_typed_markers: bool | None = None
-    require_empty_scaffold: bool | None = None
+    require_empty_scaffold: bool | None = Field(default=None, description='Refuse unless the target paragraph is empty. Give cursor_pos with it: a paragraph found by visible text is never empty.')
     forbidden_concatenations: Expect | None = None
     source_find: Find | None = None
 
@@ -240,6 +240,8 @@ class ReplaceEmptyNativeListScaffold(_Search):
     def target_and_items(self):
         if self.find is None and self.cursor_pos is None:
             raise ValueError("give find or cursor_pos")
+        if self.require_empty_scaffold and self.find is not None and self.find.split():
+            raise ValueError('require_empty_scaffold checks that the target paragraph is empty; give cursor_pos, because a paragraph found by visible text is never empty')
         if self.items is None and self.replace is None:
             raise ValueError("give items or a multiline replace")
         return self

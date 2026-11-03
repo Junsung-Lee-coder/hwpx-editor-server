@@ -189,7 +189,7 @@ QUEUED_SAMPLES: dict[str, dict] = {
     'align_paragraph': {'find': '제목', 'align': 'center'},
     'paragraph_shape': {'find': '본문', 'line_spacing': 160, 'keep_with_next': True, 'left_margin': 10.0},
     'list_paragraph': {'find': '항목', 'kind': 'bullet', 'level': 1},
-    'replace_empty_native_list_scaffold': {'find': '자리', 'items': [{'text': '첫째', 'kind': 'number', 'level': 1}, '둘째'],
+    'replace_empty_native_list_scaffold': {'cursor_pos': [0, 1, 0], 'items': [{'text': '첫째', 'kind': 'number', 'level': 1}, '둘째'],
                                            'kind': 'number', 'require_empty_scaffold': True},
     'cursor_replace_text': {'start_cursor_pos': [0, 1, 0], 'end_cursor_pos': [0, 1, 3], 'replace': '새', 'expected_selected_text': '옛것'},
     'cursor_delete_range': {'start_cursor_pos': [0, 1, 0], 'end_cursor_pos': [0, 1, 3], 'expected_selected_text': '지울'},
