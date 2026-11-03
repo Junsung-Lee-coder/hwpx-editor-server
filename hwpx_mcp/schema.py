@@ -1,10 +1,12 @@
 """Closed adapter schemas; field spellings follow the r16 REST and bundle boundaries."""
 from __future__ import annotations
 
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Literal, Union
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.models import CellMarginsGetRequest
+from hwpx_mcp import job_schema as jobs
+from hwpx_mcp import operations as ops
 
 SessionId = Annotated[str, Field(pattern=r'^[a-f0-9]{32}$')]
 Text = Annotated[str, Field(min_length=1, max_length=16384)]
@@ -56,7 +58,7 @@ class SelectionStep(Closed):
 class ReadbackStep(Closed):
     op: Literal['readback']
     label: Label = 'mcp:readback'
-    scope: Literal['document', 'selection'] = 'document'
+    scope: Literal['document', 'selection', 'caret', 'page'] = 'document'
     page_from: int | None = Field(default=None, ge=1, le=10000)
     page_to: int | None = Field(default=None, ge=1, le=10000)
     max_blocks: int = Field(default=100, ge=1, le=1000)
@@ -77,16 +79,26 @@ class CellFormatStep(Closed):
     expected_page: int = Field(ge=1, le=10000)
     page_from: int = Field(ge=1, le=10000)
     page_to: int = Field(ge=1, le=10000)
-    around: int = Field(default=0, ge=0, le=5)
+    around: Annotated[str, Field(min_length=1, max_length=500)] | None = Field(
+        default=None, description='Optional nearby text the backend must also find before the edit.')
     vertical_align: Literal['top', 'center', 'bottom'] | None = None
     cell_margin_hu: int | None = Field(default=None, ge=1, le=100000)
     cell_margin_mm: float | None = Field(default=None, gt=0.0, le=70.0)
+    fill_color: Annotated[str, Field(pattern=r'^#[0-9A-Fa-f]{6}$')] | None = Field(default=None, description='Legacy cell fill (#RRGGBB) at the inventory target; table_style_exact is the exact table_id alternative.')
+    border: Literal['none'] | None = Field(default=None, description='Legacy removal of the target cell border lines.')
     confirm_layout: Literal[True]
     max_controls: int = Field(default=100, ge=1, le=1000)
 
+    @field_validator('around', mode='before')
+    @classmethod
+    def legacy_zero_around(cls, value):
+        # Earlier adapters declared around as an int defaulting to 0, which the backend always dropped as empty
+        # anchor text. Keep accepting that 0 as "no around"; any other number would have become a bogus anchor.
+        return None if type(value) is int and value == 0 else value
+
     @model_validator(mode='after')
     def require_one_format_selector(self) -> 'CellFormatStep':
-        selectors = (self.vertical_align, self.cell_margin_hu, self.cell_margin_mm)
+        selectors = (self.vertical_align, self.cell_margin_hu, self.cell_margin_mm, self.fill_color, self.border)
         if sum(value is not None for value in selectors) != 1:
             raise ValueError('cell_format_exact requires exactly one format selector')
         return self
@@ -399,9 +411,78 @@ class Reconcile(Closed):
     command_id: Annotated[str, Field(min_length=1, max_length=128, pattern=r'^[a-zA-Z0-9_.:-]+$')]
 
 
+_EXACT_STEPS = (ContextStep, SelectionStep, ReadbackStep, CellFormatStep, PageNumberStep, OfficialNumberingStep, ParagraphInsertStep,
+                ParagraphRemoveStep, CharacterFormatStep, ParagraphFormatStep, TableInventoryStep, TableReadStep, TableEditStep,
+                TableStyleStep, TableWidthStep, TableCreateStep)
+# One command-bundle step: every backend bundle op MCP exposes (hwpx_mcp/parity.py BUNDLE_OPS).
+BundleStep = Annotated[Union[(*_EXACT_STEPS, *ops.NEW_BUNDLE_STEPS)], Field(discriminator='op')]
+_REST_STEPS = tuple(model for _path, model in ops.REST_OPS.values())
+
+
 class Command(Session):
-    request: Annotated[ContextStep | SelectionStep | ReadbackStep | CellFormatStep | PageNumberStep | OfficialNumberingStep | ParagraphInsertStep | ParagraphRemoveStep | CharacterFormatStep | ParagraphFormatStep | TableInventoryStep | TableReadStep | TableEditStep | TableStyleStep | TableWidthStep | TableCreateStep | UndoStep | RedoStep | Reconcile,
+    request: Annotated[Union[(*_EXACT_STEPS, *ops.NEW_BUNDLE_STEPS, *_REST_STEPS, UndoStep, RedoStep, Reconcile)],
                        Field(discriminator='op')]
+
+
+class BundleRequest(Closed):
+    steps: Annotated[list[BundleStep], Field(min_length=1, max_length=20,
+                     description='Up to 20 steps run by the backend as one command bundle, in order; it stops at the first failed step.')]
+
+
+class Bundle(Session):
+    request: BundleRequest
+
+
+ImagePath = Annotated[str, Field(min_length=1, max_length=4096, description='Absolute .png/.jpg/.jpeg/.bmp path under the input or artifact root.')]
+
+
+class _ImageOptions(Closed):
+    source_path: ImagePath
+    width: float | None = Field(default=None, gt=0, le=10000, description='Millimetres, passed to the backend picture insert.')
+    height: float | None = Field(default=None, gt=0, le=10000)
+    sizeoption: int | None = Field(default=None, ge=0, le=10)
+    treat_as_char: bool | None = Field(default=None, description='Backend default: true.')
+    embedded: bool | None = Field(default=None, description='Backend default: true.')
+    fit_cell: bool | None = Field(default=None, description='Shorthand for sizeoption 3 in a table cell.')
+
+
+class ImageInsert(_ImageOptions):
+    action: Literal['insert']
+
+
+class ImageAtAnchor(_ImageOptions):
+    action: Literal['insert_at_anchor']
+    target: Annotated[str, Field(min_length=1, max_length=500)]
+    position: ops.AnchorPosition | None = Field(default=None, description='Backend default: before-anchor.')
+
+
+class FigureSectionImage(_ImageOptions):
+    action: Literal['figure_section']
+    target_heading: Annotated[str, Field(min_length=1, max_length=500)]
+    heading: Annotated[str, Field(min_length=1, max_length=500)]
+    intro: Annotated[str, Field(min_length=1, max_length=4000)] | None = None
+    caption: Annotated[str, Field(min_length=1, max_length=500)] | None = None
+    body: Annotated[str, Field(min_length=1, max_length=4000)] | None = None
+
+
+class Image(Session):
+    request: Annotated[ImageInsert | ImageAtAnchor | FigureSectionImage, Field(discriminator='action')]
+
+
+class Job(Closed):
+    request: jobs.JobRequest
+
+
+class ArtifactRequest(Closed):
+    kind: Literal['screenshot', 'recovery'] = Field(description='screenshot: the latest native frame; recovery: the copy kept after a reconciled timeout.')
+
+
+class Artifact(Session):
+    request: ArtifactRequest
+
+
+class Capabilities(Closed):
+    pass
 
 
 class FrameProof(Closed):
@@ -446,4 +527,6 @@ MODELS = {
     'hwpx_find': Find, 'hwpx_where': Session, 'hwpx_command': Command,
     'hwpx_proof': Proof, 'hwpx_save': Session, 'hwpx_close': Session,
     'hwpx_cell_margins_get': CellMarginsGetRequest,
+    'hwpx_bundle': Bundle, 'hwpx_image': Image, 'hwpx_job': Job,
+    'hwpx_artifact': Artifact, 'hwpx_capabilities': Capabilities,
 }

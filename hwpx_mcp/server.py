@@ -28,9 +28,30 @@ from pydantic import ValidationError
 from starlette.datastructures import Headers
 from starlette.responses import JSONResponse, Response
 
+from hwpx_mcp import parity
 from hwpx_mcp import review as review_rules
+from hwpx_mcp.job_schema import METADATA_ROUTES, SUBMIT_ROUTES
+from hwpx_mcp.operations import REST_OPS
 from hwpx_mcp.proof import ProofError
 from hwpx_mcp.schema import MODELS, Envelope
+
+IMAGE_SUFFIXES = {'.png', '.jpg', '.jpeg', '.bmp'}
+DOCUMENT_SUFFIXES = {'.hwpx', '.hwp'}
+JOB_ID = re.compile(r'^[a-f0-9]{32}$')
+
+
+def bundle_step(request):
+    """One server command-bundle step, through the CLI client's strict op/field allowlist (never widened here)."""
+    from local_cli_v1.bundles import CommandStep
+    fields = {k: v for k, v in request.items() if k not in {'op', 'label'}}
+    return CommandStep(op=request['op'], label=request['label'], fields=fields).to_server_json()
+
+
+def form_value(value):
+    """Multipart form text exactly as the backend route parses it."""
+    if isinstance(value, bool):
+        return 'true' if value else 'false'
+    return str(value)
 
 PROTOCOL_VERSION = '2026-07-28'
 MAX_BODY = 1024 * 1024
@@ -136,7 +157,8 @@ class Facade:
         # pretend that MCP requests make it a multi-document COM runtime.
         self.serial = asyncio.Lock()
 
-    async def request(self, http, method, path, **kwargs):
+    async def request(self, http, method, path, require_ok=True, **kwargs):
+        """One backend call. require_ok=False accepts any HTTP-success JSON object (metadata/readiness documents carry no ok flag)."""
         async with http.stream(method, self.settings.backend.rstrip('/') + path, **kwargs) as response:
             chunks = bytearray()
             async for chunk in response.aiter_bytes():
@@ -149,7 +171,7 @@ class Facade:
                 raise BackendFailure('BACKEND_INVALID_RESPONSE', 'Backend did not return a JSON object.') from None
             if not isinstance(value, dict):
                 raise BackendFailure('BACKEND_INVALID_RESPONSE', 'Backend did not return a JSON object.')
-            if response.status_code >= 400 or value.get('ok') is not True:
+            if response.status_code >= 400 or (require_ok and value.get('ok') is not True):
                 # Preserve journal identifiers and backend evidence, not the
                 # exception/HTTP request (which could contain credentials).
                 summary = rejection_summary(value)
@@ -216,6 +238,10 @@ class Facade:
                     except OSError:
                         # The session is open and its identity must reach the caller; only a later comparison is lost.
                         result = {**result, 'source_record_error': 'SOURCE_RECORD_NOT_WRITTEN'}
+                elif name == 'hwpx_job':
+                    result = await self.job(http, args.request)
+                elif name == 'hwpx_capabilities':
+                    result = await self.capabilities(http)
                 else:
                     record = await self.session(http, sid)
                     if name == 'hwpx_status':
@@ -227,25 +253,37 @@ class Facade:
                     elif name == 'hwpx_command':
                         if self._session_is_closed(record):
                             raise BackendFailure('SESSION_CLOSED', 'Closed local-CLI sessions are status-queryable but cannot receive new commands.')
-                        request = args.request.model_dump(exclude_none=True)
+                        request = args.request.model_dump(mode='json', exclude_none=True)
                         if request['op'] == 'command_reconcile':
                             result = await self.request(http, 'POST', '/local-cli/command-reconcile',
                                 json={'session_id': sid, 'command_id': request['command_id']})
                         elif request['op'] in {'undo', 'redo'}:
                             result = await self.request(http, 'POST', '/local-cli/' + request['op'], json={'session_id': sid})
+                        elif request['op'] in REST_OPS:
+                            # A direct live-session route: the same request body its REST model takes.
+                            path, _model = REST_OPS[request['op']]
+                            fields = {k: v for k, v in request.items() if k != 'op'}
+                            result = await self.request(http, 'POST', path, json={'session_id': sid, **fields})
                         else:
-                            # Reuse the strict existing bundle validation, including
-                            # each command's native CAS/proof guard. Never widen it.
-                            from local_cli_v1.bundles import CommandStep
-                            fields = {k: v for k, v in request.items() if k not in {'op', 'label'}}
-                            step = CommandStep(op=request['op'], label=request['label'], fields=fields)
                             result = await self.request(http, 'POST', '/local-cli/command-bundle',
-                                json={'session_id': sid, 'steps': [step.to_server_json()]})
+                                json={'session_id': sid, 'steps': [bundle_step(request)]})
+                    elif name == 'hwpx_bundle':
+                        if self._session_is_closed(record):
+                            raise BackendFailure('SESSION_CLOSED', 'Closed local-CLI sessions are status-queryable but cannot receive new commands.')
+                        steps = [bundle_step(step.model_dump(mode='json', exclude_none=True)) for step in args.request.steps]
+                        result = await self.request(http, 'POST', '/local-cli/command-bundle', json={'session_id': sid, 'steps': steps})
+                    elif name == 'hwpx_image':
+                        if self._session_is_closed(record):
+                            raise BackendFailure('SESSION_CLOSED', 'Closed local-CLI sessions are status-queryable but cannot receive new commands.')
+                        result = await self.image(http, sid, args.request)
+                    elif name == 'hwpx_artifact':
+                        result = await self.session_artifact(http, sid, args.request.kind)
                     elif name == 'hwpx_proof':
                         if self._session_is_closed(record):
                             raise BackendFailure('SESSION_CLOSED', 'Closed local-CLI sessions are status-queryable but cannot receive new commands.')
                         if args.request.kind == 'frame':
                             result = await self.request(http, 'POST', '/local-cli/screenshot', json={'session_id': sid})
+                            result = {**result, 'frame_proof': await self.frame_proof(http, sid, result)}
                         elif args.request.kind == 'review':
                             result = await self.review(http, sid, args.request)
                         else:
@@ -282,6 +320,211 @@ class Facade:
             return envelope(name, sid=sid, error={'code': 'LOCAL_INPUT_OR_ARTIFACT_ERROR', 'message': 'Input or artifact processing failed; no automatic replay was attempted.', 'details': {}})
         finally:
             self.serial.release()
+
+    def confined_file(self, raw, suffixes, what):
+        """An existing regular file under the input or artifact root with an allowed suffix and size."""
+        candidate = Path(raw)
+        if not candidate.is_absolute():
+            raise BackendFailure('SOURCE_NOT_ALLOWED', f'{what} must be an absolute path under the configured input or artifact root.')
+        try:
+            source = candidate.resolve(strict=True)
+        except OSError:
+            raise BackendFailure('SOURCE_NOT_ALLOWED', f'{what} does not exist.') from None
+        roots = (self.settings.source_root.resolve(), self.settings.artifact_root.resolve())
+        if not any(source.is_relative_to(root) for root in roots) or source.suffix.lower() not in suffixes or not source.is_file():
+            raise BackendFailure('SOURCE_NOT_ALLOWED', f'{what} is not an allowed {"/".join(sorted(suffixes))} file under the input or artifact root.')
+        if not 0 < source.stat().st_size <= MAX_FILE:
+            raise BackendFailure('SOURCE_SIZE_LIMIT', f'{what} must be nonempty and no larger than 25 MiB.')
+        return source
+
+    async def upload(self, http, path, source, field, form):
+        with source.open('rb') as stream:
+            return await self.request(http, 'POST', path, files={field: (source.name, stream, 'application/octet-stream')},
+                                      data={key: form_value(value) for key, value in form.items()})
+
+    async def image(self, http, sid, request):
+        """A picture from the confined roots, uploaded to the backend's live-session picture routes."""
+        source = self.confined_file(request.source_path, IMAGE_SUFFIXES, 'Picture')
+        values = request.model_dump(exclude_none=True)
+        options = {key: values[key] for key in ('width', 'height', 'sizeoption', 'fit_cell') if key in values}
+        for key in ('treat_as_char', 'embedded'):
+            if key in values:
+                options[key] = 'on' if values[key] else 'off'
+        if request.action == 'insert':
+            path, field, extra = '/local-cli/image', 'file', {}
+        elif request.action == 'insert_at_anchor':
+            path, field = '/local-cli/image-at-anchor', 'file'
+            extra = {key: values[key] for key in ('target', 'position') if key in values}
+        else:
+            path, field = '/local-cli/figure-section-image', 'image'
+            extra = {key: values[key] for key in ('target_heading', 'heading', 'intro', 'caption', 'body') if key in values}
+        result = await self.upload(http, path, source, field, {'session_id': sid, **extra, **options})
+        return {**result, 'picture': {'path': str(source), 'sha256': await asyncio.to_thread(file_sha256, source)}}
+
+    def job_dir(self, job_id):
+        if not JOB_ID.fullmatch(job_id):
+            raise BackendFailure('JOB_NOT_OWNED', 'Unknown job id.')
+        return self.settings.artifact_root / 'jobs' / job_id
+
+    def owned_job(self, job_id):
+        record = self.read_json(self.job_dir(job_id) / 'job.json')
+        if record is None or record.get('job_id') != job_id:
+            raise BackendFailure('JOB_NOT_OWNED', 'This adapter did not submit that job; nothing was sent to the backend.')
+        return record
+
+    def record_job(self, job_id, action, source):
+        folder = self.job_dir(job_id)
+        folder.mkdir(parents=True, exist_ok=True)
+        record = {'job_id': job_id, 'action': action, 'source': {'path': str(source), 'sha256': file_sha256(source), 'package': None}}
+        if source.suffix.lower() == '.hwpx':
+            try:
+                record['source']['package'] = review_rules.package_inventory(source)
+            except review_rules.PackageUnreadable as exc:
+                record['source']['package_error'] = exc.code
+        write_json_atomic(folder / 'job.json', record)
+        return record
+
+    async def job(self, http, request):
+        action = request.action
+        if action in SUBMIT_ROUTES:
+            source = self.confined_file(request.source_path, DOCUMENT_SUFFIXES, 'Source document')
+            values = request.model_dump(mode='json', exclude_none=True)
+            form = {}
+            if action == 'edit_and_convert':
+                form['instructions_json'] = json.dumps(values['instructions'], ensure_ascii=False)
+            if 'authoring_markdown' in values:
+                form['authoring_markdown'] = values['authoring_markdown']
+            if 'placeholder_fills' in values:
+                form['placeholder_fills_json'] = json.dumps(values['placeholder_fills'], ensure_ascii=False)
+            if 'validation' in values:
+                form['validation_json'] = json.dumps(values['validation'], ensure_ascii=False)
+            if 'cleanup_placeholders' in values:
+                form['cleanup_placeholders'] = values['cleanup_placeholders']
+            if 'policy_override' in values:
+                form['policy_override_json'] = json.dumps(values['policy_override'], ensure_ascii=False)
+            result = await self.upload(http, SUBMIT_ROUTES[action], source, 'file', form)
+            job = result.get('job') if isinstance(result.get('job'), dict) else {}
+            job_id = job.get('job_id') or result.get('job_id')
+            if isinstance(job_id, str) and JOB_ID.fullmatch(job_id):
+                await asyncio.to_thread(self.record_job, job_id, action, source)
+                return {**result, 'job_owned': True}
+            return {**result, 'job_owned': False}
+        self.owned_job(request.job_id)
+        base = f'/jobs/{request.job_id}'
+        if action == 'status':
+            return await self.request(http, 'GET', base)
+        if action == 'confirm_state':
+            return await self.request(http, 'GET', base + '/confirm-state')
+        if action == 'confirm_brief':
+            return await self.request(http, 'GET', base + '/confirm-brief')
+        if action == 'confirm_action':
+            values = request.model_dump(mode='json', exclude_none=True)
+            body = {'action': values['confirm']}
+            for key, target in (('authoring_markdown', 'authoring_markdown'), ('validation', 'validation_json'),
+                                ('cleanup_placeholders', 'cleanup_placeholders'), ('policy_override', 'policy_override'),
+                                ('enqueue_convert', 'enqueue_convert')):
+                if key in values:
+                    body[target] = values[key]
+            return await self.request(http, 'POST', base + '/confirm-action', json=body)
+        if action == 'metadata':
+            value = await self.request(http, 'GET', f'{base}/{METADATA_ROUTES[request.kind]}', require_ok=False)
+            return {'ok': True, 'job_id': request.job_id, 'kind': request.kind, 'metadata': value}
+        return await self.retrieve_job(http, request)
+
+    async def retrieve_job(self, http, request):
+        """Download a finished job's PDF and edited file outside the backend, render every page and compare the package."""
+        record = self.owned_job(request.job_id)
+        status = await self.request(http, 'GET', f'/jobs/{request.job_id}')
+        job = status.get('job') if isinstance(status.get('job'), dict) else {}
+        if job.get('status') != 'succeeded':
+            raise BackendFailure('JOB_NOT_READY', 'The job has not succeeded; nothing was downloaded. Check hwpx_job status or metadata.',
+                                 {'job': job})
+        folder = self.job_dir(request.job_id)
+        existing = [int(m.group(1)) for item in folder.iterdir() if (m := re.fullmatch(r'retrieve-([0-9]+)', item.name))]
+        destination = folder / f'retrieve-{max(existing, default=0) + 1}'
+        destination.mkdir(exist_ok=False)
+        pdf = destination / 'result.pdf'
+        await self.download(http, f'/jobs/{request.job_id}/result', pdf, 'Job PDF', limit=MAX_SAVED_FILE)
+        suffix = Path(str(record['source']['path'])).suffix.lower() or '.hwpx'
+        edited = destination / f'edited{suffix}'
+        try:
+            await self.download(http, f'/jobs/{request.job_id}/edited', edited, 'Edited document', limit=MAX_SAVED_FILE)
+        except BackendFailure as exc:
+            if exc.code != 'ARTIFACT_NOT_FOUND':
+                raise
+            edited = None  # A convert-only job has no edited document.
+        from hwpx_mcp.proof import render_pages
+        pages = await asyncio.to_thread(render_pages, pdf, destination / 'pages', dpi=request.dpi, max_pages=request.max_pages + 1)
+        truncated = len(pages) > request.max_pages
+        if truncated:
+            discard(pages.pop())
+        from PIL import Image as PILImage
+        rows = []
+        for number, png in enumerate(pages, start=1):
+            with PILImage.open(png) as image:
+                width, height = image.size
+                image.verify()
+            rows.append({'page': number, 'path': str(png), 'sha256': await asyncio.to_thread(file_sha256, png), 'width': width, 'height': height})
+        value = {'ok': True, 'job_id': request.job_id, 'job': job, 'folder': str(destination),
+                 'pdf': {'path': str(pdf), 'sha256': await asyncio.to_thread(file_sha256, pdf), 'size_bytes': pdf.stat().st_size},
+                 'pages': rows, 'pages_truncated': truncated, 'edited': None}
+        if edited is not None:
+            saved = {'path': str(edited), 'sha256': await asyncio.to_thread(file_sha256, edited), 'size_bytes': edited.stat().st_size}
+            if suffix == '.hwpx':
+                try:
+                    package = await asyncio.to_thread(review_rules.package_inventory, edited)
+                    saved['package'] = package
+                    if record['source'].get('package'):
+                        saved['compared_with_source'] = review_rules.compare_packages(record['source']['package'], package)
+                except review_rules.PackageUnreadable as exc:
+                    saved['package_error'] = exc.code
+            value['edited'] = saved
+        write_json_atomic(destination / 'retrieval.json', value)
+        return value
+
+    async def download(self, http, route, target, what, limit=MAX_FILE):
+        partial = target.with_name(target.name + '.part')
+        try:
+            await self.fetch_complete(http, route, partial, what, limit=limit)
+            os.replace(partial, target)
+        finally:
+            discard(partial)
+
+    async def session_artifact(self, http, sid, kind):
+        """The backend's custody-checked screenshot or recovery copy, copied under the artifact root."""
+        folder = self.session_dir(sid) / 'artifacts'
+        folder.mkdir(parents=True, exist_ok=True)
+        numbers = [int(m.group(1)) for item in folder.iterdir() if (m := re.fullmatch(rf'{kind}-([0-9]+)\..+', item.name))]
+        if kind == 'screenshot':
+            suffix = '.png'
+        else:
+            source = (self.read_json(self.session_dir(sid) / 'source.json') or {}).get('path')
+            suffix = Path(source).suffix.lower() if source else '.bin'
+        target = folder / f'{kind}-{max(numbers, default=0) + 1}{suffix}'
+        await self.download(http, f'/local-cli/session/{sid}/artifact/{kind}', target, f'The {kind} artifact', limit=MAX_SAVED_FILE)
+        return {'ok': True, 'session_id': sid, 'kind': kind, 'path': str(target),
+                'sha256': await asyncio.to_thread(file_sha256, target), 'size_bytes': target.stat().st_size}
+
+    async def frame_proof(self, http, sid, result):
+        """Copy the native frame the screenshot just recorded; a failed copy is reported, never turned into a failed screenshot."""
+        if result.get('download_path') != f'/local-cli/session/{sid}/artifact/screenshot':
+            return {'retrieved': False, 'code': 'ARTIFACT_IDENTITY_MISMATCH'}
+        try:
+            return {'retrieved': True, **await self.session_artifact(http, sid, 'screenshot')}
+        except BackendFailure as exc:
+            return {'retrieved': False, 'code': exc.code}
+
+    async def capabilities(self, http):
+        """The parity contract plus the backend's own live capability and readiness documents."""
+        backend = {}
+        for key, path in (('capabilities', '/capabilities'), ('runtime_readiness', '/runtime-readiness')):
+            try:
+                backend[key] = await self.request(http, 'GET', path, require_ok=False)
+            except BackendFailure as exc:
+                backend[key] = {'available': False, 'code': exc.code, 'details': exc.details}
+            except (httpx2.TimeoutException, httpx2.TransportError):
+                backend[key] = {'available': False, 'code': 'BACKEND_UNREACHABLE'}
+        return {'ok': True, 'tools': sorted(MODELS), 'matrix': parity.matrix(), 'backend': backend}
 
     async def cell_margins_get(self, http, sid, args):
         """One canonical POST plus full positive-response validation.
@@ -369,14 +612,6 @@ class Facade:
                     stream.write(chunk)
             if declared is not None and declared.isdigit() and int(declared) != size:
                 raise BackendFailure('ARTIFACT_INCOMPLETE', f'{what} arrived incomplete and was not kept.')
-
-    async def download(self, http, route, target, what):
-        partial = target.with_name(target.name + '.part')
-        try:
-            await self.fetch_complete(http, route, partial, what)
-            os.replace(partial, target)
-        finally:
-            discard(partial)
 
     async def export_pdf(self, http, sid, pdf):
         result = await self.request(http, 'POST', '/local-cli/export', json={'session_id': sid})
@@ -720,15 +955,49 @@ def build_app(settings: Settings | None = None):
                 'hwpx_status': 'Inspect explicit session and reconciliation status. May repair stale backend status; not a rollback claim.',
                 'hwpx_find': 'Find text in the explicit managed copy; may move the live cursor or create proof.',
                 'hwpx_where': 'Read native cursor/location; runs work in the existing serialized backend lane.',
-                'hwpx_command': 'Bounded context/readback/selection, guarded cell alignment or margin formatting, native page-number insertion, native outline numbering of one proven paragraph, insertion or removal of one proven body paragraph (removal also requires its full text), character formatting (font family, size, bold, italic, underline, text color; a printed number mark stays as it was unless number_mark=follow) or paragraph formatting (alignment, indents, line spacing) of one exact range or paragraph found again before each command, tables (table_inventory and table_read to list and read them; table_edit_exact to insert or delete rows and columns, merge, split or unmerge cells; table_style_exact to set border line type, width and color on edges and set or clear the cell fill of one cell, a range or the whole table; table_width_exact to set column widths or fit a table to the text width on request; table_create_exact to add a table after a paragraph), undo or redo within the tracked edits of this session with a report of what changed, or command reconciliation. No arbitrary COM, Python or shell.',
+                'hwpx_command': 'One backend operation on the managed session, chosen by request.op (each op has its own closed schema). '
+                                'Exact engines: context/readback/selection_proof/where, page_number_apply, official_numbering_apply, paragraph_insert_exact, '
+                                'paragraph_remove_exact, character_format_exact, paragraph_format_exact (one exact range or paragraph found again before each command; '
+                                'a printed number mark stays unless number_mark=follow), exact table_id+hash tables (table_inventory and table_read to list '
+                                'and read them; table_edit_exact to insert or delete rows and columns, merge, split or unmerge cells; table_style_exact to set '
+                                'border line type, width and color on edges and set or clear the cell fill of one cell, a range or the whole table; '
+                                'table_width_exact to set column widths or fit a table to the text width on request; table_create_exact to add a table after a '
+                                'paragraph). Layout and objects: layout_inspect, layout_exact (page_setup, columns, '
+                                'section_insert, section_delete, hanging_indent), object_insert_exact (footnote, endnote, memo, hyperlink, bookmark, equation, line, '
+                                'rectangle, ellipse, header, footer). Legacy control-inventory engines: control_inventory, table_frame_inventory, '
+                                'exact_control_select_proof, table_cell_structure_exact, control_delete_exact, control_move_resize_exact, control_join_previous_exact, '
+                                'cell_format_exact (alignment, margins, fill, border none), cell_row_fit_exact, table_split_exact, table_structure_exact, '
+                                'table_column_width_exact. Text and paragraphs: anchor_insert, set_text_file, get_selected_text, native_table_insert, '
+                                'anchor_range_replace_native_table, selected_text_delete_exact, paragraph_style_apply_exact (keep with next, widow/orphan, '
+                                'page break before), paragraph_delete_exact, paragraph_join_previous_exact, paragraph_join_next_exact, paragraph_rehome_exact. '
+                                'Reads: style_inspect, typography_overview. Allowlisted low level: hwp_action and pyhwpx_call (only the backend bundle allowlists). '
+                                'Direct caret routes: target_info, move_to_target, select_target, cell_info, cell_move, cursor_move, type_text, figure_section, '
+                                'cell_replace, font_size, bold, font_family, bullet, table_insert, list_items, numbering_readback. Also undo/redo within the tracked '
+                                'edits and command_reconcile. Backend refusals, partial and unknown outcomes are returned unchanged. No arbitrary COM, Python or shell. '
+                                'hwpx_capabilities lists every backend operation with its MCP route or exclusion reason.',
+                'hwpx_bundle': 'Up to 20 command-bundle steps (the same step schemas as hwpx_command) sent as one backend command bundle, in order. '
+                               'The backend stops at the first failed step and reports each step; a semantic refusal keeps earlier edits, a technical '
+                               'failure holds the session. Use it where steps must share one backend request, such as native_table_insert followed by '
+                               'selected_text_delete_exact.',
+                'hwpx_image': 'Insert a picture from the input or artifact root into the managed session: insert at the caret, insert_at_anchor next to '
+                              'anchor text, or figure_section (heading, intro, caption and body around the picture). Best-effort legacy picture insert; '
+                              'check the result with hwpx_proof review.',
+                'hwpx_job': 'Queued backend jobs that run on their own copy of a file from the input or artifact root: convert, edit_and_convert (typed '
+                            'queued operations), compile_authoring/author_and_convert (Markdown authoring), clear_placeholders(_and_convert), '
+                            'compile_placeholder_fills/fill_placeholders_and_convert, confirm_action/confirm_state/confirm_brief for compiled plans, status, '
+                            'metadata, and retrieve (PDF and edited file copied under the artifact root, every page rendered to PNG, package compared with the '
+                            'submitted file). Only jobs this adapter submitted can be queried. Native numbering is refused by the queued runtime.',
+                'hwpx_artifact': 'Copy the backend\'s custody-checked latest screenshot or recovery file of the session under the artifact root.',
+                'hwpx_capabilities': 'Every backend operation, route and queued operation with its MCP route, an equivalent tool, or the reason it is not '
+                                     'exposed; plus the backend\'s live capabilities and readiness. Does not open or edit anything.',
                 'hwpx_proof': 'Native frame, one PDF-rendered page, or kind=review: first how much could be checked (complete, partial, unverified or mismatch), then numbering as printed in the native PDF, changes and preservation against an earlier review, page previews, the PDF and the saved file. Does not edit or save.',
                 'hwpx_save': 'Save the managed working copy and copy the saved file to the artifact root; the result gives its path, hash and a comparison with the opened file. If the copy fails the result says so, and calling hwpx_save again retries it.',
                 'hwpx_close': 'Close the explicit clean managed session and remove its managed files, after confirming its saved content exists under the artifact root. Refused, with nothing deleted, while unsaved changes remain or the saved file cannot be copied.',
                 'hwpx_cell_margins_get': 'One exact-target four-side cell-margin observation in the existing live managed session; navigation is restored and no cache, persistence or freshness guarantee is implied.',
             }[name], input_schema=model.model_json_schema(), output_schema=Envelope.model_json_schema(),
-            annotations=types.ToolAnnotations(read_only_hint=name in {'hwpx_health', 'hwpx_cell_margins_get'},
-                destructive_hint=name not in {'hwpx_health', 'hwpx_cell_margins_get'},
-                idempotent_hint=name == 'hwpx_health', open_world_hint=False)))
+            annotations=types.ToolAnnotations(read_only_hint=name in {'hwpx_health', 'hwpx_cell_margins_get', 'hwpx_capabilities'},
+                destructive_hint=name not in {'hwpx_health', 'hwpx_cell_margins_get', 'hwpx_capabilities', 'hwpx_artifact'},
+                idempotent_hint=name in {'hwpx_health', 'hwpx_capabilities'}, open_world_hint=False)))
 
     async def list_tools(ctx, params):
         return types.ListToolsResult(tools=descriptors)
