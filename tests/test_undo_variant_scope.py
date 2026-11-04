@@ -4,7 +4,7 @@ Measured on Hancom 2024 13.0.0.3457 (owned characterization beside existing tabl
 equation brings it back with a new z-order; of a line, rectangle or ellipse also with a new drawing instance id (and an
 ellipse with new unused arc points); of a header or footer with a new series number. Nothing else differed, and no layout
 edit's Redo differed at all. Columns from_caret_new changed the existing column definition instead of adding one, so it
-has no measured Undo. The SDK here is tests.native_text_fakes and the layout fake; source behavior only, not Hancom
+is refused before any edit and has nothing to undo. The SDK here is tests.native_text_fakes and the layout fake; source behavior only, not Hancom
 evidence.
 """
 from __future__ import annotations
@@ -187,15 +187,14 @@ class LayoutUndoVariants(unittest.TestCase):
         values = iter([{'sha': 'a' * 64, 'renewal_free_sha': 'c' * 64}, {'sha': 'b' * 64, 'renewal_free_sha': 'd' * 64}])
         return patch('app.local_cli_layout.history_state', side_effect=lambda _text, _controls: next(values))
 
-    def test_columns_from_caret_new_reports_no_counted_undo(self) -> None:
+    def test_columns_from_caret_new_is_refused_before_any_edit_so_nothing_is_undone(self) -> None:
+        from app.step_refusal import LocalCliStepRefusal
         from tests.test_layout_exact import _FakeLayoutHwp, _run
-        with self.states():
-            result = _run(_FakeLayoutHwp(), {'kind': 'columns', 'expected_pos': [0, 0, 0], 'confirm_layout': True, 'count': 3, 'gap_mm': 8.0, 'apply_to': 'from_caret_new'})
-        self.assertTrue(result['verification']['ok'])
-        self.assertEqual((result['undo']['hwpx_undo'], result['undo']['undo_units_verified']), ('refused', False), result['undo'])
-        self.assertNotIn('pre_state_sha256', result['undo'])
-        step = {'op': 'layout_exact', 'ok': True, 'dirty': True, 'result': result}
-        self.assertFalse(service_module._bundle_step_single_undo(step))
+        hwp = _FakeLayoutHwp()
+        with self.states(), self.assertRaises(LocalCliStepRefusal) as caught:
+            _run(hwp, {'kind': 'columns', 'expected_pos': [0, 0, 0], 'confirm_layout': True, 'count': 3, 'gap_mm': 8.0, 'apply_to': 'from_caret_new'})
+        self.assertEqual(caught.exception.code, 'columns_from_caret_new_unsupported')
+        self.assertEqual(hwp.mutations(), [])
 
     def test_columns_in_the_current_section_report_a_counted_undo(self) -> None:
         from tests.test_layout_exact import _FakeLayoutHwp, _run

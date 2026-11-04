@@ -473,7 +473,7 @@ _LAYOUT_KIND_FIELDS = {
 
 
 class LayoutStep(Closed):
-    """Page setup, columns, section break insert/delete or hanging indent at the proven caret (expected_pos from hwpx_where). section_insert is qualified only with the caret between two characters of one paragraph's text; at a paragraph's first text (also after its leading section and column definitions), at its end, next to an inline control or in a paragraph without text it is refused before any edit (section_insert_position_unsupported). section_delete of a section with its own memo shape is refused before any edit (layout_unsupported) while a memo field's memo-shape reference cannot be read. Refusal codes before any edit: caret_moved, editor_not_normal, caret_in_table, stale_expected_before, nothing_to_change, not_section_start, marker_mismatch, layout_unsupported, proof_budget, section_insert_position_unsupported. A request the backend proves stale or impossible from its own exact reads before the first native edit is refused with a refusal_code; the document is unchanged and the caret is put back (an existing selection may be cleared), and the session stays usable. Any other backend error, and any failure after the edit started, is reported as an unknown outcome and holds the session."""
+    """Page setup, columns, section break insert/delete or hanging indent at the proven caret (expected_pos from hwpx_where). section_insert is qualified only with the caret between two characters of one paragraph's text; at a paragraph's first text (also after its leading section and column definitions), at its end, next to an inline control or in a paragraph without text it is refused before any edit (section_insert_position_unsupported). section_delete of a section with its own memo shape is refused before any edit (layout_unsupported) while a memo field's memo-shape reference cannot be read. columns takes apply_to current_section; apply_to from_caret_new is refused from the request alone, before any SDK call (columns_from_caret_new_unsupported), because on Hancom 2024 it changed the section's existing column definition instead of starting new columns at the caret. Refusal codes before any edit: caret_moved, editor_not_normal, caret_in_table, stale_expected_before, nothing_to_change, not_section_start, marker_mismatch, layout_unsupported, proof_budget, section_insert_position_unsupported, columns_from_caret_new_unsupported. A request the backend proves stale or impossible from its own exact reads before the first native edit is refused with a refusal_code; the document is unchanged and the caret is put back (an existing selection may be cleared), and the session stays usable. Any other backend error, and any failure after the edit started, is reported as an unknown outcome and holds the session."""
     op: Literal['layout_exact']
     label: Label = 'mcp:layout-exact'
     kind: Literal['page_setup', 'columns', 'section_insert', 'section_delete', 'hanging_indent']
@@ -492,7 +492,9 @@ class LayoutStep(Closed):
     gap_mm: float | None = Field(default=None, ge=0.0, le=100.0)
     same_width: bool | None = None
     apply_to: Literal['current_section', 'whole_document', 'from_caret_new'] | None = Field(
-        default=None, description='page_setup: current_section or whole_document; columns: current_section or from_caret_new.')
+        default=None, description='page_setup: current_section or whole_document; columns: current_section. columns from_caret_new is accepted only '
+                                  'to be refused before any edit (columns_from_caret_new_unsupported): on Hancom 2024 it changed the section\'s existing '
+                                  'column definition instead of starting new columns at the caret.')
     section_index: int | None = Field(default=None, ge=2, description='section_delete: the section merged into its predecessor. Put the caret on the '
                                       "first text of that section's first paragraph (hwpx_where then reports pos 16, after the section and column definitions, or 0); "
                                       'the backend proves the section start and deletes the break from there.')
@@ -523,7 +525,7 @@ class LayoutStep(Closed):
             if self.gap_mm is not None and (self.count < 2 or self.same_width is False):
                 raise ValueError('gap_mm needs count >= 2 and same_width true')
             if self.apply_to not in (None, 'current_section', 'from_caret_new'):
-                raise ValueError('columns apply_to is current_section or from_caret_new')
+                raise ValueError('columns apply_to is current_section (from_caret_new is refused by the backend before any edit)')
             if self.expected_before is not None:
                 before = self.expected_before.model_dump(exclude_none=True)
                 if not before or set(before) - {'count', 'gap_mm', 'same_width'}:

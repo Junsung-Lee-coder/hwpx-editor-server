@@ -32,6 +32,7 @@ from app.layout_ops import (
     plan_page_setup,
     plan_section_delete,
     plan_section_insert,
+    preflight_refusal,
     public_document,
     head_pair,
     reason_code,
@@ -471,6 +472,12 @@ class LocalCliLayoutMixin:
             refusal = control.refuse('invalid_request', f'{OP} refused: {exc}')
             control.register(refusal)
             raise refusal from exc
+        refused = preflight_refusal(request)
+        if refused is not None:
+            # From the request alone: no caret read, parameter set, readback or native action of this operation.
+            refusal = control.refuse(refused[0], f'{OP} refused before any SDK call: {refused[1]}')
+            control.register(refusal)
+            raise refusal
         kind = request['kind']
         handler = {
             'page_setup': self._layout_page_setup,

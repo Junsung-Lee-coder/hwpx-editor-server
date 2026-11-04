@@ -318,7 +318,9 @@ class BundleParity(unittest.TestCase):
 
         checks = {
             ('layout_exact', 'kind'): set(layout_ops.KINDS),
-            ('layout_exact', 'apply_to'): set(layout_ops.PAGE_APPLY_TO) | set(layout_ops.COLUMN_APPLY_TO),
+            # Executable values plus each recognized value the backend refuses from the request alone with a named code, so the
+            # caller gets that normal refusal rather than a schema error (test_recognized_refused_values_are_refusals_not_edits).
+            ('layout_exact', 'apply_to'): set(layout_ops.PAGE_APPLY_TO) | set(layout_ops.COLUMN_APPLY_TO) | set(layout_ops.REFUSED_COLUMN_APPLY_TO),
             ('object_insert_exact', 'kind'): set(object_insert.KINDS),
             ('object_insert_exact', 'apply_to'): set(object_insert.APPLY_PAGE_TYPES),
             ('table_structure_exact', 'action'): set(table_structure.ACTIONS),
@@ -333,6 +335,37 @@ class BundleParity(unittest.TestCase):
         page_model = commands.get('layout_exact')
         self.assertIsNotNone(page_model)
         self.assertTrue(set(layout_ops.PAGE_FIELDS) <= set(page_model.model_fields))
+
+    def test_recognized_refused_values_are_refusals_not_edits(self):
+        """A value the schema keeps only to reach a refusal is never executable, and schema, refusal code and capability agree."""
+        from app import layout_ops
+        from app.step_refusal import STEP_REFUSAL_CODES
+        refused, executable = layout_ops.REFUSED_COLUMN_APPLY_TO, layout_ops.COLUMN_APPLY_TO
+        self.assertTrue(refused)
+        self.assertEqual(set(refused) & set(executable), set())
+        model = command_models()['layout_exact']
+        description = model.model_fields['apply_to'].description
+        variants = {row['variant']: row for row in _contract('VARIANTS')['layout_exact']}
+
+        def request(value):
+            return layout_ops.normalize_request({'op': 'layout_exact', 'kind': 'columns', 'expected_pos': [0, 0, 0], 'confirm_layout': True,
+                                                 'count': 2, 'apply_to': value})
+        for value, code in refused.items():
+            with self.subTest(refused=value):
+                self.assertIn(code, STEP_REFUSAL_CODES['layout_exact'])
+                self.assertIn(code, description)
+                self.assertIn(code, model.__doc__)
+                row = variants[f'columns:{value}']
+                self.assertEqual((row['native'], row.get('refusal_code'), row.get('undo')), ('unsupported', code, 'not_applicable'))
+                self.assertNotIn(f'columns:{value}', layout_ops.UNDO_STEPS)
+                self.assertEqual(model.model_validate({'op': 'layout_exact', 'kind': 'columns', 'expected_pos': [0, 0, 0], 'confirm_layout': True,
+                                                       'count': 2, 'apply_to': value}).apply_to, value)
+                self.assertEqual((layout_ops.preflight_refusal(request(value)) or (None,))[0], code)
+        for value in executable:
+            with self.subTest(executable=value):
+                self.assertNotEqual(variants[f'columns:{value}']['native'], 'unsupported')
+                self.assertIn(f'columns:{value}', layout_ops.UNDO_STEPS)
+                self.assertIsNone(layout_ops.preflight_refusal(request(value)))
 
 
 class RouteParity(unittest.TestCase):

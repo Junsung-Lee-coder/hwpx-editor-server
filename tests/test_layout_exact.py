@@ -726,10 +726,13 @@ class ColumnFlowTests(unittest.TestCase):
         self.assertEqual(result['undo']['hwpx_undo'], 'refused')
         self.assertEqual(result['verification']['after']['Count'], 2)
         self.assertEqual(hwp.sections[0]['coldefs'], [{**COLDEF, 'Count': 2, 'SameGap': mm_to_hwpunit(8)}])
+        # from_caret_new is refused from the request alone (tests.test_columns_from_caret_new_refusal): nothing is executed.
+        from app.step_refusal import LocalCliStepRefusal
         hwp = _FakeLayoutHwp()
-        _run(hwp, self._step(apply_to='from_caret_new', count=3))
-        self.assertEqual(len(hwp.sections[0]['coldefs']), 2)
-        self.assertEqual(hwp.executed_apply_to, [6])
+        with self.assertRaises(LocalCliStepRefusal) as caught:
+            _run(hwp, self._step(apply_to='from_caret_new', count=3))
+        self.assertEqual(caught.exception.code, 'columns_from_caret_new_unsupported')
+        self.assertEqual((len(hwp.sections[0]['coldefs']), hwp.executed_apply_to, hwp.mutations()), (1, [], []))
 
     def test_readback_mismatch(self) -> None:
         hwp = _FakeLayoutHwp(coldef_ignores_gap=True)
@@ -743,12 +746,10 @@ class ColumnFlowTests(unittest.TestCase):
         result = _run(hwp, self._step(expected_pos=[0, 1, 0]))
         self.assertTrue(result['verification']['ok'])
         self.assertEqual([len(s['coldefs']) and s['coldefs'][-1]['Count'] for s in hwp.sections], [1, 2, 1])
-        for apply_to in ('current_section', 'from_caret_new'):
-            with self.subTest(apply_to=apply_to):
-                hwp = _FakeLayoutHwp(sections, coldef_applies_to_all=True)
-                hwp.caret = (0, 1, 0)
-                with self.assertRaisesRegex(LocalCliMutationError, r'sections \[1, 2, 3\], expected only section 2'):
-                    _run(hwp, self._step(expected_pos=[0, 1, 0], apply_to=apply_to))
+        hwp = _FakeLayoutHwp(sections, coldef_applies_to_all=True)
+        hwp.caret = (0, 1, 0)
+        with self.assertRaisesRegex(LocalCliMutationError, r'sections \[1, 2, 3\], expected only section 2'):
+            _run(hwp, self._step(expected_pos=[0, 1, 0], apply_to='current_section'))
 
     def test_multi_section_without_caret_section_is_refused_before_mutation(self) -> None:
         hwp = _FakeLayoutHwp([['one'], ['two']])

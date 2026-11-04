@@ -22,7 +22,7 @@ STEP_REFUSAL_CODES: dict[str, frozenset[str]] = {
     'layout_exact': frozenset({
         'invalid_request', 'caret_moved', 'editor_not_normal', 'caret_in_table', 'stale_expected_before',
         'nothing_to_change', 'layout_unsupported', 'not_section_start', 'marker_mismatch', 'proof_budget',
-        'section_insert_position_unsupported',
+        'section_insert_position_unsupported', 'columns_from_caret_new_unsupported',
     }),
     'object_insert_exact': frozenset({
         'invalid_request', 'caret_moved', 'editor_not_normal', 'selection_required', 'selection_text_mismatch',

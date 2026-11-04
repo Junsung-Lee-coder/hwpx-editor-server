@@ -73,18 +73,22 @@ COLDEF_ITEMS = ('Count', 'SameSize', 'SameGap', 'Type', 'Layout', 'LineType', 'L
 COLDEF_REQUIRED = ('Count', 'SameSize', 'SameGap')
 MAX_COLUMNS = 10
 GAP_BOUNDS_MM = (0.0, 100.0)
-# ApplyTo codes for HColDef. UNVERIFIED natively: 2 mirrors HSecDef "current
-# section"; 6 is the value recorded Hancom macros use for the multi-column
-# dialog's "new columns from here". The HWPML COLDEF count check makes a wrong
-# code fail verification instead of passing silently.
-COLUMN_APPLY_TO = {'current_section': 2, 'from_caret_new': 6}
+# ApplyTo codes for HColDef: 2 mirrors HSecDef "current section" (measured on Hancom 2024: the section's column
+# definition changes and nothing else).
+COLUMN_APPLY_TO = {'current_section': 2}
+# Recognized values refused from the request alone, before any SDK call, with a fixed refusal code. from_caret_new
+# ("new columns from the caret", ApplyTo 6 in recorded Hancom macros) was characterized on Hancom 2024 13.0.0.3457: at
+# the first and at an interior paragraph, MultiColumn rewrote the section's existing column definition (count 1 to 2)
+# instead of adding a new one at the caret, so the edit could only end held.
+REFUSED_COLUMN_APPLY_TO = {'from_caret_new': 'columns_from_caret_new_unsupported'}
+_REFUSED_COLUMN_REASON = ('columns apply_to from_caret_new is not supported: on Hancom 2024 it changes the section\'s existing column '
+                          'definition instead of starting new columns at the caret; use apply_to current_section')
 
 # The native Undo steps that revert one layout edit, per variant, as measured on Hancom 2024 13.0.0.3457 in an owned
 # characterization (documents with tables and pictures, two sections, a numbered heading): its one native action is
 # one step, Undo reached the state recorded before it and Redo exactly the state after it. columns from_caret_new is not
-# listed: on that host it changed the section's existing column definition instead of adding one (at the first and at
-# an interior paragraph), so the edit is refused success and no Undo of it was measured. `hwpx undo` counts a layout
-# edit only when every variant its request touches is listed.
+# listed: it is refused before any edit (REFUSED_COLUMN_APPLY_TO), so there is nothing to undo. `hwpx undo` counts a
+# layout edit only when every variant its request touches is listed.
 UNDO_STEPS: dict[str, int] = {
     'page_setup:margins': 1, 'page_setup:landscape': 1, 'page_setup:paper_size': 1, 'page_setup:whole_document': 1,
     'columns:current_section': 1, 'section_insert:inside_paragraph': 1, 'section_delete': 1, 'hanging_indent': 1,
@@ -328,7 +332,7 @@ def _validate_columns(step: Mapping[str, Any]) -> dict[str, Any]:
             raise LayoutError('columns gap_mm only applies with same_width=true (per-column gaps are not supported)')
         gap_mm = float(gap_mm)
     apply_to = step.get('apply_to') or 'current_section'
-    if apply_to not in COLUMN_APPLY_TO:
+    if apply_to not in COLUMN_APPLY_TO and apply_to not in REFUSED_COLUMN_APPLY_TO:
         raise LayoutError(f'columns apply_to must be one of: {", ".join(COLUMN_APPLY_TO)}')
     expected = step.get('expected_before')
     expected_before: dict[str, Any] | None = None
@@ -917,7 +921,18 @@ def _read_optional_ints(values: Mapping[str, Any], items: tuple[str, ...]) -> di
     return {item: int(values[item]) if _is_number(values.get(item)) else None for item in items}
 
 
+def preflight_refusal(request: Mapping[str, Any]) -> tuple[str, str] | None:
+    """(refusal code, reason) for a normalized request that is refused from the request alone, before any SDK call; else None."""
+    if request['kind'] == 'columns' and request['apply_to'] in REFUSED_COLUMN_APPLY_TO:
+        return REFUSED_COLUMN_APPLY_TO[request['apply_to']], _REFUSED_COLUMN_REASON
+    return None
+
+
 def plan_columns(request: Mapping[str, Any], before_raw: Mapping[str, Any], doc: Mapping[str, Any]) -> dict[str, Any]:
+    refused = preflight_refusal(request)
+    if refused is not None:
+        # The engine refuses earlier; a planner reached any other way never plans the refused value.
+        raise LayoutError(refused[1], refused[0])
     if doc['section_count'] > 1 and doc['coldefs_by_section'] is None:
         raise LayoutError('the section each column definition belongs to cannot be proven from the readback (SECDEF/COLDEF order)')
     _as_int_items(before_raw, COLDEF_REQUIRED, 'MultiColumn')

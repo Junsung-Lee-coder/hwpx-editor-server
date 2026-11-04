@@ -47,7 +47,8 @@ class UndoPerVariant(unittest.TestCase):
         self.assertEqual({name for name, undo in objects.items() if undo == 'not_counted'}, {'memo', 'memo:selection', 'hyperlink'})
         self.assertEqual(objects['line:diagonal'], 'not_applicable')
         layout = {name: row['undo'] for name, row in variants('layout_exact').items()}
-        self.assertEqual({name for name, undo in layout.items() if undo == 'not_counted'}, {'columns:from_caret_new'})
+        self.assertEqual({name for name, undo in layout.items() if undo == 'not_counted'}, set())
+        self.assertEqual(layout['columns:from_caret_new'], 'not_applicable')
         self.assertEqual(layout['section_insert:paragraph_start_or_end'], 'not_applicable')
         steps = object_insert.UNDO_STEPS
         self.assertEqual((steps['footnote'], steps['endnote'], steps['bookmark'], steps['equation'], steps['header:odd'], steps['footer:even']), (2, 2, 1, 1, 2, 2))

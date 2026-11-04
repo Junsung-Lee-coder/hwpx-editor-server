@@ -71,7 +71,7 @@ class VariantRows(unittest.TestCase):
     def test_the_statuses_are_per_variant_not_per_op(self):
         layout = {row['variant']: row['native'] for row in self.variants('layout_exact')}
         self.assertEqual(layout['section_insert:paragraph_start_or_end'], 'unsupported')
-        self.assertEqual(layout['columns:from_caret_new'], 'not_qualified')
+        self.assertEqual(layout['columns:from_caret_new'], 'unsupported')
         objects = {row['variant']: row['native'] for row in self.variants('object_insert_exact')}
         # Shapes are drawn with the characterized contract, one row per drawn variant; a diagonal line has no
         # characterized contract and is refused before any edit, never reported as inserted.

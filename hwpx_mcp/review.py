@@ -1735,6 +1735,9 @@ def to_markdown(review: dict[str, Any]) -> str:
             kind = change['kind']
             if 'replaces' in change:
                 kind, label = 'text_changed', f"{_clip(change['replaces'], 60) or '(빈 문단)'} → {label or '(빈 문단)'}"
+            elif kind in ('removed', 'added') and not label and not change.get('in_table'):
+                # A row without text names what it holds: its listed objects, or that its content was not read.
+                label = _paragraph_name(change, width=60)
             if change.get('in_table'):
                 label = f"표 안 문단 {label or '(빈 문단)'}"
             out.append(f"- {names[kind]}: {label}{arrow}")

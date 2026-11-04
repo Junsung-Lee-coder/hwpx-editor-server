@@ -102,7 +102,8 @@ BUNDLE_OPS: dict[str, dict[str, Any]] = {
     'get_selected_text': _exposed(SESSION_TOOLS),
     'style_inspect': _exposed(SESSION_TOOLS),
     'typography_overview': _exposed(SESSION_TOOLS),
-    'layout_exact': _exposed(SESSION_TOOLS, note=f'page_setup, columns, section_insert (only between two characters of one paragraph\'s text), '
+    'layout_exact': _exposed(SESSION_TOOLS, note=f'page_setup, columns (apply_to current_section; from_caret_new is refused before any edit with '
+                                                f'columns_from_caret_new_unsupported), section_insert (only between two characters of one paragraph\'s text), '
                                                 f'section_delete, hanging_indent; native qualification per variant in variants; {_UNDO_COUNTED}{_UNDO_VARIANTS}; '
                                                 f'redo is compared exactly'),
     'layout_inspect': _exposed(SESSION_TOOLS, note='read-only page and column definition at the caret'),
@@ -189,9 +190,9 @@ VARIANTS: dict[str, list[dict[str, Any]]] = {
         _variant('page_setup', 'paper_size', 'paper_width_mm/paper_height_mm', 'qualified', **_counted('undo_layout_paper_size', 1)),
         _variant('page_setup', 'whole_document', 'apply_to whole_document', 'qualified', **_counted('undo_layout_whole_document', 1)),
         _variant('columns', 'current_section', 'count/gap_mm/same_width, apply_to current_section', 'qualified', **_counted('undo_layout_columns', 1)),
-        _variant('columns', 'from_caret_new', 'apply_to from_caret_new (new columns from the caret)', 'not_qualified', undo='not_counted',
-                 undo_reason='no native Undo was measured: on Hancom 2024 the edit changed the section\'s existing column definition instead of '
-                             'adding one (at the first and at an interior paragraph), so the backend refused to mark it a success'),
+        _variant('columns', 'from_caret_new', 'apply_to from_caret_new (new columns from the caret): refused before any SDK call, because on '
+                 'Hancom 2024 the native action changed the section\'s existing column definition instead of adding one at the caret',
+                 'unsupported', refusal_code='columns_from_caret_new_unsupported', refusal_evidence=['columns_from_caret_new_refusal'], **_NOT_APPLICABLE),
         _variant('section_insert', 'inside_paragraph', 'caret between two characters of one paragraph\'s text; the two-section '
                  'document saved, reopened and rendered', 'qualified', **_counted('undo_layout_section_insert', 1)),
         _variant('section_insert', 'paragraph_start_or_end', 'caret at a paragraph\'s first text (also after its leading section '

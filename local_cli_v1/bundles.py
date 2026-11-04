@@ -2515,7 +2515,7 @@ def _build_layout_exact(argv: Sequence[str]) -> BundleSpec:
     parser.add_argument('--count', type=int, default=None, help='columns: 1..10')
     parser.add_argument('--gap-mm', type=float, default=None, help='columns: gap between columns in mm')
     parser.add_argument('--same-width', choices=('on', 'off'), default=None, help='columns: equal widths (default on)')
-    parser.add_argument('--apply-to', default=None, help='page_setup: current_section|whole_document; columns: current_section|from_caret_new')
+    parser.add_argument('--apply-to', default=None, help='page_setup: current_section|whole_document; columns: current_section (from_caret_new is refused before any edit: columns_from_caret_new_unsupported)')
     parser.add_argument('--section-index', type=int, default=None, help='section_delete: 1-based section whose leading break is removed (>= 2)')
     parser.add_argument('--marker-text', default=None, help='hanging_indent: the marker the paragraph starts with, e.g. "1. "')
     parser.add_argument('--expected-before', action='append', default=[], help='Current value from layout-inspect as KEY=VALUE; repeat per field being changed')
@@ -2724,7 +2724,7 @@ def bundle_help(name: str) -> str:
     if bundle_name == 'layout-inspect':
         return 'usage: hwpx bundle-dump layout-inspect\n       read-only page setup and column definition at the caret; values feed layout-exact --expected-before'
     if bundle_name == 'layout-exact':
-        return 'usage: hwpx bundle-dump layout-exact --kind KIND --expected-pos LIST,PARA,POS [page fields --expected-before KEY=VALUE ... --apply-to current_section|whole_document | --count N [--gap-mm G] [--same-width on|off] [--apply-to current_section|from_caret_new] | --section-index N | --marker-text TEXT] --confirm-layout\n       KIND: page_setup, columns, section_insert, section_delete, hanging_indent; verified by native parameter-set and HWPML readback'
+        return 'usage: hwpx bundle-dump layout-exact --kind KIND --expected-pos LIST,PARA,POS [page fields --expected-before KEY=VALUE ... --apply-to current_section|whole_document | --count N [--gap-mm G] [--same-width on|off] [--apply-to current_section] | --section-index N | --marker-text TEXT] --confirm-layout\n       KIND: page_setup, columns, section_insert, section_delete, hanging_indent; verified by native parameter-set and HWPML readback'
     if bundle_name == 'object-insert-exact':
         return 'usage: hwpx bundle-dump object-insert-exact --kind KIND --expected-pos LIST,PARA,POS [--text T | --url U --display-text T | --name N | --script S | --width-mm W --height-mm H [--treat-as-char on|off]] [--apply-to both|even|odd] --confirm-mutation\n       KIND: footnote, endnote, memo, hyperlink, bookmark, equation, line, rectangle, ellipse, header, footer; verified by whole-document HWPML readback'
     if bundle_name == 'table-split-exact':
