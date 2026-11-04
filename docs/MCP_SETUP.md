@@ -193,6 +193,17 @@ GUI에서 범위를 직접 선택해 둘 필요가 없습니다. 명령마다 �
 
 새 번호의 모양은 비교되지 않았으므로 `compared`로 세지 않으며, 요약과 `summary.md`에 새 번호 개수를 적습니다. 인쇄된 번호 글자·종류·수준 확인은 별개이며 `numbering`에 있습니다. 번호를 붙인 뒤의 확인을 기준으로 다시 확인하면 그 번호는 `compared`가 됩니다. 이 비교는 서식 값으로 계산한 것이며 인쇄된 모양은 미리보기로 확인합니다. 저장되지 않은 변경이 없고 저장본이 있으면 `persisted_format`이 Hancom을 거치지 않고 HWPX 파일을 직접 읽어 비교한 결과를 줍니다(`match`, `partial`, `mismatch`, `unverified`). `mismatch`이면 `review_status`도 `mismatch`입니다. 저장본 비교에는 번호 모양도 포함됩니다. `review.json`의 각 문단에는 `index`, `context`(`body`, `table_cell`, `other`)와 `format`(글자 묶음별 값, 문단 값, 번호 모양, 개체 목록)이 있습니다. 글자 묶음 값이 아주 많은 문서는 응답 크기 안에서 뒤쪽 문단의 묶음을 생략하고 `runs_truncated`로 알립니다.
 
+## 기존 글 바꾸기
+
+`{"op": "text_replace_exact", "match": "Annual Plan 2025", "old_text": "2025", "new_text": "2026", "expected_page": 1, "confirm_layout": true}`는 본문이나 표 셀 문단에 이미 있는 글 한 범위를 바꿉니다. `old_text`는 지금 문서에 있는 정확한 글(한 줄), `new_text`는 바꿀 글(한 줄, 탭 없음)입니다.
+
+- 대상 지정: `old_text`가 문서에 한 번만 있으면 그것만으로 됩니다. 여러 번 있으면 그것을 한 번 담은 더 긴 `match`, 문서 순서로 센 `occurrence`와 지금 개수 `expected_occurrences`, 또는 `paragraph_index`와 그 문단의 전체 `expected_text` 중 하나를 줍니다. 첫 번째 것을 대신 고르지 않습니다. 여러 번 있으면 `target_ambiguous`, 개수가 다르면 `target_count_mismatch`로 편집 전에 거부합니다.
+- 서식: 새 글은 바뀌는 글의 글자 모양을 그대로 받습니다. 바뀌는 글에 글자 모양이 여럿이면 `target_mixed_format`으로 거부하며, `format_from: "last_character"`를 주면 마지막 글자의 모양을 받습니다. 부분마다 모양을 지키려면 부분마다 명령을 나눕니다.
+- 방식: 선택한 글 위에 입력하면 Hancom이 새 글에 블록 앞 글자의 모양을 주므로(측정), 새 글을 옛 글 바로 뒤에 넣고 옛 글을 지웁니다. 네이티브 동작 두 번이며 Undo·Redo는 한 번씩입니다.
+- 거부: 머리말·꼬리말(`target_in_header_footer`), 글상자·캡션·주석(`target_unsupported_context`), 개체나 보이지 않는 컨트롤을 가로지르는 범위, 측정하지 않은 컨트롤 바로 뒤에서 시작하는 범위(`target_beside_unproven_control`)는 편집 전에 거부하고 캐럿을 되돌립니다.
+- 확인: 대상 문단이 옛 글에서 그 범위만 바뀐 글과 정확히 같고 새 글이 기대한 모양인지, 다른 문단·표·컨트롤·정의·머리말·꼬리말이 그대로인지 비교합니다. 맞지 않으면 결과 불명으로 세션을 보류합니다.
+- 결과의 `result`에 문단의 바뀌기 전과 후 글(300자까지), 새 글의 글자 모양, 네이티브 동작이 있습니다.
+
 ## 표
 
 표는 문서 안의 정확한 하나를 지정해서 편집합니다. GUI에서 표를 클릭해 둘 필요가 없습니다. 명령마다 표를 네이티브 식별자로 다시 찾아 들어가고, 셀로 이동하거나 셀 블록을 만든 뒤 블록이 요청한 셀과 정확히 같은지 확인하고 네이티브 동작을 실행합니다. 실행 후 대상 표의 모든 셀과 다른 표, 표 밖 문단, 머리말·꼬리말, 스타일, 그림 데이터를 비교합니다. 그래서 `review`, `context`, `find`를 사이에 끼워도 대상이 바뀌지 않습니다.
@@ -283,6 +294,15 @@ Hancom 13.0.0.3457에서 측정한 결과이며, 결과의 `changes`와 `after`�
 
 `{"op": "table_create_exact", "match": "기준 문단의 고유한 문구", "expected_page": 1, "rows": 2, "cols": 3, "confirm_layout": true}`는 그 본문 문단 뒤에 표 문단과 빈 문단 하나를 만듭니다. 결과의 `table`에 다음 편집에 쓸 값이 있습니다. 선택 항목 `cells`로 행별 글을 넣을 수 있습니다. 빈 글은 빈 셀이고, 줄바꿈은 새 문단이 되며, 탭과 연속 공백은 그대로입니다. 그 밖의 제어 문자는 편집 전에 `cells_text_unsupported`로 거부합니다. 표 문단은 기준 문단의 문단 모양을 물려받으므로 번호 문단 뒤에는 `target_numbered`로 거부합니다. 표 안, 머리말·꼬리말, 없는 문구, 여러 문단에 있는 문구, 다른 쪽도 거부합니다.
 
+### 칸의 글 쓰기
+
+`{"op": "table_cell_text_exact", "table_id": "tbl:1011", "expected_hash": "sha256:...", "expected_page": 1, "expected_rows": 3, "expected_cols": 3, "cells": [{"address": "B2", "expected_text": "1,200", "text": "1,350"}, {"address": "C2", "expected_text": "Planned", "text": "Revised"}], "confirm_layout": true}`는 표 하나의 여러 칸 글을 통째로 바꿉니다.
+
+- `cells`는 1~100개, 칸마다 한 번씩입니다. `expected_text`는 `table_read`가 준 그 칸의 전체 글(빈 칸은 빈 글), `text`는 새 글(한 줄)입니다. 병합 칸은 첫 칸 주소로 지정합니다(아니면 `cell_covered_by_merge`).
+- 문단이 여럿인 칸(`cell_multi_paragraph`), 글자 모양이 여럿인 칸(`cell_mixed_format`), 표·그림 같은 개체가 든 칸(`cell_has_objects`), 지금 글이 다른 칸(`cell_text_mismatch`)은 편집 전에 거부합니다. 그런 칸의 글은 `text_replace_exact`로 바꿉니다. 모든 칸에 들어가 글을 확인한 뒤에 첫 칸을 쓰므로 거부되면 아무것도 바뀌지 않습니다.
+- 새 글은 그 칸 글의 모양을 받습니다. 빈 칸은 네이티브 동작 한 번, 그 밖의 칸은 두 번이며 명령 전체가 Undo·Redo 한 번입니다.
+- 결과의 `changes`에 칸 주소와 바뀌기 전·후 글이, `after.expected_hash`에 다음 편집에 쓸 해시가 있습니다. 격자, 병합, 너비, 선, 채우기, 칸 속성과 다른 칸·다른 표를 편집 후에 비교합니다.
+
 ### 되돌리기
 
 명령 하나가 Undo·Redo 한 번입니다. 결과의 `confirmation.expected_state`가 `{"compared": true, "matches": true}`이면 명령 전후 상태와 같습니다. 측정된 예외는 다음과 같습니다.
@@ -348,6 +368,7 @@ Hancom 13.0.0.3457에서 측정한 결과이며, 결과의 `changes`와 `after`�
 | 글 넣기·선택 | `anchor_insert`, `set_text_file`, `get_selected_text` | `anchor_insert`는 `target`, `position`(`before-anchor`, `after-anchor`, `after-paragraph`, `before-heading`), `text` 또는 `fragments` |
 | 읽기 | `style_inspect`, `typography_overview`, `where` | 문서를 바꾸지 않음 |
 | 저수준 | `hwp_action`, `pyhwpx_call` | 백엔드 명령 묶음 허용 목록의 이름만. `hwp_action`은 이동·셀 선택 12개, `pyhwpx_call`은 위치·선택·글 읽기와 캐럿 이동 15개 |
+| 기존 글·표 칸 | `text_replace_exact`, `table_cell_text_exact` | 위 "기존 글 바꾸기"와 "칸의 글 쓰기" 절 |
 | 기존 정확한 명령 | 위 "번호 문단 편집", "글자·문단 서식", "표" 절의 op | 변경 없음. `readback`의 `scope`는 백엔드와 같이 `caret`, `selection`, `page`, `document`를 받음(기본 `document`) |
 
 백엔드에서 "변경 전 거부" 경로가 있는 것은 번호·문단 삽입/삭제·글자/문단 서식·`table_*` 정확한 명령과 `layout_exact`, `object_insert_exact`, `paragraph_rehome_exact`입니다. 뒤의 세 op는 첫 편집 동작 전에 백엔드가 직접 정확히 읽은 값으로 요청이 맞지 않음을 확인한 경우(캐럿이 `expected_pos`와 다름, 선택이 남아 있음, `expected_before`가 현재 값과 다름, 바꿀 것이 없음, 같은 이름의 책갈피가 이미 있음, 기준 문구가 옮길 글보다 앞이거나 떨어져 있음 등)에만 `refusal_code`와 함께 거부합니다. 이때 문서는 그대로이고 캐럿은 원래 자리로 돌아가며(남아 있던 선택은 풀릴 수 있음) 세션도 계속 쓸 수 있습니다. 그 밖의 백엔드 오류나 편집을 시작한 뒤의 실패는 결과 불명으로 보고하고 세션을 보류합니다. 거부 코드는 각 op의 입력 스키마 설명에 있습니다. 위 표의 다른 op(기존 컨트롤·표 방식, `paragraph_rehome_exact`를 뺀 문단 구조, 글 넣기, 저수준, `style_inspect`·`typography_overview` 같은 읽기 포함)는 백엔드 오류가 나면 잘못된 대상이나 오래된 해시였더라도 결과 불명으로 보고하고 세션을 보류합니다. 실제 한글 2024에서 선택 없이 `get_selected_text`를 부른 경우와 구역 정의 컨트롤을 `table_cell_structure_exact`에 준 경우가 그랬습니다. 그래서 MCP는 표 전용 기존 단계(`cell_format_exact`, `cell_row_fit_exact`, `table_split_exact`, `table_structure_exact`, `table_cell_structure_exact`)에 표 컨트롤 ID(`ctrl/<n>/tbl/<id>`)만 받고, `get_selected_text`는 `select_target` 등으로 선택을 만든 뒤 부릅니다. 각 op의 입력 스키마 설명에도 같은 내용이 있습니다.
@@ -363,6 +384,10 @@ Hancom 13.0.0.3457에서 측정한 결과이며, 결과의 `changes`와 `after`�
 ```json
 {"session_id": "<세션>", "request": {"op": "layout_exact", "kind": "columns", "expected_pos": [0, 0, 0], "count": 2, "gap_mm": 8, "same_width": true, "apply_to": "current_section", "expected_before": {"count": 1}, "confirm_layout": true}}
 ```
+
+### 개체 넣기와 레이아웃의 되돌리기
+
+`object_insert_exact`와 `layout_exact`는 편집 전후 문서 상태를 기록합니다. `{"op": "undo"}`는 그 단계가 알린 편집 동작 수만큼(레이아웃 하나, 개체 하나 또는 둘) 네이티브 Undo를 실행하고 기록한 편집 전 상태와 비교하며, `{"op": "redo"}`는 편집 후 상태와 비교합니다. 단계 결과의 `undo.hwpx_undo`가 `counted`이면 이렇게 되돌릴 수 있습니다. 다시 만든 도형·수식·머리말·꼬리말은 Redo 뒤 인스턴스 번호, 겹침 순서, 머리말 일련번호가 새로 정해질 수 있어 `confirmation.expected_state.renewed`에 그 항목을 적습니다. 하이퍼링크와 메모는 필드 끝의 컨트롤 식별자가 빈 글이라 문서를 비교할 수 없으므로 `undo_not_counted`로 거부합니다. 컨트롤 목록을 읽을 수 없는 문서에서는 네이티브 호출 없이 `undo_evidence_unavailable`로 거부합니다.
 
 `hwpx_bundle`은 같은 단계를 1~20개 묶어 한 번에 보냅니다. 백엔드는 첫 실패 단계에서 멈추며, 의미상 거부는 앞 단계의 편집을 유지하고 기술 실패는 세션을 보류합니다(위 "쪽 번호" 절의 묶음 규칙과 같음).
 

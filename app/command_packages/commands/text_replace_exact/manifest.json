@@ -1,0 +1,23 @@
+{
+  "op": "text_replace_exact",
+  "version": "local-cli/text-replace-exact/v1-package",
+  "summary": "Replace one exact range of existing body or table-cell text, found again by its own text, occurrence or paragraph, keeping the format of the replaced text.",
+  "module": "app.command_packages.commands.text_replace_exact.run",
+  "read_only": false,
+  "dirty_default": true,
+  "allowed_keys": [
+    "op",
+    "operation",
+    "label",
+    "old_text",
+    "new_text",
+    "match",
+    "occurrence",
+    "expected_occurrences",
+    "paragraph_index",
+    "expected_text",
+    "expected_page",
+    "format_from",
+    "confirm_layout"
+  ]
+}

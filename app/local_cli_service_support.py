@@ -390,6 +390,8 @@ _BUNDLE_ALLOWED_OPS = {
     'table_style_exact',
     'table_width_exact',
     'table_create_exact',
+    'text_replace_exact',
+    'table_cell_text_exact',
     'paragraph_format_exact',
     'paragraph_delete_exact',
     'paragraph_join_previous_exact',

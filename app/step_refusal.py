@@ -51,6 +51,8 @@ class StepControl:
         self.on_refusal = on_refusal
         self.started = False
         self.pending: LocalCliStepRefusal | None = None
+        # What `hwpx undo` will compare the document with, as the engine recorded it from its own reads (no extra SDK call).
+        self.history: dict[str, Any] = {}
 
     def begin_mutation(self) -> None:
         """Call immediately before the first native mutating call."""

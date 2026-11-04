@@ -6,6 +6,8 @@ import time
 from typing import Any
 
 from app.edit_ops import _get_pos, _get_selected_text
+from app.native_format import history_state
+from app.native_numbering import _control_ids
 from app.hwpml_invariants import before_budget_reason, head_summary, readback_size_reason
 from app.local_cli_runtime import LocalCliRuntimeError, insert_text_at_caret
 from app.local_cli_service_support import LocalCliMutationError
@@ -37,8 +39,14 @@ from app.object_insert import (
 
 _ROLLBACK_HINT = {'attempted': False, 'hint': 'Retain the working copy and owning STA; full native close is unsupported for this unproved or held session. Separately authorized exact-owned operator closure is required; a single Undo does not guarantee a full rollback of this edit.'}
 _UNDO_NOTE = (
-    'hwpx undo refuses after object_insert_exact (_BUNDLE_UNDO_POLICY): Hancom may record each native editing action '
-    'as its own undo unit and the grouping is not verified natively. Retain the working copy and owning STA; full native close is unsupported for this unproved or held session. Separately authorized exact-owned operator closure is required to discard the edit.'
+    'hwpx undo refuses after this object_insert_exact: the document state before and after it could not both be recorded '
+    '(a control walk that returns an identifier other than exact text, as a hyperlink or memo field does, or a readback that is no census), '
+    'so a native Undo could not be compared with it. Retain the working copy and owning STA; full native close is unsupported for this unproved or held session. Separately authorized exact-owned operator closure is required to discard the edit.'
+)
+_COUNTED_NOTE = (
+    'hwpx undo reverts this insertion as one request: as many native Undo steps as the editing actions reported here '
+    '(measured on Hancom 2024: each is one step, Cancel and CloseEx none), compared with the state recorded before it; '
+    'redo is compared with the state after it, where a re-created object may carry a new instance id, z-order or series number.'
 )
 
 
@@ -53,14 +61,23 @@ class _Mutation:
     editing_actions = 0
 
 
-def _undo_report(mutation: _Mutation) -> dict[str, Any]:
-    """What `hwpx undo` will do after this edit: refuse, whatever the action count."""
+def _undo_report(mutation: _Mutation, pre: dict[str, str] | None = None, post: dict[str, str] | None = None) -> dict[str, Any]:
+    """What `hwpx undo` will do after this edit: count its actions when both states were recorded, else refuse."""
+    if pre is None or post is None or mutation.editing_actions < 1:
+        return {'native_editing_actions': mutation.editing_actions, 'hwpx_undo': 'refused', 'undo_units_verified': False, 'note': _UNDO_NOTE}
     return {
         'native_editing_actions': mutation.editing_actions,
-        'hwpx_undo': 'refused',
-        'undo_units_verified': False,
-        'note': _UNDO_NOTE,
+        'pre_state_sha256': pre['sha'],
+        'post_state_sha256': post['sha'],
+        'post_renewal_free_sha256': post['renewal_free_sha'],
+        'hwpx_undo': 'counted',
+        'undo_units_verified': True,
+        'note': _COUNTED_NOTE,
     }
+
+
+def _controls(hwp: Any) -> list[str]:
+    return [name for _control, name in _control_ids(hwp)]
 
 
 class LocalCliObjectInsertMixin:
@@ -159,7 +176,7 @@ class LocalCliObjectInsertMixin:
             return {'action': action_name, 'succeeded': raw is True, 'method': label, 'result': raw if type(raw) is bool else type(raw).__name__}
         return {'action': action_name, 'succeeded': raw is None or bool(raw), 'method': label, 'result': bool(raw) if raw is not None else None}
 
-    def _object_insert_readback(self, hwp: Any, control: StepControl, *, where: str) -> Any:
+    def _object_insert_readback(self, hwp: Any, control: StepControl, *, where: str, texts: list[str] | None = None) -> Any:
         get_text = getattr(hwp, 'GetTextFile', None)
         if not callable(get_text):
             raise LocalCliRuntimeError(f'{OP} {where}: GetTextFile is unavailable, so the document cannot be read back')
@@ -174,6 +191,8 @@ class LocalCliObjectInsertMixin:
             if where == 'before insert':
                 raise control.refuse('proof_budget', f'{OP} refused before mutation: {too_big}')
             raise LocalCliRuntimeError(f'{OP} {where}: {too_big}')
+        if texts is not None:
+            texts.append(xml_text)
         try:
             return parse_hwpml(xml_text)
         except ObjectInsertError as exc:
@@ -316,10 +335,11 @@ class LocalCliObjectInsertMixin:
             control.register(refusal)
             raise refusal
         mutation = _Mutation()
+        texts: list[str] = []
         try:
             proof = self._object_insert_require(hwp, plan, control, where='before the readback', initial=True)
             started = time.monotonic()
-            before_root = self._object_insert_readback(hwp, control, where='before insert')
+            before_root = self._object_insert_readback(hwp, control, where='before insert', texts=texts)
             # Dry run of the after-edit proof (its cost, not its verdict) so an
             # edit whose proof cannot finish in time is refused before mutating.
             dry_run_proof(plan, before_root)
@@ -331,10 +351,12 @@ class LocalCliObjectInsertMixin:
             except ObjectInsertError as exc:
                 code = getattr(exc, 'code', 'unverifiable_layout')
                 raise control.refuse(code if code in STEP_REFUSAL_CODES[OP] else 'unverifiable_layout', f'{OP} refused before mutation: {exc}') from exc
+            # The state `hwpx undo` will compare with, from the same text; the control walk is read only when that text is a census.
+            pre_state = history_state(texts[0], lambda: _controls(hwp))
             proof = self._object_insert_require(hwp, plan, control, where='after before-readback')
             actions = self._object_insert_mutate(hwp, plan, control, mutation)
             try:
-                after_root = self._object_insert_readback(hwp, control, where='after insert')
+                after_root = self._object_insert_readback(hwp, control, where='after insert', texts=texts)
             except LocalCliRuntimeError as exc:
                 exc.step_phase, exc.step_reason = 'readback', 'readback_after_failed'
                 raise
@@ -343,6 +365,7 @@ class LocalCliObjectInsertMixin:
                 error = LocalCliRuntimeError(f'{OP} refused to mark success: {"; ".join(verification["reasons"])}')
                 error.step_phase, error.step_reason = 'verify', reason_code(verification['reasons'][0]) if verification['reasons'] else 'other'
                 raise error
+            post_state = history_state(texts[1], lambda: _controls(hwp)) if pre_state is not None else None
             return {
                 'schema_version': SCHEMA_VERSION,
                 'succeeded': True,
@@ -355,7 +378,7 @@ class LocalCliObjectInsertMixin:
                 'head_before': head_summary(before_root),
                 'head_after': head_summary(after_root),
                 'verification': verification,
-                'undo': _undo_report(mutation),
+                'undo': _undo_report(mutation, pre_state, post_state),
                 'next_proof_required': 'Render the page (page-screenshot or export-proof-range) and review it before saving; re-run where before another caret-bound edit.',
                 'warnings': [],
             }

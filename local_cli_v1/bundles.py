@@ -38,6 +38,8 @@ BUNDLE_SERVER_OPS = frozenset(
         'table_style_exact',
         'table_width_exact',
         'table_create_exact',
+        'text_replace_exact',
+        'table_cell_text_exact',
         'paragraph_format_exact',
         'paragraph_delete_exact',
         'paragraph_join_previous_exact',
@@ -139,6 +141,8 @@ _STEP_KEYS: dict[str, frozenset[str]] = {
     'table_style_exact': frozenset({'expected_cols', 'borders', 'expected_rows', 'confirm_layout', 'end_cell', 'expected_hash', 'table_id', 'cell', 'scope', 'over_wider_neighbour', 'fill', 'op', 'expected_page', 'label'}),
     'table_width_exact': frozenset({'expected_cols', 'column_widths_mm', 'confirm_layout', 'expected_hash', 'expected_page', 'expected_rows', 'fit', 'label', 'op', 'table_id'}),
     'table_create_exact': frozenset({'cells', 'cols', 'confirm_layout', 'rows', 'op', 'expected_page', 'label', 'match'}),
+    'text_replace_exact': frozenset({'op', 'operation', 'label', 'old_text', 'new_text', 'match', 'occurrence', 'expected_occurrences', 'paragraph_index', 'expected_text', 'expected_page', 'format_from', 'confirm_layout'}),
+    'table_cell_text_exact': frozenset({'op', 'operation', 'label', 'table_id', 'expected_hash', 'expected_page', 'expected_rows', 'expected_cols', 'cells', 'confirm_layout'}),
     'character_format_exact': frozenset({'op', 'operation', 'label', 'match', 'through_match', 'paragraph_index', 'expected_text', 'expected_page', 'confirm_layout', 'number_mark', 'font_family', 'size_pt', 'bold', 'italic', 'underline', 'text_color'}),
     'paragraph_format_exact': frozenset({'op', 'operation', 'label', 'match', 'through_match', 'paragraph_index', 'expected_text', 'expected_page', 'confirm_layout', 'align', 'left_indent_pt', 'right_indent_pt', 'first_line_indent_pt', 'line_spacing_type', 'line_spacing_value'}),
     'paragraph_delete_exact': frozenset(

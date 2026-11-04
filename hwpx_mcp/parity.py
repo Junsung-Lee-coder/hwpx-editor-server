@@ -33,7 +33,11 @@ def _excluded(reason: str) -> dict[str, Any]:
 
 
 _LEGACY = 'legacy native control-inventory path (target_id ctrl/..), not the exact table_id+hash engine; any backend error holds the session'
-_UNDO_REFUSED = 'backend Undo policy refuses this step (local_cli_service._BUNDLE_UNDO_POLICY)'
+_UNDO_COUNTED = ('hwpx_command undo reverts the step as one request of the native editing actions it reports, compared with the document '
+                 'state recorded before it, and redo compares with the state after it (local_cli_service._BUNDLE_UNDO_POLICY); a step whose '
+                 'states could not both be recorded refuses undo_not_counted')
+_UNDO_FIELDS = ('; hyperlink and memo insertions always refuse it: their field ends make the control walk return an identifier that is '
+                'not exact text, so the document cannot be compared')
 _UNGUARDED = ('not a guarded exact engine: any backend error in the step, including a stale or wrong target, is an unknown outcome '
               'that holds the session (local_cli_service command_bundle; measured on Hancom 2024 with get_selected_text without a '
               'selection and table_cell_structure_exact on a section control)')
@@ -57,6 +61,10 @@ BUNDLE_OPS: dict[str, dict[str, Any]] = {
     'table_style_exact': _exposed(SESSION_TOOLS),
     'table_width_exact': _exposed(SESSION_TOOLS),
     'table_create_exact': _exposed(SESSION_TOOLS),
+    'text_replace_exact': _exposed(SESSION_TOOLS, note='one exact range of existing body or table-cell text, found by its own text, '
+                                                       'occurrence or paragraph; the new text keeps the replaced text\'s format; ' + _UNDO_COUNTED),
+    'table_cell_text_exact': _exposed(SESSION_TOOLS, note='the whole text of cells of one table bound by table_id+expected_hash, each with its '
+                                                          'expected current text; returns the next binding; ' + _UNDO_COUNTED),
     'control_inventory': _exposed(SESSION_TOOLS, note='read-only native control list with target_id/expected_hash'),
     'table_frame_inventory': _exposed(SESSION_TOOLS, note='read-only table frame list'),
     'exact_control_select_proof': _exposed(SESSION_TOOLS, note='read-only selection proof of one control'),
@@ -89,10 +97,10 @@ BUNDLE_OPS: dict[str, dict[str, Any]] = {
     'style_inspect': _exposed(SESSION_TOOLS),
     'typography_overview': _exposed(SESSION_TOOLS),
     'layout_exact': _exposed(SESSION_TOOLS, note=f'page_setup, columns, section_insert (only between two characters of one paragraph\'s text), '
-                                                f'section_delete, hanging_indent; native qualification per variant in variants; {_UNDO_REFUSED}'),
+                                                f'section_delete, hanging_indent; native qualification per variant in variants; {_UNDO_COUNTED}'),
     'layout_inspect': _exposed(SESSION_TOOLS, note='read-only page and column definition at the caret'),
     'object_insert_exact': _exposed(SESSION_TOOLS, note=f'footnote, endnote, memo, hyperlink, bookmark, equation, line, rectangle, ellipse, header, footer; '
-                                                       f'native qualification per variant in variants; {_UNDO_REFUSED}'),
+                                                       f'native qualification per variant in variants; {_UNDO_COUNTED}{_UNDO_FIELDS}'),
     'hwp_action': _exposed(SESSION_TOOLS, note='only the backend command-bundle navigation/selection allowlist'),
     'pyhwpx_call': _exposed(SESSION_TOOLS, note='only the backend command-bundle read/caret allowlist'),
     'export_pdf': _equivalent('hwpx_proof', 'hwpx_proof page/review runs the same backend export, then downloads, renders and checks the PDF; a bare bundle export leaves the PDF unretrieved'),
@@ -103,7 +111,7 @@ BUNDLE_OPS: dict[str, dict[str, Any]] = {
 # exposed op reports a backend error as an unknown outcome that holds the session.
 GUARDED = frozenset({'page_number_apply', 'official_numbering_apply', 'paragraph_insert_exact', 'paragraph_remove_exact',
                      'character_format_exact', 'paragraph_format_exact', 'table_inventory', 'table_read', 'table_edit_exact',
-                     'table_style_exact', 'table_width_exact', 'table_create_exact'})
+                     'table_style_exact', 'table_width_exact', 'table_create_exact', 'text_replace_exact', 'table_cell_text_exact'})
 # Ops that publish mutation intent at their first native edit (app.step_refusal.DEFERRED_INTENT_OPS): before it they
 # refuse with a fixed refusal_code only from their own exact reads; anything else holds the session.
 DEFERRED = frozenset({'layout_exact', 'object_insert_exact', 'paragraph_rehome_exact'})
@@ -145,30 +153,30 @@ _SHAPE_DRAWN = 'drawn with its points and a solid 0.3 mm black outline'
 
 VARIANTS: dict[str, list[dict[str, Any]]] = {
     'layout_exact': [
-        _variant('page_setup', 'margins', 'margin fields, apply_to current_section', 'qualified_unaffected', evidence=('layout_margins',)),
-        _variant('page_setup', 'landscape', 'landscape true, apply_to current_section', 'qualified_unaffected', evidence=('layout_landscape',)),
+        _variant('page_setup', 'margins', 'margin fields, apply_to current_section', 'qualified', evidence=('layout_margins', 'e2_layout_margins_undo_redo')),
+        _variant('page_setup', 'landscape', 'landscape true, apply_to current_section', 'qualified', evidence=('layout_landscape',)),
         _variant('page_setup', 'paper_size', 'paper_width_mm/paper_height_mm', 'not_qualified'),
         _variant('page_setup', 'whole_document', 'apply_to whole_document', 'not_qualified'),
-        _variant('columns', 'current_section', 'count/gap_mm/same_width, apply_to current_section', 'qualified_unaffected', evidence=('layout_columns',)),
+        _variant('columns', 'current_section', 'count/gap_mm/same_width, apply_to current_section', 'qualified', evidence=('layout_columns', 'e2_layout_columns_undo_redo')),
         _variant('columns', 'from_caret_new', 'apply_to from_caret_new (new columns from the caret)', 'not_qualified'),
         _variant('section_insert', 'inside_paragraph', 'caret between two characters of one paragraph\'s text; the two-section '
-                 'document saved, reopened and rendered, outline numbering after the break kept', 'qualified_unaffected', evidence=('layout_section_insert', 'section_refusal_continue',)),
+                 'document saved, reopened and rendered, outline numbering after the break kept', 'qualified', evidence=('layout_section_insert', 'section_refusal_continue', 'e2_layout_section_insert_undo_redo')),
         _variant('section_insert', 'paragraph_start_or_end', 'caret at a paragraph\'s first text (also after its leading section '
                  'and column definitions), at its end, next to an inline control or in a paragraph without text', 'unsupported',
                  refusal_code='section_insert_position_unsupported'),
         _variant('section_delete', None, 'caret at the first text of section_index in a saved multi-section document opened on its own',
-                 'qualified_unaffected', evidence=('layout_section_delete', 'layout_section_delete_memo_s1', 'layout_section_delete_memo_s2',)),
-        _variant('hanging_indent', None, 'marker_text at the paragraph start', 'qualified_unaffected', evidence=('layout_hanging',)),
+                 'qualified', evidence=('layout_section_delete', 'layout_section_delete_memo_s1', 'layout_section_delete_memo_s2', 'e2_layout_section_delete_undo_redo')),
+        _variant('hanging_indent', None, 'marker_text at the paragraph start', 'qualified', evidence=('layout_hanging', 'e2_layout_hanging_undo_redo')),
     ],
     'object_insert_exact': [
-        _variant('footnote', None, 'text at the caret', 'qualified', evidence=('object_footnote',)),
+        _variant('footnote', None, 'text at the caret', 'qualified', evidence=('object_footnote', 'e2_footnote_undo_redo_then_edit')),
         _variant('endnote', None, 'text at the caret', 'qualified', evidence=('object_endnote',)),
-        _variant('memo', None, 'text at the caret, no selection', 'qualified', evidence=('object_memo',)),
+        _variant('memo', None, 'text at the caret, no selection', 'qualified', evidence=('object_memo', 'e2_memo_undo_refused')),
         _variant('memo', 'selection', 'text on a live selection', 'not_qualified'),
-        _variant('hyperlink', None, 'url on the live selection of display_text', 'qualified', evidence=('object_hyperlink',)),
-        _variant('bookmark', None, 'new name at the caret', 'qualified', evidence=('object_bookmark',)),
-        _variant('equation', None, 'script at the caret', 'qualified', evidence=('object_equation',)),
-        _variant('line', 'horizontal_inline', f'height_mm 0, treat_as_char true; {_SHAPE_DRAWN}', 'qualified', evidence=('object_line_h_inline', 'line_diagonal_refusal_continue',)),
+        _variant('hyperlink', None, 'url on the live selection of display_text', 'qualified', evidence=('object_hyperlink', 'e2_hyperlink_undo_refused')),
+        _variant('bookmark', None, 'new name at the caret', 'qualified', evidence=('object_bookmark', 'e2_bookmark_undo_redo')),
+        _variant('equation', None, 'script at the caret', 'qualified', evidence=('object_equation', 'e2_equation_undo_redo')),
+        _variant('line', 'horizontal_inline', f'height_mm 0, treat_as_char true; {_SHAPE_DRAWN}', 'qualified', evidence=('object_line_h_inline', 'line_diagonal_refusal_continue', 'e2_line_undo_redo')),
         _variant('line', 'horizontal_floating', f'height_mm 0, treat_as_char false; {_SHAPE_DRAWN}', 'qualified', evidence=('object_line_h_floating',)),
         _variant('line', 'vertical_inline', f'width_mm 0, treat_as_char true; {_SHAPE_DRAWN}', 'qualified', evidence=('object_line_v_inline',)),
         _variant('line', 'vertical_floating', f'width_mm 0, treat_as_char false; {_SHAPE_DRAWN}', 'qualified', evidence=('object_line_v_floating',)),
@@ -178,12 +186,28 @@ VARIANTS: dict[str, list[dict[str, Any]]] = {
         _variant('rectangle', 'floating', f'treat_as_char false; {_SHAPE_DRAWN}', 'qualified', evidence=('object_rectangle_floating',)),
         _variant('ellipse', 'inline', f'treat_as_char true; {_SHAPE_DRAWN}', 'qualified', evidence=('object_ellipse_inline',)),
         _variant('ellipse', 'floating', f'treat_as_char false; {_SHAPE_DRAWN}', 'qualified', evidence=('object_ellipse_floating',)),
-        _variant('header', 'both', 'apply_to both', 'qualified', evidence=('object_header_both', 'object_header_both_p1',)),
+        _variant('header', 'both', 'apply_to both', 'qualified', evidence=('object_header_both', 'object_header_both_p1', 'e2_header_undo_redo')),
         _variant('header', 'odd', 'apply_to odd', 'qualified', evidence=('object_header_odd', 'object_header_odd_p1',)),
         _variant('header', 'even', 'apply_to even', 'not_qualified'),
         _variant('footer', 'both', 'apply_to both', 'qualified', evidence=('object_footer_both',)),
         _variant('footer', 'odd', 'apply_to odd', 'not_qualified'),
         _variant('footer', 'even', 'apply_to even', 'qualified', evidence=('object_footer_even',)),
+    ],
+    'text_replace_exact': [
+        _variant('body', 'single_format', 'one range of one character format in a body paragraph, found by text, match, occurrence or paragraph',
+                 'qualified', evidence=('e1_demo_annual_plan', 'e1_text_cases')),
+        _variant('body', 'last_character', 'a range over several character formats with format_from last_character', 'qualified', evidence=('e1_text_cases',)),
+        _variant('body', 'mixed_formats', 'a range over several character formats without format_from', 'unsupported', refusal_code='target_mixed_format'),
+        _variant('table_cell', None, 'one range in a table cell paragraph', 'qualified', evidence=('e1_text_cases',)),
+        _variant('other_context', None, 'text in a text box, caption or note', 'unsupported', refusal_code='target_unsupported_context'),
+        _variant('header_footer', None, 'text in a header or footer', 'unsupported', refusal_code='target_in_header_footer'),
+    ],
+    'table_cell_text_exact': [
+        _variant('single_paragraph', None, 'the whole text of cells of one paragraph and one character format', 'qualified', evidence=('e1_demo_annual_plan', 'e1_cell_cases')),
+        _variant('blank', None, 'a blank cell', 'qualified', evidence=('e1_cell_cases',)),
+        _variant('multi_paragraph', None, 'a cell of several paragraphs', 'unsupported', refusal_code='cell_multi_paragraph'),
+        _variant('mixed_format', None, 'a cell with text in several character formats', 'unsupported', refusal_code='cell_mixed_format'),
+        _variant('objects', None, 'a cell holding a table, picture or other object', 'unsupported', refusal_code='cell_has_objects'),
     ],
 }
 for _op, _variants in VARIANTS.items():

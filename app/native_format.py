@@ -43,6 +43,7 @@ from app.native_numbering import (
     _read_target_state,
     _sdk_read,
     _reject_unknown_keys,
+    _validated_census,
     _require_confirm_layout,
     _require_motion_result,
     _set_pos,
@@ -1125,6 +1126,50 @@ def _paragraph_problems(before: Mapping[str, Any], after: Mapping[str, Any], row
 def state_digest(evidence: Mapping[str, Any]) -> str:
     """One value for what Undo and Redo are compared with, so a later history step can say whether it reached this state."""
     return hashlib.sha256(json.dumps(evidence, ensure_ascii=False, sort_keys=True, default=list).encode('utf-8', 'surrogatepass')).hexdigest()
+
+
+# Measured on Hancom 2024: Redo of an inserted line, rectangle, ellipse or equation brings it back with a new instance id or z-order,
+# and of a header or footer with a new series number; nothing else differed. These alone are left out of the tolerant digest.
+RENEWED_ATTRIBUTES = frozenset({'instid', 'zorder', 'seriesnum'})
+
+
+def renewal_free_digest(text: Any, controls: list[str]) -> str | None:
+    """The state digest of this exact HWPML2X text with the renewed identity attributes left out; None when it is no evidence."""
+    if type(text) is not str or len(text) > MAX_HWPML_CHARS or _DOCTYPE.search(text):
+        return None
+    try:
+        root = ET.fromstring(text)
+    except ET.ParseError:
+        return None
+    for element in root.iter():
+        for key in [key for key in element.attrib if key.rsplit('}', 1)[-1].lower() in RENEWED_ATTRIBUTES]:
+            del element.attrib[key]
+    try:
+        census = _validated_census(parse_hwpml2x_census(ET.tostring(root, encoding='unicode')))
+    except (CensusError, RuntimeError):
+        return None
+    if census['paragraphs'] is None:
+        return None
+    return state_digest(evidence_of(census, controls))
+
+
+def history_state(text: Any, read_controls: Callable[[], list[str]]) -> dict[str, str] | None:
+    """What `hwpx undo` and `redo` compare this document with, from this exact text and the control walk, or None when the
+    document cannot be such evidence: an unusable census, or a control walk that returns values it will not read further."""
+    try:
+        census = _validated_census(parse_hwpml2x_census(text))
+    except (CensusError, RuntimeError):
+        return None
+    if census['paragraphs'] is None:
+        return None
+    try:
+        controls = read_controls()
+    except ControlEnumerationUnproven:
+        return None
+    renewal_free = renewal_free_digest(text, controls)
+    if renewal_free is None:
+        return None
+    return {'sha': state_digest(evidence_of(census, controls)), 'renewal_free_sha': renewal_free}
 
 
 def _read(hwp: Any, read: Callable[[], Mapping[str, Any]]) -> dict[str, Any]:

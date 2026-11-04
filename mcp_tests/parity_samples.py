@@ -122,6 +122,11 @@ BUNDLE_SAMPLES: dict[str, list[dict]] = {
     'table_width_exact': [{'table_id': 'tbl:1011', 'expected_hash': 'sha256:' + 'b' * 24, 'expected_page': 1, 'expected_rows': 2,
                            'expected_cols': 2, 'fit': 'text_width', 'confirm_layout': True}],
     'table_create_exact': [{'match': '기준', 'expected_page': 1, 'rows': 2, 'cols': 2, 'confirm_layout': True}],
+    'text_replace_exact': [{'match': 'Annual Plan 2025', 'old_text': '2025', 'new_text': '2026', 'expected_page': 1, 'confirm_layout': True},
+                           {'old_text': 'draft', 'new_text': 'final', 'occurrence': 2, 'expected_occurrences': 3, 'format_from': 'last_character', 'expected_page': 1, 'confirm_layout': True},
+                           {'paragraph_index': 4, 'expected_text': 'Status: draft', 'old_text': 'draft', 'new_text': 'final', 'expected_page': 1, 'confirm_layout': True}],
+    'table_cell_text_exact': [{'table_id': 'tbl:1011', 'expected_hash': 'sha256:' + 'b' * 24, 'expected_page': 1, 'expected_rows': 3, 'expected_cols': 3,
+                               'cells': [{'address': 'B2', 'expected_text': '1,200', 'text': '1,350'}, {'address': 'C1', 'expected_text': '', 'text': 'Filled'}], 'confirm_layout': True}],
 }
 
 # Requests MCP must refuse before any backend call: allowlists and typed limits.
