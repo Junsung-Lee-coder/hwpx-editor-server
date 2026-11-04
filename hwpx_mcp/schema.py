@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from typing import Annotated, Any, Literal, Union
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 from app.models import CellMarginsGetRequest
 from hwpx_mcp import job_schema as jobs
@@ -404,24 +404,29 @@ class TextReplaceStep(Closed):
 
     @model_validator(mode='after')
     def require_one_exact_target(self):
-        _one_line(self.old_text, 'old_text')
-        _one_line(self.new_text, 'new_text')
-        if self.new_text == self.old_text:
-            raise ValueError('new_text is the same as old_text')
-        if (self.occurrence is None) != (self.expected_occurrences is None):
-            raise ValueError('occurrence and expected_occurrences go together')
-        if self.occurrence is not None and self.occurrence > self.expected_occurrences:
-            raise ValueError('occurrence cannot be greater than expected_occurrences')
-        if self.paragraph_index is not None or self.expected_text is not None:
-            if self.match is not None:
-                raise ValueError('give match, or paragraph_index with expected_text, not both')
-            if self.paragraph_index is None or self.expected_text is None:
-                raise ValueError('paragraph_index and expected_text go together')
-        elif self.match is not None:
-            _one_line(self.match, 'match')
-            if sum(self.match.startswith(self.old_text, offset) for offset in range(len(self.match))) != 1:
-                raise ValueError('match must contain old_text exactly once')
-        return self
+        return _exact_text_target(self)
+
+
+def _exact_text_target(step):
+    """One exact range of text, as text_replace_exact and header_footer_text_exact both take it."""
+    _one_line(step.old_text, 'old_text')
+    _one_line(step.new_text, 'new_text')
+    if step.new_text == step.old_text:
+        raise ValueError('new_text is the same as old_text')
+    if (step.occurrence is None) != (step.expected_occurrences is None):
+        raise ValueError('occurrence and expected_occurrences go together')
+    if step.occurrence is not None and step.occurrence > step.expected_occurrences:
+        raise ValueError('occurrence cannot be greater than expected_occurrences')
+    if step.paragraph_index is not None or step.expected_text is not None:
+        if step.match is not None:
+            raise ValueError('give match, or paragraph_index with expected_text, not both')
+        if step.paragraph_index is None or step.expected_text is None:
+            raise ValueError('paragraph_index and expected_text go together')
+    elif step.match is not None:
+        _one_line(step.match, 'match')
+        if sum(step.match.startswith(step.old_text, offset) for offset in range(len(step.match))) != 1:
+            raise ValueError('match must contain old_text exactly once')
+    return step
 
 
 class CellText(Closed):
@@ -480,9 +485,83 @@ class Reconcile(Closed):
     command_id: Annotated[str, Field(min_length=1, max_length=128, pattern=r'^[a-zA-Z0-9_.:-]+$')]
 
 
+AreaHash = Annotated[str, Field(pattern=r'^sha256:[0-9a-f]{24}$', description='The hash header_footer_inventory reported for this area.')]
+
+
+class HeaderFooterInventoryStep(Closed):
+    op: Literal['header_footer_inventory']
+    label: Label = 'mcp:header-footer-inventory'
+
+
+class _AreaBinding(Closed):
+    """One existing header or footer: its kind, its section and the pages it applies to, as header_footer_inventory lists them, with its hash."""
+    kind: Literal['header', 'footer']
+    section: int = Field(ge=0, le=10000, description='The section number header_footer_inventory gives, from 0. A section without its own area is refused, naming the section whose area it shows.')
+    apply_to: Literal['both', 'odd', 'even'] = Field(description='The pages the area applies to: both (every page), odd or even.')
+    expected_area_hash: AreaHash
+    confirm_layout: Literal[True]
+
+
+class HeaderFooterTextStep(_AreaBinding):
+    op: Literal['header_footer_text_exact']
+    label: Label = 'mcp:header-footer-text-exact'
+    old_text: Annotated[str, Field(min_length=1, max_length=500)] = Field(description='The exact current text to replace inside this area, on one line. A page number field cannot be inside it.')
+    new_text: Annotated[str, Field(min_length=1, max_length=2000)] = Field(description='The text that takes its place, on one line. It takes the format of the replaced text.')
+    match: Annotated[str, Field(min_length=1, max_length=500)] | None = Field(default=None, description='Longer text of this area around old_text that holds it exactly once.')
+    occurrence: int | None = Field(default=None, ge=1, le=10000, description='Which occurrence inside this area, counted from 1; with expected_occurrences.')
+    expected_occurrences: int | None = Field(default=None, ge=1, le=10000, description='How many occurrences this area has now.')
+    paragraph_index: int | None = Field(default=None, ge=0, le=100000, description='The paragraph inside this area, as header_footer_inventory numbers them, with expected_text.')
+    expected_text: Annotated[str, Field(max_length=4000)] | None = Field(default=None, description="That paragraph's whole current text, with paragraph_index.")
+    format_from: Literal['replaced_text', 'last_character'] = Field(default='replaced_text', description='As text_replace_exact: replaced_text needs one format over the replaced text; last_character takes the last replaced character\'s format.')
+
+    @model_validator(mode='after')
+    def require_one_exact_target(self):
+        return _exact_text_target(self)
+
+
+class HeaderFooterFormatStep(_AreaBinding):
+    op: Literal['header_footer_format_exact']
+    label: Label = 'mcp:header-footer-format-exact'
+    match: Annotated[str, Field(min_length=1, max_length=500)] | None = Field(default=None, description='Text of this area that occurs in it exactly once, inside one paragraph.')
+    paragraph_index: int | None = Field(default=None, ge=0, description='A whole paragraph of this area, as header_footer_inventory numbers them, with expected_text.')
+    expected_text: Annotated[str, Field(max_length=4000)] | None = None
+    font_family: Annotated[str, Field(min_length=1, max_length=64, pattern=r'^[^@\s](.*\S)?$')] | None = None
+    size_pt: float | None = Field(default=None, ge=0.1, le=4096.0, description='Points, in steps of 0.1.')
+    bold: bool | None = None
+    italic: bool | None = None
+    underline: bool | None = None
+    text_color: Annotated[str, Field(pattern=r'^#[0-9A-Fa-f]{6}$')] | None = Field(default=None, description='#RRGGBB.')
+    align: Literal['left', 'center', 'right', 'justify'] | None = None
+    left_indent_pt: float | None = Field(default=None, ge=0.0, le=570.2)
+    right_indent_pt: float | None = Field(default=None, ge=0.0, le=570.2)
+    first_line_indent_pt: float | None = Field(default=None, ge=-570.2, le=570.2)
+    line_spacing_type: Literal['percent', 'fixed', 'between_lines', 'at_least'] | None = None
+    line_spacing_value: float | None = Field(default=None, ge=0.0, le=841.8)
+
+    @model_validator(mode='after')
+    def require_target_and_property(self):
+        """The body commands' own rules for each kind of property, over the same target."""
+        target = {key: value for key in ('match', 'paragraph_index', 'expected_text') if (value := getattr(self, key)) is not None}
+        character = {key: value for key in ('font_family', 'size_pt', 'bold', 'italic', 'underline', 'text_color') if (value := getattr(self, key)) is not None}
+        paragraph = {key: value for key in ('align', 'left_indent_pt', 'right_indent_pt', 'first_line_indent_pt', 'line_spacing_type', 'line_spacing_value')
+                     if (value := getattr(self, key)) is not None}
+        if not character and not paragraph:
+            raise ValueError('header_footer_format_exact needs at least one character or paragraph property')
+        common = {**target, 'expected_page': 1, 'confirm_layout': True}
+        try:
+            if character:
+                CharacterFormatStep.model_validate({'op': 'character_format_exact', **common, **character})
+            if paragraph:
+                ParagraphFormatStep.model_validate({'op': 'paragraph_format_exact', **common, **paragraph})
+        except ValidationError as exc:
+            raise ValueError('; '.join(str(item.get('msg')) for item in exc.errors())) from None
+        return self
+
+
 _EXACT_STEPS = (ContextStep, SelectionStep, ReadbackStep, CellFormatStep, PageNumberStep, OfficialNumberingStep, ParagraphInsertStep,
                 ParagraphRemoveStep, CharacterFormatStep, ParagraphFormatStep, TableInventoryStep, TableReadStep, TableEditStep,
-                TableStyleStep, TableWidthStep, TableCreateStep, TextReplaceStep, TableCellTextStep)
+                TableStyleStep, TableWidthStep, TableCreateStep, TextReplaceStep, TableCellTextStep, HeaderFooterInventoryStep,
+                HeaderFooterTextStep, HeaderFooterFormatStep)
 # One command-bundle step: every backend bundle op MCP exposes (hwpx_mcp/parity.py BUNDLE_OPS).
 BundleStep = Annotated[Union[(*_EXACT_STEPS, *ops.NEW_BUNDLE_STEPS)], Field(discriminator='op')]
 _REST_STEPS = tuple(model for _path, model in ops.REST_OPS.values())

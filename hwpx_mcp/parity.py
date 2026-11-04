@@ -71,6 +71,13 @@ BUNDLE_OPS: dict[str, dict[str, Any]] = {
     'table_cell_text_exact': _exposed(SESSION_TOOLS, note='the whole text of cells of one table bound by table_id+expected_hash, each with its '
                                                           'expected current text; returns the next binding; ' + _UNDO_COUNTED +
                                                           '; measured on Hancom 2024 up to the 100-cell maximum (200 native Undo steps, then as many Redo)'),
+    'header_footer_inventory': _exposed(SESSION_TOOLS, note='read-only list of the existing headers and footers: section, apply_to (both, odd or even pages), '
+                                                            'text, format, page number fields, the sections that show each, and the hash that binds it'),
+    'header_footer_text_exact': _exposed(SESSION_TOOLS, note='one exact range of the text of one existing header or footer bound by kind+section+apply_to+'
+                                                             'expected_area_hash, in the replaced text\'s format; its page number fields, the body and every other '
+                                                             'area stay; returns the next hash; ' + _UNDO_COUNTED),
+    'header_footer_format_exact': _exposed(SESSION_TOOLS, note='character format of exact text and paragraph format of its paragraph in one existing header or '
+                                                               'footer, bound as header_footer_text_exact; ' + _UNDO_COUNTED),
     'control_inventory': _exposed(SESSION_TOOLS, note='read-only native control list with target_id/expected_hash'),
     'table_frame_inventory': _exposed(SESSION_TOOLS, note='read-only table frame list'),
     'exact_control_select_proof': _exposed(SESSION_TOOLS, note='read-only selection proof of one control'),
@@ -119,7 +126,8 @@ BUNDLE_OPS: dict[str, dict[str, Any]] = {
 # exposed op reports a backend error as an unknown outcome that holds the session.
 GUARDED = frozenset({'page_number_apply', 'official_numbering_apply', 'paragraph_insert_exact', 'paragraph_remove_exact',
                      'character_format_exact', 'paragraph_format_exact', 'table_inventory', 'table_read', 'table_edit_exact',
-                     'table_style_exact', 'table_width_exact', 'table_create_exact', 'text_replace_exact', 'table_cell_text_exact'})
+                     'table_style_exact', 'table_width_exact', 'table_create_exact', 'text_replace_exact', 'table_cell_text_exact',
+                     'header_footer_inventory', 'header_footer_text_exact', 'header_footer_format_exact'})
 # Ops that publish mutation intent at their first native edit (app.step_refusal.DEFERRED_INTENT_OPS): before it they
 # refuse with a fixed refusal_code only from their own exact reads; anything else holds the session.
 DEFERRED = frozenset({'layout_exact', 'object_insert_exact', 'paragraph_rehome_exact'})
@@ -225,7 +233,31 @@ VARIANTS: dict[str, list[dict[str, Any]]] = {
         _variant('body', 'mixed_formats', 'a range over several character formats without format_from', 'unsupported', refusal_code='target_mixed_format'),
         _variant('table_cell', None, 'one range in a table cell paragraph', 'qualified_unaffected', evidence=('text_replace_cases',)),
         _variant('other_context', None, 'text in a text box, caption or note', 'unsupported', refusal_code='target_unsupported_context'),
-        _variant('header_footer', None, 'text in a header or footer', 'unsupported', refusal_code='target_in_header_footer'),
+        _variant('header_footer', None, 'text in a header or footer: header_footer_text_exact edits it', 'unsupported', refusal_code='target_in_header_footer'),
+    ],
+    'header_footer_text_exact': [
+        _variant('area', 'both', 'one range of one character format in the header or footer for every page of a section', 'qualified',
+                 evidence=('hf_text_header_both', 'hf_text_footer_page_field'), undo='counted', undo_steps=2, undo_evidence=('undo_hf_text',)),
+        _variant('area', 'odd_even', 'one range in the odd-page or even-page header or footer of a section, the other one untouched', 'qualified',
+                 evidence=('hf_text_odd_section',), undo='counted', undo_steps=2, undo_evidence=('undo_hf_text',)),
+        _variant('area', 'inherited', 'a section without its own area of this kind: refused, naming the section whose area it shows', 'unsupported',
+                 refusal_code='area_inherited', **_NOT_APPLICABLE),
+        _variant('area', 'missing_scope', 'a page scope the section does not define, or no such area at all', 'unsupported', refusal_code='area_not_found', **_NOT_APPLICABLE),
+        _variant('area', 'duplicate_scope', 'two areas of one kind for the same pages of one section', 'unsupported', refusal_code='area_ambiguous', **_NOT_APPLICABLE),
+        _variant('area', 'stale', 'an area changed since header_footer_inventory', 'unsupported', refusal_code='area_hash_mismatch', **_NOT_APPLICABLE),
+        _variant('range', 'page_number_field', 'a range over the page number field', 'unsupported', refusal_code='target_crosses_control', **_NOT_APPLICABLE),
+        _variant('range', 'mixed_formats', 'a range over several character formats without format_from', 'unsupported', refusal_code='target_mixed_format', **_NOT_APPLICABLE),
+        _variant('range', 'inside_object', 'text in a table or text box inside the header or footer', 'unsupported', refusal_code='target_unsupported_context', **_NOT_APPLICABLE),
+    ],
+    'header_footer_format_exact': [
+        _variant('character', None, 'bold, italic, underline, size, color or font over one exact range of one header or footer paragraph', 'qualified',
+                 evidence=('hf_format_header',), undo='counted', undo_steps=1, undo_evidence=('undo_hf_format',)),
+        _variant('paragraph', None, 'alignment, indents or line spacing of one header or footer paragraph', 'qualified',
+                 evidence=('hf_format_even_paragraph',), undo='counted', undo_steps=1, undo_evidence=('undo_hf_format',)),
+        _variant('both', None, 'character and paragraph properties in one step: two native actions, one counted undo of both', 'qualified',
+                 evidence=('hf_format_header',), undo='counted', undo_steps=2, undo_evidence=('undo_hf_format',)),
+        _variant('area', 'inherited', 'a section without its own area of this kind', 'unsupported', refusal_code='area_inherited', **_NOT_APPLICABLE),
+        _variant('range', 'page_number_field', 'a range over the page number field', 'unsupported', refusal_code='target_crosses_control', **_NOT_APPLICABLE),
     ],
     'table_cell_text_exact': [
         _variant('single_paragraph', None, 'the whole text of cells of one paragraph and one character format, a merged range by its anchor cell',

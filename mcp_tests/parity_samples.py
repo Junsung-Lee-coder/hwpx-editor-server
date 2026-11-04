@@ -125,6 +125,13 @@ BUNDLE_SAMPLES: dict[str, list[dict]] = {
     'text_replace_exact': [{'match': 'Annual Plan 2025', 'old_text': '2025', 'new_text': '2026', 'expected_page': 1, 'confirm_layout': True},
                            {'old_text': 'draft', 'new_text': 'final', 'occurrence': 2, 'expected_occurrences': 3, 'format_from': 'last_character', 'expected_page': 1, 'confirm_layout': True},
                            {'paragraph_index': 4, 'expected_text': 'Status: draft', 'old_text': 'draft', 'new_text': 'final', 'expected_page': 1, 'confirm_layout': True}],
+    'header_footer_inventory': [{}],
+    'header_footer_text_exact': [{'kind': 'header', 'section': 0, 'apply_to': 'both', 'expected_area_hash': 'sha256:' + 'c' * 24, 'confirm_layout': True, 'old_text': 'SAMPLE', 'new_text': 'UPDATED'},
+                                 {'kind': 'footer', 'section': 1, 'apply_to': 'odd', 'expected_area_hash': 'sha256:' + 'd' * 24, 'confirm_layout': True,
+                                  'old_text': 'draft', 'new_text': 'final', 'occurrence': 2, 'expected_occurrences': 2, 'format_from': 'last_character'}],
+    'header_footer_format_exact': [{'kind': 'header', 'section': 0, 'apply_to': 'both', 'expected_area_hash': 'sha256:' + 'c' * 24, 'confirm_layout': True, 'match': 'REPORT', 'bold': True, 'text_color': '#C00000', 'align': 'center'},
+                                   {'kind': 'header', 'section': 1, 'apply_to': 'even', 'expected_area_hash': 'sha256:' + 'e' * 24, 'confirm_layout': True,
+                                    'paragraph_index': 0, 'expected_text': 'EVEN HEADER 2025', 'line_spacing_type': 'percent', 'line_spacing_value': 150}],
     'table_cell_text_exact': [{'table_id': 'tbl:1011', 'expected_hash': 'sha256:' + 'b' * 24, 'expected_page': 1, 'expected_rows': 3, 'expected_cols': 3,
                                'cells': [{'address': 'B2', 'expected_text': '1,200', 'text': '1,350'}, {'address': 'C1', 'expected_text': '', 'text': 'Filled'}], 'confirm_layout': True}],
 }

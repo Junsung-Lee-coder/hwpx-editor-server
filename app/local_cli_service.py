@@ -120,6 +120,7 @@ from app.local_cli_cell_margins import LocalCliCellMarginsMixin
 from app.local_cli_table_structure import LocalCliTableStructureMixin
 from app.local_cli_layout import LocalCliLayoutMixin
 from app.local_cli_object_insert import LocalCliObjectInsertMixin
+from app.local_cli_bundle_header_footer import LocalCliBundleHeaderFooterMixin
 from app.local_cli_bundle_text import LocalCliBundleTextMixin
 from app.media_guard import MediaGuardError, media_change_reasons, media_inventory, public_counts
 
@@ -149,6 +150,10 @@ _BUNDLE_UNDO_POLICY: dict[str, str] = {
     # Measured: the new text is inserted and the old range deleted, one Undo step each; a blank cell takes only the insertion.
     'text_replace_exact': 'counted_native_edit',
     'table_cell_text_exact': 'counted_any_native_edit',
+    # Measured inside a header or footer list as in the body: insertion and deletion are one Undo step each, and so are CharShape
+    # and ParagraphShape over a block; a value already present issues none.
+    'header_footer_text_exact': 'counted_native_edit',
+    'header_footer_format_exact': 'counted_native_edit',
     'table_structure_exact': 'single_native_edit',
     # One native action is one counted Undo; a definition plus a paragraph write is not one step and refuses.
     'official_numbering_apply': 'single_native_edit',
@@ -175,6 +180,7 @@ _GUARDED_BUNDLE_OPS = frozenset({
     'character_format_exact', 'paragraph_format_exact',
     'table_inventory', 'table_read', 'table_edit_exact', 'table_style_exact',
     'table_width_exact', 'table_create_exact', 'text_replace_exact', 'table_cell_text_exact',
+    'header_footer_inventory', 'header_footer_text_exact', 'header_footer_format_exact',
 })
 _COUNTED_POLICIES = frozenset({'counted_native_edit', 'counted_any_native_edit', 'counted_state_edit'})
 
@@ -327,6 +333,7 @@ class LocalCliService(
     LocalCliObjectInsertMixin,
     LocalCliLayoutMixin,
     LocalCliBundleTextMixin,
+    LocalCliBundleHeaderFooterMixin,
 ):
     def __init__(self, *, settings: Any, interactive_sessions: Any):
         self.settings = settings
@@ -1559,7 +1566,7 @@ class LocalCliService(
                     )
                 if step.get('op') in {'character_format_exact', 'paragraph_format_exact'} and all(key in raw_result for key in ('target', 'requested', 'result')):
                     result.update(native_format.public_report(raw_result))
-                if step.get('op') in {'table_inventory', 'table_read', 'table_edit_exact', 'table_style_exact', 'table_width_exact', 'table_create_exact', 'text_replace_exact', 'table_cell_text_exact'}:
+                if step.get('op') in {'table_inventory', 'table_read', 'table_edit_exact', 'table_style_exact', 'table_width_exact', 'table_create_exact', 'text_replace_exact', 'table_cell_text_exact', 'header_footer_inventory', 'header_footer_text_exact', 'header_footer_format_exact'}:
                     # The caller asked for these values and they are bounded where they are built; the journal copy stays bounded and redacted.
                     result.update(raw_result)
                 step['result'] = result
@@ -2924,6 +2931,12 @@ class LocalCliService(
             'table_create_exact': {'cells', 'cols', 'confirm_layout', 'operation', 'rows', 'op', 'expected_page', 'label', 'match'},
             'text_replace_exact': {'op', 'operation', 'label', 'old_text', 'new_text', 'match', 'occurrence', 'expected_occurrences', 'paragraph_index', 'expected_text', 'expected_page', 'format_from', 'confirm_layout'},
             'table_cell_text_exact': {'op', 'operation', 'label', 'table_id', 'expected_hash', 'expected_page', 'expected_rows', 'expected_cols', 'cells', 'confirm_layout'},
+            'header_footer_inventory': {'op', 'label', 'operation'},
+            'header_footer_text_exact': {'op', 'operation', 'label', 'kind', 'section', 'apply_to', 'expected_area_hash', 'old_text', 'new_text', 'match', 'occurrence',
+                                         'expected_occurrences', 'paragraph_index', 'expected_text', 'format_from', 'confirm_layout'},
+            'header_footer_format_exact': {'op', 'operation', 'label', 'kind', 'section', 'apply_to', 'expected_area_hash', 'match', 'paragraph_index', 'expected_text', 'confirm_layout',
+                                           'font_family', 'size_pt', 'bold', 'italic', 'underline', 'text_color', 'align', 'left_indent_pt', 'right_indent_pt', 'first_line_indent_pt',
+                                           'line_spacing_type', 'line_spacing_value'},
             'character_format_exact': {'op', 'operation', 'label', 'match', 'through_match', 'paragraph_index', 'expected_text', 'expected_page', 'confirm_layout', 'number_mark', 'font_family', 'size_pt', 'bold', 'italic', 'underline', 'text_color'},
             'paragraph_format_exact': {'op', 'operation', 'label', 'match', 'through_match', 'paragraph_index', 'expected_text', 'expected_page', 'confirm_layout', 'align', 'left_indent_pt', 'right_indent_pt', 'first_line_indent_pt', 'line_spacing_type', 'line_spacing_value'},
             'paragraph_delete_exact': {
@@ -7352,7 +7365,7 @@ class LocalCliService(
                         error_text = f'Refused before any edit ({step_refusal_code}); the document is unchanged and the caret is put back; an existing selection may be cleared.'
                     elif target_refused:
                         error_text = ('Formatting refused before any edit; original state and preservation verified.' if step.get('op') in {'character_format_exact', 'paragraph_format_exact', 'table_inventory', 'table_read', 'table_edit_exact', 'table_style_exact', 'table_width_exact', 'table_create_exact'}
-                                      else 'Edit refused before any change; original state and preservation verified.' if step.get('op') in {'text_replace_exact', 'table_cell_text_exact'}
+                                      else 'Edit refused before any change; original state and preservation verified.' if step.get('op') in {'text_replace_exact', 'table_cell_text_exact', 'header_footer_inventory', 'header_footer_text_exact', 'header_footer_format_exact'}
                                       else 'Numbering preflight refused; original state and preservation verified.')
                     rollback = {}
                     if not step_refused and (type(exc) is LocalCliMutationError or type(exc) is LocalCliRuntimeError):
@@ -7383,7 +7396,7 @@ class LocalCliService(
                             'rollback': rollback,
                         },
                     }
-                    if type(exc) is LocalCliMutationError and step.get('op') in {'table_edit_exact', 'table_style_exact', 'table_width_exact', 'table_create_exact', 'text_replace_exact', 'table_cell_text_exact'}:
+                    if type(exc) is LocalCliMutationError and step.get('op') in {'table_edit_exact', 'table_style_exact', 'table_width_exact', 'table_create_exact', 'text_replace_exact', 'table_cell_text_exact', 'header_footer_text_exact', 'header_footer_format_exact'}:
                         # These messages name cells and properties, never document text, and say why the outcome is not proven.
                         status['outcome_detail'] = error_text[:800]
                     if step_refused and not mutation_may_have_persisted:
@@ -7393,7 +7406,7 @@ class LocalCliService(
                         status['refusal_code'] = (exc.code if type(exc) is _NumberingSemanticRefusal or type(exc) is _NumberingCleanRefusal
                                                   else _native_diagnostic('bundle_step', exc)['refusal_code'])
                         args = BaseException.__dict__['args'].__get__(exc)
-                        if step.get('op') in {'character_format_exact', 'paragraph_format_exact', 'page_number_apply', 'table_inventory', 'table_read', 'table_edit_exact', 'table_style_exact', 'table_width_exact', 'table_create_exact', 'text_replace_exact', 'table_cell_text_exact'} and type(args) is tuple and len(args) == 1 and type(args[0]) is str:
+                        if step.get('op') in {'character_format_exact', 'paragraph_format_exact', 'page_number_apply', 'table_inventory', 'table_read', 'table_edit_exact', 'table_style_exact', 'table_width_exact', 'table_create_exact', 'text_replace_exact', 'table_cell_text_exact', 'header_footer_inventory', 'header_footer_text_exact', 'header_footer_format_exact'} and type(args) is tuple and len(args) == 1 and type(args[0]) is str:
                             status['refusal_message'] = args[0][:400]
                         if type(exc) is NativeNumberingRefusal:
                             found_page = BaseException.__dict__['__dict__'].__get__(exc).get('found_page')
