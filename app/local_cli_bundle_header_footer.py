@@ -29,10 +29,10 @@ class LocalCliBundleHeaderFooterMixin:
                 model = native_format.parse_format_model(source)
                 areas = native_header_footer.parse_areas(source)
             except (LocalCliRuntimeError, native_numbering_census.CensusError) as exc:
-                raise native_numbering.NativeNumberingRefusal('Document preservation evidence is unusable before the edit.', code='preservation_unprovable') from exc
+                raise native_numbering.NativeNumberingReadFailure('Document preservation evidence is unusable; no further native call is permitted.', code='preservation_unprovable') from exc
             census = native_numbering._validated_census(raw)  # noqa: SLF001
             if census['paragraphs'] is None or census['definitions'] is None:
-                raise native_numbering.NativeNumberingRefusal('Document preservation evidence is unusable before the edit.', code='preservation_unprovable')
+                raise native_numbering.NativeNumberingReadFailure('Document preservation evidence is unusable; no further native call is permitted.', code='preservation_unprovable')
             return {'census': census, 'model': model, 'areas': areas}
 
         return read
@@ -47,7 +47,7 @@ class LocalCliBundleHeaderFooterMixin:
             source = native_numbering._sdk_read(lambda: hwp.get_text_file('HWPML2X', ''))  # noqa: SLF001
             model = native_header_footer.parse_areas(source)
         except native_numbering_census.CensusError as exc:
-            raise native_numbering.NativeNumberingRefusal('The document text could not be read as headers and footers.', code='preservation_unprovable') from exc
+            raise native_numbering.NativeNumberingReadFailure('The document text could not be read as headers and footers.', code='preservation_unprovable') from exc
         return {'schema_version': 'local-cli/header-footer-inventory/v1', 'read_only': True, **native_header_footer.inventory(model), 'warnings': []}
 
     def _header_footer_mutation(self, hwp: Any, step: dict[str, Any], *, validate: Callable[[dict[str, Any]], dict[str, Any]], apply: Callable[..., dict[str, Any]],

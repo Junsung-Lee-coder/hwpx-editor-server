@@ -25,14 +25,14 @@ from app.native_numbering import (
     NativeNumberingInputError,
     NativeNumberingMutationError,
     NativeNumberingRefusal,
+    NativeNumberingReadFailure,
     _STEP_ENVELOPE_KEYS,
     _MutationReach,
     _action_confirmed,
-    _get_pos,
-    _get_selection,
+    _get_pos as _native_pos,
+    _get_selection as _native_selection,
     _multiset_delta,
     _native_method,
-    _read_target_state,
     _reject_unknown_keys,
     _require_confirm_layout,
     _sdk_read,
@@ -256,14 +256,70 @@ def resolve_area(model: Mapping[str, Any], request: Mapping[str, Any]) -> dict[s
     return found[0]
 
 
-# The native list.
+# The native list. An entered malformed read is not a target refusal: it stops before restoration or diagnostics.
+
+def _get_pos(hwp: Any) -> tuple[int, int, int]:
+    try:
+        return _native_pos(hwp)
+    except NativeNumberingRefusal as exc:
+        raise NativeNumberingReadFailure('native area caret is not canonical', code='target_unlocatable') from exc
+
+
+def _get_selection(hwp: Any) -> tuple[int, ...]:
+    value = _native_selection(hwp)
+    if value is None:
+        raise NativeNumberingReadFailure('native area selection is not canonical', code='selection_unverified')
+    return value
+
+
+def _state(hwp: Any) -> tuple[tuple[int, int, int], tuple[int, ...]]:
+    caret = _get_pos(hwp)
+    selection = _get_selection(hwp)
+    if _get_pos(hwp) != caret:
+        raise NativeNumberingReadFailure('native area caret drifted during its read', code='selection_unverified')
+    return caret, selection
+
+
+def _cancel(hwp: Any) -> None:
+    if _sdk_read(lambda: hwp.HAction.Run('Cancel')) is not True:
+        raise NativeNumberingReadFailure('native area Cancel was not confirmed', code='selection_unverified')
+
+
+def _words(hwp: Any) -> list[str]:
+    value = nf._block_words(hwp)  # noqa: SLF001
+    if value is None:
+        raise NativeNumberingReadFailure('native area block is unreadable', code='selection_unverified')
+    return value
+
+
+def _select_area(hwp: Any, block: tuple[int, ...], words: list[str] | None, holder: str, *, mismatch_code: str = 'selection_unverified') -> None:
+    lid, para, first, _lid, last_para, last = block
+    _set_pos(hwp, (lid, para, first))
+    selected = _sdk_read(lambda: hwp.select_text(para, first, last_para, last, lid))
+    if selected is not True:
+        raise NativeNumberingReadFailure('native area block selection was not confirmed', code='selection_unverified')
+    if _get_selection(hwp) != block:
+        raise NativeNumberingReadFailure('native area block identity is unproven', code='selection_unverified')
+    if words is not None and _words(hwp) != words:
+        raise NativeNumberingRefusal('native area block does not hold the requested words', code=mismatch_code)
+    if _holder(hwp) != holder or _state(hwp)[1] != block:
+        raise NativeNumberingReadFailure('native area scope or selection was lost', code='selection_unverified')
+
+
+def _caret_at(hwp: Any, at: tuple[int, int, int], holder: str) -> None:
+    _set_pos(hwp, at)
+    if _holder(hwp) != holder or _state(hwp) != (at, ()):
+        raise NativeNumberingReadFailure('native area caret or scope is unproven', code='selection_unverified')
+
 
 def _holder(hwp: Any) -> str | None:
     parent = _sdk_read(lambda: hwp.ParentCtrl)
     if parent is None:
         return None
     value = _sdk_read(lambda: parent.CtrlID)
-    return value if type(value) is str else None
+    if type(value) is not str or not value:
+        raise NativeNumberingReadFailure('native ParentCtrl.CtrlID is not canonical', code='selection_unverified')
+    return value
 
 
 def _area_list(hwp: Any, model: Mapping[str, Any], found: Mapping[str, Any]) -> int:
@@ -285,18 +341,15 @@ def _area_list(hwp: Any, model: Mapping[str, Any], found: Mapping[str, Any]) -> 
     paragraphs = found['paragraphs']
     last = len(paragraphs) - 1
     end = nf._end_position(paragraphs[last])  # noqa: SLF001
-    selected = _sdk_read(lambda: hwp.select_text(0, 0, last, end, list_id))
-    words = nf._block_words(hwp) if selected is True and _get_selection(hwp) == (list_id, 0, 0, list_id, last, end) else None  # noqa: SLF001
-    _sdk_read(lambda: hwp.HAction.Run('Cancel'))
-    if words != [item['text'] for item in paragraphs]:
-        raise NativeNumberingRefusal('the native list found for this area does not hold its words, so it cannot be located', code='area_unlocatable')
+    _select_area(hwp, (list_id, 0, 0, list_id, last, end), [item['text'] for item in paragraphs], _NATIVE_HOLDER[found['kind']], mismatch_code='area_unlocatable')
+    _cancel(hwp)
     return list_id
 
 
 def _leave(hwp: Any, caret: tuple[int, int, int]) -> None:
     """Back to where the caller had the caret: out of the area, with nothing selected."""
     _set_pos(hwp, caret)
-    if _read_target_state(hwp) != (caret, ()):
+    if _state(hwp) != (caret, ()):
         raise NativeNumberingMutationError('the caret did not go back to where it was after the edit; nothing was rolled back')
 
 
@@ -414,7 +467,7 @@ def apply_text(hwp: Any, *, request: Mapping[str, Any], read: Callable[[], Mappi
     reach = _MutationReach(on_mutating)
 
     def body() -> dict[str, Any]:
-        caret = _read_target_state(hwp)
+        caret = _state(hwp)
         if caret is None or caret[1] != ():
             raise NativeNumberingRefusal('the caret could not be read plainly before the edit', code='selection_unverified')
         before = nf._read(hwp, read)  # noqa: SLF001
@@ -429,11 +482,12 @@ def apply_text(hwp: Any, *, request: Mapping[str, Any], read: Callable[[], Mappi
         para = paragraph['index']
         first, last = nf._position_of(paragraph, row['first']), nf._position_of(paragraph, row['last'])  # noqa: SLF001
         block = (list_id, para, first, list_id, para, last)
-        nte._select_words(hwp, block, [request['old_text']], after_mutation=False)  # noqa: SLF001
-        nte._caret_at(hwp, (list_id, para, last), after_mutation=False, what='at the end of the old text')  # noqa: SLF001
+        holder = _NATIVE_HOLDER[found['kind']]
+        _select_area(hwp, block, [request['old_text']], holder)
+        _caret_at(hwp, (list_id, para, last), holder)
         reach.issue()
         nte._insert(hwp, request['new_text'])  # noqa: SLF001
-        nte._select_words(hwp, block, [request['old_text']], after_mutation=True)  # noqa: SLF001
+        _select_area(hwp, block, [request['old_text']], holder)
         nte._delete(hwp)  # noqa: SLF001
         after = nf._read(hwp, read)  # noqa: SLF001
         problems = _text_problems(before, after, found, row, request['new_text'], shape)
@@ -477,7 +531,7 @@ def apply_format(hwp: Any, *, request: Mapping[str, Any], read: Callable[[], Map
     character, paragraph_wanted = request['character'], request['paragraph']
 
     def body() -> dict[str, Any]:
-        caret = _read_target_state(hwp)
+        caret = _state(hwp)
         if caret is None or caret[1] != ():
             raise NativeNumberingRefusal('the caret could not be read plainly before the edit', code='selection_unverified')
         before = nf._read(hwp, read)  # noqa: SLF001
@@ -506,22 +560,22 @@ def apply_format(hwp: Any, *, request: Mapping[str, Any], read: Callable[[], Map
                     'result': {'changed': False, 'status': 'already_set', 'before': _format_report(paragraph, row), 'after': _format_report(paragraph, row), 'native_actions': []},
                     'caret': list(caret[0]), 'undo': {'native_editing_actions': 0, 'pre_state_sha256': None, 'post_state_sha256': None}}
         list_id = _area_list(hwp, before['areas'], found)
-        page = (lambda: 1)  # A header or footer has no page of its own; the block is proven by position and words instead.
+        holder = _NATIVE_HOLDER[found['kind']]
         actions: list[str] = []
         if need_character:
             block, words = nf._character_block(rows, list_id, paragraph['index'])  # noqa: SLF001
-            nf._select(hwp, block, words, page, 1)  # noqa: SLF001
+            _select_area(hwp, block, words, holder)
             reach.issue()
             _execute(hwp, 'CharShape', nf._character_items(character))  # noqa: SLF001
             actions.append('Execute:CharShape')
-            _sdk_read(lambda: hwp.HAction.Run('Cancel'))
+            _cancel(hwp)
         if need_paragraph:
             block, words = nf._paragraph_block(rows, list_id, paragraph['index'], local)  # noqa: SLF001
-            nf._select(hwp, block, words, page, 1)  # noqa: SLF001
+            _select_area(hwp, block, words, holder)
             reach.issue()
             _execute(hwp, 'ParagraphShape', nf._paragraph_items(paragraph_wanted))  # noqa: SLF001
             actions.append('Execute:ParagraphShape')
-            _sdk_read(lambda: hwp.HAction.Run('Cancel'))
+            _cancel(hwp)
         after = nf._read(hwp, read)  # noqa: SLF001
         problems = _format_problems(before, after, found, row, character if need_character else None, paragraph_wanted if need_paragraph else None)
         if problems:
