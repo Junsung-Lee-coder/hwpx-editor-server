@@ -71,7 +71,7 @@ class VariantRows(unittest.TestCase):
     def test_the_statuses_are_per_variant_not_per_op(self):
         layout = {row['variant']: row['native'] for row in self.variants('layout_exact')}
         self.assertEqual(layout['section_insert:paragraph_start_or_end'], 'unsupported')
-        self.assertEqual(layout['columns:from_caret_new'], 'not_qualified')
+        self.assertEqual(layout['columns:from_caret_new'], 'unsupported')
         objects = {row['variant']: row['native'] for row in self.variants('object_insert_exact')}
         # Shapes are drawn with the characterized contract, one row per drawn variant; a diagonal line has no
         # characterized contract and is refused before any edit, never reported as inserted.
@@ -82,7 +82,7 @@ class VariantRows(unittest.TestCase):
         self.assertEqual((shape_rows['line:diagonal']['native'], shape_rows['line:diagonal'].get('refusal_code')), ('unsupported', 'unverifiable_layout'))
         for name in drawn:
             self.assertIn(shape_rows[name]['native'], ('qualified', 'not_qualified'), shape_rows[name])
-        self.assertEqual(objects['header:even'], 'not_qualified')
+        self.assertEqual((objects['header:even'], objects['footer:odd']), ('qualified', 'qualified'))
         self.assertNotIn('native', rows()['layout_exact'])
 
     def test_the_reference_is_described_without_private_labels(self):

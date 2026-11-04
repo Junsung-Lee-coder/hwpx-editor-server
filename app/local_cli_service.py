@@ -120,6 +120,7 @@ from app.local_cli_cell_margins import LocalCliCellMarginsMixin
 from app.local_cli_table_structure import LocalCliTableStructureMixin
 from app.local_cli_layout import LocalCliLayoutMixin
 from app.local_cli_object_insert import LocalCliObjectInsertMixin
+from app.local_cli_bundle_text import LocalCliBundleTextMixin
 from app.media_guard import MediaGuardError, media_change_reasons, media_inventory, public_counts
 
 
@@ -133,10 +134,21 @@ from app.media_guard import MediaGuardError, media_change_reasons, media_invento
 #                          successful step reports.
 #   'counted_any_native_edit' - one tracked edit of however many native edits the
 #                          successful step reports, each one proven by its block.
+#   'counted_state_edit'  - one tracked edit of however many native edits the
+#                          successful step reports, only when it also recorded the
+#                          document state before and after (an insertion or layout
+#                          edit on a document that cannot be such evidence refuses).
 # Ops not listed count one undo unit per changed step.
 _BUNDLE_UNDO_POLICY: dict[str, str] = {
-    'layout_exact': 'refuse',
-    'object_insert_exact': 'refuse',
+    # Measured per variant (app.object_insert.UNDO_STEPS, app.layout_ops.UNDO_STEPS): each editing action these report is one
+    # native Undo step (Cancel and CloseEx are none) and Undo reaches the recorded state; an engine reports a counted undo only
+    # for a measured variant. Redo of a re-created object may renew only the attributes of that one element it was measured to
+    # renew (native_format.REDO_RENEWAL); a layout edit's Redo is compared exactly.
+    'layout_exact': 'counted_state_edit',
+    'object_insert_exact': 'counted_state_edit',
+    # Measured: the new text is inserted and the old range deleted, one Undo step each; a blank cell takes only the insertion.
+    'text_replace_exact': 'counted_native_edit',
+    'table_cell_text_exact': 'counted_any_native_edit',
     'table_structure_exact': 'single_native_edit',
     # One native action is one counted Undo; a definition plus a paragraph write is not one step and refuses.
     'official_numbering_apply': 'single_native_edit',
@@ -162,8 +174,9 @@ _GUARDED_BUNDLE_OPS = frozenset({
     'paragraph_insert_exact', 'paragraph_remove_exact',
     'character_format_exact', 'paragraph_format_exact',
     'table_inventory', 'table_read', 'table_edit_exact', 'table_style_exact',
-    'table_width_exact', 'table_create_exact',
+    'table_width_exact', 'table_create_exact', 'text_replace_exact', 'table_cell_text_exact',
 })
+_COUNTED_POLICIES = frozenset({'counted_native_edit', 'counted_any_native_edit', 'counted_state_edit'})
 
 
 class LocalCliUndoRefused(LocalCliRuntimeError):
@@ -195,11 +208,16 @@ def _bundle_step_single_undo(step: dict[str, Any]) -> bool:
     policy = _BUNDLE_UNDO_POLICY.get(str(step.get('op')))
     if policy is None:
         return True
-    if policy not in {'single_native_edit', 'counted_native_edit', 'counted_any_native_edit'}:
+    if policy not in {'single_native_edit', *_COUNTED_POLICIES}:
         return False
     reported = _reported_native_edits(step)
     if policy == 'counted_any_native_edit':
         return step.get('ok') is True and type(reported) is int and reported >= 1
+    if policy == 'counted_state_edit':
+        states = _recorded_states([step])
+        undo = step['result'].get('undo') if isinstance(step.get('result'), dict) else None
+        counted = isinstance(undo, dict) and undo.get('hwpx_undo') == 'counted' and undo.get('undo_units_verified') is True
+        return step.get('ok') is True and counted and type(reported) is int and reported >= 1 and states is not None
     return step.get('ok') is True and reported in ({1, 2} if policy == 'counted_native_edit' else {1})
 
 
@@ -211,7 +229,7 @@ def _reported_native_edits(step: dict[str, Any]) -> Any:
 
 def _native_undo_steps(steps: list[dict[str, Any]]) -> int:
     """How many native Undo calls reverse these steps: what a counted step reported, one for any other."""
-    return sum(_reported_native_edits(step) if _BUNDLE_UNDO_POLICY.get(str(step.get('op'))) in {'counted_native_edit', 'counted_any_native_edit'} else 1 for step in steps)
+    return sum(_reported_native_edits(step) if _BUNDLE_UNDO_POLICY.get(str(step.get('op'))) in _COUNTED_POLICIES else 1 for step in steps)
 
 
 def _record_bundle_undo_state(binding: dict[str, Any], steps: list[Any], prior: dict[str, Any]) -> None:
@@ -240,12 +258,20 @@ def _record_bundle_undo_state(binding: dict[str, Any], steps: list[Any], prior: 
     _track_history_edit(binding, None if unverified else _native_undo_steps(dirty_steps), _recorded_states(dirty_steps))
 
 
-def _recorded_states(steps: list[dict[str, Any]]) -> dict[str, str] | None:
+def _recorded_states(steps: list[dict[str, Any]]) -> dict[str, Any] | None:
     """The document state a lone step started from and ended in, when it recorded them."""
     if len(steps) != 1 or not isinstance(steps[0].get('result'), dict) or not isinstance(steps[0]['result'].get('undo'), dict):
         return None
     undo = steps[0]['result']['undo']
-    return {'pre': undo['pre_state_sha256'], 'post': undo['post_state_sha256']} if undo.get('pre_state_sha256') and undo.get('post_state_sha256') else None
+    if not (type(undo.get('pre_state_sha256')) is str and undo['pre_state_sha256'] and type(undo.get('post_state_sha256')) is str and undo['post_state_sha256']):
+        return None
+    states: dict[str, Any] = {'pre': undo['pre_state_sha256'], 'post': undo['post_state_sha256']}
+    if 'redo_renewal' in undo:
+        if not native_format.valid_renewal_scope(undo['redo_renewal']):
+            return None
+        # The one element Redo re-creates and the recorded values of what it may renew; everything else is compared exactly.
+        states['post_renewal'] = undo['redo_renewal']
+    return states
 
 
 def _track_history_edit(binding: dict[str, Any], native_steps: Any, states: dict[str, str] | None = None) -> None:
@@ -260,13 +286,20 @@ def _track_history_edit(binding: dict[str, Any], native_steps: Any, states: dict
 _MAX_HISTORY_DIFFERENCES = 30
 
 
-def _expected_state(states: Any, name: str, reached: Any, differences: list[dict[str, Any]] | None = None) -> dict[str, Any]:
-    """Whether a history step reached the state its edit recorded, and what differs by name when it did not; an edit that recorded none cannot be compared."""
+def _expected_state(states: Any, name: str, reached: Any, differences: list[dict[str, Any]] | None = None, renewal: Any = None) -> dict[str, Any]:
+    """Whether a history step reached the state its edit recorded, and what differs by name when it did not; an edit that recorded none cannot be compared.
+
+    ``renewal``: native_format.renewal_check of the reached text against the scope the edit recorded (Redo of an insertion).
+    """
     recorded = states.get(name) if isinstance(states, dict) else None
     if recorded is None or reached is None:
         return {'compared': False, 'matches': None}
     if recorded == reached:
         return {'compared': True, 'matches': True}
+    scope = states.get(name + '_renewal')
+    if native_format.valid_renewal_scope(scope) and isinstance(renewal, dict) and renewal.get('sha') == scope['sha'] and renewal.get('renewed'):
+        # Everything but the measured attributes of the one re-created element is exactly the recorded state.
+        return {'compared': True, 'matches': True, 'renewed_object': {'element': scope['element'], 'ordinal': scope['ordinal']}, 'renewed': renewal['renewed']}
     if differences is None:
         return {'compared': True, 'matches': False}
     return {'compared': True, 'matches': False, 'differences': differences[:_MAX_HISTORY_DIFFERENCES], 'differences_total': len(differences)}
@@ -293,6 +326,7 @@ class LocalCliService(
     LocalCliTableStructureMixin,
     LocalCliObjectInsertMixin,
     LocalCliLayoutMixin,
+    LocalCliBundleTextMixin,
 ):
     def __init__(self, *, settings: Any, interactive_sessions: Any):
         self.settings = settings
@@ -1525,7 +1559,7 @@ class LocalCliService(
                     )
                 if step.get('op') in {'character_format_exact', 'paragraph_format_exact'} and all(key in raw_result for key in ('target', 'requested', 'result')):
                     result.update(native_format.public_report(raw_result))
-                if step.get('op') in {'table_inventory', 'table_read', 'table_edit_exact', 'table_style_exact', 'table_width_exact', 'table_create_exact'}:
+                if step.get('op') in {'table_inventory', 'table_read', 'table_edit_exact', 'table_style_exact', 'table_width_exact', 'table_create_exact', 'text_replace_exact', 'table_cell_text_exact'}:
                     # The caller asked for these values and they are bounded where they are built; the journal copy stays bounded and redacted.
                     result.update(raw_result)
                 step['result'] = result
@@ -2888,6 +2922,8 @@ class LocalCliService(
             'table_style_exact': {'expected_cols', 'borders', 'expected_rows', 'confirm_layout', 'end_cell', 'expected_hash', 'table_id', 'cell', 'scope', 'over_wider_neighbour', 'fill', 'op', 'expected_page', 'label', 'operation'},
             'table_width_exact': {'expected_cols', 'column_widths_mm', 'confirm_layout', 'expected_hash', 'expected_page', 'expected_rows', 'fit', 'label', 'op', 'operation', 'table_id'},
             'table_create_exact': {'cells', 'cols', 'confirm_layout', 'operation', 'rows', 'op', 'expected_page', 'label', 'match'},
+            'text_replace_exact': {'op', 'operation', 'label', 'old_text', 'new_text', 'match', 'occurrence', 'expected_occurrences', 'paragraph_index', 'expected_text', 'expected_page', 'format_from', 'confirm_layout'},
+            'table_cell_text_exact': {'op', 'operation', 'label', 'table_id', 'expected_hash', 'expected_page', 'expected_rows', 'expected_cols', 'cells', 'confirm_layout'},
             'character_format_exact': {'op', 'operation', 'label', 'match', 'through_match', 'paragraph_index', 'expected_text', 'expected_page', 'confirm_layout', 'number_mark', 'font_family', 'size_pt', 'bold', 'italic', 'underline', 'text_color'},
             'paragraph_format_exact': {'op', 'operation', 'label', 'match', 'through_match', 'paragraph_index', 'expected_text', 'expected_page', 'confirm_layout', 'align', 'left_indent_pt', 'right_indent_pt', 'first_line_indent_pt', 'line_spacing_type', 'line_spacing_value'},
             'paragraph_delete_exact': {
@@ -7316,6 +7352,7 @@ class LocalCliService(
                         error_text = f'Refused before any edit ({step_refusal_code}); the document is unchanged and the caret is put back; an existing selection may be cleared.'
                     elif target_refused:
                         error_text = ('Formatting refused before any edit; original state and preservation verified.' if step.get('op') in {'character_format_exact', 'paragraph_format_exact', 'table_inventory', 'table_read', 'table_edit_exact', 'table_style_exact', 'table_width_exact', 'table_create_exact'}
+                                      else 'Edit refused before any change; original state and preservation verified.' if step.get('op') in {'text_replace_exact', 'table_cell_text_exact'}
                                       else 'Numbering preflight refused; original state and preservation verified.')
                     rollback = {}
                     if not step_refused and (type(exc) is LocalCliMutationError or type(exc) is LocalCliRuntimeError):
@@ -7346,7 +7383,7 @@ class LocalCliService(
                             'rollback': rollback,
                         },
                     }
-                    if type(exc) is LocalCliMutationError and step.get('op') in {'table_edit_exact', 'table_style_exact', 'table_width_exact', 'table_create_exact'}:
+                    if type(exc) is LocalCliMutationError and step.get('op') in {'table_edit_exact', 'table_style_exact', 'table_width_exact', 'table_create_exact', 'text_replace_exact', 'table_cell_text_exact'}:
                         # These messages name cells and properties, never document text, and say why the outcome is not proven.
                         status['outcome_detail'] = error_text[:800]
                     if step_refused and not mutation_may_have_persisted:
@@ -7356,7 +7393,7 @@ class LocalCliService(
                         status['refusal_code'] = (exc.code if type(exc) is _NumberingSemanticRefusal or type(exc) is _NumberingCleanRefusal
                                                   else _native_diagnostic('bundle_step', exc)['refusal_code'])
                         args = BaseException.__dict__['args'].__get__(exc)
-                        if step.get('op') in {'character_format_exact', 'paragraph_format_exact', 'page_number_apply', 'table_inventory', 'table_read', 'table_edit_exact', 'table_style_exact', 'table_width_exact', 'table_create_exact'} and type(args) is tuple and len(args) == 1 and type(args[0]) is str:
+                        if step.get('op') in {'character_format_exact', 'paragraph_format_exact', 'page_number_apply', 'table_inventory', 'table_read', 'table_edit_exact', 'table_style_exact', 'table_width_exact', 'table_create_exact', 'text_replace_exact', 'table_cell_text_exact'} and type(args) is tuple and len(args) == 1 and type(args[0]) is str:
                             status['refusal_message'] = args[0][:400]
                         if type(exc) is NativeNumberingRefusal:
                             found_page = BaseException.__dict__['__dict__'].__get__(exc).get('found_page')
@@ -7677,7 +7714,7 @@ class LocalCliService(
             return None
         return native_table.detail_differences(recorded, now) if now is not None else None
 
-    def _run_history_action(self, handle: LocalCliRuntimeHandle, name: str, native_steps: int, expected_sha: Any = None) -> dict[str, Any]:
+    def _run_history_action(self, handle: LocalCliRuntimeHandle, name: str, native_steps: int, expected_sha: Any = None, expected_renewal: Any = None) -> dict[str, Any]:
         """Undo or Redo with no second call once one may have been issued, compared with the document before and after."""
         hwp = handle.hwp
         protection = self._numbering_protection_reader(handle)
@@ -7700,12 +7737,18 @@ class LocalCliService(
             raise LocalCliRuntimeError(f'Native {name} did not return True; its outcome is unknown.')
         after = native_paragraph_edit.history_evidence(hwp, protection)
         reached = native_format.state_digest(after) if after is not None else None
-        differences = self._history_differences(expected_sha, reached, getattr(protection, 'last_text', None), after)
+        renewal = None
+        if expected_renewal is not None and after is not None and reached != expected_sha:
+            # From the text this comparison already read; no native call.
+            renewal = native_format.renewal_check(getattr(protection, 'last_text', None), after['controls'], expected_renewal)
+        renewed = isinstance(renewal, dict) and isinstance(expected_renewal, dict) and renewal.get('sha') == expected_renewal.get('sha')
+        differences = None if renewed else self._history_differences(expected_sha, reached, getattr(protection, 'last_text', None), after)
         # Native history gives a block back; it must not linger for whatever command comes next.
         if callable(getattr(hwp, 'get_selected_pos', None)) and native_numbering._get_selection(hwp):  # noqa: SLF001
             native_numbering._set_pos(hwp, native_numbering._get_pos(hwp))  # noqa: SLF001
         return {
             'state_sha256': reached,
+            'renewal_check': renewal,
             'state_differences': differences,
             'confirmation': native_paragraph_edit.history_confirmation(before, after),
             'snapshot': _snapshot_cursor_context(hwp),
@@ -7826,7 +7869,8 @@ class LocalCliService(
             raise LocalCliUndoRefused('redo refused: no undone edit to reapply.', code='no_redo_available')
         redo_count = tracked[-1] if tracked is not None and type(tracked[-1]) is int else 1
         result = self._execute_live(binding=binding, command_name='redo', task_label='local_cli.redo',
-                                    handler=lambda handle: self._run_history_action(handle, 'Redo', redo_count, _recorded_sha(binding.get('redo_states'), 'post')))
+                                    handler=lambda handle: self._run_history_action(handle, 'Redo', redo_count, _recorded_sha(binding.get('redo_states'), 'post'),
+                                                                                    _recorded_sha(binding.get('redo_states'), 'post_renewal')))
         if result.get('evidence_unavailable') is True:
             raise LocalCliUndoRefused('redo refused: the document cannot be compared before and after.', code='redo_evidence_unavailable')
         if result.get('not_applied') is True:
@@ -7840,7 +7884,7 @@ class LocalCliService(
             binding.setdefault('undo_stack', []).append(binding['redo_stack'].pop())
             binding.setdefault('undo_states', []).append(states)
             binding = self._save_binding(binding)
-        expected = _expected_state(states, 'post', result.get('state_sha256'), result.get('state_differences'))
+        expected = _expected_state(states, 'post', result.get('state_sha256'), result.get('state_differences'), result.get('renewal_check'))
         confirmation = {**result['confirmation'], 'expected_state': expected} if expected['compared'] else result.get('confirmation')
         if expected['matches'] is False:
             self._stop_history(binding)

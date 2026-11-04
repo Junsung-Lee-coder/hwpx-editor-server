@@ -522,6 +522,13 @@ def validate_step_for_op(op: str, *, service: Any, index: int, step: dict[str, A
             (native_format.validate_character_step if op == 'character_format_exact' else native_format.validate_paragraph_step)(step)
         except native_format.NativeNumberingInputError as exc:
             _raise(error_type, f'command-bundle step {index} {op}: {exc}')
+    elif op in {'text_replace_exact', 'table_cell_text_exact'}:
+        from app import native_text_edit
+
+        try:
+            (native_text_edit.validate_replace_step if op == 'text_replace_exact' else native_text_edit.validate_cell_text_step)(step)
+        except native_text_edit.NativeNumberingInputError as exc:
+            _raise(error_type, f'command-bundle step {index} {op}: {exc}')
     elif op in {'control_inventory', 'table_frame_inventory', 'export_pdf', 'where'}:
         pass
     else:
@@ -638,6 +645,10 @@ def run_step_for_op(op: str, *, service: Any, handle: Any, step: dict[str, Any],
         )
         # A value already present is a proven no-op, not a new dirty delta.
         return result, result['result']['changed'] is not False, list(result.get('warnings') or [])
+    if op in {'text_replace_exact', 'table_cell_text_exact'}:
+        run = service._bundle_text_replace_exact if op == 'text_replace_exact' else service._bundle_table_cell_text_exact  # noqa: SLF001
+        result = run(handle.hwp, step, on_mutating=handle.mark_mutating_intent)
+        return result, True, list(result.get('warnings') or [])
     if op == 'paragraph_delete_exact':
         result = service._bundle_paragraph_delete_exact(handle.hwp, step)  # noqa: SLF001
         return result, True, list(result.get('warnings') or [])

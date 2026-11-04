@@ -1,0 +1,20 @@
+{
+  "op": "table_cell_text_exact",
+  "version": "local-cli/table-cell-text-exact/v1-package",
+  "summary": "Write the text of whole cells of one bound existing table, each with its expected current text, keeping each cell's format and everything else of the table.",
+  "module": "app.command_packages.commands.table_cell_text_exact.run",
+  "read_only": false,
+  "dirty_default": true,
+  "allowed_keys": [
+    "op",
+    "operation",
+    "label",
+    "table_id",
+    "expected_hash",
+    "expected_page",
+    "expected_rows",
+    "expected_cols",
+    "cells",
+    "confirm_layout"
+  ]
+}

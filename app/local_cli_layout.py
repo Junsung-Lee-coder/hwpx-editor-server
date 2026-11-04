@@ -20,6 +20,7 @@ from app.layout_ops import (
     PARASHAPE_ITEMS,
     SCHEMA_VERSION,
     REASON_CODES,
+    UNDO_STEPS,
     LayoutError,
     compare_documents,
     hwpunit_to_mm,
@@ -31,9 +32,11 @@ from app.layout_ops import (
     plan_page_setup,
     plan_section_delete,
     plan_section_insert,
+    preflight_refusal,
     public_document,
     head_pair,
     reason_code,
+    undo_variants,
     verify_columns,
     verify_hanging_indent,
     verify_page_setup,
@@ -41,16 +44,37 @@ from app.layout_ops import (
     verify_section_insert,
 )
 from app.local_cli_runtime import LocalCliRuntimeError
+from app.native_format import history_state
+from app.native_numbering import _control_ids
 from app.local_cli_service_support import LocalCliMutationError
 from app.step_refusal import STEP_REFUSAL_CODES, StepControl, restore_caret, strict_pos, strict_state
 
 _ROLLBACK_HINT = {'attempted': False, 'hint': 'Retain the working copy and owning STA; full native close is unsupported for this unproved or held session. Separately authorized exact-owned operator closure is required; a single Undo does not guarantee a full rollback of this edit.'}
-# What `hwpx undo` does after a layout edit (_BUNDLE_UNDO_POLICY): refuse.
+# What `hwpx undo` does after a layout edit that failed, or whose document state could not be recorded: refuse.
 _UNDO_REPORT = {
     'hwpx_undo': 'refused',
     'undo_units_verified': False,
     'note': 'Retain the working copy and owning STA; full native close is unsupported for this unproved or held session. Separately authorized exact-owned operator closure is required to discard the edit.',
 }
+_COUNTED_NOTE = ('hwpx undo reverts this layout edit as one request: its one native action is one native Undo step (measured on Hancom 2024 for '
+                 'this variant), compared with the state recorded before it; redo is compared exactly with the state after it.')
+_UNMEASURED_UNDO = {
+    'hwpx_undo': 'refused',
+    'undo_units_verified': False,
+    'note': ('hwpx undo refuses after this layout edit before any native history call: no native Undo of this variant was measured '
+             '(the capability contract lists the counted variants). Retain the working copy and owning STA; full native close is unsupported '
+             'for this unproved or held session. Separately authorized exact-owned operator closure is required to discard the edit.'),
+}
+
+
+def _layout_undo_report(actions: int, pre: dict[str, str] | None, post: dict[str, str] | None, variants: set[str] | frozenset[str] = frozenset()) -> dict[str, Any]:
+    if pre is None or post is None or actions < 1:
+        return dict(_UNDO_REPORT)
+    named = sorted(variants)
+    if not named or any(UNDO_STEPS.get(variant) != actions for variant in named):
+        return {'native_editing_actions': actions, 'undo_variants': named, **_UNMEASURED_UNDO}
+    return {'native_editing_actions': actions, 'undo_variants': named, 'pre_state_sha256': pre['sha'], 'post_state_sha256': post['sha'],
+            'hwpx_undo': 'counted', 'undo_units_verified': True, 'note': _COUNTED_NOTE}
 # Kinds whose caret position stays meaningful after the edit and is restored.
 _RESTORE_CARET_KINDS = frozenset({'page_setup', 'columns', 'hanging_indent'})
 _NATIVE_REASONS = frozenset({'native_action_failed', 'native_outcome_unknown', 'readback_after_failed'})
@@ -237,6 +261,11 @@ class LocalCliLayoutMixin:
             doc = parse_layout_xml(xml_text)
         except LayoutError as exc:
             raise LocalCliRuntimeError(f'{OP} {where}: HWPML readback failed: {exc}') from exc
+        if before:
+            # Before the single native action, so the control walk sees the document as it was.
+            control.history['pre'] = self._layout_history_state(hwp, xml_text)
+        else:
+            control.history['after_text'] = xml_text
         # Every 'before edit' readback runs before the single native action;
         # dry-run the whole-document comparison to time the after-edit proof.
         if before:
@@ -428,6 +457,11 @@ class LocalCliLayoutMixin:
         return {'plan': public_plan, 'native_actions': [result], 'verification': verification,
                 'document_before': public_document(doc_before), 'document_after': public_document(doc_after), **head_pair(doc_before, doc_after)}
 
+    @staticmethod
+    def _layout_history_state(hwp: Any, xml_text: str) -> dict[str, str] | None:
+        """What `hwpx undo` compares the document with, from the engine's own readback; the control walk only when that text is a census."""
+        return history_state(xml_text, lambda: [name for _control, name in _control_ids(hwp)])
+
     # ------------------------------------------------------------ entry point
 
     def _bundle_layout_exact(self, hwp: Any, step: dict[str, Any], control: StepControl | None = None) -> dict[str, Any]:
@@ -438,6 +472,12 @@ class LocalCliLayoutMixin:
             refusal = control.refuse('invalid_request', f'{OP} refused: {exc}')
             control.register(refusal)
             raise refusal from exc
+        refused = preflight_refusal(request)
+        if refused is not None:
+            # From the request alone: no caret read, parameter set, readback or native action of this operation.
+            refusal = control.refuse(refused[0], f'{OP} refused before any SDK call: {refused[1]}')
+            control.register(refusal)
+            raise refusal
         kind = request['kind']
         handler = {
             'page_setup': self._layout_page_setup,
@@ -449,6 +489,9 @@ class LocalCliLayoutMixin:
         original_pos = strict_pos(hwp, OP)
         try:
             body = handler(hwp, request, control)
+            pre_state = control.history.get('pre')
+            # From the verified readback; a control walk that raises after the edit is an unknown outcome.
+            post_state = self._layout_history_state(hwp, control.history['after_text']) if pre_state is not None and 'after_text' in control.history else None
         except Exception as exc:
             if control.is_pending(exc):
                 # A clean refusal leaves the caret exactly where it was; prove that before handing it over.
@@ -480,7 +523,7 @@ class LocalCliLayoutMixin:
             'kind': kind,
             'expected_pos': list(request['expected_pos']),
             **body,
-            'undo': dict(_UNDO_REPORT),
+            'undo': _layout_undo_report(len(body.get('native_actions') or []), pre_state, post_state, undo_variants(request)),
             'next_proof_required': 'Render the affected pages (page-screenshot or export-proof-range) and review them before saving; re-probe positions and layout before another exact edit.',
             'warnings': [],
         }

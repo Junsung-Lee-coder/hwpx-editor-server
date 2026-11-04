@@ -20,6 +20,7 @@ is an unknown outcome that is never rolled back.
 """
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import math
@@ -43,6 +44,7 @@ from app.native_numbering import (
     _read_target_state,
     _sdk_read,
     _reject_unknown_keys,
+    _validated_census,
     _require_confirm_layout,
     _require_motion_result,
     _set_pos,
@@ -1125,6 +1127,146 @@ def _paragraph_problems(before: Mapping[str, Any], after: Mapping[str, Any], row
 def state_digest(evidence: Mapping[str, Any]) -> str:
     """One value for what Undo and Redo are compared with, so a later history step can say whether it reached this state."""
     return hashlib.sha256(json.dumps(evidence, ensure_ascii=False, sort_keys=True, default=list).encode('utf-8', 'surrogatepass')).hexdigest()
+
+
+# Measured on Hancom 2024 13.0.0.3457 in an owned characterization beside existing tables, pictures and drawn objects: Redo of
+# an inserted object re-creates it, and only these attributes of the re-created element differed from the state after the
+# insertion; no other element, and nothing after any layout edit's Redo, differed. Each entry is (path below the object's own
+# element, '' for the element itself; attribute). An equation came back with a new z-order; a line, rectangle or ellipse
+# also with a new drawing instance id; an ellipse also with new values of its eight arc points, which hold no geometry while
+# HasArcProperty is false (they differ between reads of the same insertion too); a header or footer with a new series number.
+_ARC_POINTS = ('Start1X', 'Start1Y', 'End1X', 'End1Y', 'Start2X', 'Start2Y', 'End2X', 'End2Y')
+_DRAWN_RENEWAL = (('SHAPEOBJECT', 'ZOrder'), ('DRAWINGOBJECT/SHAPECOMPONENT', 'InstID'))
+REDO_RENEWAL: dict[str, tuple[tuple[str, str], ...]] = {
+    'EQUATION': (('SHAPEOBJECT', 'ZOrder'),),
+    'LINE': _DRAWN_RENEWAL,
+    'RECTANGLE': _DRAWN_RENEWAL,
+    'ELLIPSE': _DRAWN_RENEWAL + tuple(('', name) for name in _ARC_POINTS),
+    'HEADER': (('', 'SeriesNum'),),
+    'FOOTER': (('', 'SeriesNum'),),
+}
+
+
+def _parsed(text: Any) -> ET.Element | None:
+    if type(text) is not str or len(text) > MAX_HWPML_CHARS or _DOCTYPE.search(text):
+        return None
+    try:
+        return ET.fromstring(text)
+    except ET.ParseError:
+        return None
+
+
+def _subtree(element: ET.Element) -> str:
+    """An element and everything inside it, without the text that follows it in its parent."""
+    alone = copy.copy(element)
+    alone.tail = None
+    return ET.tostring(alone, encoding='unicode')
+
+
+def _renewal_values(target: ET.Element) -> list[list[str]] | None:
+    """[path, attribute, value] of every attribute REDO_RENEWAL names for this element, or None when one is missing."""
+    rows = []
+    for path, name in REDO_RENEWAL[target.tag]:
+        node = target if not path else target.find(path)
+        if node is None or name not in node.attrib:
+            return None
+        rows.append([path, name, node.attrib[name]])
+    if target.tag == 'ELLIPSE' and target.get('HasArcProperty') != 'false':
+        return None  # The arc points are geometry then; nothing was measured for that.
+    return rows
+
+
+def _masked_digest(root: ET.Element, target: ET.Element, controls: list[str]) -> str | None:
+    """The state digest of the whole text with only the named attributes of this one element left out."""
+    for path, name in REDO_RENEWAL[target.tag]:
+        node = target if not path else target.find(path)
+        if node is not None:
+            node.attrib.pop(name, None)
+    try:
+        census = _validated_census(parse_hwpml2x_census(ET.tostring(root, encoding='unicode')))
+    except (CensusError, RuntimeError):
+        return None
+    if census['paragraphs'] is None:
+        return None
+    return state_digest(evidence_of(census, controls))
+
+
+def renewal_scope(pre_text: Any, post_text: Any, tag: str, controls: list[str]) -> dict[str, Any] | None:
+    """What Redo of this insertion may renew: the one new ``tag`` element of the post text (by its ordinal among that tag),
+    the recorded values of its REDO_RENEWAL attributes, and the digest of the post state without them. None when the new
+    element is not exactly one, or a named attribute is missing."""
+    pre, post = _parsed(pre_text), _parsed(post_text)
+    if pre is None or post is None or tag not in REDO_RENEWAL:
+        return None
+    old = [_subtree(element) for element in pre.iter(tag)]
+    new_elements = list(post.iter(tag))
+    new = [_subtree(element) for element in new_elements]
+    found = [index for index in range(len(new)) if len(new) == len(old) + 1 and new[:index] == old[:index] and new[index + 1:] == old[index:]]
+    if len(found) != 1:
+        return None
+    target = new_elements[found[0]]
+    values = _renewal_values(target)
+    if values is None:
+        return None
+    digest = _masked_digest(post, target, controls)
+    return None if digest is None else {'element': tag, 'ordinal': found[0], 'values': values, 'sha': digest}
+
+
+def valid_renewal_scope(scope: Any) -> bool:
+    """Whether a recorded scope names one REDO_RENEWAL element and exactly its attributes."""
+    if not isinstance(scope, dict) or scope.get('element') not in REDO_RENEWAL or type(scope.get('ordinal')) is not int or scope['ordinal'] < 0:
+        return False
+    if type(scope.get('sha')) is not str or not re.fullmatch(r'[0-9a-f]{64}', scope['sha']):
+        return False
+    values = scope.get('values')
+    named = [list(item) for item in REDO_RENEWAL[scope['element']]]
+    return isinstance(values, list) and len(values) == len(named) and all(
+        isinstance(row, list) and len(row) == 3 and row[:2] == pair and type(row[2]) is str for row, pair in zip(values, named))
+
+
+def renewal_check(text: Any, controls: list[str], scope: Any) -> dict[str, Any] | None:
+    """The reached state's digest without the recorded element's renewable attributes, and which of them changed (element
+    path, attribute, recorded and current value); None when the scope is not usable or that element is not there."""
+    if not valid_renewal_scope(scope):
+        return None
+    root = _parsed(text)
+    elements = list(root.iter(scope['element'])) if root is not None else []
+    if scope['ordinal'] >= len(elements):
+        return None
+    target = elements[scope['ordinal']]
+    now = _renewal_values(target)
+    if now is None:
+        return None
+    renewed = [{'element': '/'.join(part for part in (scope['element'], path) if part), 'attribute': name, 'recorded': recorded, 'now': current}
+               for (path, name, recorded), (_path, _name, current) in zip(scope['values'], now) if recorded != current]
+    digest = _masked_digest(root, target, controls)
+    return None if digest is None else {'sha': digest, 'renewed': renewed}
+
+
+def history_state(text: Any, read_controls: Callable[[], list[str]], *, renewal: tuple[str, Any] | None = None) -> dict[str, Any] | None:
+    """What `hwpx undo` and `redo` compare this document with, from this exact text and the control walk, or None when the
+    document cannot be such evidence: an unusable census, or a control walk that returns values it will not read further.
+
+    ``renewal``: (element tag, the text before the insertion) for an insertion whose Redo re-creates that element; its
+    renewal_scope is recorded with the state, and a scope that cannot be bound makes the state no evidence.
+    """
+    try:
+        census = _validated_census(parse_hwpml2x_census(text))
+    except (CensusError, RuntimeError):
+        return None
+    if census['paragraphs'] is None:
+        return None
+    try:
+        controls = read_controls()
+    except ControlEnumerationUnproven:
+        return None
+    state: dict[str, Any] = {'sha': state_digest(evidence_of(census, controls))}
+    if renewal is not None:
+        scope = renewal_scope(renewal[1], text, renewal[0], controls)
+        if scope is None:
+            return None
+        state['renewal'] = scope
+    return state
 
 
 def _read(hwp: Any, read: Callable[[], Mapping[str, Any]]) -> dict[str, Any]:

@@ -256,6 +256,7 @@ def _paragraph_facts(paragraph: ET.Element, chars: Mapping[str, Any], paras: Map
         'objects': [atom['control'] for atom in atoms if 'control' in atom and atom['control'] not in nf._JOINING_CONTROLS],  # noqa: SLF001
         'tables': [row[1] for row in rows if row[0] == 't'],
         'digest': _digest([rows, _shape_id(shape, cache), _shape_id(end, cache) if end is not None else None, other_attrs, style_digest]),
+        'end_shape': end,
     }
 
 

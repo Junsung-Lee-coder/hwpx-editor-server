@@ -382,6 +382,74 @@ class TableWidthStep(_TableBinding):
         return self
 
 
+def _one_line(value: str, name: str) -> str:
+    if any(ord(char) < 32 or char in '\u2028\u2029' for char in value):
+        raise ValueError(f'{name} must be one line, without tabs or other control characters')
+    return value
+
+
+class TextReplaceStep(Closed):
+    op: Literal['text_replace_exact']
+    label: Label = 'mcp:text-replace-exact'
+    old_text: Annotated[str, Field(min_length=1, max_length=500)] = Field(description='The exact current text to replace, on one line. Found again in the document before anything changes.')
+    new_text: Annotated[str, Field(min_length=1, max_length=2000)] = Field(description='The text that takes its place, on one line. It takes the format of the replaced text.')
+    match: Annotated[str, Field(min_length=1, max_length=500)] | None = Field(default=None, description='Longer text around old_text that holds it exactly once, such as "Annual Plan 2025" for 2025 in a title, when old_text alone occurs more than once.')
+    occurrence: int | None = Field(default=None, ge=1, le=10000, description='Which occurrence of match (or old_text), counted in document order from 1; with expected_occurrences.')
+    expected_occurrences: int | None = Field(default=None, ge=1, le=10000, description='How many occurrences there are now; a different count refuses as target_count_mismatch.')
+    paragraph_index: int | None = Field(default=None, ge=0, le=100000, description='The paragraph by its index from numbering_readback, with expected_text.')
+    expected_text: Annotated[str, Field(max_length=4000)] | None = Field(default=None, description="The paragraph's whole current text, with paragraph_index.")
+    expected_page: int = Field(ge=1, le=10000)
+    format_from: Literal['replaced_text', 'last_character'] = Field(default='replaced_text', description='replaced_text: the replaced text must have one character format, which the new text takes; text in several formats is refused before any edit. last_character: the new text takes the format of the last replaced character.')
+    confirm_layout: Literal[True]
+
+    @model_validator(mode='after')
+    def require_one_exact_target(self):
+        _one_line(self.old_text, 'old_text')
+        _one_line(self.new_text, 'new_text')
+        if self.new_text == self.old_text:
+            raise ValueError('new_text is the same as old_text')
+        if (self.occurrence is None) != (self.expected_occurrences is None):
+            raise ValueError('occurrence and expected_occurrences go together')
+        if self.occurrence is not None and self.occurrence > self.expected_occurrences:
+            raise ValueError('occurrence cannot be greater than expected_occurrences')
+        if self.paragraph_index is not None or self.expected_text is not None:
+            if self.match is not None:
+                raise ValueError('give match, or paragraph_index with expected_text, not both')
+            if self.paragraph_index is None or self.expected_text is None:
+                raise ValueError('paragraph_index and expected_text go together')
+        elif self.match is not None:
+            _one_line(self.match, 'match')
+            if sum(self.match.startswith(self.old_text, offset) for offset in range(len(self.match))) != 1:
+                raise ValueError('match must contain old_text exactly once')
+        return self
+
+
+class CellText(Closed):
+    address: CellAddress
+    expected_text: Annotated[str, Field(max_length=2000)] = Field(description="The cell's whole current text as table_read gives it; empty for a blank cell.")
+    text: Annotated[str, Field(min_length=1, max_length=2000)] = Field(description='The new text of the whole cell, on one line, in the format of the cell text.')
+
+    @model_validator(mode='after')
+    def require_a_change(self):
+        _one_line(self.text, 'text')
+        if self.text == self.expected_text:
+            raise ValueError('text is the same as expected_text')
+        return self
+
+
+class TableCellTextStep(_TableBinding):
+    op: Literal['table_cell_text_exact']
+    label: Label = 'mcp:table-cell-text-exact'
+    cells: Annotated[list[CellText], Field(min_length=1, max_length=100)] = Field(description='The cells to write, each once. A merged cell is named by its first cell. A cell of several paragraphs, several character formats or holding an object is refused before any edit.')
+
+    @model_validator(mode='after')
+    def require_distinct_cells(self):
+        addresses = [cell.address for cell in self.cells]
+        if len(addresses) != len(set(addresses)):
+            raise ValueError('each cell may be named once')
+        return self
+
+
 class TableCreateStep(Closed):
     op: Literal['table_create_exact']
     label: Label = 'mcp:table-create-exact'
@@ -414,7 +482,7 @@ class Reconcile(Closed):
 
 _EXACT_STEPS = (ContextStep, SelectionStep, ReadbackStep, CellFormatStep, PageNumberStep, OfficialNumberingStep, ParagraphInsertStep,
                 ParagraphRemoveStep, CharacterFormatStep, ParagraphFormatStep, TableInventoryStep, TableReadStep, TableEditStep,
-                TableStyleStep, TableWidthStep, TableCreateStep)
+                TableStyleStep, TableWidthStep, TableCreateStep, TextReplaceStep, TableCellTextStep)
 # One command-bundle step: every backend bundle op MCP exposes (hwpx_mcp/parity.py BUNDLE_OPS).
 BundleStep = Annotated[Union[(*_EXACT_STEPS, *ops.NEW_BUNDLE_STEPS)], Field(discriminator='op')]
 _REST_STEPS = tuple(model for _path, model in ops.REST_OPS.values())

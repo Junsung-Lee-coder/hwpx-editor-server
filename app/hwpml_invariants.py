@@ -606,6 +606,13 @@ def head_reason_code(reason: str) -> str | None:
     return None
 
 
+# Native reads report a different stored BINDATA Size for the same unchanged payload (measured on Hancom 2024 13.0.0.3457: the
+# opens of settled copies of one document read 669, 664 and 654 over an identical base64 payload, and an edit's after-read turned
+# 654 into 669); the numbering census elides the same value. Only that attribute is left out: the payload text, every other
+# BINDATA attribute and every other part outside HEAD and BODY stay bound.
+_TAIL_IGNORE = {'BINDATA': frozenset({'Size'})}
+
+
 def head_tail_reasons(before_root: ET.Element, after_root: ET.Element, *, allow_head_attrs: Mapping[str, Iterable[str]] | None = None,
                       definitions: DefinitionDelta | None = None) -> list[str]:
     """Reasons HEAD did not only grow, or anything else outside BODY changed.
@@ -625,6 +632,6 @@ def head_tail_reasons(before_root: ET.Element, after_root: ET.Element, *, allow_
             found: list[str] = []
             _head_growth_reasons(old, new, '', allow_head_attrs or {}, found, definitions or DefinitionDelta())
             reasons.extend(f'existing HEAD entry changed: {item}' for item in found)
-        elif signature(old) != signature(new):
+        elif signature(old, _TAIL_IGNORE) != signature(new, _TAIL_IGNORE):
             reasons.append(f'{old.tag} changed (it holds embedded binary data and document-level parts that must not change)')
     return reasons[:MAX_REASONS]

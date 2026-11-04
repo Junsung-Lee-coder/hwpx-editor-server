@@ -17,7 +17,6 @@ from typing import Any, Callable, Mapping
 
 from app.native_numbering_census import CensusError, CensusTextUnusable, _digest_tokens
 from app.native_numbering import (
-    ControlEnumerationLimit,
     ControlEnumerationUnproven,
     NativeNumberingInputError,
     NativeNumberingMutationError,
@@ -399,7 +398,9 @@ def history_evidence(hwp: Any, protection: Callable[[], Any]) -> dict[str, Any] 
         return None
     try:
         controls = [name for _control, name in _control_ids(hwp)]
-    except ControlEnumerationLimit:
+    except ControlEnumerationUnproven:
+        # The walk returned, but with values it will not read further (a limit, or an identifier that is not exact text, as a
+        # hyperlink or memo field end reads on Hancom 2024): a fact about the document, so it is no evidence and nothing is called.
         return None
     return evidence_of(census, controls)
 
