@@ -238,6 +238,12 @@ def _native_undo_steps(steps: list[dict[str, Any]]) -> int:
     return sum(_reported_native_edits(step) if _BUNDLE_UNDO_POLICY.get(str(step.get('op'))) in _COUNTED_POLICIES else 1 for step in steps)
 
 
+def _n1_composed_history_unqualified(steps: list[Any]) -> bool:
+    """Per-step native counts do not qualify a composed N1 expected state."""
+    dirty = [step for step in steps if isinstance(step, dict) and step.get('dirty')]
+    return len(dirty) > 1 and any(step.get('op') in {'header_footer_text_exact', 'header_footer_format_exact'} for step in dirty)
+
+
 def _record_bundle_undo_state(binding: dict[str, Any], steps: list[Any], prior: dict[str, Any]) -> None:
     """Set how `undo` may revert this bundle: a native step count, refusal, or the prior state.
 
@@ -251,6 +257,8 @@ def _record_bundle_undo_state(binding: dict[str, Any], steps: list[Any], prior: 
         binding.update(prior)
         return
     unverified = sorted({str(step.get('op')) for step in dirty_steps if not _bundle_step_single_undo(step)})
+    if _n1_composed_history_unqualified(steps):
+        unverified.append('header_footer_multi_dirty_composition')
     if unverified:
         binding['pending_logical_undo_count'] = None
         binding['logical_undo_unverified'] = (
@@ -2932,9 +2940,9 @@ class LocalCliService(
             'text_replace_exact': {'op', 'operation', 'label', 'old_text', 'new_text', 'match', 'occurrence', 'expected_occurrences', 'paragraph_index', 'expected_text', 'expected_page', 'format_from', 'confirm_layout'},
             'table_cell_text_exact': {'op', 'operation', 'label', 'table_id', 'expected_hash', 'expected_page', 'expected_rows', 'expected_cols', 'cells', 'confirm_layout'},
             'header_footer_inventory': {'op', 'label', 'operation'},
-            'header_footer_text_exact': {'op', 'operation', 'label', 'kind', 'section', 'apply_to', 'expected_area_hash', 'old_text', 'new_text', 'match', 'occurrence',
+            'header_footer_text_exact': {'op', 'operation', 'label', 'kind', 'section', 'apply_to', 'expected_area_hash', 'expected_affected_sections', 'old_text', 'new_text', 'match', 'occurrence',
                                          'expected_occurrences', 'paragraph_index', 'expected_text', 'format_from', 'confirm_layout'},
-            'header_footer_format_exact': {'op', 'operation', 'label', 'kind', 'section', 'apply_to', 'expected_area_hash', 'match', 'paragraph_index', 'expected_text', 'confirm_layout',
+            'header_footer_format_exact': {'op', 'operation', 'label', 'kind', 'section', 'apply_to', 'expected_area_hash', 'expected_affected_sections', 'match', 'paragraph_index', 'expected_text', 'confirm_layout',
                                            'font_family', 'size_pt', 'bold', 'italic', 'underline', 'text_color', 'align', 'left_indent_pt', 'right_indent_pt', 'first_line_indent_pt',
                                            'line_spacing_type', 'line_spacing_value'},
             'character_format_exact': {'op', 'operation', 'label', 'match', 'through_match', 'paragraph_index', 'expected_text', 'expected_page', 'confirm_layout', 'number_mark', 'font_family', 'size_pt', 'bold', 'italic', 'underline', 'text_color'},
@@ -7527,6 +7535,10 @@ class LocalCliService(
             'semantic_ok': semantic_ok,
             'command': 'command-bundle',
             'summary': summary,
+            **({'history': {'qualified': False, 'reason': 'header_footer_multi_dirty_composition',
+                           'undo': 'refused_before_native', 'redo': 'no_redo_available',
+                           'dirty_step_count': sum(bool(item.get('dirty')) for item in result.get('steps', []) if isinstance(item, dict))}}
+               if _n1_composed_history_unqualified(result.get('steps') or []) else {}),
             'dirty': dirty,
             'before': self._bundle_compact_location(result.get('before_location') if isinstance(result.get('before_location'), dict) else {}),
             'after': self._bundle_compact_location(location),

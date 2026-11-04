@@ -46,7 +46,7 @@ KINDS = ('header', 'footer')
 SCOPES = ('both', 'odd', 'even')
 _NATIVE_HOLDER = {'header': 'head', 'footer': 'foot'}
 _HASH_HEX = 24
-_BINDING_FIELDS = ('kind', 'section', 'apply_to', 'expected_area_hash')
+_BINDING_FIELDS = ('kind', 'section', 'apply_to', 'expected_area_hash', 'expected_affected_sections')
 _TEXT_FIELDS = ('old_text', 'new_text', 'match', 'occurrence', 'expected_occurrences', 'paragraph_index', 'expected_text', 'format_from', 'confirm_layout')
 _TARGET_FIELDS = ('match', 'paragraph_index', 'expected_text', 'confirm_layout')
 _CHARACTER_FIELDS = ('font_family', 'size_pt', 'bold', 'italic', 'underline', 'text_color')
@@ -63,7 +63,7 @@ _MAY_EMPTY = frozenset({'charshapelist', 'facenamelist'})
 
 def _binding(step: Mapping[str, Any], op: str) -> dict[str, Any]:
     _require_confirm_layout(step, op)
-    kind, section, scope, expected = (step.get(name) for name in _BINDING_FIELDS)
+    kind, section, scope, expected = (step.get(name) for name in _BINDING_FIELDS[:4])
     if type(kind) is not str or kind not in KINDS:
         raise NativeNumberingInputError('kind must be header or footer')
     if type(section) is not int or not 0 <= section <= 10000:
@@ -73,7 +73,15 @@ def _binding(step: Mapping[str, Any], op: str) -> dict[str, Any]:
     if type(expected) is not str or len(expected) != len('sha256:') + _HASH_HEX or not expected.startswith('sha256:') \
             or any(char not in '0123456789abcdef' for char in expected[len('sha256:'):]):
         raise NativeNumberingInputError('expected_area_hash must be the hash header_footer_inventory reported for this area')
-    return {'kind': kind, 'section': section, 'apply_to': scope, 'expected_area_hash': expected}
+    binding = {'kind': kind, 'section': section, 'apply_to': scope, 'expected_area_hash': expected}
+    if 'expected_affected_sections' in step:
+        affected = step['expected_affected_sections']
+        if (type(affected) is not list or not 1 <= len(affected) <= 10001
+                or any(type(item) is not int or not 0 <= item <= 10000 for item in affected)
+                or affected != sorted(set(affected))):
+            raise NativeNumberingInputError('expected_affected_sections must be a nonempty ascending unique array of exact section integers 0..10000')
+        binding['expected_affected_sections'] = list(affected)
+    return binding
 
 
 def validate_inventory_step(step: Mapping[str, Any]) -> dict[str, Any]:
@@ -253,6 +261,12 @@ def resolve_area(model: Mapping[str, Any], request: Mapping[str, Any]) -> dict[s
         raise NativeNumberingRefusal(f'section {section} has no {kind}, and no section before it has one; this command edits only an existing {kind}', code='area_not_found')
     if found[0]['hash'] != request['expected_area_hash']:
         raise NativeNumberingRefusal('this area is not as it was when it was listed; list it again with header_footer_inventory', code='area_hash_mismatch')
+    affected = _shown_in(model, found[0])
+    expected_affected = request.get('expected_affected_sections')
+    if expected_affected is None and len(affected) > 1:
+        raise NativeNumberingRefusal('this area is shared; explicitly acknowledge every shown section with expected_affected_sections', code='affected_sections_required')
+    if expected_affected is not None and expected_affected != affected:
+        raise NativeNumberingRefusal('the acknowledged affected sections do not match the current full section set; list the areas again', code='affected_sections_mismatch')
     return found[0]
 
 
@@ -442,6 +456,19 @@ def _format_problems(before: Mapping[str, Any], after: Mapping[str, Any], found:
     return problems
 
 
+# Preservation reads. Keep this N1 policy local: entered unprovable control
+# enumeration is UNKNOWN, not authority to restore the caret or reread evidence.
+def _read(hwp: Any, read: Callable[[], Mapping[str, Any]]) -> dict[str, Any]:
+    try:
+        return nf._read(hwp, read)  # noqa: SLF001
+    except NativeNumberingReadFailure:
+        raise
+    except NativeNumberingRefusal as exc:
+        if exc.code == 'control_enumeration_unavailable':
+            raise NativeNumberingReadFailure('Header/footer preservation controls are unproven; no further native calls are permitted.', code='control_enumeration_unavailable') from exc
+        raise
+
+
 # Edits.
 
 def _require_plain(paragraph: Mapping[str, Any]) -> None:
@@ -470,7 +497,7 @@ def apply_text(hwp: Any, *, request: Mapping[str, Any], read: Callable[[], Mappi
         caret = _state(hwp)
         if caret is None or caret[1] != ():
             raise NativeNumberingRefusal('the caret could not be read plainly before the edit', code='selection_unverified')
-        before = nf._read(hwp, read)  # noqa: SLF001
+        before = _read(hwp, read)
         found = resolve_area(before['areas'], request)
         local = {'paragraphs': found['paragraphs'], 'header_footer_text': []}
         row, number, count = nte._resolve(local, request)  # noqa: SLF001
@@ -489,7 +516,7 @@ def apply_text(hwp: Any, *, request: Mapping[str, Any], read: Callable[[], Mappi
         nte._insert(hwp, request['new_text'])  # noqa: SLF001
         _select_area(hwp, block, [request['old_text']], holder)
         nte._delete(hwp)  # noqa: SLF001
-        after = nf._read(hwp, read)  # noqa: SLF001
+        after = _read(hwp, read)
         problems = _text_problems(before, after, found, row, request['new_text'], shape)
         if problems:
             raise NativeNumberingMutationError('header or footer text replacement outcome is not as requested: ' + '; '.join(problems[:5]) + '; nothing was rolled back')
@@ -534,7 +561,7 @@ def apply_format(hwp: Any, *, request: Mapping[str, Any], read: Callable[[], Map
         caret = _state(hwp)
         if caret is None or caret[1] != ():
             raise NativeNumberingRefusal('the caret could not be read plainly before the edit', code='selection_unverified')
-        before = nf._read(hwp, read)  # noqa: SLF001
+        before = _read(hwp, read)
         found = resolve_area(before['areas'], request)
         local = {'paragraphs': found['paragraphs'], 'header_footer_text': []}
         rows, _kind = nf._resolve(local, {key: request[key] for key in ('match', 'paragraph_index', 'expected_text') if key in request})  # noqa: SLF001
@@ -576,7 +603,7 @@ def apply_format(hwp: Any, *, request: Mapping[str, Any], read: Callable[[], Map
             _execute(hwp, 'ParagraphShape', nf._paragraph_items(paragraph_wanted))  # noqa: SLF001
             actions.append('Execute:ParagraphShape')
             _cancel(hwp)
-        after = nf._read(hwp, read)  # noqa: SLF001
+        after = _read(hwp, read)
         problems = _format_problems(before, after, found, row, character if need_character else None, paragraph_wanted if need_paragraph else None)
         if problems:
             raise NativeNumberingMutationError('header or footer formatting outcome is not as requested: ' + '; '.join(problems[:5]) + '; nothing was rolled back')

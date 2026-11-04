@@ -29,7 +29,7 @@ def inventory(hwp: HeaderFooterHwp) -> dict:
 
 def bound(hwp: HeaderFooterHwp, area_id: str) -> dict:
     found = {item['area_id']: item for item in inventory(hwp)['areas']}[area_id]
-    return {'kind': found['kind'], 'section': found['section'], 'apply_to': found['apply_to'], 'expected_area_hash': found['hash']}
+    return {'kind': found['kind'], 'section': found['section'], 'apply_to': found['apply_to'], 'expected_area_hash': found['hash'], 'expected_affected_sections': found['shown_in_sections']}
 
 
 def ok(test: unittest.TestCase, outcome: dict) -> dict:
@@ -136,7 +136,7 @@ class TextEdit(unittest.TestCase):
         self.assertEqual(hwp.area_props(0)[4], (' ', char()))
         self.assertEqual(hwp.area_props(0)[9], (' ', char()))
 
-    def test_odd_header_of_the_second_section_only(self) -> None:
+    def test_odd_header_with_explicit_shared_section_scope(self) -> None:
         hwp = sections_document()
         result = ok(self, Flow(hwp).step(**TEXT, **bound(hwp, 'header:s1:odd'), old_text='2025', new_text='2026'))
         self.assertEqual([hwp.area_text(number) for number in range(5)],
@@ -295,7 +295,7 @@ class UndoRedo(unittest.TestCase):
     def binding(self, area_id: str) -> dict:
         listed = self.step(op='header_footer_inventory')['steps'][0]['result']['areas']
         found = {item['area_id']: item for item in listed}[area_id]
-        return {'kind': found['kind'], 'section': found['section'], 'apply_to': found['apply_to'], 'expected_area_hash': found['hash']}
+        return {'kind': found['kind'], 'section': found['section'], 'apply_to': found['apply_to'], 'expected_area_hash': found['hash'], 'expected_affected_sections': found['shown_in_sections']}
 
     def test_a_header_replacement_is_one_logical_undo_of_two_native_steps(self) -> None:
         self.assertTrue(self.step(**TEXT, **self.binding('header:s1:odd'), old_text='2025', new_text='2026')['ok'])

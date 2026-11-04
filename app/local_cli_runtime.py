@@ -199,6 +199,7 @@ def _native_diagnostic(site: object, error: BaseException) -> dict[str, str]:
                             'target_not_found', 'target_not_in_body', 'target_unidentifiable', 'target_unlocatable',
                             'text_readback_unavailable',
                             'area_not_found', 'area_inherited', 'area_ambiguous', 'area_hash_mismatch', 'area_unlocatable',
+                            'affected_sections_required', 'affected_sections_mismatch',
                             'table_not_found', 'table_identity_ambiguous', 'table_grid_mismatch', 'table_state_stale', 'table_too_large', 'table_would_be_empty', 'table_geometry_unknown',
                             'cell_out_of_range', 'cell_covered_by_merge', 'cell_not_merged', 'range_cuts_merged_cell', 'range_too_small', 'merged_cell_crosses_lines', 'merged_split_rows_unsupported',
                             'line_inside_merged_cell', 'removed_content_mismatch', 'edge_not_in_target', 'edge_held_by_wider_neighbour', 'cells_text_unsupported', 'table_would_overflow', 'column_widths_mismatch', 'column_too_narrow', 'fill_kind_unsupported', 'target_table_not_entered', 'target_cell_unreachable',

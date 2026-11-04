@@ -499,7 +499,17 @@ class _AreaBinding(Closed):
     section: int = Field(ge=0, le=10000, description='The section number header_footer_inventory gives, from 0. A section without its own area is refused, naming the section whose area it shows.')
     apply_to: Literal['both', 'odd', 'even'] = Field(description='The pages the area applies to: both (every page), odd or even.')
     expected_area_hash: AreaHash
+    expected_affected_sections: list[Annotated[int, Field(ge=0, le=10000)]] | None = Field(
+        default=None, min_length=1, max_length=10001,
+        description='Copy the complete shown_in_sections array from the inventory in ascending unique order. Required for shared owners; binds all affected sections, never detaches an inherited area.')
     confirm_layout: Literal[True]
+
+    @field_validator('expected_affected_sections')
+    @classmethod
+    def canonical_affected_sections(cls, value):
+        if value is None or value != sorted(set(value)):
+            raise ValueError('expected_affected_sections must be a nonempty ascending unique section array, not null')
+        return value
 
 
 class HeaderFooterTextStep(_AreaBinding):

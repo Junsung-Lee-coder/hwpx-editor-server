@@ -74,10 +74,10 @@ BUNDLE_OPS: dict[str, dict[str, Any]] = {
     'header_footer_inventory': _exposed(SESSION_TOOLS, note='read-only list of the existing headers and footers: section, apply_to (both, odd or even pages), '
                                                             'text, format, page number fields, the sections that show each, and the hash that binds it'),
     'header_footer_text_exact': _exposed(SESSION_TOOLS, note='one exact range of the text of one existing header or footer bound by kind+section+apply_to+'
-                                                             'expected_area_hash, in the replaced text\'s format; its page number fields, the body and every other '
-                                                             'area stay; returns the next hash; ' + _UNDO_COUNTED),
+                                                             'expected_area_hash and the exact expected_affected_sections array for shared owners, in the replaced text\'s format; its page number fields, the body and every other '
+                                                             'area stay; returns the next hash; history is measured for one actually dirty step, not multi-dirty N1 bundles; ' + _UNDO_COUNTED),
     'header_footer_format_exact': _exposed(SESSION_TOOLS, note='character format of exact text and paragraph format of its paragraph in one existing header or '
-                                                               'footer, bound as header_footer_text_exact; ' + _UNDO_COUNTED),
+                                                               'footer, bound as header_footer_text_exact; history is measured for one actually dirty step only; a bundle with multiple dirty steps and any N1 mutation refuses Undo/Redo before native calls; ' + _UNDO_COUNTED),
     'control_inventory': _exposed(SESSION_TOOLS, note='read-only native control list with target_id/expected_hash'),
     'table_frame_inventory': _exposed(SESSION_TOOLS, note='read-only table frame list'),
     'exact_control_select_proof': _exposed(SESSION_TOOLS, note='read-only selection proof of one control'),

@@ -967,7 +967,7 @@ def build_app(settings: Settings | None = None):
                                 'occurrence with expected_occurrences, or paragraph_index with expected_text; the new text keeps the replaced text\'s format, and text '
                                 'in several formats needs format_from=last_character. Existing headers and footers: header_footer_inventory lists each with its section, '
                                 'apply_to (both, odd or even pages), text, page number fields and hash; header_footer_text_exact replaces one exact range of its text and '
-                                'header_footer_format_exact sets character or paragraph format in it, bound by kind+section+apply_to+expected_area_hash (a section '
+                                'header_footer_format_exact sets character or paragraph format in it, bound by kind+section+apply_to+expected_area_hash + the exact expected_affected_sections array for shared owners (a section '
                                 'showing an earlier section\'s area is refused as area_inherited, naming that section). Layout and objects: layout_inspect, layout_exact (page_setup, columns, '
                                 'section_insert, section_delete, hanging_indent), object_insert_exact (footnote, endnote, memo, hyperlink, bookmark, equation, line, '
                                 'rectangle, ellipse, header, footer). Legacy control-inventory engines: control_inventory, table_frame_inventory, '
@@ -982,6 +982,7 @@ def build_app(settings: Settings | None = None):
                                 'edits and command_reconcile. Backend refusals, partial and unknown outcomes are returned unchanged. No arbitrary COM, Python or shell. '
                                 'hwpx_capabilities lists every backend operation with its MCP route or exclusion reason.',
                 'hwpx_bundle': 'Up to 20 command-bundle steps (the same step schemas as hwpx_command) sent as one backend command bundle, in order. '
+                               'More than one actually dirty step with any header/footer mutation makes composed history unqualified: Undo/Redo refuse before native calls; inventory/no-op companions do not count as dirty. '
                                'The backend stops at the first failed step and reports each step; a semantic refusal keeps earlier edits, a technical '
                                'failure holds the session. Use it where steps must share one backend request, such as native_table_insert followed by '
                                'selected_text_delete_exact.',

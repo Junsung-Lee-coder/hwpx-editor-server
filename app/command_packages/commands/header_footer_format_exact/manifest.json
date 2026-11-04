@@ -13,6 +13,7 @@
     "section",
     "apply_to",
     "expected_area_hash",
+    "expected_affected_sections",
     "match",
     "paragraph_index",
     "expected_text",

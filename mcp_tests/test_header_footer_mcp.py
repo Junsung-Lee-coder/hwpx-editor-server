@@ -13,7 +13,7 @@ BINDING = {'kind': 'header', 'section': 0, 'apply_to': 'both', 'expected_area_ha
 INVENTORY = {'op': 'header_footer_inventory'}
 TEXT = {'op': 'header_footer_text_exact', **BINDING, 'old_text': 'SAMPLE', 'new_text': 'UPDATED'}
 TEXT_ODD = {'op': 'header_footer_text_exact', 'kind': 'header', 'section': 1, 'apply_to': 'odd', 'expected_area_hash': 'sha256:' + 'd' * 24, 'confirm_layout': True,
-            'paragraph_index': 0, 'expected_text': 'ODD HEADER 2025', 'old_text': '2025', 'new_text': '2026'}
+            'paragraph_index': 0, 'expected_affected_sections': [1, 2], 'expected_text': 'ODD HEADER 2025', 'old_text': '2025', 'new_text': '2026'}
 FORMAT = {'op': 'header_footer_format_exact', **BINDING, 'match': 'REPORT', 'bold': True, 'text_color': '#C00000', 'align': 'center'}
 
 
@@ -28,7 +28,7 @@ class HeaderFooterCommands(Base):
         for name in ('hwpx_command', 'hwpx_bundle'):
             tool = next(item for item in tools.tools if item.name == name)
             rendered = json.dumps(tool.input_schema)
-            for field in ('header_footer_inventory', 'header_footer_text_exact', 'header_footer_format_exact', 'expected_area_hash', 'apply_to'):
+            for field in ('header_footer_inventory', 'header_footer_text_exact', 'header_footer_format_exact', 'expected_area_hash', 'expected_affected_sections', 'apply_to'):
                 self.assertIn(field, rendered, name)
         command = next(item for item in tools.tools if item.name == 'hwpx_command')
         for name in ('header_footer_inventory', 'header_footer_text_exact', 'header_footer_format_exact', 'area_inherited'):
@@ -60,7 +60,7 @@ class HeaderFooterCommands(Base):
         self.assertEqual((details['stopped_before_edit'], details['session_held']), (False, True))
 
     async def test_invalid_requests_never_reach_the_backend(self):
-        for request in ({**TEXT, 'apply_to': 'first'}, {**TEXT, 'kind': 'body'}, {**TEXT, 'section': -1}, {**TEXT, 'expected_area_hash': 'sha256:abc'},
+        for request in (*({**TEXT, 'expected_affected_sections': value} for value in (None, [], [True], [0, 0], [2, 1], [-1], [10001], [0.0], '0')), {**TEXT, 'apply_to': 'first'}, {**TEXT, 'kind': 'body'}, {**TEXT, 'section': -1}, {**TEXT, 'expected_area_hash': 'sha256:abc'},
                         {**TEXT, 'expected_page': 1}, {**TEXT, 'new_text': 'two\nlines'}, {**TEXT, 'confirm_layout': False},
                         {key: value for key, value in TEXT.items() if key != 'expected_area_hash'}, {**FORMAT, 'through_match': 'X'},
                         {key: value for key, value in FORMAT.items() if key not in {'bold', 'text_color', 'align'}}, {**FORMAT, 'size_pt': 10.05},
