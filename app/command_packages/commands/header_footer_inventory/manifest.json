@@ -1,0 +1,13 @@
+{
+  "op": "header_footer_inventory",
+  "version": "local-cli/header-footer-inventory/v1-package",
+  "summary": "List every existing header and footer with its section, page scope (both, odd or even pages), text, format, page number fields, the sections that show it, and its hash.",
+  "module": "app.command_packages.commands.header_footer_inventory.run",
+  "read_only": true,
+  "dirty_default": false,
+  "allowed_keys": [
+    "op",
+    "operation",
+    "label"
+  ]
+}

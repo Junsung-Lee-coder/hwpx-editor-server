@@ -1,0 +1,27 @@
+{
+  "op": "header_footer_text_exact",
+  "version": "local-cli/header-footer-text-exact/v1-package",
+  "summary": "Replace one exact range of the text of one existing header or footer, bound by kind, section, page scope and hash, in the format of the replaced text, keeping its page number fields, the body and every other area.",
+  "module": "app.command_packages.commands.header_footer_text_exact.run",
+  "read_only": false,
+  "dirty_default": true,
+  "allowed_keys": [
+    "op",
+    "operation",
+    "label",
+    "kind",
+    "section",
+    "apply_to",
+    "expected_area_hash",
+    "expected_affected_sections",
+    "old_text",
+    "new_text",
+    "match",
+    "occurrence",
+    "expected_occurrences",
+    "paragraph_index",
+    "expected_text",
+    "format_from",
+    "confirm_layout"
+  ]
+}

@@ -529,6 +529,15 @@ def validate_step_for_op(op: str, *, service: Any, index: int, step: dict[str, A
             (native_text_edit.validate_replace_step if op == 'text_replace_exact' else native_text_edit.validate_cell_text_step)(step)
         except native_text_edit.NativeNumberingInputError as exc:
             _raise(error_type, f'command-bundle step {index} {op}: {exc}')
+    elif op in {'header_footer_inventory', 'header_footer_text_exact', 'header_footer_format_exact'}:
+        from app import native_header_footer
+
+        validate = {'header_footer_inventory': native_header_footer.validate_inventory_step, 'header_footer_text_exact': native_header_footer.validate_text_step,
+                    'header_footer_format_exact': native_header_footer.validate_format_step}[op]
+        try:
+            validate(step)
+        except native_header_footer.NativeNumberingInputError as exc:
+            _raise(error_type, f'command-bundle step {index} {op}: {exc}')
     elif op in {'control_inventory', 'table_frame_inventory', 'export_pdf', 'where'}:
         pass
     else:
@@ -649,6 +658,14 @@ def run_step_for_op(op: str, *, service: Any, handle: Any, step: dict[str, Any],
         run = service._bundle_text_replace_exact if op == 'text_replace_exact' else service._bundle_table_cell_text_exact  # noqa: SLF001
         result = run(handle.hwp, step, on_mutating=handle.mark_mutating_intent)
         return result, True, list(result.get('warnings') or [])
+    if op == 'header_footer_inventory':
+        result = service._bundle_header_footer_inventory(handle.hwp, step)  # noqa: SLF001
+        return result, False, list(result.get('warnings') or [])
+    if op in {'header_footer_text_exact', 'header_footer_format_exact'}:
+        run = service._bundle_header_footer_text_exact if op == 'header_footer_text_exact' else service._bundle_header_footer_format_exact  # noqa: SLF001
+        result = run(handle.hwp, step, on_mutating=handle.mark_mutating_intent)
+        # A format already present is a proven no-op, not a new dirty delta.
+        return result, result['result']['changed'] is not False, list(result.get('warnings') or [])
     if op == 'paragraph_delete_exact':
         result = service._bundle_paragraph_delete_exact(handle.hwp, step)  # noqa: SLF001
         return result, True, list(result.get('warnings') or [])

@@ -10,6 +10,8 @@ if ($PSVersionTable.PSVersion.Major -ne 5) {
 }
 
 $root = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
+# Execute the actual suite-row consumer under PS5.1 before broader runtime fixtures.
+& (Join-Path $PSScriptRoot 'suite_skip_health_contract.ps1') -RunnerPath (Join-Path $PSScriptRoot 'run_windows_suite.ps1')
 $commonPath = Join-Path $root 'scripts\windows_install_common.psm1'
 Import-Module $commonPath -Force
 
