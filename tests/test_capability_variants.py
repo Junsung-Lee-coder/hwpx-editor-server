@@ -82,7 +82,7 @@ class VariantRows(unittest.TestCase):
         self.assertEqual((shape_rows['line:diagonal']['native'], shape_rows['line:diagonal'].get('refusal_code')), ('unsupported', 'unverifiable_layout'))
         for name in drawn:
             self.assertIn(shape_rows[name]['native'], ('qualified', 'not_qualified'), shape_rows[name])
-        self.assertEqual(objects['header:even'], 'not_qualified')
+        self.assertEqual((objects['header:even'], objects['footer:odd']), ('qualified', 'qualified'))
         self.assertNotIn('native', rows()['layout_exact'])
 
     def test_the_reference_is_described_without_private_labels(self):

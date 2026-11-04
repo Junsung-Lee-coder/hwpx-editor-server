@@ -176,6 +176,39 @@ def drawing_points(plan: Mapping[str, Any]) -> tuple[int, list[int]]:
 # 'none': strict normal edit state; 'required': a live selection; 'optional': either.
 SELECTION_POLICY: dict[str, str] = {kind: 'none' for kind in KINDS} | {'hyperlink': 'required', 'memo': 'optional'}
 
+# ---------------------------------------------------------------- undo per variant
+#
+# The native Undo steps that revert one insertion, per variant, as measured on Hancom 2024 13.0.0.3457 in an owned
+# characterization beside existing tables and pictures: each editing action the engine reports is one step (the typed
+# text of a note, header or footer is the second; Cancel and CloseEx are none), and Undo reached the state recorded
+# before the insertion. `hwpx undo` counts only these variants, and only when the insertion reports exactly this many
+# editing actions; memo and hyperlink (their field ends make the control walk unreadable) and anything not listed here
+# refuse undo_not_counted before any native history call.
+UNDO_STEPS: dict[str, int] = {
+    'footnote': 2, 'endnote': 2, 'bookmark': 1, 'equation': 1,
+    **{f'line:{axis}_{place}': 1 for axis in ('horizontal', 'vertical') for place in ('inline', 'floating')},
+    **{f'{shape}:{place}': 1 for shape in ('rectangle', 'ellipse') for place in ('inline', 'floating')},
+    **{f'{kind}:{pages}': 2 for kind in ('header', 'footer') for pages in ('both', 'odd', 'even')},
+}
+# The element Redo re-creates for these kinds; native_format.REDO_RENEWAL names what of it was measured to renew.
+REDO_ELEMENT: dict[str, str] = {kind: KIND_TAGS[kind][0] for kind in ('equation', 'line', 'rectangle', 'ellipse', 'header', 'footer')}
+
+
+def undo_variant(plan: Mapping[str, Any], *, selected: bool) -> str:
+    """The variant name an insertion is counted under (the capability contract's variant rows); ``selected``: a memo
+    inserted on a live selection."""
+    kind = plan['kind']
+    if kind in ('rectangle', 'ellipse'):
+        return f"{kind}:{'inline' if plan['treat_as_char'] else 'floating'}"
+    if kind == 'line':
+        axis = 'horizontal' if plan['height_mm'] == 0 else 'vertical' if plan['width_mm'] == 0 else 'diagonal'
+        return f"line:{axis}_{'inline' if plan['treat_as_char'] else 'floating'}" if axis != 'diagonal' else 'line:diagonal'
+    if kind in ('header', 'footer'):
+        return f"{kind}:{plan['apply_to']}"
+    if kind == 'memo' and selected:
+        return 'memo:selection'
+    return kind
+
 MAX_TEXT = 2000
 MAX_URL = 2000
 MAX_BOOKMARK = 40

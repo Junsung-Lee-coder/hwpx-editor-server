@@ -353,6 +353,23 @@ def _table_mark(paragraph: dict[str, Any], tables: dict[str, Any] | None) -> dic
     return {'in_table': True} if tables and (tables['changed'] or tables['added'] or tables['removed']) and (paragraph.get('context') == 'table_cell' or paragraph.get('table_id')) else {}
 
 
+# The backend's digest of a paragraph's objects when it holds none (app.native_format._short_digest([])).
+_NO_OBJECTS = hashlib.sha256(b'[]').hexdigest()[:16]
+
+
+def _replaced_in_place(old: dict[str, Any], new: dict[str, Any]) -> bool:
+    """Whether a paragraph can be shown as one text change into another: both name the same objects (their digest, which
+    also covers bookmarks and other controls the object list leaves out), so nothing was removed or added with the text,
+    and the old one was not objects alone. Paragraphs whose objects are not known are never paired."""
+    before, after = old.get('format'), new.get('format')
+    if not isinstance(before, dict) or not isinstance(after, dict):
+        return False
+    digest = before.get('objects_sha256')
+    if type(digest) is not str or digest != after.get('objects_sha256'):
+        return False
+    return bool(str(old.get('text') or '').strip()) or digest == _NO_OBJECTS
+
+
 def _object_mark(paragraph: dict[str, Any]) -> dict[str, Any]:
     """A removed paragraph's objects, so a picture gone from a saved file can be traced to it."""
     objects = (paragraph.get('format') or {}).get('objects') if isinstance(paragraph.get('format'), dict) else None
@@ -446,12 +463,13 @@ def compare(baseline: dict[str, Any], current: dict[str, Any], rows: list[dict[s
                             marks['changed'] += 1
                             changes.append({'kind': 'number_mark_changed', 'text': after[right]['text'], 'paragraph_index': after[right].get('index', right), 'changes': mark_changes, 'objects': (after[right].get('format') or {}).get('objects')})
                 continue
-            # A paragraph replaced one for one in the same place (the body, or the same cell of the same table) and holding no table
-            # names the text that took its place, so the summary can show one change from the old text to the new.
+            # A paragraph replaced one for one in the same place (the body, or the same cell of the same table), holding no table and
+            # keeping exactly its objects, names the text that took its place, so the summary can show one change from the old text
+            # to the new; any other stays a removal (with its objects) beside the addition.
             pairs = dict(zip(left_indexes[i1:i2], right_indexes[j1:j2])) if (
                 op == 'replace' and i2 - i1 == j2 - j1 and not (baseline.get('paragraphs_truncated') and i2 == len(left_indexes))
                 and not (current.get('paragraphs_truncated') and j2 == len(right_indexes))
-                and all(not before[left].get('holds_tables') and not after[right].get('holds_tables')
+                and all(not before[left].get('holds_tables') and not after[right].get('holds_tables') and _replaced_in_place(before[left], after[right])
                         and (before[left].get('in_body'), before[left].get('table_id'), before[left].get('cell')) == (after[right].get('in_body'), after[right].get('table_id'), after[right].get('cell'))
                         for left, right in zip(left_indexes[i1:i2], right_indexes[j1:j2]))) else {}
             replaced = {right: left for left, right in pairs.items()}

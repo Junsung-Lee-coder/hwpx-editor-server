@@ -20,8 +20,10 @@ from app.object_insert import (
     DRAWING_POINT_ARRAY,
     DRAWING_POINT_COUNT,
     OP,
+    REDO_ELEMENT,
     SCHEMA_VERSION,
     SHAPE_KINDS,
+    UNDO_STEPS,
     ObjectInsertError,
     check_before,
     drawing_points,
@@ -35,6 +37,7 @@ from app.object_insert import (
     public_plan,
     reason_code,
     summarize,
+    undo_variant,
 )
 
 _ROLLBACK_HINT = {'attempted': False, 'hint': 'Retain the working copy and owning STA; full native close is unsupported for this unproved or held session. Separately authorized exact-owned operator closure is required; a single Undo does not guarantee a full rollback of this edit.'}
@@ -43,10 +46,15 @@ _UNDO_NOTE = (
     '(a control walk that returns an identifier other than exact text, as a hyperlink or memo field does, or a readback that is no census), '
     'so a native Undo could not be compared with it. Retain the working copy and owning STA; full native close is unsupported for this unproved or held session. Separately authorized exact-owned operator closure is required to discard the edit.'
 )
+_UNMEASURED_NOTE = (
+    'hwpx undo refuses after this object_insert_exact before any native history call: no native Undo of this variant with this many '
+    'editing actions was measured (the capability contract lists the counted variants). Retain the working copy and owning STA; full '
+    'native close is unsupported for this unproved or held session. Separately authorized exact-owned operator closure is required to discard the edit.'
+)
 _COUNTED_NOTE = (
     'hwpx undo reverts this insertion as one request: as many native Undo steps as the editing actions reported here '
-    '(measured on Hancom 2024: each is one step, Cancel and CloseEx none), compared with the state recorded before it; '
-    'redo is compared with the state after it, where a re-created object may carry a new instance id, z-order or series number.'
+    '(measured for this variant on Hancom 2024: each is one step, Cancel and CloseEx none), compared with the state recorded before it; '
+    'redo is compared with the state after it, where only the re-created object may differ, and only in the attributes redo_renewal names.'
 )
 
 
@@ -61,19 +69,29 @@ class _Mutation:
     editing_actions = 0
 
 
-def _undo_report(mutation: _Mutation, pre: dict[str, str] | None = None, post: dict[str, str] | None = None) -> dict[str, Any]:
-    """What `hwpx undo` will do after this edit: count its actions when both states were recorded, else refuse."""
+def _undo_report(mutation: _Mutation, pre: dict[str, Any] | None = None, post: dict[str, Any] | None = None, variant: str | None = None) -> dict[str, Any]:
+    """What `hwpx undo` will do after this edit: count its actions when the variant's native Undo was measured with this
+    many actions and both states were recorded, else refuse (before any native history call)."""
+    refused = {'native_editing_actions': mutation.editing_actions, **({'undo_variant': variant} if variant else {}), 'hwpx_undo': 'refused', 'undo_units_verified': False}
+    if variant is None:
+        return {**refused, 'note': _UNDO_NOTE}  # The edit failed, or its states were not read.
+    if UNDO_STEPS.get(variant) != mutation.editing_actions:
+        return {**refused, 'note': _UNDO_NOTE if variant in ('memo', 'memo:selection', 'hyperlink') else _UNMEASURED_NOTE}
     if pre is None or post is None or mutation.editing_actions < 1:
-        return {'native_editing_actions': mutation.editing_actions, 'hwpx_undo': 'refused', 'undo_units_verified': False, 'note': _UNDO_NOTE}
-    return {
+        return {**refused, 'note': _UNDO_NOTE}
+    report = {
         'native_editing_actions': mutation.editing_actions,
+        'undo_variant': variant,
         'pre_state_sha256': pre['sha'],
         'post_state_sha256': post['sha'],
-        'post_renewal_free_sha256': post['renewal_free_sha'],
         'hwpx_undo': 'counted',
         'undo_units_verified': True,
         'note': _COUNTED_NOTE,
     }
+    if 'renewal' in post:
+        # The one element Redo re-creates, with the recorded values of the attributes it was measured to renew.
+        report['redo_renewal'] = post['renewal']
+    return report
 
 
 def _controls(hwp: Any) -> list[str]:
@@ -365,7 +383,11 @@ class LocalCliObjectInsertMixin:
                 error = LocalCliRuntimeError(f'{OP} refused to mark success: {"; ".join(verification["reasons"])}')
                 error.step_phase, error.step_reason = 'verify', reason_code(verification['reasons'][0]) if verification['reasons'] else 'other'
                 raise error
-            post_state = history_state(texts[1], lambda: _controls(hwp)) if pre_state is not None else None
+            variant = undo_variant(plan, selected=proof['snapshot']['has_selection'] is True)
+            renewal = (REDO_ELEMENT[plan['kind']], texts[0]) if plan['kind'] in REDO_ELEMENT else None
+            measured = UNDO_STEPS.get(variant) == mutation.editing_actions
+            # Only a counted variant's states are read: an unmeasured one refuses undo whatever they are.
+            post_state = history_state(texts[1], lambda: _controls(hwp), renewal=renewal) if pre_state is not None and measured else None
             return {
                 'schema_version': SCHEMA_VERSION,
                 'succeeded': True,
@@ -378,7 +400,7 @@ class LocalCliObjectInsertMixin:
                 'head_before': head_summary(before_root),
                 'head_after': head_summary(after_root),
                 'verification': verification,
-                'undo': _undo_report(mutation, pre_state, post_state),
+                'undo': _undo_report(mutation, pre_state, post_state, variant),
                 'next_proof_required': 'Render the page (page-screenshot or export-proof-range) and review it before saving; re-run where before another caret-bound edit.',
                 'warnings': [],
             }

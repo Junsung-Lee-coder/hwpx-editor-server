@@ -140,8 +140,10 @@ from app.media_guard import MediaGuardError, media_change_reasons, media_invento
 #                          edit on a document that cannot be such evidence refuses).
 # Ops not listed count one undo unit per changed step.
 _BUNDLE_UNDO_POLICY: dict[str, str] = {
-    # Measured: each editing action these report is one native Undo step (Cancel and CloseEx are none), and Undo reaches the
-    # recorded state; Redo of a re-created object can renew identity attributes only, which the history comparison names.
+    # Measured per variant (app.object_insert.UNDO_STEPS, app.layout_ops.UNDO_STEPS): each editing action these report is one
+    # native Undo step (Cancel and CloseEx are none) and Undo reaches the recorded state; an engine reports a counted undo only
+    # for a measured variant. Redo of a re-created object may renew only the attributes of that one element it was measured to
+    # renew (native_format.REDO_RENEWAL); a layout edit's Redo is compared exactly.
     'layout_exact': 'counted_state_edit',
     'object_insert_exact': 'counted_state_edit',
     # Measured: the new text is inserted and the old range deleted, one Undo step each; a blank cell takes only the insertion.
@@ -213,7 +215,9 @@ def _bundle_step_single_undo(step: dict[str, Any]) -> bool:
         return step.get('ok') is True and type(reported) is int and reported >= 1
     if policy == 'counted_state_edit':
         states = _recorded_states([step])
-        return step.get('ok') is True and type(reported) is int and reported >= 1 and states is not None
+        undo = step['result'].get('undo') if isinstance(step.get('result'), dict) else None
+        counted = isinstance(undo, dict) and undo.get('hwpx_undo') == 'counted' and undo.get('undo_units_verified') is True
+        return step.get('ok') is True and counted and type(reported) is int and reported >= 1 and states is not None
     return step.get('ok') is True and reported in ({1, 2} if policy == 'counted_native_edit' else {1})
 
 
@@ -254,17 +258,19 @@ def _record_bundle_undo_state(binding: dict[str, Any], steps: list[Any], prior: 
     _track_history_edit(binding, None if unverified else _native_undo_steps(dirty_steps), _recorded_states(dirty_steps))
 
 
-def _recorded_states(steps: list[dict[str, Any]]) -> dict[str, str] | None:
+def _recorded_states(steps: list[dict[str, Any]]) -> dict[str, Any] | None:
     """The document state a lone step started from and ended in, when it recorded them."""
     if len(steps) != 1 or not isinstance(steps[0].get('result'), dict) or not isinstance(steps[0]['result'].get('undo'), dict):
         return None
     undo = steps[0]['result']['undo']
     if not (type(undo.get('pre_state_sha256')) is str and undo['pre_state_sha256'] and type(undo.get('post_state_sha256')) is str and undo['post_state_sha256']):
         return None
-    states = {'pre': undo['pre_state_sha256'], 'post': undo['post_state_sha256']}
-    if type(undo.get('post_renewal_free_sha256')) is str and undo['post_renewal_free_sha256']:
-        # What Redo is compared with when it re-creates an object under a new identity, z-order or series number.
-        states['post_renewed'] = undo['post_renewal_free_sha256']
+    states: dict[str, Any] = {'pre': undo['pre_state_sha256'], 'post': undo['post_state_sha256']}
+    if 'redo_renewal' in undo:
+        if not native_format.valid_renewal_scope(undo['redo_renewal']):
+            return None
+        # The one element Redo re-creates and the recorded values of what it may renew; everything else is compared exactly.
+        states['post_renewal'] = undo['redo_renewal']
     return states
 
 
@@ -280,17 +286,20 @@ def _track_history_edit(binding: dict[str, Any], native_steps: Any, states: dict
 _MAX_HISTORY_DIFFERENCES = 30
 
 
-def _expected_state(states: Any, name: str, reached: Any, differences: list[dict[str, Any]] | None = None, renewed: Any = None) -> dict[str, Any]:
-    """Whether a history step reached the state its edit recorded, and what differs by name when it did not; an edit that recorded none cannot be compared."""
+def _expected_state(states: Any, name: str, reached: Any, differences: list[dict[str, Any]] | None = None, renewal: Any = None) -> dict[str, Any]:
+    """Whether a history step reached the state its edit recorded, and what differs by name when it did not; an edit that recorded none cannot be compared.
+
+    ``renewal``: native_format.renewal_check of the reached text against the scope the edit recorded (Redo of an insertion).
+    """
     recorded = states.get(name) if isinstance(states, dict) else None
     if recorded is None or reached is None:
         return {'compared': False, 'matches': None}
     if recorded == reached:
         return {'compared': True, 'matches': True}
-    tolerant = states.get(name + '_renewed')
-    if type(tolerant) is str and type(renewed) is str and tolerant == renewed:
-        # Everything but the attributes Hancom renews when it re-creates an object is the recorded state.
-        return {'compared': True, 'matches': True, 'renewed': sorted(native_format.RENEWED_ATTRIBUTES)}
+    scope = states.get(name + '_renewal')
+    if native_format.valid_renewal_scope(scope) and isinstance(renewal, dict) and renewal.get('sha') == scope['sha'] and renewal.get('renewed'):
+        # Everything but the measured attributes of the one re-created element is exactly the recorded state.
+        return {'compared': True, 'matches': True, 'renewed_object': {'element': scope['element'], 'ordinal': scope['ordinal']}, 'renewed': renewal['renewed']}
     if differences is None:
         return {'compared': True, 'matches': False}
     return {'compared': True, 'matches': False, 'differences': differences[:_MAX_HISTORY_DIFFERENCES], 'differences_total': len(differences)}
@@ -7705,7 +7714,7 @@ class LocalCliService(
             return None
         return native_table.detail_differences(recorded, now) if now is not None else None
 
-    def _run_history_action(self, handle: LocalCliRuntimeHandle, name: str, native_steps: int, expected_sha: Any = None, expected_renewed: Any = None) -> dict[str, Any]:
+    def _run_history_action(self, handle: LocalCliRuntimeHandle, name: str, native_steps: int, expected_sha: Any = None, expected_renewal: Any = None) -> dict[str, Any]:
         """Undo or Redo with no second call once one may have been issued, compared with the document before and after."""
         hwp = handle.hwp
         protection = self._numbering_protection_reader(handle)
@@ -7728,17 +7737,18 @@ class LocalCliService(
             raise LocalCliRuntimeError(f'Native {name} did not return True; its outcome is unknown.')
         after = native_paragraph_edit.history_evidence(hwp, protection)
         reached = native_format.state_digest(after) if after is not None else None
-        renewed = None
-        if expected_renewed is not None and after is not None and reached != expected_sha:
+        renewal = None
+        if expected_renewal is not None and after is not None and reached != expected_sha:
             # From the text this comparison already read; no native call.
-            renewed = native_format.renewal_free_digest(getattr(protection, 'last_text', None), after['controls'])
-        differences = self._history_differences(expected_sha, reached, getattr(protection, 'last_text', None), after) if renewed is None or renewed != expected_renewed else None
+            renewal = native_format.renewal_check(getattr(protection, 'last_text', None), after['controls'], expected_renewal)
+        renewed = isinstance(renewal, dict) and isinstance(expected_renewal, dict) and renewal.get('sha') == expected_renewal.get('sha')
+        differences = None if renewed else self._history_differences(expected_sha, reached, getattr(protection, 'last_text', None), after)
         # Native history gives a block back; it must not linger for whatever command comes next.
         if callable(getattr(hwp, 'get_selected_pos', None)) and native_numbering._get_selection(hwp):  # noqa: SLF001
             native_numbering._set_pos(hwp, native_numbering._get_pos(hwp))  # noqa: SLF001
         return {
             'state_sha256': reached,
-            'renewal_free_sha256': renewed,
+            'renewal_check': renewal,
             'state_differences': differences,
             'confirmation': native_paragraph_edit.history_confirmation(before, after),
             'snapshot': _snapshot_cursor_context(hwp),
@@ -7860,7 +7870,7 @@ class LocalCliService(
         redo_count = tracked[-1] if tracked is not None and type(tracked[-1]) is int else 1
         result = self._execute_live(binding=binding, command_name='redo', task_label='local_cli.redo',
                                     handler=lambda handle: self._run_history_action(handle, 'Redo', redo_count, _recorded_sha(binding.get('redo_states'), 'post'),
-                                                                                    _recorded_sha(binding.get('redo_states'), 'post_renewed')))
+                                                                                    _recorded_sha(binding.get('redo_states'), 'post_renewal')))
         if result.get('evidence_unavailable') is True:
             raise LocalCliUndoRefused('redo refused: the document cannot be compared before and after.', code='redo_evidence_unavailable')
         if result.get('not_applied') is True:
@@ -7874,7 +7884,7 @@ class LocalCliService(
             binding.setdefault('undo_stack', []).append(binding['redo_stack'].pop())
             binding.setdefault('undo_states', []).append(states)
             binding = self._save_binding(binding)
-        expected = _expected_state(states, 'post', result.get('state_sha256'), result.get('state_differences'), result.get('renewal_free_sha256'))
+        expected = _expected_state(states, 'post', result.get('state_sha256'), result.get('state_differences'), result.get('renewal_check'))
         confirmation = {**result['confirmation'], 'expected_state': expected} if expected['compared'] else result.get('confirmation')
         if expected['matches'] is False:
             self._stop_history(binding)

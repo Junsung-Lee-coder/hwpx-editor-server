@@ -5,12 +5,13 @@ import unittest
 
 from hwpx_mcp import review
 from tests.test_repair_review_rules import built, para
+from tests.test_review_removed_objects import with_objects
 
 
 class TextChanged(unittest.TestCase):
     def test_a_replaced_title_names_its_old_and_new_text(self):
-        first = built([para('Annual Plan 2025'), para('Body for 2025.'), para('Tail')], ['Annual Plan 2025\nBody for 2025.\nTail\n'])
-        result = built([para('Annual Plan 2026'), para('Body for 2025.'), para('Tail')], ['Annual Plan 2026\nBody for 2025.\nTail\n'], baseline=first)
+        first = built([with_objects('Annual Plan 2025'), with_objects('Body for 2025.'), with_objects('Tail')], ['Annual Plan 2025\nBody for 2025.\nTail\n'])
+        result = built([with_objects('Annual Plan 2026'), with_objects('Body for 2025.'), with_objects('Tail')], ['Annual Plan 2026\nBody for 2025.\nTail\n'], baseline=first)
         changes = result['comparison']['changes']
         self.assertEqual([(change['kind'], change['text']) for change in changes], [('removed', 'Annual Plan 2025'), ('added', 'Annual Plan 2026')])
         self.assertEqual((changes[0]['replaced_by'], changes[1]['replaces']), ('Annual Plan 2026', 'Annual Plan 2025'))

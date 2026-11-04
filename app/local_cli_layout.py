@@ -20,6 +20,7 @@ from app.layout_ops import (
     PARASHAPE_ITEMS,
     SCHEMA_VERSION,
     REASON_CODES,
+    UNDO_STEPS,
     LayoutError,
     compare_documents,
     hwpunit_to_mm,
@@ -34,6 +35,7 @@ from app.layout_ops import (
     public_document,
     head_pair,
     reason_code,
+    undo_variants,
     verify_columns,
     verify_hanging_indent,
     verify_page_setup,
@@ -54,13 +56,23 @@ _UNDO_REPORT = {
     'note': 'Retain the working copy and owning STA; full native close is unsupported for this unproved or held session. Separately authorized exact-owned operator closure is required to discard the edit.',
 }
 _COUNTED_NOTE = ('hwpx undo reverts this layout edit as one request: its one native action is one native Undo step (measured on Hancom 2024 for '
-                 'page setup, columns, section insert and delete, and hanging indent), compared with the state recorded before it; redo with the state after it.')
+                 'this variant), compared with the state recorded before it; redo is compared exactly with the state after it.')
+_UNMEASURED_UNDO = {
+    'hwpx_undo': 'refused',
+    'undo_units_verified': False,
+    'note': ('hwpx undo refuses after this layout edit before any native history call: no native Undo of this variant was measured '
+             '(the capability contract lists the counted variants). Retain the working copy and owning STA; full native close is unsupported '
+             'for this unproved or held session. Separately authorized exact-owned operator closure is required to discard the edit.'),
+}
 
 
-def _layout_undo_report(actions: int, pre: dict[str, str] | None, post: dict[str, str] | None) -> dict[str, Any]:
+def _layout_undo_report(actions: int, pre: dict[str, str] | None, post: dict[str, str] | None, variants: set[str] | frozenset[str] = frozenset()) -> dict[str, Any]:
     if pre is None or post is None or actions < 1:
         return dict(_UNDO_REPORT)
-    return {'native_editing_actions': actions, 'pre_state_sha256': pre['sha'], 'post_state_sha256': post['sha'], 'post_renewal_free_sha256': post['renewal_free_sha'],
+    named = sorted(variants)
+    if not named or any(UNDO_STEPS.get(variant) != actions for variant in named):
+        return {'native_editing_actions': actions, 'undo_variants': named, **_UNMEASURED_UNDO}
+    return {'native_editing_actions': actions, 'undo_variants': named, 'pre_state_sha256': pre['sha'], 'post_state_sha256': post['sha'],
             'hwpx_undo': 'counted', 'undo_units_verified': True, 'note': _COUNTED_NOTE}
 # Kinds whose caret position stays meaningful after the edit and is restored.
 _RESTORE_CARET_KINDS = frozenset({'page_setup', 'columns', 'hanging_indent'})
@@ -504,7 +516,7 @@ class LocalCliLayoutMixin:
             'kind': kind,
             'expected_pos': list(request['expected_pos']),
             **body,
-            'undo': _layout_undo_report(len(body.get('native_actions') or []), pre_state, post_state),
+            'undo': _layout_undo_report(len(body.get('native_actions') or []), pre_state, post_state, undo_variants(request)),
             'next_proof_required': 'Render the affected pages (page-screenshot or export-proof-range) and review them before saving; re-probe positions and layout before another exact edit.',
             'warnings': [],
         }

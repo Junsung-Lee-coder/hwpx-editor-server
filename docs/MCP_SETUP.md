@@ -203,7 +203,7 @@ GUI에서 범위를 직접 선택해 둘 필요가 없습니다. 명령마다 �
 - 거부: 머리말·꼬리말(`target_in_header_footer`), 글상자·캡션·주석(`target_unsupported_context`), 개체나 보이지 않는 컨트롤을 가로지르는 범위, 측정하지 않은 컨트롤 바로 뒤에서 시작하는 범위(`target_beside_unproven_control`)는 편집 전에 거부하고 캐럿을 되돌립니다.
 - 확인: 대상 문단이 옛 글에서 그 범위만 바뀐 글과 정확히 같고 새 글이 기대한 모양인지, 다른 문단·표·컨트롤·정의·머리말·꼬리말이 그대로인지 비교합니다. 맞지 않으면 결과 불명으로 세션을 보류합니다.
 - 결과의 `result`에 문단의 바뀌기 전과 후 글(300자까지), 새 글의 글자 모양, 네이티브 동작이 있습니다.
-- `hwpx_proof`의 `review`는 같은 자리에서 글이 바뀐 문단을 "글 변경: 바뀌기 전 → 바뀐 후" 한 줄로 보여 줍니다. `comparison.changes`의 삭제 행에는 `replaced_by`, 추가 행에는 `replaces`가 붙습니다.
+- `hwpx_proof`의 `review`는 같은 자리에서 글이 바뀌고 개체는 그대로인 문단을 "글 변경: 바뀌기 전 → 바뀐 후" 한 줄로 보여 줍니다. `comparison.changes`의 삭제 행에는 `replaced_by`, 추가 행에는 `replaces`가 붙습니다. 개체만 있던 문단이나 글과 함께 개체가 빠지거나 더해진 문단은 삭제 행(개체 포함)과 추가 행으로 따로 보여 줍니다.
 
 ## 표
 
@@ -299,7 +299,7 @@ Hancom 13.0.0.3457에서 측정한 결과이며, 결과의 `changes`와 `after`�
 
 `{"op": "table_cell_text_exact", "table_id": "tbl:1011", "expected_hash": "sha256:...", "expected_page": 1, "expected_rows": 3, "expected_cols": 3, "cells": [{"address": "B2", "expected_text": "1,200", "text": "1,350"}, {"address": "C2", "expected_text": "Planned", "text": "Revised"}], "confirm_layout": true}`는 표 하나의 여러 칸 글을 통째로 바꿉니다.
 
-- `cells`는 1~100개, 칸마다 한 번씩입니다. `expected_text`는 `table_read`가 준 그 칸의 전체 글(빈 칸은 빈 글), `text`는 새 글(한 줄)입니다. 병합 칸은 첫 칸 주소로 지정합니다(아니면 `cell_covered_by_merge`).
+- `cells`는 1~100개, 칸마다 한 번씩입니다. 100칸 쓰기(네이티브 동작 200번)를 Hancom 2024에서 Undo 한 번과 Redo 한 번으로 되돌리고 다시 실행했습니다. `expected_text`는 `table_read`가 준 그 칸의 전체 글(빈 칸은 빈 글), `text`는 새 글(한 줄)입니다. 병합 칸은 첫 칸 주소로 지정합니다(아니면 `cell_covered_by_merge`).
 - 문단이 여럿인 칸(`cell_multi_paragraph`), 글자 모양이 여럿인 칸(`cell_mixed_format`), 표·그림 같은 개체가 든 칸(`cell_has_objects`), 지금 글이 다른 칸(`cell_text_mismatch`)은 편집 전에 거부합니다. 그런 칸의 글은 `text_replace_exact`로 바꿉니다. 모든 칸에 들어가 글을 확인한 뒤에 첫 칸을 쓰므로 거부되면 아무것도 바뀌지 않습니다.
 - 새 글은 그 칸 글의 모양을 받습니다. 빈 칸은 네이티브 동작 한 번, 그 밖의 칸은 두 번이며 명령 전체가 Undo·Redo 한 번입니다.
 - 결과의 `changes`에 칸 주소와 바뀌기 전·후 글이, `after.expected_hash`에 다음 편집에 쓸 해시가 있습니다. 격자, 병합, 너비, 선, 채우기, 칸 속성과 다른 칸·다른 표를 편집 후에 비교합니다.
@@ -388,7 +388,7 @@ Hancom 13.0.0.3457에서 측정한 결과이며, 결과의 `changes`와 `after`�
 
 ### 개체 넣기와 레이아웃의 되돌리기
 
-`object_insert_exact`와 `layout_exact`는 편집 전후 문서 상태를 기록합니다. `{"op": "undo"}`는 그 단계가 알린 편집 동작 수만큼(레이아웃 하나, 개체 하나 또는 둘) 네이티브 Undo를 실행하고 기록한 편집 전 상태와 비교하며, `{"op": "redo"}`는 편집 후 상태와 비교합니다. 단계 결과의 `undo.hwpx_undo`가 `counted`이면 이렇게 되돌릴 수 있습니다. 다시 만든 도형·수식·머리말·꼬리말은 Redo 뒤 인스턴스 번호, 겹침 순서, 머리말 일련번호가 새로 정해질 수 있어 `confirmation.expected_state.renewed`에 그 항목을 적습니다. 하이퍼링크와 메모는 필드 끝의 컨트롤 식별자가 빈 글이라 문서를 비교할 수 없으므로 `undo_not_counted`로 거부합니다. 컨트롤 목록을 읽을 수 없는 문서에서는 네이티브 호출 없이 `undo_evidence_unavailable`로 거부합니다.
+`object_insert_exact`와 `layout_exact`는 편집 전후 문서 상태를 기록합니다. 네이티브 Undo를 측정한 변형(`hwpx_capabilities`의 변형별 `undo`, `undo_steps`, 사례)이면 `{"op": "undo"}`는 그 단계가 알린 편집 동작 수만큼(레이아웃 하나, 개체 하나 또는 둘) 네이티브 Undo를 실행하고 기록한 편집 전 상태와 비교하며, `{"op": "redo"}`는 편집 후 상태와 비교합니다. 단계 결과의 `undo.hwpx_undo`가 `counted`이면 이렇게 되돌릴 수 있습니다. 레이아웃 편집의 Redo는 편집 후 상태와 정확히 같아야 합니다. 수식·선·사각형·타원·머리말·꼬리말을 넣은 뒤의 Redo는 그 개체 하나를 다시 만들며, 그 개체만 겹침 순서, 그리기 인스턴스 번호, 머리말·꼬리말 일련번호, (타원은) 쓰이지 않는 호 좌표가 새로 정해질 수 있습니다. 그 밖의 문서는 모두 정확히 비교하고, 바뀐 개체와 항목을 `confirmation.expected_state.renewed_object`와 `renewed`에 적습니다. 하이퍼링크와 메모는 필드 끝의 컨트롤 식별자가 빈 글이라 문서를 비교할 수 없고, 다단 `from_caret_new`는 Undo를 측정하지 못했으므로, 네이티브 호출 없이 `undo_not_counted`로 거부합니다. 컨트롤 목록을 읽을 수 없는 문서에서는 네이티브 호출 없이 `undo_evidence_unavailable`로 거부합니다.
 
 `hwpx_bundle`은 같은 단계를 1~20개 묶어 한 번에 보냅니다. 백엔드는 첫 실패 단계에서 멈추며, 의미상 거부는 앞 단계의 편집을 유지하고 기술 실패는 세션을 보류합니다(위 "쪽 번호" 절의 묶음 규칙과 같음).
 

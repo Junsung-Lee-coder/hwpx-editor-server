@@ -79,6 +79,33 @@ GAP_BOUNDS_MM = (0.0, 100.0)
 # code fail verification instead of passing silently.
 COLUMN_APPLY_TO = {'current_section': 2, 'from_caret_new': 6}
 
+# The native Undo steps that revert one layout edit, per variant, as measured on Hancom 2024 13.0.0.3457 in an owned
+# characterization (documents with tables and pictures, two sections, a numbered heading): its one native action is
+# one step, Undo reached the state recorded before it and Redo exactly the state after it. columns from_caret_new is not
+# listed: on that host it changed the section's existing column definition instead of adding one (at the first and at
+# an interior paragraph), so the edit is refused success and no Undo of it was measured. `hwpx undo` counts a layout
+# edit only when every variant its request touches is listed.
+UNDO_STEPS: dict[str, int] = {
+    'page_setup:margins': 1, 'page_setup:landscape': 1, 'page_setup:paper_size': 1, 'page_setup:whole_document': 1,
+    'columns:current_section': 1, 'section_insert:inside_paragraph': 1, 'section_delete': 1, 'hanging_indent': 1,
+}
+
+
+def undo_variants(request: Mapping[str, Any]) -> set[str]:
+    """The capability contract's variant rows a normalized request touches (page setup: one per group of fields it sets)."""
+    kind = request['kind']
+    if kind == 'page_setup':
+        fields = set(request['targets'])
+        touched = {'page_setup:paper_size'} if fields & {'paper_width_mm', 'paper_height_mm'} else set()
+        touched |= {'page_setup:landscape'} if 'landscape' in fields else set()
+        touched |= {'page_setup:margins'} if fields - {'paper_width_mm', 'paper_height_mm', 'landscape'} else set()
+        return touched | ({'page_setup:whole_document'} if request['apply_to'] == 'whole_document' else set())
+    if kind == 'columns':
+        return {f"columns:{request['apply_to']}"}
+    if kind == 'section_insert':
+        return {'section_insert:inside_paragraph'}
+    return {kind}
+
 # HParaShape items compared for "nothing else changed" (pyhwpx apply_parashape list
 # plus the heading/border scalars). Only scalar values are compared.
 PARASHAPE_ITEMS = ('AlignType', 'BreakLatinWord', 'BreakNonLatinWord', 'LineSpacingType', 'LineSpacing', 'Condense',
