@@ -446,11 +446,22 @@ def compare(baseline: dict[str, Any], current: dict[str, Any], rows: list[dict[s
                             marks['changed'] += 1
                             changes.append({'kind': 'number_mark_changed', 'text': after[right]['text'], 'paragraph_index': after[right].get('index', right), 'changes': mark_changes, 'objects': (after[right].get('format') or {}).get('objects')})
                 continue
+            # A paragraph replaced one for one in the same place (the body, or the same cell of the same table) and holding no table
+            # names the text that took its place, so the summary can show one change from the old text to the new.
+            pairs = dict(zip(left_indexes[i1:i2], right_indexes[j1:j2])) if (
+                op == 'replace' and i2 - i1 == j2 - j1 and not (baseline.get('paragraphs_truncated') and i2 == len(left_indexes))
+                and not (current.get('paragraphs_truncated') and j2 == len(right_indexes))
+                and all(not before[left].get('holds_tables') and not after[right].get('holds_tables')
+                        and (before[left].get('in_body'), before[left].get('table_id'), before[left].get('cell')) == (after[right].get('in_body'), after[right].get('table_id'), after[right].get('cell'))
+                        for left, right in zip(left_indexes[i1:i2], right_indexes[j1:j2]))) else {}
+            replaced = {right: left for left, right in pairs.items()}
             # What runs off the end of a truncated list says nothing about the document.
             if not (baseline.get('paragraphs_truncated') and i2 == len(left_indexes)):
-                changes.extend({'kind': 'removed', 'text': before[index]['text'], 'before': old_labels[index][0] or _numbering_kind(before[index]), **_table_mark(before[index], tables_compared), **_object_mark(before[index])} for index in left_indexes[i1:i2])
+                changes.extend({'kind': 'removed', 'text': before[index]['text'], 'before': old_labels[index][0] or _numbering_kind(before[index]), **_table_mark(before[index], tables_compared), **_object_mark(before[index]),
+                                **({'replaced_by': after[pairs[index]]['text']} if index in pairs else {})} for index in left_indexes[i1:i2])
             if not (current.get('paragraphs_truncated') and j2 == len(right_indexes)):
-                changes.extend({'kind': 'added', 'text': after[index]['text'], 'after': new_labels[index][0] or _numbering_kind(after[index]), **_table_mark(after[index], tables_compared)} for index in right_indexes[j1:j2])
+                changes.extend({'kind': 'added', 'text': after[index]['text'], 'after': new_labels[index][0] or _numbering_kind(after[index]), **_table_mark(after[index], tables_compared),
+                                **({'replaces': before[replaced[index]]['text']} if index in replaced else {})} for index in right_indexes[j1:j2])
                 marks['new'] += sum(after[index]['heading'] != 'NONE' for index in right_indexes[j1:j2])
     partial = 'partial' in states
     cells_before = [item['text'] for item in before if not item.get('in_body')]
@@ -1514,10 +1525,11 @@ def summarize(review: dict[str, Any]) -> str:
     if comparison:
         counts: dict[str, int] = {}
         for change in comparison['changes']:
-            if change.get('in_table'):
+            if change.get('in_table') or 'replaced_by' in change:
                 continue
-            counts[change['kind']] = counts.get(change['kind'], 0) + 1
-        names = {'added': '추가', 'removed': '삭제', 'number_changed': '번호 변경', 'format_changed': '서식 변경', 'number_mark_changed': '번호 모양 변경'}
+            kind = 'text_changed' if 'replaces' in change else change['kind']
+            counts[kind] = counts.get(kind, 0) + 1
+        names = {'added': '추가', 'removed': '삭제', 'text_changed': '글 변경', 'number_changed': '번호 변경', 'format_changed': '서식 변경', 'number_mark_changed': '번호 모양 변경'}
         found = ', '.join(f'{names[key]} {value}건' for key, value in counts.items())
         label = _short_id(comparison['baseline'], review)
         state = comparison.get('state', 'complete')
@@ -1696,13 +1708,18 @@ def to_markdown(review: dict[str, Any]) -> str:
     comparison = review.get('comparison')
     if comparison:
         out += [f"## 바뀐 내용 ({_short_id(comparison['baseline'], review)} 대비)", '']
-        names = {'added': '추가', 'removed': '삭제', 'number_changed': '번호 변경', 'format_changed': '서식 변경', 'number_mark_changed': '번호 모양 변경'}
+        names = {'added': '추가', 'removed': '삭제', 'text_changed': '글 변경', 'number_changed': '번호 변경', 'format_changed': '서식 변경', 'number_mark_changed': '번호 모양 변경'}
         for change in comparison['changes']:
+            if 'replaced_by' in change:
+                continue  # Shown once, with the text that took its place.
             arrow = f" ({change.get('before') or '번호 없음'} → {change.get('after') or '번호 없음'})" if change['kind'] == 'number_changed' else (f" ({change['after']})" if change.get('after') else (f" ({change['before']})" if change.get('before') else ''))
             label = _paragraph_name(change, width=60) if change['kind'] in {'format_changed', 'number_mark_changed'} else _clip(change['text'], 60)
+            kind = change['kind']
+            if 'replaces' in change:
+                kind, label = 'text_changed', f"{_clip(change['replaces'], 60) or '(빈 문단)'} → {label or '(빈 문단)'}"
             if change.get('in_table'):
                 label = f"표 안 문단 {label or '(빈 문단)'}"
-            out.append(f"- {names[change['kind']]}: {label}{arrow}")
+            out.append(f"- {names[kind]}: {label}{arrow}")
         if not comparison['changes']:
             out.append('- 바뀐 문단 없음')
         out += ['', '## 보존 확인', '']
