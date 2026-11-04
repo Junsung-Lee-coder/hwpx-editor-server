@@ -287,7 +287,8 @@ foreach ($suite in $suites) {
     $outputStatus = if ($reportedStatus) { $reportedStatus } elseif ($processHealthy) { 'PASS' } else { 'FAIL' }
     $isRequiredSkip = [bool]($outputStatus -eq 'SKIP')
     $passed = [bool]($processHealthy -and -not $isRequiredSkip -and $outputStatus -ne 'FAIL')
-    $accepted = [bool]($passed -or ($isRequiredSkip -and $AllowRequiredSkipForStaticCi))
+    $accepted = [bool]($processHealthy -and ($passed -or ($isRequiredSkip -and $AllowRequiredSkipForStaticCi)))
+    $disposition = if ($isRequiredSkip) { if (-not $processHealthy) { 'REQUIRED_SKIP_PROCESS_UNHEALTHY' } elseif ($AllowRequiredSkipForStaticCi) { 'SKIP_ALLOWED_STATIC_CI' } else { 'REQUIRED_SKIP_REJECTED' } } elseif ($passed) { 'PASS' } else { 'FAIL' }
     [void]$rows.Add([ordered]@{
         name = $suite
         path = $scriptPath
@@ -316,8 +317,20 @@ foreach ($suite in $suites) {
         output_status = $outputStatus
         passed = $passed
         accepted = $accepted
-        disposition = if ($isRequiredSkip) { if ($AllowRequiredSkipForStaticCi) { 'SKIP_ALLOWED_STATIC_CI' } else { 'REQUIRED_SKIP_REJECTED' } } elseif ($passed) { 'PASS' } else { 'FAIL' }
+        disposition = $disposition
     })
+    # Safe stdout projection for future CI evidence: no argv/environment, raw streams or private paths.
+    Write-Output ("WINDOWS_SUITE_ROW=" + ([ordered]@{
+        name = $suite
+        output_status = $outputStatus
+        accepted = $accepted
+        exit_code = $process.exit_code
+        process_exit_confirmed = $process.process_exit_confirmed
+        timed_out = $process.timed_out
+        stdout_capture_complete = $process.stdout_capture_complete
+        stderr_capture_complete = $process.stderr_capture_complete
+        disposition = $disposition
+    } | ConvertTo-Json -Compress))
 }
 $endedAt = [DateTime]::UtcNow
 $failedRows = @($rows | Where-Object { -not [bool]$_.passed })
@@ -374,5 +387,6 @@ $result = [ordered]@{
 $resultPath = Join-Path $OutputRoot 'suite-result.json'
 $result | ConvertTo-Json -Depth 40 | Set-Content -LiteralPath $resultPath -Encoding UTF8
 Write-Output ("WINDOWS_SUITE_STATUS={0};RESULT={1};RUNNER_SHA256={2}" -f $(if ($result.overall_pass) { 'PASS' } else { 'FAIL' }), $resultPath, $runnerSha256)
+Write-Output ("WINDOWS_SUITE_STATIC_CI_STATUS={0};REQUIRED_SKIP_COUNT={1};UNACCEPTED_COUNT={2};NATIVE_OVERALL_PASS={3}" -f $(if (-not $AllowRequiredSkipForStaticCi) { 'NOT_REQUESTED' } elseif ($result.process_exit_accepted) { 'ACCEPTED' } else { 'REJECTED' }), $skippedRows.Count, $unacceptedRows.Count, $result.overall_pass)
 if (-not $result.process_exit_accepted) { exit 1 }
 exit 0
