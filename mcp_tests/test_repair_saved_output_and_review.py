@@ -77,6 +77,7 @@ class Backend(BaseHTTPRequestHandler):
     close_mode = 'ok'
     printed = [['1. Alpha', '2. Beta'], ['second page']]
     bundle_reply = {'ok': True, 'steps': []}
+    save_extra = {}  # extra save-reply fields, e.g. a backend saved_proof
 
     def log_message(self, format, *args):
         pass
@@ -132,7 +133,8 @@ class Backend(BaseHTTPRequestHandler):
         if self.path == '/local-cli/export':
             return self.reply({'ok': True, 'session_id': SID, 'download_path': f'/local-cli/session/{SID}/artifact/export'})
         if self.path == '/local-cli/save':
-            return self.reply({'ok': True, 'session_id': SID, 'filename': 'fixture-edited.hwpx', 'download_path': f'/local-cli/session/{SID}/artifact/working-copy'})
+            return self.reply({'ok': True, 'session_id': SID, 'filename': 'fixture-edited.hwpx', 'download_path': f'/local-cli/session/{SID}/artifact/working-copy',
+                               **type(self).save_extra})
         if self.path == '/local-cli/close':
             if type(self).close_mode == 'held':
                 return self.reply({'detail': 'native_custody_held: The live local CLI session holds a native command whose outcome is unknown; it is retained and is not closed, discarded or released by this runtime.'}, 409)
@@ -199,6 +201,7 @@ class Base(unittest.IsolatedAsyncioTestCase):
         Backend.close_mode = 'ok'
         Backend.printed = [['1. Alpha', '2. Beta'], ['second page']]
         Backend.bundle_reply = {'ok': True, 'steps': []}
+        Backend.save_extra = {}
         shutil.rmtree(self.root / 'artifacts', ignore_errors=True)
         self.saved_dir = self.root / 'artifacts' / SID / 'saved'
 

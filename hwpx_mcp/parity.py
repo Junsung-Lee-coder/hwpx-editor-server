@@ -79,6 +79,10 @@ BUNDLE_OPS: dict[str, dict[str, Any]] = {
     'header_footer_format_exact': _exposed(SESSION_TOOLS, note='character format of exact text and paragraph format of its paragraph in one existing header or '
                                                                'footer, bound as header_footer_text_exact; history is measured for one actually dirty step only; a bundle with multiple dirty steps and any header/footer mutation refuses Undo/Redo before native calls; ' + _UNDO_COUNTED),
     'control_inventory': _exposed(SESSION_TOOLS, note='read-only native control list with target_id/expected_hash'),
+    'picture_inventory': _exposed(SESSION_TOOLS, note='read-only structural picture census with exact SHAPEOBJECT identity/hash, frame, crop, media and explicit unqualified edit/history bounds'),
+    'picture_replace_exact': _exposed(SESSION_TOOLS, note='implemented body-picture PNG replacement, same decoded aspect ratio, current GetCtrlInstID mapping before selection; final native qualification incomplete; Undo/Redo refused before dispatch'),
+    'picture_crop_exact': _exposed(SESSION_TOOLS, note='implemented normalized 0..1 native source crop, same frame and payload; native edit/history/save/reopen qualification incomplete; Undo/Redo refused before dispatch'),
+    'picture_layout_exact': _exposed(SESSION_TOOLS, note='implemented inline/square body-picture placement without resize; native edit/history/save/reopen qualification incomplete; Undo/Redo refused before dispatch'),
     'table_frame_inventory': _exposed(SESSION_TOOLS, note='read-only table frame list'),
     'exact_control_select_proof': _exposed(SESSION_TOOLS, note='read-only selection proof of one control'),
     'table_cell_structure_exact': _exposed(SESSION_TOOLS, note='read-only cell structure of one table control'),
@@ -127,7 +131,8 @@ BUNDLE_OPS: dict[str, dict[str, Any]] = {
 GUARDED = frozenset({'page_number_apply', 'official_numbering_apply', 'paragraph_insert_exact', 'paragraph_remove_exact',
                      'character_format_exact', 'paragraph_format_exact', 'table_inventory', 'table_read', 'table_edit_exact',
                      'table_style_exact', 'table_width_exact', 'table_create_exact', 'text_replace_exact', 'table_cell_text_exact',
-                     'header_footer_inventory', 'header_footer_text_exact', 'header_footer_format_exact'})
+                     'header_footer_inventory', 'header_footer_text_exact', 'header_footer_format_exact',
+                     'picture_inventory', 'picture_replace_exact', 'picture_crop_exact', 'picture_layout_exact'})
 # Ops that publish mutation intent at their first native edit (app.step_refusal.DEFERRED_INTENT_OPS): before it they
 # refuse with a fixed refusal_code only from their own exact reads; anything else holds the session.
 DEFERRED = frozenset({'layout_exact', 'object_insert_exact', 'paragraph_rehome_exact'})
@@ -270,6 +275,20 @@ VARIANTS: dict[str, list[dict[str, Any]]] = {
 }
 for _op, _variants in VARIANTS.items():
     BUNDLE_OPS[_op]['variants'] = _variants
+
+# These rows expose implemented callers, not a fabricated native acceptance.
+for _op, _kinds in {'picture_replace_exact': ('png_same_aspect',),
+                    'picture_crop_exact': ('normalized_source',),
+                    'picture_layout_exact': ('inline', 'square')}.items():
+    BUNDLE_OPS[_op]['variants'] = [
+        _variant(_kind, None, 'existing body picture without a native caption', 'not_qualified',
+                 undo='not_counted', undo_reason='native picture edit/Undo/Redo/save/reopen qualification is incomplete; '
+                 'only an explicitly configured pinned HWPX profile that declares this kind counts it, against recorded package states',
+                 preservation='legacy HWPML strict comparison by default; complete native HWPX private-copy package proof, '
+                 'verified public save and saved-package proof only under an explicitly configured pinned profile (prospective, '
+                 'reported with its literal qualification); legacy HWPML BINDATA Size is never certified')
+        for _kind in _kinds
+    ]
 
 EXCLUDED_FIELDS: dict[str, dict[str, str]] = {}
 

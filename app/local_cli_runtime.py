@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from concurrent.futures import Future, TimeoutError as FutureTimeoutError
 from dataclasses import dataclass, field as dataclass_field
+from datetime import datetime, timezone
 from pathlib import Path
 from queue import Empty, Queue
 import hashlib
@@ -188,6 +189,11 @@ def _native_diagnostic(site: object, error: BaseException) -> dict[str, str]:
                             'control_enumeration_unavailable', 'existing_number_or_bullet', 'existing_page_number',
                             'existing_page_restart', 'existing_section_page_start',
                             'foreign_outline_definition', 'header_footer_unprovable', 'native_defaults_unavailable',
+                            'picture_aspect_unqualified', 'picture_asset_root_unproven', 'picture_binding_stale',
+                            'picture_context_unqualified', 'picture_crop_empty', 'picture_layout_unqualified',
+                            'picture_native_mapping_unqualified', 'picture_source_unreadable',
+                            'picture_source_unsupported', 'picture_target_unproven', 'picture_inventory_limit',
+                            'picture_saved_proof_unqualified', 'picture_saved_bridge_unproven',
                             'native_parameters_unavailable', 'native_unavailable', 'outline_definition_unreadable',
                             'outline_usage_unprovable', 'paragraph_shape_unreadable', 'preservation_unprovable',
                             'protection_unavailable', 'section_count_unprovable', 'target_ambiguous', 'target_moved',
@@ -831,22 +837,93 @@ def save_document(hwp: object, *, diagnostic: dict[str, Any] | None = None) -> b
     return result is True
 
 
-def checked_save_hwp_as(hwp: object, output_path: Path, fmt: str) -> dict[str, Any]:
-    """Save a new native artifact and require an affirmative, hashed result."""
+def checked_public_save_false(hwp: object, working_path: Path, diagnostic: dict[str, Any]) -> None:
+    """One documented unconditional ``Save(False)`` of the exact owned working document.
 
+    HwpAutomation ``Save(save_if_dirty)``: False saves unconditionally, True
+    saves only a dirty document. The service reaches this only for an exact
+    False pre-save state whose native flag was cleared by our own private HWPX
+    export while logical debt and a current verified package exist. Every read
+    is exact; the first invalid field stops before any later SDK call, and the
+    Save is never retried or replaced by another method.
+    """
+    raw = hwp.hwp
+    normalize = lambda value: str(value).replace('\\', '/').rstrip('/').casefold()
+    current = raw.Path
+    if type(current) is not str or normalize(current) != normalize(working_path):
+        raise LocalCliRuntimeError('Public save target is not the exact owned working document.')
+    if raw.IsModified is not False:
+        raise LocalCliRuntimeError('Public Save(False) precondition changed; no Save was issued.')
+    diagnostic['save_false_entered'] = True
+    result = raw.Save(False)
+    diagnostic['save_return_arrived'] = True
+    diagnostic['save_returned_false'] = result is False
+    if result is not True:
+        raise LocalCliRuntimeError('Public Save(False) did not return exact True; custody retained.')
+    after = raw.Path
+    if type(after) is not str or normalize(after) != normalize(working_path):
+        raise LocalCliRuntimeError('Public Save(False) retargeted the working document; custody retained.')
+
+
+def _private_copy_state(raw: Any, working_path: Path, expected_position=None) -> dict[str, Any]:
+    """Ordered mandatory reads; a failed field never permits the next getter."""
+    try:
+        current_path = raw.Path
+        if type(current_path) is not str or not current_path:
+            raise ValueError('missing exact Path')
+        normalize = lambda value: str(value).replace('\\', '/').rstrip('/').casefold()
+        if normalize(current_path) != normalize(working_path):
+            raise ValueError('private serialization retargeted the owned working document')
+        modified = raw.IsModified
+        if type(modified) is not bool:
+            raise ValueError('IsModified is not exact BOOL')
+        position = raw.GetPos()
+        if type(position) is not tuple or len(position) != 3 or any(type(x) is not int or x < 0 for x in position):
+            raise ValueError('GetPos is not an exact native position')
+        if expected_position is not None and position != expected_position:
+            raise ValueError('private serialization moved the caller caret')
+    except Exception as exc:
+        raise LocalCliRuntimeError('Private HWPX copy native state is uncertain; no follow-on SDK.') from exc
+    return {'path': current_path, 'modified': modified, 'position': position}
+
+
+def checked_save_hwp_as(hwp: object, output_path: Path, fmt: str, *,
+                        private_copy: bool = False, working_path: Path | None = None) -> dict[str, Any]:
+    """Require an affirmative hashed artifact; private copies never verify user Save.
+
+    The explicit private-copy protocol is prospective and must be qualified on the
+    actual installation. It is NOT a fallback from any failed legacy proof or Save.
+    The caller retains logical dirty/history debt and owns uncertain native custody.
+    """
+    if type(private_copy) is not bool or (private_copy and (fmt != 'HWPX' or working_path is None)):
+        raise LocalCliRuntimeError('Private copy requires the explicit HWPX strategy and owned working path.')
     output_path = Path(output_path)
     if output_path.exists() or output_path.is_symlink():
         raise LocalCliRuntimeError('Recovery output already exists; refusing to overwrite it.')
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    save_method = _safe_hwp_attr(hwp, 'save_as')
-    if not callable(save_method):
-        save_method = _safe_hwp_attr(hwp, 'SaveAs')
-    if not callable(save_method):
-        raise LocalCliRuntimeError('Hancom save_as/SaveAs is unavailable for recovery.')
-    try:
-        native_result = save_method(str(output_path), format=str(fmt).upper())
-    except Exception as exc:
-        raise LocalCliRuntimeError(f'Native recovery SaveAs raised {type(exc).__name__}.') from exc
+    native_before = None
+    raw: Any = None
+    if private_copy:
+        try:
+            raw = hwp.hwp
+        except Exception as exc:
+            raise LocalCliRuntimeError('Private copy requires the already owned raw Automation object.') from exc
+        native_before = _private_copy_state(raw, Path(working_path))
+        try:
+            # Exact selected candidate, not a guessed export:true option or retry.
+            native_result = raw.SaveAs(str(output_path), 'HWPX', 'lock:false;export')
+        except Exception as exc:
+            raise LocalCliRuntimeError('Native private HWPX SaveAs raised; retain uncertain custody.') from exc
+    else:
+        save_method = _safe_hwp_attr(hwp, 'save_as')
+        if not callable(save_method):
+            save_method = _safe_hwp_attr(hwp, 'SaveAs')
+        if not callable(save_method):
+            raise LocalCliRuntimeError('Hancom save_as/SaveAs is unavailable for recovery.')
+        try:
+            native_result = save_method(str(output_path), format=str(fmt).upper())
+        except Exception as exc:
+            raise LocalCliRuntimeError(f'Native recovery SaveAs raised {type(exc).__name__}.') from exc
     if native_result is not True:
         raise LocalCliRuntimeError('Native recovery SaveAs did not return an affirmative result.')
     if not output_path.exists() or output_path.is_symlink() or not output_path.is_file():
@@ -868,12 +945,28 @@ def checked_save_hwp_as(hwp: object, output_path: Path, fmt: str) -> dict[str, A
         raise LocalCliRuntimeError('Native recovery output changed during custody readback.')
     if size_bytes <= 0:
         raise LocalCliRuntimeError('Native recovery SaveAs created an empty output file.')
-    return {
+    result = {
         'path': str(output_path),
         'size_bytes': size_bytes,
         'sha256': sha256,
         'format': str(fmt).upper(),
     }
+    if private_copy:
+        assert raw is not None and working_path is not None and native_before is not None
+        # The bytes are tentative proof input, not public latest output or a Save receipt.
+        # Validate output before any following native getter.
+        from local_cli_v1.hwpx_reader import load_document, read_package_members
+        try:
+            read_package_members(output_path)
+            load_document(output_path)
+        except Exception as exc:
+            raise LocalCliRuntimeError('Private HWPX output is unreadable; no following SDK.') from exc
+        native_after = _private_copy_state(raw, Path(working_path), native_before['position'])
+        result.update(private_copy=True, native_before=native_before, native_after=native_after,
+                      verified_user_save=False, logical_debt_discharged=False,
+                      preservation_qualified=False, history_qualified=False,
+                      native_method='SaveAs', native_format='HWPX', native_args='lock:false;export')
+    return result
 
 
 def _resolve_hwp_open_method(hwp: object) -> Callable[[str], Any]:
@@ -1292,6 +1385,105 @@ class LocalCliRuntimeHandle:
     observe_pre_save: Callable[[], dict[str, Any]] | None = None
     # Set by command_bundle for the duration of one step (app/step_refusal.py StepControl.register).
     register_step_refusal: Callable[[BaseException], None] | None = None
+    # Owning-STA private HWPX copy custody (app/hwpx_saved_proof.py); None off the real runtime.
+    hwpx_proof: Any = None
+
+
+def _new_hwpx_state() -> dict[str, Any]:
+    return {'used': False, 'export_cleared_native_dirty': False, 'verified': None, 'mutations': 0,
+            'epoch_command': None, 'nonce': None, 'index': 0}
+
+
+# Commands whose intent is not a content mutation: save writes the file, export
+# renders a PDF. Their native effects are still checked by their own receipts.
+_HWPX_NON_CONTENT_COMMANDS = frozenset({'save', 'export'})
+
+
+class _HwpxProofCustody:
+    """Private HWPX copies and the latest verified package state of ONE live session.
+
+    Copies are exclusive files below the session root, bound to the active
+    command epoch and never overwritten. A native IsModified flag cleared by our
+    own export is recorded exactly; it never discharges logical debt. A recorded
+    package is a complete private copy known to equal the in-memory document; it
+    is current only until the next content-mutating intent. It says nothing
+    about whether earlier edits were correct; their own proofs do.
+    """
+
+    def __init__(self, session: 'LocalCliLiveSession') -> None:
+        self._session = session
+
+    def _require(self) -> '_LiveCommand':
+        s = self._session
+        command = s._active_command
+        if (threading.current_thread() is not s._thread or command is None or s._native_custody_held
+                or command.custody_held or command.timed_out or s._terminal_error is not None):
+            raise LocalCliRuntimeError('Private HWPX custody requires the healthy owning STA.')
+        return command
+
+    @property
+    def working_copy_path(self) -> Path:
+        return self._session.working_copy_path
+
+    def copy(self, label: str, profile: Any) -> Any:
+        from app import hwpx_saved_proof as proof
+        command = self._require()
+        s = self._session
+        state = s._hwpx
+        if state.get('epoch_command') != command.command_id:
+            state.update(epoch_command=command.command_id, nonce=uuid.uuid4().hex[:16], index=0)
+        state['index'] += 1
+        epoch = {'session_id': s.session_id, 'sequence': int(command.sequence), 'command_id': command.command_id,
+                 'nonce': state['nonce'], 'index': state['index'], 'label': label}
+        path = proof.private_copy_path(s.session_root, epoch, label)
+        state['used'] = True
+        start = datetime.now(timezone.utc)
+        receipt = checked_save_hwp_as(s._active_handle.hwp, path, 'HWPX', private_copy=True,
+                                      working_path=s.working_copy_path)
+        window = (start, datetime.now(timezone.utc))
+        before, after = receipt['native_before']['modified'], receipt['native_after']['modified']
+        if before is False and after is True:
+            raise LocalCliRuntimeError('Private HWPX copy set the native modified flag; outcome uncertain.')
+        if before is True and after is False:
+            state['export_cleared_native_dirty'] = True
+        declared = profile.data['export_native_dirty']
+        if (declared == 'unchanged' and after is not before) or (declared == 'cleared' and after is not False):
+            raise LocalCliRuntimeError('Private HWPX copy dirty effect differs from the configured profile.')
+        return proof.read_state(path, receipt=receipt, epoch=epoch, window=window)
+
+    def record(self, package: Any, profile: Any, basis: str) -> None:
+        """Record a complete private copy taken in THIS command as the in-memory state.
+
+        ``basis`` names why this copy is the save baseline (hwpx_saved_proof.BASELINES);
+        it is reported with the saved-package proof and never upgrades a refusal.
+        """
+        from app import hwpx_saved_proof as proof
+        if basis not in proof.BASELINES:
+            raise LocalCliRuntimeError('Verified package baseline is not a named basis.')
+        command = self._require()
+        if package.epoch.get('command_id') != command.command_id:
+            raise LocalCliRuntimeError('Verified package belongs to another command epoch.')
+        s = self._session
+        s._hwpx['verified'] = {'state': package, 'profile': profile, 'mutations': s._hwpx['mutations'],
+                               'sequence': int(command.sequence), 'basis': basis}
+
+    def current(self) -> dict[str, Any] | None:
+        verified = self._session._hwpx.get('verified')
+        if isinstance(verified, dict) and verified['mutations'] == self._session._hwpx['mutations']:
+            return verified
+        return None
+
+    def last(self) -> dict[str, Any] | None:
+        """The last recorded package, current or stale; only a save binds a fresh copy to it."""
+        verified = self._session._hwpx.get('verified')
+        return verified if isinstance(verified, dict) else None
+
+    def facts(self) -> dict[str, Any]:
+        s = self._session
+        return {'hwpx_strategy_used': s._hwpx.get('used') is True,
+                'export_cleared_native_dirty': s._hwpx.get('export_cleared_native_dirty') is True,
+                'logical_debt': s._normal_close_requires_save is True,
+                'verified_package_current': self.current() is not None}
 
 
 @dataclass
@@ -1363,6 +1555,10 @@ class LocalCliLiveSession:
         # discharged by a proved ordinary Save (or acknowledged recovery).
         # Native clean/no-op/export projections cannot clear it.
         self._normal_close_requires_save = False
+        # Native HWPX private-copy proof state (app/hwpx_saved_proof.py). The
+        # mutation counter makes any later content-mutating intent stale a
+        # previously verified package; a cleared export flag is never discharge.
+        self._hwpx: dict[str, Any] = _new_hwpx_state()
         self._active_command: _LiveCommand | None = None
         self._active_hwp: object | None = None
         self._active_handle: LocalCliRuntimeHandle | None = None
@@ -1699,6 +1895,10 @@ class LocalCliLiveSession:
         self._lifetime_edit_possible = True
         if self._active_command is None or self._active_command.name != 'save':
             self._normal_close_requires_save = True
+        hwpx = getattr(self, '_hwpx', None)
+        if isinstance(hwpx, dict) and (self._active_command is None
+                                       or self._active_command.name not in _HWPX_NON_CONTENT_COMMANDS):
+            hwpx['mutations'] += 1
         if self._active_handle is not None:
             self._active_handle.mutation_intent = True
 
@@ -1722,6 +1922,11 @@ class LocalCliLiveSession:
             'save_returned_false': None,
         }
         command.save_diagnostic = diagnostic
+        custody = getattr(self._active_handle, 'hwpx_proof', None)
+        if custody is not None:
+            # Python state only: logical debt, our own export's cleared flag and
+            # whether the last verified package is still current. No SDK read.
+            diagnostic.update(custody.facts())
         read_error = None
         try:
             value = self._active_handle.hwp.IsModified
@@ -2263,6 +2468,8 @@ class LocalCliLiveSession:
             self._native_custody_held = False
         if not hasattr(self, '_normal_close_requires_save'):
             self._normal_close_requires_save = False
+        if not hasattr(self, '_hwpx'):
+            self._hwpx = _new_hwpx_state()
         if not hasattr(self, '_active_command'):
             self._active_command = None
         if not hasattr(self, '_active_hwp'):
@@ -2611,6 +2818,7 @@ class LocalCliLiveSession:
                 hold_native_custody=self._hold_active_command_custody,
                 mark_mutating_intent=self._mark_mutating_intent,
                 observe_pre_save=self._observe_pre_save_is_modified,
+                hwpx_proof=_HwpxProofCustody(self),
             )
             self._active_hwp = hwp
             self._active_handle = handle
@@ -2755,10 +2963,13 @@ class LocalCliLiveSession:
                         clean_export = False
                     command.result = command.handler(handle)
                     handle.diagnostic_site = 'handler_returned'
-                    if clean_export and handle.hwp.IsModified is False:
+                    if (clean_export and self._hwpx.get('epoch_command') != command.command_id
+                            and handle.hwp.IsModified is False):
                         # Exact-clean before and after with no earlier debt: an export, a history call or a navigation-only
                         # command that changed nothing adds no preservation debt.
                         # Earlier debt is never discharged here; only a proved ordinary Save does that.
+                        # A command that wrote its own private HWPX copy is excluded: that export
+                        # can clear the native flag, so a False afterwards is no clean evidence.
                         self._normal_close_requires_save = False
                     self._apply_normalized_outcome(command, command.result)
                     if command.name in _MUTATING_COMMANDS - {'command-bundle'} and command.semantic_ok is not True and not command.custody_held:
@@ -2785,10 +2996,16 @@ class LocalCliLiveSession:
                             self._settle_held_command(command, result=command.result)
                         else:
                             self._persist_command(command)
-                            if (command.name == 'save' and command.semantic_ok is True
-                                    and command.result.get('ordinary_save_confirmed') is True
+                            saved = (command.result.get('ordinary_save_confirmed') is True
+                                     or command.result.get('verified_public_save_confirmed') is True)
+                            # A save of a current verified HWPX state discharges debt
+                            # only with its saved-package preservation proof.
+                            preserved = (command.result.get('saved_preservation_required') is not True
+                                         or command.result.get('saved_preservation_proved') is True)
+                            if (command.name == 'save' and command.semantic_ok is True and saved and preserved
                                     and not command.timed_out and not self._quarantined):
                                 self._normal_close_requires_save = False
+                                self._hwpx['export_cleared_native_dirty'] = False
                             if not command.future.done():
                                 command.future.set_result(command.result)
                 except Exception as exc:

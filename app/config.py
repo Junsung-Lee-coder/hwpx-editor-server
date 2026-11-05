@@ -44,6 +44,10 @@ class Settings(BaseSettings):
     # These map to the registry-backed module alias that suppresses the file-path/security confirmation.
     security_module_dll: str = 'FilePathCheckDLL'
     security_module_name: str = 'FilePathCheckerModule'
+    # Optional existing-picture saved-HWPX proof profile (app/hwpx_saved_proof.py):
+    # an absolute JSON path and its exact SHA-256 pin, both or neither.
+    picture_hwpx_profile: str = ''
+    picture_hwpx_profile_sha256: str = ''
 
     @field_validator('api_port')
     @classmethod

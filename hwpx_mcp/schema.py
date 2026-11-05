@@ -568,10 +568,54 @@ class HeaderFooterFormatStep(_AreaBinding):
         return self
 
 
+class PictureInventoryStep(Closed):
+    op: Literal['picture_inventory']
+    label: Label = 'mcp:picture-inventory'
+
+
+class PictureBinding(Closed):
+    target_id: Annotated[str, Field(pattern=r'^picture:[0-9]{1,20}$', description='Exact target_id from picture_inventory; SHAPEOBJECT InstId namespace only.')]
+    expected_hash: Annotated[str, Field(pattern=r'^sha256:[0-9a-f]{24}$', description='Fresh picture_inventory hash binding full picture/frame/caption/media state.')]
+    confirm_layout: Literal[True]
+    label: Label = 'mcp:picture-edit'
+
+
+class PictureReplaceStep(PictureBinding):
+    op: Literal['picture_replace_exact']
+    source_path: Annotated[str, Field(min_length=1, max_length=4096, description='Absolute regular PNG path on the native backend host, same decoded aspect ratio as the existing image. Body pictures without native captions only; native edit/history/save/reopen qualification is incomplete.')]
+
+
+class PictureCropStep(PictureBinding):
+    op: Literal['picture_crop_exact']
+    left: float = Field(ge=0, le=1, allow_inf_nan=False, description='Visible left edge, fraction of the original source width; absolute, not incremental.')
+    top: float = Field(ge=0, le=1, allow_inf_nan=False, description='Visible top edge, fraction of the original source height.')
+    right: float = Field(ge=0, le=1, allow_inf_nan=False, description='Visible right edge, exclusive fraction of the original source width.')
+    bottom: float = Field(ge=0, le=1, allow_inf_nan=False, description='Visible bottom edge, exclusive fraction of the original source height.')
+
+    @model_validator(mode='after')
+    def visible_extent(self):
+        if self.left >= self.right or self.top >= self.bottom:
+            raise ValueError('crop requires left<right and top<bottom')
+        return self
+
+
+class PictureLayoutStep(PictureBinding):
+    op: Literal['picture_layout_exact']
+    mode: Literal['inline', 'square', 'top_bottom', 'behind', 'in_front']
+    horizontal_offset_mm: float | None = Field(default=None, ge=-300, le=300, allow_inf_nan=False, description='Floating horizontal offset in millimetres; never a width.')
+    vertical_offset_mm: float | None = Field(default=None, ge=-300, le=300, allow_inf_nan=False, description='Floating vertical offset in millimetres; never a height.')
+
+    @model_validator(mode='after')
+    def inline_has_no_offsets(self):
+        if self.mode == 'inline' and any(value not in (None, 0) for value in (self.horizontal_offset_mm, self.vertical_offset_mm)):
+            raise ValueError('inline pictures do not take floating offsets')
+        return self
+
+
 _EXACT_STEPS = (ContextStep, SelectionStep, ReadbackStep, CellFormatStep, PageNumberStep, OfficialNumberingStep, ParagraphInsertStep,
                 ParagraphRemoveStep, CharacterFormatStep, ParagraphFormatStep, TableInventoryStep, TableReadStep, TableEditStep,
                 TableStyleStep, TableWidthStep, TableCreateStep, TextReplaceStep, TableCellTextStep, HeaderFooterInventoryStep,
-                HeaderFooterTextStep, HeaderFooterFormatStep)
+                HeaderFooterTextStep, HeaderFooterFormatStep, PictureInventoryStep, PictureReplaceStep, PictureCropStep, PictureLayoutStep)
 # One command-bundle step: every backend bundle op MCP exposes (hwpx_mcp/parity.py BUNDLE_OPS).
 BundleStep = Annotated[Union[(*_EXACT_STEPS, *ops.NEW_BUNDLE_STEPS)], Field(discriminator='op')]
 _REST_STEPS = tuple(model for _path, model in ops.REST_OPS.values())

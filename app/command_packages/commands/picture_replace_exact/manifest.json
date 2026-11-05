@@ -1,0 +1,17 @@
+{
+  "op": "picture_replace_exact",
+  "version": "local-cli/picture-replace-exact/v1-package",
+  "summary": "Replace one bound body picture with a same-aspect owned PNG; native history unqualified.",
+  "module": "app.command_packages.commands.picture_replace_exact.run",
+  "read_only": false,
+  "dirty_default": true,
+  "allowed_keys": [
+    "op",
+    "operation",
+    "label",
+    "target_id",
+    "expected_hash",
+    "confirm_layout",
+    "source_path"
+  ]
+}

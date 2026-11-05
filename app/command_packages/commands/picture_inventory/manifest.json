@@ -1,0 +1,9 @@
+{
+  "op": "picture_inventory",
+  "version": "local-cli/picture-inventory/v1-package",
+  "summary": "Discover existing picture identities, full-state hashes, frame, crop, layout, caption and embedded-media mappings without moving the caret.",
+  "module": "app.command_packages.commands.picture_inventory.run",
+  "read_only": true,
+  "dirty_default": false,
+  "allowed_keys": ["op", "operation", "label"]
+}

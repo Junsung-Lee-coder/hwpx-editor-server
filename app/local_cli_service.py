@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import hashlib
+from datetime import datetime, timezone
 import os
 import re
 import shutil
@@ -154,6 +155,14 @@ _BUNDLE_UNDO_POLICY: dict[str, str] = {
     # and ParagraphShape over a block; a value already present issues none.
     'header_footer_text_exact': 'counted_native_edit',
     'header_footer_format_exact': 'counted_native_edit',
+    # One Execute is not a measured Undo transaction. A picture step is counted
+    # ONLY when an explicitly configured HWPX profile declares that kind's native
+    # Undo/Redo steps and the step recorded its complete package states; a
+    # picture-only bundle composes only when those states chain exactly.
+    # Everything else refuses before native history dispatch.
+    'picture_replace_exact': 'picture_edit',
+    'picture_crop_exact': 'picture_edit',
+    'picture_layout_exact': 'picture_edit',
     'table_structure_exact': 'single_native_edit',
     # One native action is one counted Undo; a definition plus a paragraph write is not one step and refuses.
     'official_numbering_apply': 'single_native_edit',
@@ -180,6 +189,7 @@ _GUARDED_BUNDLE_OPS = frozenset({
     'character_format_exact', 'paragraph_format_exact',
     'table_inventory', 'table_read', 'table_edit_exact', 'table_style_exact',
     'table_width_exact', 'table_create_exact', 'text_replace_exact', 'table_cell_text_exact',
+    'picture_inventory', 'picture_replace_exact', 'picture_crop_exact', 'picture_layout_exact',
     'header_footer_inventory', 'header_footer_text_exact', 'header_footer_format_exact',
 })
 _COUNTED_POLICIES = frozenset({'counted_native_edit', 'counted_any_native_edit', 'counted_state_edit'})
@@ -210,10 +220,44 @@ _DIRECT_EDIT_COMMANDS = frozenset({
 })
 
 
+def _picture_history(step: dict[str, Any]) -> dict[str, Any] | None:
+    """The profile-declared package history a successful changed picture step recorded, if exact."""
+    result = step.get('result') if isinstance(step.get('result'), dict) else {}
+    undo = result.get('undo')
+    if step.get('ok') is not True or result.get('changed') is not True or type(undo) is not dict:
+        return None
+    if undo.get('hwpx_undo') != 'profile_declared' or undo.get('state_kind') != 'hwpx_package' or undo.get('native_editing_actions') != 1:
+        return None
+    for key in ('undo_native_steps', 'redo_native_steps'):
+        if type(undo.get(key)) is not int or not 1 <= undo[key] <= 4:
+            return None
+    for key in ('pre_state_sha256', 'post_state_sha256', 'profile_sha256'):
+        if type(undo.get(key)) is not str or re.fullmatch(r'[0-9a-f]{64}', undo[key]) is None:
+            return None
+    return undo
+
+
+def _picture_states(steps: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """Aggregate initial/final package states of picture-only dirty steps that chain exactly."""
+    histories = [_picture_history(step) for step in steps]
+    if not histories or any(item is None for item in histories):
+        return None
+    if len({item['profile_sha256'] for item in histories}) != 1:
+        return None
+    if any(a['post_state_sha256'] != b['pre_state_sha256'] for a, b in zip(histories, histories[1:])):
+        return None
+    return {'kind': 'hwpx_package', 'pre': histories[0]['pre_state_sha256'], 'post': histories[-1]['post_state_sha256'],
+            'undo_steps': sum(item['undo_native_steps'] for item in histories),
+            'redo_steps': sum(item['redo_native_steps'] for item in histories),
+            'profile_sha256': histories[0]['profile_sha256'], 'edits': len(histories)}
+
+
 def _bundle_step_single_undo(step: dict[str, Any]) -> bool:
     policy = _BUNDLE_UNDO_POLICY.get(str(step.get('op')))
     if policy is None:
         return True
+    if policy == 'picture_edit':
+        return _picture_history(step) is not None
     if policy not in {'single_native_edit', *_COUNTED_POLICIES}:
         return False
     reported = _reported_native_edits(step)
@@ -235,7 +279,12 @@ def _reported_native_edits(step: dict[str, Any]) -> Any:
 
 def _native_undo_steps(steps: list[dict[str, Any]]) -> int:
     """How many native Undo calls reverse these steps: what a counted step reported, one for any other."""
-    return sum(_reported_native_edits(step) if _BUNDLE_UNDO_POLICY.get(str(step.get('op'))) in _COUNTED_POLICIES else 1 for step in steps)
+    def count(step: dict[str, Any]) -> int:
+        policy = _BUNDLE_UNDO_POLICY.get(str(step.get('op')))
+        if policy == 'picture_edit':
+            return _picture_history(step)['undo_native_steps']
+        return _reported_native_edits(step) if policy in _COUNTED_POLICIES else 1
+    return sum(count(step) for step in steps)
 
 
 def _n1_composed_history_unqualified(steps: list[Any]) -> bool:
@@ -259,6 +308,11 @@ def _record_bundle_undo_state(binding: dict[str, Any], steps: list[Any], prior: 
     unverified = sorted({str(step.get('op')) for step in dirty_steps if not _bundle_step_single_undo(step)})
     if _n1_composed_history_unqualified(steps):
         unverified.append('header_footer_multi_dirty_composition')
+    pictures = any(_BUNDLE_UNDO_POLICY.get(str(step.get('op'))) == 'picture_edit' for step in dirty_steps)
+    picture_states = _picture_states(dirty_steps) if pictures else None
+    if pictures and picture_states is None and not unverified:
+        # Picture package states compose only among exactly chained picture steps.
+        unverified.append('picture_history_composition')
     if unverified:
         binding['pending_logical_undo_count'] = None
         binding['logical_undo_unverified'] = (
@@ -269,7 +323,8 @@ def _record_bundle_undo_state(binding: dict[str, Any], steps: list[Any], prior: 
         # Drop this bundle's own start marker; an older unverified edit below
         # these steps still blocks undo once they are undone.
         binding['logical_undo_unverified'] = prior.get('logical_undo_unverified')
-    _track_history_edit(binding, None if unverified else _native_undo_steps(dirty_steps), _recorded_states(dirty_steps))
+    _track_history_edit(binding, None if unverified else _native_undo_steps(dirty_steps),
+                        picture_states if pictures else _recorded_states(dirty_steps))
 
 
 def _recorded_states(steps: list[dict[str, Any]]) -> dict[str, Any] | None:
@@ -317,6 +372,53 @@ def _expected_state(states: Any, name: str, reached: Any, differences: list[dict
     if differences is None:
         return {'compared': True, 'matches': False}
     return {'compared': True, 'matches': False, 'differences': differences[:_MAX_HISTORY_DIFFERENCES], 'differences_total': len(differences)}
+
+
+_SAVED_PROOF_KEYS = {
+    'basis': ('saved_package_equals_verified_private_copy',),
+    'save_decision': ('ordinary_save', 'verified_save_false'),
+    'qualification': ('qualified', 'unqualified'),
+    'legacy_hwpml_bindata_size': ('unknown_unqualified_not_compared',),
+    'source': ('operator_configured_file',),
+}
+
+
+def _public_saved_proof(raw: Any) -> dict[str, Any] | None:
+    """Typed, bounded saved-package facts; no paths, member names or document text."""
+    if type(raw) is not dict:
+        return None
+    out: dict[str, Any] = {}
+    for key, allowed in _SAVED_PROOF_KEYS.items():
+        if dict.get(raw, key) in allowed:
+            out[key] = raw[key]
+    for key in ('verified_package_sha256', 'saved_package_sha256', 'members_manifest_sha256', 'profile_sha256'):
+        value = dict.get(raw, key)
+        if type(value) is str and re.fullmatch(r'[0-9a-f]{64}', value):
+            out[key] = value
+    for key in ('saved_size_bytes', 'members', 'byte_identical', 'infoset_compared', 'regenerated_not_compared', 'added_media'):
+        value = dict.get(raw, key)
+        if type(value) is int and 0 <= value < 2**40:
+            out[key] = value
+    value = dict.get(raw, 'profile_id')
+    if type(value) is str and re.fullmatch(r'[A-Za-z0-9._/-]{1,80}', value):
+        out['profile_id'] = value
+    if type(dict.get(raw, 'native_qualified')) is bool:
+        out['native_qualified'] = raw['native_qualified']
+    from app.hwpx_saved_proof import BASELINES, EVIDENCE_NAMES
+    for key in ('evidence_used', 'evidence_not_observed'):
+        value = dict.get(raw, key)
+        if type(value) is list and all(type(v) is str and v in EVIDENCE_NAMES for v in value):
+            out[key] = list(value)
+    for key in ('baseline', 'fresh_copy_bound_to'):
+        value = dict.get(raw, key)
+        if type(value) is str and value in BASELINES:
+            out[key] = value
+    return out
+
+
+# Why an exact-False save with logical debt wrote nothing (close stays refused).
+_SAVE_DEBT_REASONS = ('hwpx_no_recorded_package', 'hwpx_profile_unavailable', 'hwpx_profile_changed',
+                      'hwpx_save_false_undeclared', 'hwpx_fresh_copy_unbound')
 
 
 def _recorded_sha(states: Any, name: str) -> Any:
@@ -1577,6 +1679,11 @@ class LocalCliService(
                 if step.get('op') in {'table_inventory', 'table_read', 'table_edit_exact', 'table_style_exact', 'table_width_exact', 'table_create_exact', 'text_replace_exact', 'table_cell_text_exact', 'header_footer_inventory', 'header_footer_text_exact', 'header_footer_format_exact'}:
                     # The caller asked for these values and they are bounded where they are built; the journal copy stays bounded and redacted.
                     result.update(raw_result)
+                if step.get('op') in {'picture_inventory', 'picture_replace_exact', 'picture_crop_exact', 'picture_layout_exact'}:
+                    # Public typed facts are not a journal. Do not retain the
+                    # earlier redacted/truncated raw copy or arbitrary keys.
+                    from app.picture_public import public_result
+                    result = public_result(raw_result)
                 step['result'] = result
             if 'error' in step:
                 step['error'] = 'native command step failed'
@@ -2939,6 +3046,10 @@ class LocalCliService(
             'table_create_exact': {'cells', 'cols', 'confirm_layout', 'operation', 'rows', 'op', 'expected_page', 'label', 'match'},
             'text_replace_exact': {'op', 'operation', 'label', 'old_text', 'new_text', 'match', 'occurrence', 'expected_occurrences', 'paragraph_index', 'expected_text', 'expected_page', 'format_from', 'confirm_layout'},
             'table_cell_text_exact': {'op', 'operation', 'label', 'table_id', 'expected_hash', 'expected_page', 'expected_rows', 'expected_cols', 'cells', 'confirm_layout'},
+            'picture_inventory': {'op', 'label', 'operation'},
+            'picture_replace_exact': {'op', 'operation', 'label', 'target_id', 'expected_hash', 'confirm_layout', 'source_path'},
+            'picture_crop_exact': {'op', 'operation', 'label', 'target_id', 'expected_hash', 'confirm_layout', 'left', 'top', 'right', 'bottom'},
+            'picture_layout_exact': {'op', 'operation', 'label', 'target_id', 'expected_hash', 'confirm_layout', 'mode', 'horizontal_offset_mm', 'vertical_offset_mm'},
             'header_footer_inventory': {'op', 'label', 'operation'},
             'header_footer_text_exact': {'op', 'operation', 'label', 'kind', 'section', 'apply_to', 'expected_area_hash', 'expected_affected_sections', 'old_text', 'new_text', 'match', 'occurrence',
                                          'expected_occurrences', 'paragraph_index', 'expected_text', 'format_from', 'confirm_layout'},
@@ -7414,7 +7525,7 @@ class LocalCliService(
                         status['refusal_code'] = (exc.code if type(exc) is _NumberingSemanticRefusal or type(exc) is _NumberingCleanRefusal
                                                   else _native_diagnostic('bundle_step', exc)['refusal_code'])
                         args = BaseException.__dict__['args'].__get__(exc)
-                        if step.get('op') in {'character_format_exact', 'paragraph_format_exact', 'page_number_apply', 'table_inventory', 'table_read', 'table_edit_exact', 'table_style_exact', 'table_width_exact', 'table_create_exact', 'text_replace_exact', 'table_cell_text_exact', 'header_footer_inventory', 'header_footer_text_exact', 'header_footer_format_exact'} and type(args) is tuple and len(args) == 1 and type(args[0]) is str:
+                        if step.get('op') in {'character_format_exact', 'paragraph_format_exact', 'page_number_apply', 'table_inventory', 'table_read', 'table_edit_exact', 'table_style_exact', 'table_width_exact', 'table_create_exact', 'text_replace_exact', 'table_cell_text_exact', 'header_footer_inventory', 'header_footer_text_exact', 'header_footer_format_exact', 'picture_inventory', 'picture_replace_exact', 'picture_crop_exact', 'picture_layout_exact'} and type(args) is tuple and len(args) == 1 and type(args[0]) is str:
                             status['refusal_message'] = args[0][:400]
                         if type(exc) is NativeNumberingRefusal:
                             found_page = BaseException.__dict__['__dict__'].__get__(exc).get('found_page')
@@ -7604,11 +7715,37 @@ class LocalCliService(
             diagnostic = handle.observe_pre_save()
             # Exact False is deliberate clean-noop, not an uncalled Save return.
             clean_noop = diagnostic['is_modified_value'] is False
-            diagnostic['save_decision'] = 'clean_noop' if clean_noop else 'ordinary_save'
-            if not clean_noop:
+            custody = getattr(handle, 'hwpx_proof', None)
+            verified = custody.current() if custody is not None else None
+            fresh_bound_to = None
+            if (clean_noop and verified is None and custody is not None and diagnostic.get('logical_debt') is True
+                    and diagnostic.get('export_cleared_native_dirty') is True):
+                # Only non-content commands (navigation, selection, read-only or export
+                # steps, history outcomes) can have staled the recorded package while
+                # the native flag stays exactly False after OUR export cleared it.
+                verified, fresh_bound_to, debt_reason = self._fresh_save_baseline(handle, custody)
+                if debt_reason is not None:
+                    diagnostic['debt_reason'] = debt_reason
+            # Bounded PUBLIC Save(False): only when OUR private export cleared the
+            # native flag, logical debt remains, and the current in-memory state
+            # is a verified package whose profile declares this save. Otherwise
+            # the unchanged conditional consumer runs (clean no-op keeps debt).
+            save_false = (clean_noop and verified is not None and diagnostic.get('logical_debt') is True
+                          and diagnostic.get('export_cleared_native_dirty') is True
+                          and verified['profile'].data['public_save']['save_false_after_export_clear'] is True)
+            diagnostic['save_decision'] = 'verified_save_false' if save_false else 'clean_noop' if clean_noop else 'ordinary_save'
+            if clean_noop and not save_false and diagnostic.get('logical_debt') is True:
+                diagnostic['logical_debt_retained'] = True
+            save_started = datetime.now(timezone.utc)
+            if save_false:
+                handle.diagnostic_site = 'save_native_false'
+                from app.local_cli_runtime import checked_public_save_false
+                checked_public_save_false(handle.hwp, working_copy_path, diagnostic)
+            elif not clean_noop:
                 handle.diagnostic_site = 'save_native'
                 if save_document(handle.hwp, diagnostic=diagnostic) is not True:
                     raise LocalCliRuntimeError('Ordinary Save did not return an affirmative result; custody retained.')
+            save_window = (save_started, datetime.now(timezone.utc))
             handle.diagnostic_site = 'save_file_readback'
             if working_copy_path.is_symlink() or not working_copy_path.is_file():
                 raise LocalCliRuntimeError('Save/checkpoint readback has no regular working-copy file.')
@@ -7621,6 +7758,30 @@ class LocalCliService(
             working_copy_custody = {}
             handle.diagnostic_site = 'save_custody_readback'
             self._verify_artifact_readback(binding, working_copy_path, readback=working_copy_custody)
+            saved_proof = None
+            required = verified is not None and (save_false or not clean_noop)
+            if required:
+                # The saved bytes must equal the last verified in-memory package;
+                # any unexplained delta escapes as uncertainty and retains custody.
+                handle.diagnostic_site = 'save_package_proof'
+                from app import hwpx_saved_proof
+                saved_state = hwpx_saved_proof.read_state(working_copy_path, window=save_window)
+                if working_copy_custody.get('sha256') not in (None, saved_state.sha256):
+                    raise LocalCliRuntimeError('Saved working copy changed between custody and package proof.')
+                used = hwpx_saved_proof.SAVE_EVIDENCE + (('public_save',) if save_false else ())
+                if verified['basis'] == 'save_fresh_copy':
+                    # The fresh copy is bound by state_digest, which masks the profile caret mapping,
+                    # and its export enforced the profile's export_native_dirty declaration.
+                    used += ('caret', 'export_native_dirty')
+                profile = verified['profile']
+                saved_proof = {**hwpx_saved_proof.prove_saved(verified['state'], saved_state, profile),
+                               **profile.identity(), 'native_qualified': profile.native_qualified(used),
+                               'evidence_used': list(used), 'evidence_not_observed': profile.not_observed(used),
+                               'members_manifest_sha256': hwpx_saved_proof.members_manifest(saved_state),
+                               'save_decision': diagnostic['save_decision'],
+                               'baseline': verified['basis'],
+                               **({'fresh_copy_bound_to': fresh_bound_to} if fresh_bound_to is not None else {}),
+                               'legacy_hwpml_bindata_size': 'unknown_unqualified_not_compared'}
             handle.diagnostic_site = 'save_location_readback'
             location = snapshot_live_location(
                 hwp=handle.hwp,
@@ -7630,7 +7791,14 @@ class LocalCliService(
             return {
                 'location': location,
                 'ordinary_save_confirmed': not clean_noop,
-                'clean_save_noop_confirmed': clean_noop,
+                'clean_save_noop_confirmed': clean_noop and not save_false,
+                'verified_public_save_confirmed': save_false,
+                'saved_preservation_required': required,
+                'saved_preservation_proved': saved_proof is not None,
+                'saved_proof': saved_proof,
+                'save_decision': diagnostic['save_decision'],
+                'logical_debt_retained': diagnostic.get('logical_debt_retained') is True,
+                'debt_reason': diagnostic.get('debt_reason'),
                 'working_copy_size_bytes': working_copy_size,
                 'working_copy_custody': working_copy_custody,
             }
@@ -7639,6 +7807,10 @@ class LocalCliService(
         location = result.get('location') if isinstance(result.get('location'), dict) else {}
         command_evidence = result.get('_local_cli_command') if isinstance(result.get('_local_cli_command'), dict) else {}
         semantic_ok = command_evidence.get('semantic_ok') if isinstance(command_evidence.get('semantic_ok'), bool) else True
+        # A verified Save(False) settles debt only together with its saved-package
+        # proof; a required-but-missing proof never reaches here (it escapes).
+        save_settled = ((result.get('ordinary_save_confirmed') is True or result.get('verified_public_save_confirmed') is True)
+                        and (result.get('saved_preservation_required') is not True or result.get('saved_preservation_proved') is True))
         dirty, dirty_source = self._reduce_working_copy_dirty(
             prior_dirty=binding.get('working_copy_dirty') is True or binding.get('dirty') is True,
             semantic_ok=semantic_ok,
@@ -7647,11 +7819,14 @@ class LocalCliService(
             command_name='save',
             fresh_document_modified=location.get('document_is_modified') if isinstance(location.get('document_is_modified'), bool) else None,
             fresh_sequence_matches=True,
-            ordinary_save_confirmed=result.get('ordinary_save_confirmed') is True,
+            ordinary_save_confirmed=save_settled,
         )
         working_copy_custody = result.get('working_copy_custody')
-        if result.get('ordinary_save_confirmed') is True and semantic_ok is True and dirty is False and 'dirty' in binding:
+        if save_settled and semantic_ok is True and dirty is False and 'dirty' in binding:
             binding['dirty'] = False  # settle the legacy alias only with the same Save proof
+        saved_proof = result.get('saved_proof') if isinstance(result.get('saved_proof'), dict) else None
+        public_saved_proof = _public_saved_proof(saved_proof) if saved_proof is not None else None
+        binding['latest_saved_proof'] = public_saved_proof
         if isinstance(working_copy_custody, dict):
             custody_map = binding.get('artifact_custody') if isinstance(binding.get('artifact_custody'), dict) else {}
             custody_map['working-copy'] = working_copy_custody
@@ -7679,7 +7854,44 @@ class LocalCliService(
             'session_id': resolved_session_id,
             'filename': self._artifact_name(kind='working-copy', source_filename=str(binding.get('source_filename') or 'document.hwpx')),
             'download_path': self._artifact_download_path(session_id=resolved_session_id, kind='working-copy'),
+            'save_decision': result.get('save_decision') if result.get('save_decision') in ('clean_noop', 'ordinary_save', 'verified_save_false') else None,
+            # Exact clean no-op with earlier debt: nothing new was written, close stays refused.
+            'logical_debt_retained': result.get('logical_debt_retained') is True,
+            **({'debt_reason': result['debt_reason']}
+               if result.get('logical_debt_retained') is True and result.get('debt_reason') in _SAVE_DEBT_REASONS else {}),
+            'saved_proof': public_saved_proof,
         }
+
+    @staticmethod
+    def _fresh_save_baseline(handle: LocalCliRuntimeHandle, custody: Any) -> tuple[dict[str, Any] | None, str | None, str | None]:
+        """One fresh owning-STA private copy bound to the last recorded package, or a named debt reason.
+
+        Reached only for an exact-False pre-save state with logical debt whose
+        native flag OUR export cleared, when the recorded package is stale. The
+        same pinned profile must still be configured and declare the bounded
+        Save(False). The copy is recorded as the save baseline only when its
+        state_digest equals the last recorded package's, i.e. nothing but the
+        caret and profile-declared volatile values differ. Otherwise nothing is
+        recorded or saved and the debt stays. Copy failures escape as uncertainty.
+        """
+        from app import hwpx_saved_proof
+        last = custody.last()
+        if last is None:
+            return None, None, 'hwpx_no_recorded_package'
+        try:
+            profile = hwpx_saved_proof.load_profile()
+        except hwpx_saved_proof.ProofUnavailable:
+            return None, None, 'hwpx_profile_unavailable'
+        if profile is None or profile.sha256 != last['profile'].sha256:
+            return None, None, 'hwpx_profile_changed'
+        if profile.data['public_save']['save_false_after_export_clear'] is not True:
+            return None, None, 'hwpx_save_false_undeclared'
+        handle.diagnostic_site = 'save_fresh_private_copy'
+        package = custody.copy('save', profile)
+        if hwpx_saved_proof.state_digest(package, profile) != hwpx_saved_proof.state_digest(last['state'], profile):
+            return None, None, 'hwpx_fresh_copy_unbound'
+        custody.record(package, profile, 'save_fresh_copy')
+        return custody.current(), last['basis'], None
 
     def export(self, *, session_id: str | None = None) -> dict[str, Any]:
         binding = self._load_active_binding(session_id=session_id)
@@ -7781,6 +7993,47 @@ class LocalCliService(
             'location': snapshot_live_location(hwp=hwp, source_filename=handle.source_filename, working_copy_id=handle.session_id),
         }
 
+    def _run_picture_history(self, handle: LocalCliRuntimeHandle, name: str, native_steps: int, states: dict[str, Any], *,
+                             reach: str, origin: str) -> dict[str, Any]:
+        """Profile-declared picture Undo/Redo, compared with the complete recorded package state.
+
+        The same pinned profile must still be configured; otherwise nothing is
+        dispatched. Every native return must be exact True; the first other value
+        is uncertainty with no further SDK call, except a first exact False whose
+        private copy proves the document still in its recorded origin state.
+        """
+        from app import hwpx_saved_proof
+        custody = getattr(handle, 'hwpx_proof', None)
+        try:
+            profile = hwpx_saved_proof.load_profile()
+        except hwpx_saved_proof.ProofUnavailable:
+            profile = None
+        if custody is None or profile is None or profile.sha256 != states.get('profile_sha256'):
+            return {'not_applied': True, 'evidence_unavailable': True}
+        run = handle.hwp.HAction.Run
+        for step in range(native_steps):
+            raw = run(name)
+            if raw is True:
+                continue
+            if raw is False and step == 0:
+                unchanged_package = custody.copy('history', profile)
+                if hwpx_saved_proof.state_digest(unchanged_package, profile) == states[origin]:
+                    # Proved still the recorded origin state: that exact copy is the save baseline.
+                    custody.record(unchanged_package, profile, 'history_not_applied')
+                    return {'not_applied': True}
+            raise LocalCliRuntimeError(f'Native {name} did not return True; its outcome is unknown.')
+        package = custody.copy('history', profile)
+        reached = hwpx_saved_proof.state_digest(package, profile)
+        # Every native step returned exact True and the copy is complete, so the reached
+        # state is known. A match is the verified state; a different state is reported
+        # as a named mismatch (history then stops) and is the explicit save baseline.
+        custody.record(package, profile, 'history_match' if reached == states[reach] else 'history_mismatch_reached')
+        return {'state_sha256': reached, 'state_differences': None, 'renewal_check': None,
+                'confirmation': {'document_changed': reached != states[origin], 'basis': 'hwpx_private_copy_state_digest',
+                                 'profile_id': profile.data['profile_id'], 'profile_qualification': profile.data['qualification']['status'],
+                                 'native_steps': native_steps, 'edits': states.get('edits')},
+                'snapshot': {}, 'context': {}, 'location': {}}
+
     def numbering_readback(self, *, session_id: str | None = None) -> dict[str, Any]:
         """Read-only numbering, page-number and preservation facts for a readable review of the live document."""
         binding = self._load_active_binding(session_id=session_id)
@@ -7856,8 +8109,12 @@ class LocalCliService(
         else:
             undo_count = int(undo_count_raw) if isinstance(undo_count_raw, int) and undo_count_raw > 1 else 1
 
-        result = self._execute_live(binding=binding, command_name='undo', task_label='local_cli.undo',
-                                    handler=lambda handle: self._run_history_action(handle, 'Undo', undo_count, _recorded_sha(binding.get('undo_states'), 'pre')))
+        top = binding['undo_states'][-1] if isinstance(binding.get('undo_states'), list) and binding['undo_states'] else None
+        if isinstance(top, dict) and top.get('kind') == 'hwpx_package':
+            handler = lambda handle: self._run_picture_history(handle, 'Undo', undo_count, top, reach='pre', origin='post')
+        else:
+            handler = lambda handle: self._run_history_action(handle, 'Undo', undo_count, _recorded_sha(binding.get('undo_states'), 'pre'))
+        result = self._execute_live(binding=binding, command_name='undo', task_label='local_cli.undo', handler=handler)
         if result.get('evidence_unavailable') is True:
             raise LocalCliUndoRefused('undo refused: the document cannot be compared before and after.', code='undo_evidence_unavailable')
         if result.get('not_applied') is True:
@@ -7893,9 +8150,15 @@ class LocalCliService(
         if tracked is not None and not tracked:
             raise LocalCliUndoRefused('redo refused: no undone edit to reapply.', code='no_redo_available')
         redo_count = tracked[-1] if tracked is not None and type(tracked[-1]) is int else 1
-        result = self._execute_live(binding=binding, command_name='redo', task_label='local_cli.redo',
-                                    handler=lambda handle: self._run_history_action(handle, 'Redo', redo_count, _recorded_sha(binding.get('redo_states'), 'post'),
-                                                                                    _recorded_sha(binding.get('redo_states'), 'post_renewal')))
+        top = binding['redo_states'][-1] if isinstance(binding.get('redo_states'), list) and binding['redo_states'] else None
+        if isinstance(top, dict) and top.get('kind') == 'hwpx_package':
+            # The profile declares Redo's own native step count for each kind.
+            redo_count = top['redo_steps']
+            handler = lambda handle: self._run_picture_history(handle, 'Redo', redo_count, top, reach='post', origin='pre')
+        else:
+            handler = lambda handle: self._run_history_action(handle, 'Redo', redo_count, _recorded_sha(binding.get('redo_states'), 'post'),
+                                                              _recorded_sha(binding.get('redo_states'), 'post_renewal'))
+        result = self._execute_live(binding=binding, command_name='redo', task_label='local_cli.redo', handler=handler)
         if result.get('evidence_unavailable') is True:
             raise LocalCliUndoRefused('redo refused: the document cannot be compared before and after.', code='redo_evidence_unavailable')
         if result.get('not_applied') is True:

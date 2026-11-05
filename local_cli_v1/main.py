@@ -117,6 +117,7 @@ LOCAL_METADATA_NOTES: dict[str, str] = {
     'field-fill-plan': 'planning-only placeholder/field fill manifest; no mutation; production writes must use Hancom-native commands and proof',
     'output-format-policy': 'planning-only output extension/save/export policy manifest; no mutation; requires Hancom-native save/export proof',
     'gate-verdict': 'local read-only Hancom-primary gate verdict merger for hashes/tokens/counts/render proof/static supplements; no mutation and no external send',
+    'verify-saved': 'local read-only complete re-read of a downloaded saved HWPX against the backend saved-package proof; no server call; not a Hancom reopen or render',
 }
 LOCAL_METADATA_NOTES.update(reading_cli.READING_COMMAND_NOTES)
 
@@ -728,6 +729,12 @@ def build_parser() -> argparse.ArgumentParser:
     qa_parser.add_argument('--json', action='store_true', help='Print QA manifest JSON')
     save_parser = subparsers.add_parser('save', help='Save the active working copy and download it locally')
     save_parser.add_argument('--out', type=Path, help='Exact local destination path; no collision suffix is added')
+    verify_saved_parser = subparsers.add_parser(
+        'verify-saved',
+        help='Static complete re-read of a downloaded saved HWPX against the saved-package proof the backend returned at save')
+    verify_saved_parser.add_argument('file', type=Path, help='Local saved .hwpx file (for example the save --out destination)')
+    verify_saved_parser.add_argument('--proof', type=Path, help='saved_proof JSON; defaults to the one recorded by the last save')
+    verify_saved_parser.add_argument('--json', action='store_true', help='Print the verdict JSON')
     subparsers.add_parser('working-copy', help='Download the latest saved working copy without re-saving')
     subparsers.add_parser('undo', help='Undo the most recent live document change')
     subparsers.add_parser('redo', help='Redo the most recently undone live document change')
@@ -3788,14 +3795,61 @@ def main(argv: list[str] | None = None) -> int:
                     print(f"failure: {failure}")
             return 0
 
+        if args.command == 'verify-saved':
+            proof_record = None
+            if args.proof is not None:
+                proof_record = json.loads(args.proof.read_text(encoding='utf-8'))
+            else:
+                proof_record = load_state().get('last_saved_proof')
+            if not isinstance(proof_record, dict):
+                raise ApiError('No saved-package proof is available; pass --proof or save with the HWPX proof strategy first.')
+            from app.hwpx_saved_proof import verify_external
+            verdict = {'schema_version': 'local-cli/verify-saved/v1', 'file': str(args.file.resolve()),
+                       **verify_external(args.file, proof_record),
+                       'proof_basis': proof_record.get('basis'), 'profile_id': proof_record.get('profile_id'),
+                       'native_qualified': proof_record.get('native_qualified') is True,
+                       'evidence': 'static complete package re-read; not a Hancom reopen or rendered proof'}
+            if args.json:
+                print(json.dumps(verdict, ensure_ascii=False, indent=2))
+            else:
+                print(f"verified: {verdict['verified']} ({verdict['basis']})")
+                print(f"package_sha256: {verdict['package_sha256']}")
+            return 0 if verdict['verified'] else 1
+
         if args.command == 'save':
             _state_before_save, save_expected_generation, save_expected_session = _state_cas_snapshot()
             payload = post_json(base_url, '/local-cli/save', {'session_id': save_expected_session})
-            destination = _download_artifact(payload, kind='working-copy', base_url=base_url, out=getattr(args, 'out', None))
+            # Only an absent (null) proof keeps the legacy capture. A present proof must
+            # carry a lowercase hex SHA-256; otherwise nothing is downloaded or kept.
+            saved_proof = payload.get('saved_proof')
+            if saved_proof is not None and not (isinstance(saved_proof, dict) and isinstance(saved_proof.get('saved_package_sha256'), str)
+                                                and re.fullmatch(r'[0-9a-f]{64}', saved_proof['saved_package_sha256'])):
+                raise ApiError('The save returned a saved-package proof without a valid digest; the working copy was not kept.')
+            if saved_proof is None:
+                destination = _download_artifact(payload, kind='working-copy', base_url=base_url, out=getattr(args, 'out', None))
+                downloaded_sha = _sha256_file(destination)
+            else:
+                # Atomic verified capture: only bytes equal to the proved saved package
+                # replace the destination; a mismatching download is discarded.
+                artifact_url = payload.get('download_path')
+                if not isinstance(artifact_url, str) or not artifact_url.strip():
+                    raise ApiError('working-copy did not return a download path.')
+                destination = _artifact_destination('working-copy', out=getattr(args, 'out', None))
+                partial = destination.with_name(f'.{destination.name}.{hashlib.sha256(str(_dt.datetime.now().timestamp()).encode()).hexdigest()[:12]}.partial')
+                try:
+                    download_to_path(base_url, artifact_url, partial)
+                    downloaded_sha = _sha256_file(partial)
+                    if saved_proof.get('saved_package_sha256') != downloaded_sha:
+                        raise ApiError('Downloaded working copy does not match the saved-package proof; it was not kept.')
+                    partial.replace(destination)
+                finally:
+                    if partial.exists():
+                        partial.unlink()
             update_state(lambda state: {
                 **state,
                 'last_saved_working_copy_path': str(destination),
-                'last_saved_working_copy_sha256': f'sha256:{_sha256_file(destination)}',
+                'last_saved_working_copy_sha256': f'sha256:{downloaded_sha}',
+                'last_saved_proof': saved_proof,
             }, expected_generation=save_expected_generation, expected_session_id=save_expected_session)
             _print_artifact_result(
                 role='saved working copy',

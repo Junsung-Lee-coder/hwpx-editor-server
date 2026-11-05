@@ -1,0 +1,122 @@
+{
+ "schema": "hwpx-saved-proof-profile/v2",
+ "profile_id": "hancom-13.0.0.3457-h01-reflow-test/v1",
+ "qualification": {
+  "status": "unqualified",
+  "basis": "Test profile for the next public square run. Built from the e01 copies (materialization, bridge, export flag, container fields, ModifiedDate, caret for List 0 / Para 0), the g01 Save(False) method observation and the h01 line cache of one single-line paragraph. Not observed: a public picture Save, external edited output, close, reopen, a preview change under an edit, replacement allocation and picture history.",
+  "evidence_sha256": null
+ },
+ "materialization": {
+  "method": "SaveAs",
+  "format": "HWPX",
+  "args": "lock:false;export"
+ },
+ "bridge": "owpml_physical_ordinal/v1",
+ "export_native_dirty": "cleared",
+ "container_volatile": [],
+ "regenerated_members": {
+  "Preview/PrvImage.png": {
+   "kind": "png",
+   "when": "rendering_request",
+   "same_pixel_size": true
+  }
+ },
+ "volatile_values": [
+  {
+   "member": "Contents/content.hpf",
+   "element": "{http://www.idpf.org/2007/opf/}meta",
+   "where": {
+    "name": "ModifiedDate",
+    "content": "text"
+   },
+   "field": "text",
+   "value_type": "utc_second_z",
+   "bound": "native_write_window"
+  }
+ ],
+ "caret": {
+  "member": "settings.xml",
+  "element": "{http://www.hancom.co.kr/hwpml/2011/app}CaretPosition",
+  "fields": {
+   "List": "listIDRef",
+   "Para": "paraIDRef",
+   "Pos": "pos"
+  },
+  "observed_domain": {
+   "List": [
+    0
+   ],
+   "Para": [
+    0
+   ]
+  }
+ },
+ "replacement_manifest_attributes": [
+  "id",
+  "href",
+  "media-type",
+  "isEmbeded"
+ ],
+ "public_save": {
+  "save_false_after_export_clear": true
+ },
+ "history": {},
+ "evidence": {
+  "materialization": {
+   "status": "observed",
+   "basis": "Four SaveAs(path,\"HWPX\",\"lock:false;export\") completions behind the production exact-True guard; working Path, caret and empty selection unchanged; complete 12-member packages. No separate raw-return logger."
+  },
+  "bridge": {
+   "status": "observed",
+   "basis": "Product bridge on all four actual HWPML2X producer strings and HWPX copies: one body picture; frame, position, crop, dimensions and media digest agree; the native control census secd, cold, gso matches. Multi-picture, rich, shared and post-edit censuses were not observed."
+  },
+  "export_native_dirty": {
+   "status": "observed",
+   "basis": "IsModified false->false (clean) and true->false (dirty, undo, redo) across the export."
+  },
+  "container_volatile": {
+   "status": "observed",
+   "basis": "Every ZIP container field and the member order are identical across the four copies (date_time 1980-01-01 00:00:00)."
+  },
+  "regenerated_members": {
+   "status": "not_run",
+   "basis": "Previews are identical for identical content and change with body text (724x1024 PNG throughout); never observed under a picture edit."
+  },
+  "volatile_values": {
+   "status": "observed",
+   "basis": "Clean->undo and dirty->redo differ only in content.hpf ModifiedDate text; every value is an exact UTC second inside the witness-derived write window of its own copy."
+  },
+  "caret": {
+   "status": "observed",
+   "basis": "settings.xml CaretPosition listIDRef/paraIDRef/pos equals native GetPos (0,0,24) and (0,0,65); only List 0 and Para 0 were observed."
+  },
+  "replacement_manifest_attributes": {
+   "status": "not_run",
+   "basis": "The actual image manifest item also carries hashkey, which is not MD5, SHA-1 or SHA-256 of the member bytes; its new-item value cannot be derived, so new-allocation replacement is refused under this candidate."
+  },
+  "public_save": {
+   "status": "observed",
+   "basis": "g01 actual public body insertion at current typed caret, private SaveAs true-to-false, ONE exact-True Save(False), complete current601 saved package comparison. Method-limited, not public picture Save. Receipt SHA256 afa780d32ff0590ad3217073a3e5472e59bfb3c6e596d903c482f0ecb985c7e4"
+  },
+  "history": {
+   "status": "not_run",
+   "basis": "Only one public body type/Undo/Redo was observed (native_undo_steps 1); no picture Undo/Redo. No picture kind is declared."
+  },
+  "line_reflow": {
+   "status": "observed",
+   "basis": "h01 actual private copies 655a37fed3ba6348 (before) and 83b21ab0fb914aef (after) of one genuine public picture_layout_exact(square) on an inline TopAndBottom picture: only the picture's own single-line paragraph lineseg baseline, horzpos, horzsize, textheight and vertsize changed; textpos, vertpos, spacing, flags and the line count did not. That native run was held before this contract existed; no save of it was observed."
+  }
+ },
+ "line_reflow": {
+  "picture_layout_exact": {
+   "scope": "target_paragraph_lines",
+   "fields": [
+    "baseline",
+    "horzpos",
+    "horzsize",
+    "textheight",
+    "vertsize"
+   ]
+  }
+ }
+}
