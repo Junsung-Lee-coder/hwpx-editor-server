@@ -1,0 +1,19 @@
+{
+  "op": "picture_layout_exact",
+  "version": "local-cli/picture-layout-exact/v1-package",
+  "summary": "Set inline/square placement on a bound body picture without implicit resize; native history unqualified.",
+  "module": "app.command_packages.commands.picture_layout_exact.run",
+  "read_only": false,
+  "dirty_default": true,
+  "allowed_keys": [
+    "op",
+    "operation",
+    "label",
+    "target_id",
+    "expected_hash",
+    "confirm_layout",
+    "mode",
+    "horizontal_offset_mm",
+    "vertical_offset_mm"
+  ]
+}

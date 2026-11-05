@@ -2,6 +2,8 @@
 
 Existing header/footer inventory and exact text/direct formatting: [API guide](docs/HEADER_FOOTER.md).
 
+Existing pictures (inventory, replacement, crop, layout) and the optional saved-HWPX package proof, verified save and history contract: [guide](docs/EXISTING_PICTURES.md).
+
 ## Native save and normal close contract
 
 `save` reads exact typed `IsModified` on the healthy owning STA and journals it before proceeding. Exact `False` deliberately skips ordinary Save as a **clean no-op**; the working-copy/file/custody/location readbacks still run. It does not fabricate a Save return or clear prior dirty evidence. Exact `True` calls the unchanged ordinary Save once; native False, errors, UNKNOWN and receipt/readback failures retain custody, with no forced Save or retry. Historical failed Saves remain failures.

@@ -529,6 +529,12 @@ def validate_step_for_op(op: str, *, service: Any, index: int, step: dict[str, A
             (native_text_edit.validate_replace_step if op == 'text_replace_exact' else native_text_edit.validate_cell_text_step)(step)
         except native_text_edit.NativeNumberingInputError as exc:
             _raise(error_type, f'command-bundle step {index} {op}: {exc}')
+    elif op in {'picture_inventory', 'picture_replace_exact', 'picture_crop_exact', 'picture_layout_exact'}:
+        from app import native_picture
+        try:
+            native_picture.validate_step(step)
+        except native_picture.nn.NativeNumberingInputError as exc:
+            _raise(error_type, f'command-bundle step {index} {op}: {exc}')
     elif op in {'header_footer_inventory', 'header_footer_text_exact', 'header_footer_format_exact'}:
         from app import native_header_footer
 
@@ -549,6 +555,18 @@ def run_step_for_op(op: str, *, service: Any, handle: Any, step: dict[str, Any],
     from app.local_cli_runtime import LocalCliRuntimeError, export_document_pdf, insert_native_table_at_cursor, save_document, snapshot_live_location
 
     warnings: list[str] = []
+    if op == 'picture_inventory':
+        from app import native_picture
+        result = native_picture.inventory(handle.hwp, step)
+        return result, False, []
+    if op in {'picture_replace_exact', 'picture_crop_exact', 'picture_layout_exact'}:
+        from app import native_picture
+        result = native_picture.edit(handle.hwp, step,
+                                     mark_mutating=handle.mark_mutating_intent,
+                                     asset_root=getattr(handle, 'session_root', None),
+                                     witness=getattr(service, '_picture_call_witness', None),
+                                     saved_proof=getattr(handle, 'hwpx_proof', None))
+        return result, result.get('changed') is True, []
     if op == 'control_inventory':
         result = service._bundle_control_inventory(handle.hwp, step)  # noqa: SLF001
         return result, False, list(result.get('warnings') or [])

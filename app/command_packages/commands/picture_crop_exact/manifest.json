@@ -1,0 +1,20 @@
+{
+  "op": "picture_crop_exact",
+  "version": "local-cli/picture-crop-exact/v1-package",
+  "summary": "Set a bound picture normalized source crop through native metadata while preserving its frame and payload.",
+  "module": "app.command_packages.commands.picture_crop_exact.run",
+  "read_only": false,
+  "dirty_default": true,
+  "allowed_keys": [
+    "op",
+    "operation",
+    "label",
+    "target_id",
+    "expected_hash",
+    "confirm_layout",
+    "left",
+    "top",
+    "right",
+    "bottom"
+  ]
+}

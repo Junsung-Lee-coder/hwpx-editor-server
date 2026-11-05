@@ -13,6 +13,8 @@ from __future__ import annotations
 import html
 import os
 import re
+import stat
+import unicodedata
 import zipfile
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -25,6 +27,8 @@ EVIDENCE_NOTE = 'local static HWPX XML reading; not Hancom-rendered proof (no pa
 
 MAX_FILE_BYTES = 200 * 1024 * 1024
 MAX_ENTRY_BYTES = 100 * 1024 * 1024
+MAX_PACKAGE_TOTAL_BYTES = 512 * 1024 * 1024
+MAX_PACKAGE_MEMBERS = 4096
 
 _SECTION_RE = re.compile(r'^Contents/section(\d+)\.xml$', re.IGNORECASE)
 _STYLE_OUTLINE_RE = re.compile(r'^\s*(?:개요|outline)\s*(\d+)\s*$', re.IGNORECASE)
@@ -67,6 +71,84 @@ def _parse(data: bytes, name: str) -> ET.Element:
         return ET.fromstring(data)
     except ET.ParseError as exc:
         raise HwpxReadError(f'malformed XML in {name!r}: {exc}') from exc
+
+
+def read_package_members(path: str | Path) -> dict[str, bytes]:
+    """Read EVERY bounded part, retaining unknown/script/empty/directory bytes.
+
+    This is a strict full-member input to preservation, not the paragraph-only
+    projection and not itself a native/semantic/ZIP-metadata preservation verdict.
+    XML parts are checked without changing their original bytes or dropping comments.
+    """
+    return read_package_entries(path)['members']
+
+
+# ZIP container fields retained for every member. They are representation, not
+# document semantics; a comparator decides about them only from explicit data.
+CONTAINER_FIELDS = ('compress_type', 'date_time', 'external_attr', 'flag_bits', 'create_system',
+                    'create_version', 'extract_version', 'extra', 'comment')
+
+
+def read_package_entries(path: str | Path) -> dict[str, Any]:
+    """Complete members plus ordered ZIP container metadata, under one bounded read.
+
+    Returns ``{'members': {name: bytes}, 'order': [...], 'container': {name: {...}},
+    'archive_comment': bytes}``. The member bytes are exactly what
+    :func:`read_package_members` returns; no XML or ZIP field is normalized.
+    """
+    path = Path(path)
+    if path.is_symlink() or not path.is_file() or path.stat().st_size > MAX_FILE_BYTES:
+        raise HwpxReadError('package is missing, linked, nonregular or oversized')
+    members: dict[str, bytes] = {}
+    container: dict[str, dict[str, Any]] = {}
+    aliases: set[str] = set()
+    total = 0
+    try:
+        with zipfile.ZipFile(path) as archive:
+            archive_comment = bytes(archive.comment)
+            infos = archive.infolist()
+            if len(infos) > MAX_PACKAGE_MEMBERS:
+                raise HwpxReadError('complete package member limit exceeded')
+            for info in infos:
+                name = info.filename
+                _check_entry_name(name)
+                body = name[:-1] if name.endswith('/') else name
+                if not body or '\\' in name or ':' in body or any(c in body for c in ('\x00', '\r', '\n')):
+                    raise HwpxReadError('ambiguous complete package member name')
+                if any(part in ('', '.', '..') for part in body.split('/')):
+                    raise HwpxReadError('noncanonical complete package member name')
+                alias = unicodedata.normalize('NFC', body).casefold()
+                if name in members or alias in aliases:
+                    raise HwpxReadError('duplicate or aliased complete package member')
+                aliases.add(alias)
+                mode = stat.S_IFMT(info.external_attr >> 16)
+                if mode not in (0, stat.S_IFREG, stat.S_IFDIR) or (mode == stat.S_IFDIR) != info.is_dir() and mode != 0:
+                    raise HwpxReadError('nonregular or inconsistent complete package member')
+                if info.flag_bits & 1 or info.file_size > MAX_ENTRY_BYTES:
+                    raise HwpxReadError('encrypted or oversized complete package member')
+                total += info.file_size
+                if total > MAX_PACKAGE_TOTAL_BYTES:
+                    raise HwpxReadError('complete package expansion limit exceeded')
+                data = _read_entry(archive, info)
+                if len(data) != info.file_size or (info.is_dir() and data):
+                    raise HwpxReadError('complete package member length disagrees')
+                if name.lower().endswith(('.xml', '.hpf', '.rels', '.rdf')):
+                    declaration_scan = data.replace(b'\x00', b'').lower()
+                    if b'<!doctype' in declaration_scan or b'<!entity' in declaration_scan:
+                        raise HwpxReadError('complete XML part declares DOCTYPE/ENTITY')
+                    try:
+                        parser = ET.XMLParser(target=ET.TreeBuilder(insert_comments=True, insert_pis=True))
+                        ET.fromstring(data, parser=parser)
+                    except ET.ParseError as exc:
+                        raise HwpxReadError('malformed complete XML part: '+name) from exc
+                members[name] = data
+                container[name] = {key: (bytes(getattr(info, key)) if key in ('extra', 'comment')
+                                         else tuple(getattr(info, key)) if key == 'date_time'
+                                         else int(getattr(info, key)))
+                                   for key in CONTAINER_FIELDS}
+    except (zipfile.BadZipFile, OSError, RuntimeError, NotImplementedError) as exc:
+        raise HwpxReadError('complete package could not be read') from exc
+    return {'members': members, 'order': list(members), 'container': container, 'archive_comment': archive_comment}
 
 
 def _section_order(zf: zipfile.ZipFile, infos: dict[str, zipfile.ZipInfo]) -> list[str]:

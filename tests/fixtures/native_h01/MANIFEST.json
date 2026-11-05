@@ -1,0 +1,248 @@
+{
+ "schema": "hwpx-native-fixture/v1",
+ "kind": "ACTUAL native Hancom output copied verbatim; not product acceptance or picture-edit evidence",
+ "runtime": "Hancom 13.0.0.3457 (one ordinary native-authored fixture, same seed as native_e01)",
+ "source_under_test_at_capture": "858b8d6f6c198272c0992b84a47bc1a69d6d791d",
+ "delivery": {
+  "baseline": "BASELINE.json",
+  "baseline_sha256": "2d9a74847f005dd1f068a756e91410fe7464d3dd6c1224de0de922532d93e3ee",
+  "summary": "native-data/NATIVE-DATA-SUMMARY.json",
+  "summary_sha256": "f4aa494e4a5c49b81bd5a9c6b724063db511361931ca57695371927e52b0e409"
+ },
+ "files": {
+  "before.package.json": {
+   "decodes_to_sha256": "655a37fed3ba634870c9960f92eea27bf89e13dceba0228942ec05037412c940",
+   "bytes": 16571,
+   "origin": "native-data/native/observed-h01/actual-private-001.hwpx"
+  },
+  "after.package.json": {
+   "decodes_to_sha256": "83b21ab0fb914aef2cc4d7fda5164e22c2a9a96ee4acf6cb608046224f324261",
+   "bytes": 16564,
+   "origin": "native-data/native/observed-h01/actual-private-002.hwpx"
+  },
+  "g01-saved.package.json": {
+   "decodes_to_sha256": "db7ed49d2668bc97b43aa21018a8808cf6d2b229ce5a4f766bf10f357ff347fd",
+   "bytes": 17767,
+   "origin": "native-data/native/observed-g01/method-saved-working.hwpx"
+  },
+  "parse-001.hwpml2x": {
+   "sha256": "16b2b3a7103c7948cf7f7e2953e235d0c3ba2ce55e020fbe5e8419991ba132ce",
+   "bytes": 13119,
+   "origin": "native-data/native/observed-h01/parse-001.hwpml2x"
+  },
+  "parse-002.hwpml2x": {
+   "sha256": "a9e77c7a484359609933c2429c88d3bd8776af465673ef254f927138014432e8",
+   "bytes": 13119,
+   "origin": "native-data/native/observed-h01/parse-002.hwpml2x"
+  },
+  "parse-003.hwpml2x": {
+   "sha256": "0a3977be41fa44dabf652f0c50dc583a30e0ce6f7ac5aeac7f4609779036c083",
+   "bytes": 13135,
+   "origin": "native-data/native/observed-h01/parse-003.hwpml2x"
+  },
+  "g01-derived-method-profile.json": {
+   "sha256": "8e67ea40cd02f2764e3236ff2f88072a08345e27217c739505d52126b03ba8fc",
+   "bytes": 4505,
+   "origin": "native-data/native/observed-g01/DERIVED-METHOD-PROFILE.json"
+  }
+ },
+ "h01": {
+  "outcome": "native HOLD: typed GetDefault and Execute returned exact True; the complete HWPX package comparison then stopped at the target paragraph line cache; no public Save, reopen, PDF or PNG",
+  "public_mcp_request": {
+   "op": "picture_layout_exact",
+   "target_id": "picture:1239128181",
+   "expected_hash": "sha256:95b5edd0d2843068586e19aa",
+   "confirm_layout": true,
+   "mode": "square"
+  },
+  "validated_request": {
+   "op": "picture_layout_exact",
+   "target_id": "picture:1239128181",
+   "expected_hash": "sha256:95b5edd0d2843068586e19aa",
+   "mode": "square"
+  },
+  "request_sha256": "bbedab9b2b032153e29e8f6560e600a99dd59595acf9fed009423df29e00cf15",
+  "inventory_hash_source": "picture-public-inventory",
+  "native_profile": {
+   "strategy": "native_hwpx_package",
+   "profile_sha256": "8e67ea40cd02f2764e3236ff2f88072a08345e27217c739505d52126b03ba8fc",
+   "profile_id": "hancom-13.0.0.3457-g01-save-false-method/v1"
+  },
+  "ui_plan": {
+   "original": [
+    0,
+    0,
+    24
+   ],
+   "expected": [
+    0,
+    0,
+    16
+   ]
+  },
+  "anchor": [
+   0,
+   0,
+   16
+  ],
+  "typed": {
+   "TextFlow_before": 0,
+   "TextFlow_preExecute": 0,
+   "TreatAsChar_before": 1,
+   "TreatAsChar_after_put": 0,
+   "TextWrap_before": 1,
+   "TextWrap_after_put": 0,
+   "GetDefault": true,
+   "Execute": true,
+   "flow_prestate": {
+    "target_id": "picture:1239128181",
+    "observed_before": 0,
+    "serialized_before": null,
+    "expected_name": "BothSides",
+    "may_materialize": true
+   }
+  },
+  "producer_strings": {
+   "parse-001.hwpml2x": {
+    "label": "picture-public-inventory",
+    "chars": 12981,
+    "sha256": "16b2b3a7103c7948cf7f7e2953e235d0c3ba2ce55e020fbe5e8419991ba132ce"
+   },
+   "parse-002.hwpml2x": {
+    "label": "edit before.GetTextFile.HWPML2X",
+    "chars": 12981,
+    "sha256": "a9e77c7a484359609933c2429c88d3bd8776af465673ef254f927138014432e8"
+   },
+   "parse-003.hwpml2x": {
+    "label": "edit after.GetTextFile.HWPML2X",
+    "chars": 12997,
+    "sha256": "0a3977be41fa44dabf652f0c50dc583a30e0ce6f7ac5aeac7f4609779036c083"
+   }
+  },
+  "copies": {
+   "before.package.json": {
+    "native_before": {
+     "path": "[redacted private native working-copy path]",
+     "modified": false,
+     "position": [
+      0,
+      0,
+      24
+     ]
+    },
+    "native_after": {
+     "path": "[redacted private native working-copy path]",
+     "modified": false,
+     "position": [
+      0,
+      0,
+      24
+     ]
+    },
+    "write_window_utc": [
+     "2026-11-05T16:02:37.322558+00:00",
+     "2026-11-05T16:02:37.428942+00:00"
+    ]
+   },
+   "after.package.json": {
+    "native_before": {
+     "path": "[redacted private native working-copy path]",
+     "modified": true,
+     "position": [
+      0,
+      0,
+      16
+     ]
+    },
+    "native_after": {
+     "path": "[redacted private native working-copy path]",
+     "modified": false,
+     "position": [
+      0,
+      0,
+      16
+     ]
+    },
+    "write_window_utc": [
+     "2026-11-05T16:02:38.864413+00:00",
+     "2026-11-05T16:02:38.948092+00:00"
+    ]
+   }
+  },
+  "ledger": {
+   "origin": "native-data/native/observed-h01/picture-calls.jsonl",
+   "sha256": "64daa2de5c462caeb2a76f7c948a2daa5e9edaf423e4fea2b593c1ff3fde68ce",
+   "rows": 155,
+   "kept_in_repository": false,
+   "last_phase": "proof.hwpx.after"
+  }
+ },
+ "g01": {
+  "outcome": "one raw Save(False) through the production exact-True guard after a public body insertion; saved and private files are byte-identical",
+  "saved_package": "g01-saved.package.json",
+  "private_copy_window_utc": [
+   "2026-11-05T15:41:06.942026+00:00",
+   "2026-11-05T15:41:07.085519+00:00"
+  ],
+  "private_copy_native_before_after": [
+   {
+    "path": "[redacted private native working-copy path]",
+    "modified": true,
+    "position": [
+     0,
+     0,
+     58
+    ]
+   },
+   {
+    "path": "[redacted private native working-copy path]",
+    "modified": false,
+    "position": [
+     0,
+     0,
+     58
+    ]
+   }
+  ],
+  "save_window_utc": [
+   "2026-11-05T15:41:07.169890+00:00",
+   "2026-11-05T15:41:07.242033+00:00"
+  ],
+  "save_diagnostic": {
+   "save_false_entered": true,
+   "save_return_arrived": true,
+   "save_returned_false": false
+  },
+  "saved_proof": {
+   "basis": "saved_package_equals_verified_private_copy",
+   "verified_package_sha256": "db7ed49d2668bc97b43aa21018a8808cf6d2b229ce5a4f766bf10f357ff347fd",
+   "saved_package_sha256": "db7ed49d2668bc97b43aa21018a8808cf6d2b229ce5a4f766bf10f357ff347fd",
+   "saved_size_bytes": 17767,
+   "members": 12,
+   "byte_identical": 11,
+   "infoset_compared": 1,
+   "regenerated_not_compared": 0,
+   "added_media": 0
+  },
+  "receipt": {
+   "origin": "native-data/native/observed-g01/dirty-save-false-returned.json",
+   "sha256": "afa780d32ff0590ad3217073a3e5472e59bfb3c6e596d903c482f0ecb985c7e4"
+  },
+  "derived_profile": {
+   "file": "g01-derived-method-profile.json",
+   "sha256": "8e67ea40cd02f2764e3236ff2f88072a08345e27217c739505d52126b03ba8fc"
+  },
+  "not_public_picture_save": true
+ },
+ "not_observed": [
+  "public picture Save",
+  "external verified edited output",
+  "SDK safe close",
+  "public reopen",
+  "native PDF",
+  "all-page PNG",
+  "picture Undo/Redo",
+  "preview change under a picture edit",
+  "a multi-line or multi-paragraph reflow"
+ ]
+}

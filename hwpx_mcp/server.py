@@ -116,6 +116,17 @@ def discard(path):
         pass  # Its name is one no consumer accepts; a leftover is never treated as output.
 
 
+_PROVED_DIGEST = re.compile(r'[0-9a-f]{64}\Z')
+# A stored proof record that cannot be read back is present, never legacy absence.
+UNREADABLE_SAVED_PROOF = 'unreadable-saved-proof-record'
+
+
+def proved_digest(saved_proof):
+    """The lowercase hex SHA-256 a present backend saved-package proof binds, or None when unusable."""
+    value = saved_proof.get('saved_package_sha256') if type(saved_proof) is dict else None
+    return value if type(value) is str and _PROVED_DIGEST.fullmatch(value) else None
+
+
 def write_json_atomic(path, value):
     temporary = path.with_name(f'.{path.name}.{uuid.uuid4().hex}.tmp')
     temporary.write_text(json.dumps(value, ensure_ascii=False, indent=2), encoding='utf-8')
@@ -645,7 +656,7 @@ class Facade:
             name = f'{Path(source).stem}-edited{Path(source).suffix}' if source else 'document.hwpx'
         return Path(str(name)).name
 
-    async def publish_saved(self, http, sid, name):
+    async def publish_saved(self, http, sid, name, saved_proof=None):
         """Publish only a complete, verified copy, atomically, and then point the latest-saved record at it."""
         route = f'/local-cli/session/{sid}/artifact/working-copy'
         folder = self.session_dir(sid) / 'saved'
@@ -653,11 +664,11 @@ class Facade:
         partial = folder / f'.incoming-{uuid.uuid4().hex}.part'
         try:
             await self.fetch_complete(http, route, partial, 'Saved document', limit=MAX_SAVED_FILE)
-            return await self.publish_verified(sid, partial, name)
+            return await self.publish_verified(sid, partial, name, saved_proof)
         finally:
             discard(partial)
 
-    async def publish_verified(self, sid, partial, name):
+    async def publish_verified(self, sid, partial, name, saved_proof=None):
         folder = self.session_dir(sid) / 'saved'
         package, package_error = None, None
         if Path(name).suffix.lower() == '.hwpx':
@@ -672,6 +683,16 @@ class Facade:
         numbers = [int(match.group(1)) for item in folder.iterdir() if (match := re.match(r'([0-9]+)-', item.name))]
         target = folder / f'{max(numbers, default=0) + 1:03d}-{name}'
         saved = {'retrieved': True, 'path': str(target), 'sha256': await asyncio.to_thread(file_sha256, partial), 'size_bytes': partial.stat().st_size, 'package': package, 'package_error': package_error}
+        if saved_proof is not None:
+            # A present backend proof binds exactly these saved bytes. A malformed or
+            # digest-less proof is not absence: nothing is kept without the comparison.
+            digest = proved_digest(saved_proof)
+            if digest is None:
+                raise BackendFailure('ARTIFACT_IDENTITY_MISMATCH', 'The backend saved-package proof carries no valid digest; the saved document was not kept.')
+            if digest != saved['sha256']:
+                raise BackendFailure('ARTIFACT_IDENTITY_MISMATCH', 'Saved document bytes differ from the backend saved-package proof and were not kept.')
+            saved['saved_proof'] = {k: saved_proof[k] for k in ('basis', 'profile_id', 'qualification', 'native_qualified', 'members',
+                                                                'members_manifest_sha256', 'saved_package_sha256') if k in saved_proof}
         source_record = self.read_json(self.session_dir(sid) / 'source.json')
         if package is not None and source_record and source_record.get('package'):
             saved['compared_with_source'] = review_rules.compare_packages(source_record['package'], package)
@@ -701,7 +722,16 @@ class Facade:
         try:
             if result.get('download_path') != f'/local-cli/session/{sid}/artifact/working-copy':
                 raise BackendFailure('ARTIFACT_IDENTITY_MISMATCH', 'Save returned an unexpected artifact route.')
-            return await self.publish_saved(http, sid, self.saved_name(sid, result))
+            # Only an absent (null) proof is the legacy contract; any other value is kept as is,
+            # so a later close-time capture is bound to it too. A save without one clears it.
+            proof = result.get('saved_proof')
+            folder = self.session_dir(sid)
+            folder.mkdir(parents=True, exist_ok=True)
+            if proof is not None:
+                write_json_atomic(folder / 'saved-proof.json', proof)
+            else:
+                discard(folder / 'saved-proof.json')
+            return await self.publish_saved(http, sid, self.saved_name(sid, result), proof)
         except BackendFailure as exc:
             return self.record_saved_failure(sid, exc.code, exc.message)
         except (httpx2.TimeoutException, httpx2.TransportError, OSError):
@@ -733,7 +763,7 @@ class Facade:
             source = self.read_json(self.session_dir(sid) / 'source.json')
             if record is None and source and source.get('sha256') == digest:
                 return None  # Unchanged since it was opened; the input file already holds this content.
-            return await self.publish_verified(sid, partial, self.saved_name(sid))
+            return await self.publish_verified(sid, partial, self.saved_name(sid), self.stored_saved_proof(sid))
         except BackendFailure as exc:
             failure = self.record_saved_failure(sid, exc.code, exc.message)
         except (httpx2.TimeoutException, httpx2.TransportError, OSError):
@@ -752,6 +782,17 @@ class Facade:
         except (OSError, ValueError):
             return None
         return value if isinstance(value, dict) else None
+
+    def stored_saved_proof(self, sid):
+        """The proof the last save carried: None only when none was present; an unreadable record is not absence."""
+        path = self.session_dir(sid) / 'saved-proof.json'
+        if not os.path.lexists(path):
+            return None
+        try:
+            value = json.loads(path.read_text(encoding='utf-8'))
+        except (OSError, ValueError):
+            return UNREADABLE_SAVED_PROOF
+        return UNREADABLE_SAVED_PROOF if value is None else value
 
     def review_baseline(self, sid, compare_to):
         if compare_to is not None:
@@ -976,6 +1017,11 @@ def build_app(settings: Settings | None = None):
                                 '(column widths: table_width_exact). Text and paragraphs: anchor_insert, set_text_file, get_selected_text, native_table_insert, '
                                 'anchor_range_replace_native_table, selected_text_delete_exact, paragraph_style_apply_exact (keep with next, widow/orphan, '
                                 'page break before), paragraph_delete_exact, paragraph_join_previous_exact, paragraph_join_next_exact, paragraph_rehome_exact. '
+                                'Existing pictures: picture_inventory returns exact target_id/hash and qualification bounds; picture_replace_exact accepts a same-aspect backend-host PNG, '
+                                'picture_crop_exact takes normalized source bounds, and picture_layout_exact implements inline/square placement without resizing. '
+                                'Picture native edit/save/reopen and history remain unqualified; changed picture steps refuse Undo/Redo before native history dispatch '
+                                'unless an explicitly configured pinned HWPX profile declares that kind. With such a profile the result carries saved_proof: '
+                                'complete private HWPX copies before/after the edit, its literal profile qualification and that legacy HWPML BINDATA Size is not compared. '
                                 'Reads: style_inspect, typography_overview. Allowlisted low level: hwp_action and pyhwpx_call (only the backend bundle allowlists). '
                                 'Direct caret routes: target_info, move_to_target, select_target, cell_info, cell_move, cursor_move, type_text, figure_section, '
                                 'cell_replace, font_size, bold, font_family, bullet, table_insert, list_items, numbering_readback. Also undo/redo within the tracked '

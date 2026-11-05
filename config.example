@@ -26,3 +26,7 @@ HWP_POPPLER_PACKAGE_ID=oschwartz10612.Poppler
 HWP_API_TASK_NAME=hwpx-editor-api
 HWP_WORKER_TASK_NAME=hwpx-editor-worker
 HWP_SOURCE_MANIFEST=
+# Optional existing-picture saved-HWPX proof profile (docs/EXISTING_PICTURES.md). Both values or neither.
+# An absolute JSON profile path and its exact SHA-256. Unset keeps the legacy HWPML strict route.
+HWP_PICTURE_HWPX_PROFILE=
+HWP_PICTURE_HWPX_PROFILE_SHA256=

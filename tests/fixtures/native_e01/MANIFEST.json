@@ -1,0 +1,298 @@
+{
+ "schema": "hwpx-native-fixture/v1",
+ "kind": "ACTUAL native Hancom output copied verbatim; not product acceptance or picture-edit evidence",
+ "runtime": "Hancom 13.0.0.3457 / backend Python 3.13.14 (one ordinary native-authored fixture)",
+ "source_under_test_at_capture": "d72483ee37651cc130e682f3e85b68cb2c5d7e17",
+ "delivery": {
+  "file": "native-data09/PARENT-DELIVERY.json",
+  "sha256": "a137cb090a35a58a10204b296d55e1b22ab282aae6c20ddd45880794b6dd62bf",
+  "manifest_sha256": "fd171fdd6b4731ad7feaac35355b5a6ee60820f1932004eaa55a8b607cf1001b"
+ },
+ "native_call": {
+  "method": "raw IHwpObject.SaveAs",
+  "format": "HWPX",
+  "args": "lock:false;export",
+  "return": "exact True by the production checked helper guard; no separate raw-return logger"
+ },
+ "public_calls": {
+  "public_body_edit_calls": 1,
+  "public_Undo_calls": 1,
+  "public_Redo_calls": 1,
+  "ordinary_Save_calls": 0,
+  "SDK_Close_calls": 0
+ },
+ "producer_witness_source": {
+  "origin": "native-bridge09/native/observed-e01/picture-calls.jsonl",
+  "sha256": "049603763a1cd86ab7d7a0d6e5b0f65229d9e79f546f514d32b54be52f451f5e",
+  "bytes": 24388,
+  "kept_in_repository": false,
+  "facts_extracted": "GetTextFile return chars/sha256, control census CtrlID/GetCtrlInstID sha256, pre/post selection timestamps"
+ },
+ "epochs": [
+  {
+   "epoch": "clean",
+   "package": "clean.package.json",
+   "producer_string": "clean.before.hwpml2x",
+   "native_control_census_witness": {
+    "CtrlID_sha256": [
+     "6b9d27a60072ee33338b1064f07db83b73dcfbcf768d1e2f289f063e8e3a0fdb",
+     "e272deecde720ffc773d7a6a81adabbc366ccbb64da5abdb6b26f52cd3f952cb",
+     "6405105aca80ac8a9abfc4e1ffae541d0cb0e83459851d95d7f735a407c8e870"
+    ],
+    "GetCtrlInstID_sha256": [
+     "a076b1489d73551c516f1a092cb60463b6ea95596d9f7c364dffebaa48015b47"
+    ]
+   },
+   "producer_witness": {
+    "chars": 12981,
+    "sha256": "16b2b3a7103c7948cf7f7e2953e235d0c3ba2ce55e020fbe5e8419991ba132ce"
+   },
+   "write_window_utc": [
+    "2026-11-05T11:35:49.378221+00:00",
+    "2026-11-05T11:35:49.507365+00:00"
+   ],
+   "write_window_basis": "between the witness 'snapshot.pre.CurSelectedCtrl' return and the next 'snapshot.post.SelectionMode' call; the SaveAs call itself was not separately time-stamped",
+   "native_modified": [
+    false,
+    false
+   ],
+   "caret_before_after": [
+    [
+     0,
+     0,
+     24
+    ],
+    [
+     0,
+     0,
+     24
+    ]
+   ],
+   "selection_before_after": [
+    {
+     "mode": 0,
+     "control": null
+    },
+    {
+     "mode": 0,
+     "control": null
+    }
+   ],
+   "marker_present": false,
+   "working_Path_unchanged": true,
+   "native_return_exact_True": "established by successful checked_save_hwp_as exact-True guard, not a separate raw-return logger"
+  },
+  {
+   "epoch": "dirty",
+   "package": "dirty.package.json",
+   "producer_string": "dirty.before.hwpml2x",
+   "native_control_census_witness": {
+    "CtrlID_sha256": [
+     "6b9d27a60072ee33338b1064f07db83b73dcfbcf768d1e2f289f063e8e3a0fdb",
+     "e272deecde720ffc773d7a6a81adabbc366ccbb64da5abdb6b26f52cd3f952cb",
+     "6405105aca80ac8a9abfc4e1ffae541d0cb0e83459851d95d7f735a407c8e870"
+    ],
+    "GetCtrlInstID_sha256": [
+     "a076b1489d73551c516f1a092cb60463b6ea95596d9f7c364dffebaa48015b47"
+    ]
+   },
+   "producer_witness": {
+    "chars": 13028,
+    "sha256": "a41344630de1e0ad7c815f89921dc8d082f3c710b4d912cd7dbf1d7ae6653b17"
+   },
+   "write_window_utc": [
+    "2026-11-05T11:35:53.676657+00:00",
+    "2026-11-05T11:35:53.789496+00:00"
+   ],
+   "write_window_basis": "between the witness 'snapshot.pre.CurSelectedCtrl' return and the next 'snapshot.post.SelectionMode' call; the SaveAs call itself was not separately time-stamped",
+   "native_modified": [
+    true,
+    false
+   ],
+   "caret_before_after": [
+    [
+     0,
+     0,
+     65
+    ],
+    [
+     0,
+     0,
+     65
+    ]
+   ],
+   "selection_before_after": [
+    {
+     "mode": 0,
+     "control": null
+    },
+    {
+     "mode": 0,
+     "control": null
+    }
+   ],
+   "marker_present": true,
+   "working_Path_unchanged": true,
+   "native_return_exact_True": "established by successful checked_save_hwp_as exact-True guard, not a separate raw-return logger"
+  },
+  {
+   "epoch": "undo",
+   "package": "undo.package.json",
+   "producer_string": "undo.before.hwpml2x",
+   "native_control_census_witness": {
+    "CtrlID_sha256": [
+     "6b9d27a60072ee33338b1064f07db83b73dcfbcf768d1e2f289f063e8e3a0fdb",
+     "e272deecde720ffc773d7a6a81adabbc366ccbb64da5abdb6b26f52cd3f952cb",
+     "6405105aca80ac8a9abfc4e1ffae541d0cb0e83459851d95d7f735a407c8e870"
+    ],
+    "GetCtrlInstID_sha256": [
+     "a076b1489d73551c516f1a092cb60463b6ea95596d9f7c364dffebaa48015b47"
+    ]
+   },
+   "producer_witness": {
+    "chars": 12981,
+    "sha256": "4fc94264d6131e3ae8f0f6a99be7100da5e0fb5b488088df369cb6325c6d4a20"
+   },
+   "write_window_utc": [
+    "2026-11-05T11:35:57.463787+00:00",
+    "2026-11-05T11:35:57.532955+00:00"
+   ],
+   "write_window_basis": "between the witness 'snapshot.pre.CurSelectedCtrl' return and the next 'snapshot.post.SelectionMode' call; the SaveAs call itself was not separately time-stamped",
+   "native_modified": [
+    true,
+    false
+   ],
+   "caret_before_after": [
+    [
+     0,
+     0,
+     24
+    ],
+    [
+     0,
+     0,
+     24
+    ]
+   ],
+   "selection_before_after": [
+    {
+     "mode": 0,
+     "control": null
+    },
+    {
+     "mode": 0,
+     "control": null
+    }
+   ],
+   "marker_present": false,
+   "working_Path_unchanged": true,
+   "native_return_exact_True": "established by successful checked_save_hwp_as exact-True guard, not a separate raw-return logger"
+  },
+  {
+   "epoch": "redo",
+   "package": "redo.package.json",
+   "producer_string": "redo.before.hwpml2x",
+   "native_control_census_witness": {
+    "CtrlID_sha256": [
+     "6b9d27a60072ee33338b1064f07db83b73dcfbcf768d1e2f289f063e8e3a0fdb",
+     "e272deecde720ffc773d7a6a81adabbc366ccbb64da5abdb6b26f52cd3f952cb",
+     "6405105aca80ac8a9abfc4e1ffae541d0cb0e83459851d95d7f735a407c8e870"
+    ],
+    "GetCtrlInstID_sha256": [
+     "a076b1489d73551c516f1a092cb60463b6ea95596d9f7c364dffebaa48015b47"
+    ]
+   },
+   "producer_witness": {
+    "chars": 13028,
+    "sha256": "4455b842e12e2aef804ab9adc55d6f8340f0cfd904a13b107e1b0f5241c06f76"
+   },
+   "write_window_utc": [
+    "2026-11-05T11:36:01.208059+00:00",
+    "2026-11-05T11:36:01.287710+00:00"
+   ],
+   "write_window_basis": "between the witness 'snapshot.pre.CurSelectedCtrl' return and the next 'snapshot.post.SelectionMode' call; the SaveAs call itself was not separately time-stamped",
+   "native_modified": [
+    true,
+    false
+   ],
+   "caret_before_after": [
+    [
+     0,
+     0,
+     65
+    ],
+    [
+     0,
+     0,
+     65
+    ]
+   ],
+   "selection_before_after": [
+    {
+     "mode": 0,
+     "control": null
+    },
+    {
+     "mode": 0,
+     "control": null
+    }
+   ],
+   "marker_present": true,
+   "working_Path_unchanged": true,
+   "native_return_exact_True": "established by successful checked_save_hwp_as exact-True guard, not a separate raw-return logger"
+  }
+ ],
+ "files": {
+  "clean.package.json": {
+   "decodes_to_sha256": "91183076a1382dec298a24bcf56f4cb28967fc4fc76cbed6a07c9a724688dc01",
+   "bytes": 16570,
+   "origin": "native-data09/saved-data/clean/native.hwpx"
+  },
+  "clean.before.hwpml2x": {
+   "sha256": "16b2b3a7103c7948cf7f7e2953e235d0c3ba2ce55e020fbe5e8419991ba132ce",
+   "bytes": 13119,
+   "origin": "native-bridge09/native/observed-e01/clean.before.hwpml2x"
+  },
+  "dirty.package.json": {
+   "decodes_to_sha256": "c5b3cad040b5d588ff5eebcfc18385162117b5e4fbcb58128c2a3a66f51e6c33",
+   "bytes": 17931,
+   "origin": "native-data09/saved-data/dirty/native.hwpx"
+  },
+  "dirty.before.hwpml2x": {
+   "sha256": "a41344630de1e0ad7c815f89921dc8d082f3c710b4d912cd7dbf1d7ae6653b17",
+   "bytes": 13166,
+   "origin": "native-bridge09/native/observed-e01/dirty.before.hwpml2x"
+  },
+  "undo.package.json": {
+   "decodes_to_sha256": "f119fde2c3ae71c6c6f35d92fbb903fce243b22ae4110a815b8ed52e453818f6",
+   "bytes": 16571,
+   "origin": "native-data09/saved-data/undo/native.hwpx"
+  },
+  "undo.before.hwpml2x": {
+   "sha256": "4fc94264d6131e3ae8f0f6a99be7100da5e0fb5b488088df369cb6325c6d4a20",
+   "bytes": 13119,
+   "origin": "native-bridge09/native/observed-e01/undo.before.hwpml2x"
+  },
+  "redo.package.json": {
+   "decodes_to_sha256": "02156bb2b8090a9890ca0aeff16b13c6756e9d3bbb41939534088187a3cbe23d",
+   "bytes": 17930,
+   "origin": "native-data09/saved-data/redo/native.hwpx"
+  },
+  "redo.before.hwpml2x": {
+   "sha256": "4455b842e12e2aef804ab9adc55d6f8340f0cfd904a13b107e1b0f5241c06f76",
+   "bytes": 13166,
+   "origin": "native-bridge09/native/observed-e01/redo.before.hwpml2x"
+  }
+ },
+ "not_observed": [
+  "picture edit",
+  "ordinary Save",
+  "Save(False)",
+  "close/reopen",
+  "picture Undo/Redo",
+  "consecutive unchanged no-op copies",
+  "caret beyond List 0 / Para 0",
+  "script members",
+  "replacement manifest allocation"
+ ]
+}
