@@ -209,7 +209,7 @@ any native call, and it serves the qualification measurements only.
 ### Native data behind the h01 test profile
 
 `docs/profiles/hwpx-saved-proof-h01-reflow-test.json` is the `unqualified` test
-profile used for the public picture run described below. It keeps the candidate's observed
+profile used for the public picture cases described below. It keeps the candidate's observed
 fields and adds two later native observations on Hancom 13.0.0.3457, kept in
 `tests/fixtures/native_h01` (archives as base64 envelopes that decode to the
 native bytes):
@@ -229,17 +229,25 @@ native bytes):
 
 With this profile and the reflow contract above, `picture_layout_exact` with
 `mode: "square"` on an ordinary inline body picture without a caption has been
-exercised once natively on Hancom 13.0.0.3457 through public MCP. The bounded
-public `Save(False)` was issued immediately after the edit; the saved HWPX was
-verified externally by digest; the reopened file showed the picture
-Square/floating with the same image payload; and native PDF and page PNG
-rendering of the saved file succeeded, followed by a public guarded close. The
-automatic review reports text as unverified for this image-only document.
+exercised natively on Hancom 13.0.0.3457 through public MCP in two separate
+cases.
 
-Not established: a save issued later than the edit, crop, replacement, the
-inline mode, offsets, picture history, multi-line or multi-paragraph reflow, a preview change
-under an edit, replacement allocation, rich, shared and multi-picture documents,
-other Hancom versions and general native qualification.
+In the first, the bounded public `Save(False)` was issued immediately after the
+edit; the saved HWPX was verified externally by digest; the reopened file showed
+the picture Square/floating with the same image payload; and native PDF and page
+PNG rendering of the saved file succeeded, followed by a public guarded close.
+The automatic review reports text as unverified for this image-only document.
+
+In the second, about three seconds passed after the edit returned, with no
+calls, before one bounded public `Save(False)`. The saved file's `ModifiedDate`
+advanced to the save time, the saved-package proof held against the verified
+edit (11 of 12 members byte-identical, one compared as XML), `hwpx verify-saved`
+confirmed the saved file externally, and the public guarded close succeeded.
+
+Not established: other save delays, crop, replacement, the inline mode, offsets,
+picture history, multi-line or multi-paragraph reflow, a preview change under an
+edit, replacement allocation, rich, shared and multi-picture documents, other
+Hancom versions and general native qualification.
 
 ### History under a profile
 
@@ -369,4 +377,4 @@ nothing, and the MCP adapter refuses the copy with `ARTIFACT_IDENTITY_MISMATCH`
 at save and again at close. These checks are static: a Hancom reopen and
 rendered pages are separate evidence.
 
-Beyond the one square layout run described above, required acceptance still includes real public MCP edits of the other operations and modes, per-variant Undo/Redo, saved/reopened whole-document and shared-media preservation, PDF export, all-page PNG inspection and actual readable native examples. These are not satisfied by schema discovery, synthetic success, a pre-edit baseline, or safe retirement of a failed test owner.
+Beyond the two square layout cases described above, required acceptance still includes real public MCP edits of the other operations and modes, per-variant Undo/Redo, saved/reopened whole-document and shared-media preservation, PDF export, all-page PNG inspection and actual readable native examples. These are not satisfied by schema discovery, synthetic success, a pre-edit baseline, or safe retirement of a failed test owner.
