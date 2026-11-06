@@ -78,6 +78,12 @@ BUNDLE_OPS: dict[str, dict[str, Any]] = {
                                                              'area stay; returns the next hash; history is measured for one actually dirty step, not multi-dirty header/footer bundles; ' + _UNDO_COUNTED),
     'header_footer_format_exact': _exposed(SESSION_TOOLS, note='character format of exact text and paragraph format of its paragraph in one existing header or '
                                                                'footer, bound as header_footer_text_exact; history is measured for one actually dirty step only; a bundle with multiple dirty steps and any header/footer mutation refuses Undo/Redo before native calls; ' + _UNDO_COUNTED),
+    'field_inventory': _exposed(SESSION_TOOLS, note='read-only list of the existing named native fields (click-here, cell and text box fields; not [[BR::NAME]] '
+                                                    'placeholders): name, occurrence, kind, current text and the hash that binds each, from the official GetFieldList and '
+                                                    'GetFieldText of each name{{n}}; at most 1000 rows, further fields counted as omitted; a field without a name is not listed'),
+    'field_text_exact': _exposed(SESSION_TOOLS, note='fills one existing click-here field bound by name, its occurrence when the name repeats, and its hash, with one '
+                                                     'PutFieldText of its own name{{n}} (never the bare name, which writes every field of it); proven from the field list and '
+                                                     'the document text; undo is refused (undo_not_counted): its native Undo is not measured; native qualification is incomplete'),
     'control_inventory': _exposed(SESSION_TOOLS, note='read-only native control list with target_id/expected_hash'),
     'picture_inventory': _exposed(SESSION_TOOLS, note='read-only structural picture census with exact SHAPEOBJECT identity/hash, frame, crop, media and explicit unqualified edit/history bounds'),
     'picture_replace_exact': _exposed(SESSION_TOOLS, note='implemented body-picture PNG replacement, same decoded aspect ratio, current GetCtrlInstID mapping before selection; final native qualification incomplete; Undo/Redo refused before dispatch'),
@@ -131,7 +137,7 @@ BUNDLE_OPS: dict[str, dict[str, Any]] = {
 GUARDED = frozenset({'page_number_apply', 'official_numbering_apply', 'paragraph_insert_exact', 'paragraph_remove_exact',
                      'character_format_exact', 'paragraph_format_exact', 'table_inventory', 'table_read', 'table_edit_exact',
                      'table_style_exact', 'table_width_exact', 'table_create_exact', 'text_replace_exact', 'table_cell_text_exact',
-                     'header_footer_inventory', 'header_footer_text_exact', 'header_footer_format_exact',
+                     'header_footer_inventory', 'header_footer_text_exact', 'header_footer_format_exact', 'field_inventory', 'field_text_exact',
                      'picture_inventory', 'picture_replace_exact', 'picture_crop_exact', 'picture_layout_exact'})
 # Ops that publish mutation intent at their first native edit (app.step_refusal.DEFERRED_INTENT_OPS): before it they
 # refuse with a fixed refusal_code only from their own exact reads; anything else holds the session.

@@ -399,6 +399,8 @@ _BUNDLE_ALLOWED_OPS = {
     'header_footer_inventory',
     'header_footer_text_exact',
     'header_footer_format_exact',
+    'field_inventory',
+    'field_text_exact',
     'paragraph_format_exact',
     'paragraph_delete_exact',
     'paragraph_join_previous_exact',

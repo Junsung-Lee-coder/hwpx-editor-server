@@ -2,6 +2,8 @@
 
 Existing header/footer inventory and exact text/direct formatting: [API guide](docs/HEADER_FOOTER.md).
 
+Existing named fields (click-here 누름틀, cell and text box fields): inventory by name and occurrence, and filling one click-here field: [guide](docs/FIELDS.md).
+
 Existing pictures (inventory, replacement, crop, layout) and the optional saved-HWPX package proof, verified save and history contract: [guide](docs/EXISTING_PICTURES.md).
 
 ## Native save and normal close contract
