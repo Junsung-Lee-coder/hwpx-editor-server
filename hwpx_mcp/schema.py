@@ -4,6 +4,7 @@ from __future__ import annotations
 from typing import Annotated, Any, Literal, Union
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
+from app import field_rules
 from app.models import CellMarginsGetRequest
 from hwpx_mcp import job_schema as jobs
 from hwpx_mcp import operations as ops
@@ -568,6 +569,68 @@ class HeaderFooterFormatStep(_AreaBinding):
         return self
 
 
+FieldName = Annotated[str, Field(min_length=1, max_length=200, pattern=r'^[^\x00-\x1f]+$',
+                                  description='The exact field name field_inventory lists: a click-here (누름틀), cell or text box field of the document, not a [[BR::NAME]] placeholder.')]
+
+
+def _addressable_field_name(value):
+    # The backend's own rule (app.field_rules, pure): the same verdict for every name the backend would read.
+    problem = None if value is None else field_rules.name_problem(value)
+    if problem is not None:
+        raise ValueError(problem)
+    return value
+
+
+def _field_new_text(value):
+    # The backend's own rule: one line, tabs kept, no other control character and no unpaired surrogate.
+    problem = field_rules.text_problem(value)
+    if problem is not None:
+        raise ValueError(problem)
+    return value
+
+
+class FieldInventoryStep(Closed):
+    op: Literal['field_inventory']
+    label: Label = 'mcp:field-inventory'
+    name: FieldName | None = Field(default=None, description='Only the fields of this name; the list, counts and kinds are still read whole.')
+
+    @field_validator('name')
+    @classmethod
+    def addressable(cls, value):
+        return _addressable_field_name(value)
+
+
+class FieldTextStep(Closed):
+    op: Literal['field_text_exact']
+    label: Label = 'mcp:field-text-exact'
+    name: FieldName
+    expected_hash: Annotated[str, Field(pattern=r'^sha256:[0-9a-f]{24}$', description='The hash field_inventory reported for this occurrence of the field.')]
+    occurrence: int | None = Field(default=None, ge=1, le=100000, description='Which field of this name, counted from 1 in document order, as field_inventory numbers '
+                                   'them; required, with expected_occurrences, when the name repeats. It is the native name{{occurrence-1}}.')
+    expected_occurrences: int | None = Field(default=None, ge=1, le=100000, description='How many fields of this name the document has now.')
+    new_text: Annotated[str, Field(max_length=2000, pattern=r'^[^\x00-\x08\x0a-\x1f]*$')] = Field(
+        description='The text the field holds afterwards, on one line; tabs are kept; no other control character or unpaired surrogate; an empty string clears the field.')
+    confirm_layout: Literal[True]
+
+    @field_validator('name')
+    @classmethod
+    def addressable(cls, value):
+        return _addressable_field_name(value)
+
+    @field_validator('new_text')
+    @classmethod
+    def one_line(cls, value):
+        return _field_new_text(value)
+
+    @model_validator(mode='after')
+    def occurrence_with_its_count(self):
+        if (self.occurrence is None) != (self.expected_occurrences is None):
+            raise ValueError('occurrence and expected_occurrences are given together')
+        if self.occurrence is not None and self.occurrence > self.expected_occurrences:
+            raise ValueError('occurrence cannot be greater than expected_occurrences')
+        return self
+
+
 class PictureInventoryStep(Closed):
     op: Literal['picture_inventory']
     label: Label = 'mcp:picture-inventory'
@@ -615,7 +678,7 @@ class PictureLayoutStep(PictureBinding):
 _EXACT_STEPS = (ContextStep, SelectionStep, ReadbackStep, CellFormatStep, PageNumberStep, OfficialNumberingStep, ParagraphInsertStep,
                 ParagraphRemoveStep, CharacterFormatStep, ParagraphFormatStep, TableInventoryStep, TableReadStep, TableEditStep,
                 TableStyleStep, TableWidthStep, TableCreateStep, TextReplaceStep, TableCellTextStep, HeaderFooterInventoryStep,
-                HeaderFooterTextStep, HeaderFooterFormatStep, PictureInventoryStep, PictureReplaceStep, PictureCropStep, PictureLayoutStep)
+                HeaderFooterTextStep, HeaderFooterFormatStep, FieldInventoryStep, FieldTextStep, PictureInventoryStep, PictureReplaceStep, PictureCropStep, PictureLayoutStep)
 # One command-bundle step: every backend bundle op MCP exposes (hwpx_mcp/parity.py BUNDLE_OPS).
 BundleStep = Annotated[Union[(*_EXACT_STEPS, *ops.NEW_BUNDLE_STEPS)], Field(discriminator='op')]
 _REST_STEPS = tuple(model for _path, model in ops.REST_OPS.values())

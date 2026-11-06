@@ -7,3 +7,4 @@
 # Actual native captures: exact bytes (CRLF included), never normalized or diff-checked as text.
 tests/fixtures/native_e01/** binary
 tests/fixtures/native_h01/** binary
+tests/fixtures/native_fields/*.hwpml2x binary

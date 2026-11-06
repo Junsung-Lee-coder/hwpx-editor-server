@@ -47,6 +47,8 @@ BUNDLE_SERVER_OPS = frozenset(
         'header_footer_inventory',
         'header_footer_text_exact',
         'header_footer_format_exact',
+        'field_inventory',
+        'field_text_exact',
         'paragraph_format_exact',
         'paragraph_delete_exact',
         'paragraph_join_previous_exact',
@@ -160,6 +162,8 @@ _STEP_KEYS: dict[str, frozenset[str]] = {
     'header_footer_format_exact': frozenset({'op', 'operation', 'label', 'kind', 'section', 'apply_to', 'expected_area_hash', 'expected_affected_sections', 'match', 'paragraph_index', 'expected_text',
                                              'confirm_layout', 'font_family', 'size_pt', 'bold', 'italic', 'underline', 'text_color', 'align', 'left_indent_pt',
                                              'right_indent_pt', 'first_line_indent_pt', 'line_spacing_type', 'line_spacing_value'}),
+    'field_inventory': frozenset({'op', 'operation', 'label', 'name'}),
+    'field_text_exact': frozenset({'op', 'operation', 'label', 'name', 'occurrence', 'expected_occurrences', 'expected_hash', 'new_text', 'confirm_layout'}),
     'character_format_exact': frozenset({'op', 'operation', 'label', 'match', 'through_match', 'paragraph_index', 'expected_text', 'expected_page', 'confirm_layout', 'number_mark', 'font_family', 'size_pt', 'bold', 'italic', 'underline', 'text_color'}),
     'paragraph_format_exact': frozenset({'op', 'operation', 'label', 'match', 'through_match', 'paragraph_index', 'expected_text', 'expected_page', 'confirm_layout', 'align', 'left_indent_pt', 'right_indent_pt', 'first_line_indent_pt', 'line_spacing_type', 'line_spacing_value'}),
     'paragraph_delete_exact': frozenset(

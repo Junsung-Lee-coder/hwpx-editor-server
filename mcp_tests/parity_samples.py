@@ -137,6 +137,9 @@ BUNDLE_SAMPLES: dict[str, list[dict]] = {
     'header_footer_format_exact': [{'kind': 'header', 'section': 0, 'apply_to': 'both', 'expected_area_hash': 'sha256:' + 'c' * 24, 'confirm_layout': True, 'match': 'REPORT', 'bold': True, 'text_color': '#C00000', 'align': 'center'},
                                    {'kind': 'header', 'section': 1, 'apply_to': 'even', 'expected_area_hash': 'sha256:' + 'e' * 24, 'confirm_layout': True,
                                     'paragraph_index': 0, 'expected_text': 'EVEN HEADER 2025', 'line_spacing_type': 'percent', 'line_spacing_value': 150}],
+    'field_inventory': [{}, {'name': '성명'}],
+    'field_text_exact': [{'name': '성명', 'expected_hash': 'sha256:' + 'e' * 24, 'confirm_layout': True, 'new_text': '김철수'},
+                         {'name': '서명', 'occurrence': 2, 'expected_occurrences': 2, 'expected_hash': 'sha256:' + 'f' * 24, 'confirm_layout': True, 'new_text': ''}],
     'table_cell_text_exact': [{'table_id': 'tbl:1011', 'expected_hash': 'sha256:' + 'b' * 24, 'expected_page': 1, 'expected_rows': 3, 'expected_cols': 3,
                                'cells': [{'address': 'B2', 'expected_text': '1,200', 'text': '1,350'}, {'address': 'C1', 'expected_text': '', 'text': 'Filled'}], 'confirm_layout': True}],
 }

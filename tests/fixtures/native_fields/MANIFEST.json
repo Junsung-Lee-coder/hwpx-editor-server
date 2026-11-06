@@ -1,0 +1,40 @@
+{
+ "schema": "hwpx-native-fixture/v1",
+ "kind": "ACTUAL native Hancom GetTextFile('HWPML2X') string of a native-authored document with four click-here fields, persisted as UTF-8 bytes and copied verbatim. BEFORE state only: no fill was run on this document, so there is no native after state; not field-fill, save or render evidence.",
+ "runtime": "Hancom 13.0.0.3457 / pyhwpx 1.7.2 / backend Python 3.13.14, through a fresh public hwpx_open of the seed",
+ "files": {
+  "before.hwpml2x": {
+   "bytes": 30190,
+   "sha256": "579210cd943182efe0634f7f2a43b1b9ca5e9c79e23e34cd583c5a7db6f0955b",
+   "producer_witness": {"chars": 29762, "sha256": "579210cd943182efe0634f7f2a43b1b9ca5e9c79e23e34cd583c5a7db6f0955b"},
+   "utf16le_witness": {"bytes": 59524, "sha256": "b8128fff05aa3feaf60b407bb123cb36dc9d7f57ad2e23970d838c3a15337f18"},
+   "decoding": "strict UTF-8 without BOM (app.hwpx_saved_proof.producer_text); the string keeps its in-memory encoding=\"UTF-16\" declaration, which is not a byte-decoding instruction for these bytes. The UTF-16LE witness is the same COM string captured as UTF-16LE in the same session."
+  }
+ },
+ "document": {
+  "seed_hwpx": {"bytes": 18028, "sha256": "94713acdd8052a7c886482d005f6b9750356c950e91691b95b3159b0e1d96243", "kept_in_repository": false},
+  "before_hwpx_export": {"bytes": 18034, "sha256": "e93c633a0e299a87a2792c737800748b03a0b5e4c5361284e61d08ce58ec2483", "kept_in_repository": false,
+                         "differs_from_seed": "only Contents/content.hpf ModifiedDate"},
+  "fields": "four click-here fields in one body paragraph, named 성명, 주소, 태그 and 태그; every FIELDBEGIN has its own InstId and all carry the same FieldId 627272811; a FIELDEND has no InstId and the same FieldId, so each begin pairs with its end only by their order in the text. In the saved HWPX the fieldBegin ids are distinct and each fieldEnd names its begin by beginIDRef."
+ },
+ "raw_field_api_same_open": {
+  "family": "raw IHwpObject (PyIDispatch.InvokeTypes), not the pyhwpx field wrappers",
+  "GetFieldList(1, 2)": "성명{{0}}\u0002주소{{0}}\u0002태그{{0}}\u0002태그{{1}}",
+  "GetFieldText": {"성명{{0}}": "기존성명", "주소{{0}}": "고정주소", "태그{{0}}": "태그하나", "태그{{1}}": "태그둘째"},
+  "GetFieldText_note": "each single read returned a str with no trailing 0x02",
+  "GetTextFile('HWPML2X', '')": "before.hwpml2x (VARIANT holding a str)"
+ },
+ "raw_field_api_authoring_session": {
+  "GetFieldList(0, 2)": "성명\u0002주소\u0002태그\u0002태그",
+  "GetFieldList(1, 2)": "성명{{0}}\u0002주소{{0}}\u0002태그{{0}}\u0002태그{{1}}",
+  "PutFieldText": "returned None (VT_VOID) on each of the four initial fills of empty fields; '태그{{0}}' and '태그{{1}}' each wrote only their own occurrence",
+  "typelib": {"GetFieldList": "BSTR (Number, option)", "GetFieldText": "BSTR (Field)", "PutFieldText": "VOID (Field, Text)", "GetTextFile": "VARIANT (Format, option)"}
+ },
+ "not_captured": [
+  "GetFieldList with option 0, 1 or 8, and any counted form (number 2)",
+  "FieldExist",
+  "the control walk (HeadCtrl/Next CtrlID) of this document",
+  "a PutFieldText over an existing non-empty value, and any after state: HWPML2X, field list, HWPX, PDF or PNG"
+ ],
+ "sanitized": "Private worker paths, process ids and full worker logs are left out of this manifest. before.hwpml2x itself is unmodified; its DOCSUMMARY keeps AUTHOR 'owner' and the creation DATE as Hancom wrote them."
+}

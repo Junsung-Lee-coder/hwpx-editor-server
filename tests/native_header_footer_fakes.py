@@ -103,7 +103,9 @@ class HeaderFooterHwp(TextHwp):
 
     def _shapes(self) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[str]]:
         chars, paras, fonts = super()._shapes()
-        for items in self._area_lists():
+
+        def visit(items: list[dict[str, Any]]) -> None:
+            # An area's own paragraphs and those of the text boxes, tables and captions inside it.
             for para in items:
                 if para['shape'] not in paras:
                     paras.append(para['shape'])
@@ -112,8 +114,13 @@ class HeaderFooterHwp(TextHwp):
                         chars.append(atom['cs'])
                     if atom['cs']['Font'] not in fonts:
                         fonts.append(atom['cs']['Font'])
+                    for name in ('cells', 'drawtext', 'caption'):
+                        visit(atom.get(name, []))
                 if para.get('end') is not None and para['end'] not in chars:
                     chars.append(para['end'])
+
+        for items in self._area_lists():
+            visit(items)
         return chars, paras, fonts
 
     def _area_atoms(self) -> list[dict[str, Any]]:

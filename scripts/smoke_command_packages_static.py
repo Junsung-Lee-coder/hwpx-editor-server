@@ -90,6 +90,8 @@ _VALIDATION_SAMPLES: dict[str, dict[str, object]] = {
     'header_footer_inventory': {},
     'header_footer_text_exact': {'kind': 'header', 'section': 0, 'apply_to': 'both', 'expected_area_hash': 'sha256:' + 'a' * 24, 'confirm_layout': True, 'old_text': 'SAMPLE', 'new_text': 'UPDATED'},
     'header_footer_format_exact': {'kind': 'header', 'section': 0, 'apply_to': 'both', 'expected_area_hash': 'sha256:' + 'a' * 24, 'confirm_layout': True, 'match': 'REPORT', 'bold': True, 'align': 'center'},
+    'field_inventory': {},
+    'field_text_exact': {'name': '성명', 'expected_hash': 'sha256:' + 'a' * 24, 'confirm_layout': True, 'new_text': '김철수'},
     'paragraph_format_exact': {'match': 'hello', 'expected_page': 1, 'align': 'center', 'confirm_layout': True},
     'paragraph_delete_exact': {'match': 'hello', 'expected_page': 1, 'confirm_remove': True},
     'paragraph_join_previous_exact': {'match': 'hello', 'expected_page': 1, 'confirm_layout': True},

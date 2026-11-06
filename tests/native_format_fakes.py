@@ -256,7 +256,9 @@ class FormatHwp:
     def _p(self, para: dict[str, Any], chars: list[dict[str, Any]], paras: list[dict[str, Any]], *, atoms: list[dict[str, Any]] | None = None) -> str:
         whole = atoms is None
         atoms = para['atoms'] if atoms is None else atoms
-        out = [f'<P ColumnBreak="false" PageBreak="false" ParaShape="{paras.index(para["shape"])}" Style="0">']
+        # A paragraph may carry the InstId Hancom gives an edited paragraph, and a page break.
+        inst = f' InstId="{para["p_inst"]}"' if para.get('p_inst') is not None else ''
+        out = [f'<P ColumnBreak="false"{inst} PageBreak="{"true" if para.get("p_page_break") else "false"}" ParaShape="{paras.index(para["shape"])}" Style="0">']
         if not atoms:
             ref = chars.index(para['end']) if para.get('end') is not None else 0
             return out[0] + f'<TEXT CharShape="{ref}"/></P>'

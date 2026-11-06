@@ -138,8 +138,27 @@ def _fields_of(element: ET.Element, paragraphs: list[ET.Element]) -> list[dict[s
     return fields
 
 
-def parse_areas(text: str) -> dict[str, Any]:
-    """Every header and footer in document order, each with its section, page scope, paragraphs as the format model reads them, and hash."""
+def _paragraph_digests(element: ET.Element, elements: list[ET.Element], resolver: _Resolver) -> dict[str, Any]:
+    """An area whole, for a proof that only one of its own paragraphs may change.
+
+    ``shell`` is the area with every paragraph left as a mark: its attributes, its paragraph list and how many paragraphs it
+    has. ``every_paragraph`` is each paragraph in it in document order, its own and those of the text boxes, tables and other
+    lists inside them: ``content`` is the paragraph with its nested paragraphs left as marks (they come as their own rows),
+    and ``settings`` its own attributes without InstId, which Hancom renews on the paragraph it edits."""
+    every = []
+    for index, top in enumerate(elements):
+        for item in top.iter():
+            if _name(item) != 'p':
+                continue
+            own = ET.Element(item.tag, {key: value for key, value in item.attrib.items() if key.rsplit('}', 1)[-1].lower() != 'instid'})
+            every.append({'top': index, 'nested': item is not top, 'settings': resolver.digest(own), 'content': resolver.digest(item, prune=True)})
+    return {'shell': resolver.digest(element, prune=True), 'every_paragraph': every}
+
+
+def parse_areas(text: str, *, paragraph_digests: bool = False) -> dict[str, Any]:
+    """Every header and footer in document order, each with its section, page scope, paragraphs as the format model reads them, and hash.
+
+    With ``paragraph_digests`` each area also holds ``shell`` and ``every_paragraph`` (see _paragraph_digests)."""
     if type(text) is not str or len(text) > MAX_HWPML_CHARS or _DOCTYPE.search(text):
         raise nf._ModelUnusable('HWPML2X text is not usable as a document')  # noqa: SLF001
     try:
@@ -174,10 +193,11 @@ def parse_areas(text: str) -> dict[str, Any]:
                                'heading': headings.get(ref, ('', '0', ''))[0], 'mark': None})
         try:
             digest = resolver.digest(element)
+            whole = _paragraph_digests(element, elements, resolver) if paragraph_digests else {}
         except _Unresolved as exc:
             raise nf._ModelUnusable('a header or footer does not resolve') from exc  # noqa: SLF001
         return {'order': len(areas), 'kind': kind, 'section': section, 'apply_to': scope, 'area_id': f'{kind}:s{section}:{scope}',
-                'hash': _area_hash(kind, section, scope, digest), 'digest': digest, 'paragraphs': paragraphs, 'fields': _fields_of(element, elements)}
+                'hash': _area_hash(kind, section, scope, digest), 'digest': digest, 'paragraphs': paragraphs, 'fields': _fields_of(element, elements), **whole}
 
     def visit(element: ET.Element, depth: int) -> None:
         if depth > _MAX_DEPTH:

@@ -544,6 +544,13 @@ def validate_step_for_op(op: str, *, service: Any, index: int, step: dict[str, A
             validate(step)
         except native_header_footer.NativeNumberingInputError as exc:
             _raise(error_type, f'command-bundle step {index} {op}: {exc}')
+    elif op in {'field_inventory', 'field_text_exact'}:
+        from app import native_fields
+
+        try:
+            (native_fields.validate_inventory_step if op == 'field_inventory' else native_fields.validate_fill_step)(step)
+        except native_fields.NativeNumberingInputError as exc:
+            _raise(error_type, f'command-bundle step {index} {op}: {exc}')
     elif op in {'control_inventory', 'table_frame_inventory', 'export_pdf', 'where'}:
         pass
     else:
@@ -683,6 +690,13 @@ def run_step_for_op(op: str, *, service: Any, handle: Any, step: dict[str, Any],
         run = service._bundle_header_footer_text_exact if op == 'header_footer_text_exact' else service._bundle_header_footer_format_exact  # noqa: SLF001
         result = run(handle.hwp, step, on_mutating=handle.mark_mutating_intent)
         # A format already present is a proven no-op, not a new dirty delta.
+        return result, result['result']['changed'] is not False, list(result.get('warnings') or [])
+    if op == 'field_inventory':
+        result = service._bundle_field_inventory(handle.hwp, step)  # noqa: SLF001
+        return result, False, list(result.get('warnings') or [])
+    if op == 'field_text_exact':
+        result = service._bundle_field_text_exact(handle.hwp, step, on_mutating=handle.mark_mutating_intent)  # noqa: SLF001
+        # The value already present is a proven no-op, not a new dirty delta.
         return result, result['result']['changed'] is not False, list(result.get('warnings') or [])
     if op == 'paragraph_delete_exact':
         result = service._bundle_paragraph_delete_exact(handle.hwp, step)  # noqa: SLF001

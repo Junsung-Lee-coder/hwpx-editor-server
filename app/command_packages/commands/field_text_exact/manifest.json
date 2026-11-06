@@ -1,0 +1,19 @@
+{
+  "op": "field_text_exact",
+  "version": "local-cli/field-text-exact/v1-package",
+  "summary": "Fill one existing click-here field, bound by its name, its occurrence when the name repeats, and its hash, with new text on one line; every other field and the rest of the document stay.",
+  "module": "app.command_packages.commands.field_text_exact.run",
+  "read_only": false,
+  "dirty_default": true,
+  "allowed_keys": [
+    "op",
+    "operation",
+    "label",
+    "name",
+    "occurrence",
+    "expected_occurrences",
+    "expected_hash",
+    "new_text",
+    "confirm_layout"
+  ]
+}

@@ -1,0 +1,14 @@
+{
+  "op": "field_inventory",
+  "version": "local-cli/field-inventory/v1-package",
+  "summary": "List every existing named native field (click-here, cell and text box fields) with its name, occurrence, kind, current text and hash, optionally for one name.",
+  "module": "app.command_packages.commands.field_inventory.run",
+  "read_only": true,
+  "dirty_default": false,
+  "allowed_keys": [
+    "op",
+    "operation",
+    "label",
+    "name"
+  ]
+}
