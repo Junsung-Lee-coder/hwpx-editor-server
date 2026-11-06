@@ -103,4 +103,23 @@ Anything else stops as an unknown outcome: the session is held, and nothing is r
 
 **Saving.** After filling, call `hwpx_save` and keep the saved file it returns. Request `hwpx_proof` and keep the PDF and every page PNG. Then close, reopen the saved file and list the fields again to see the saved values.
 
-**Native qualification.** No fill has been completed against Hancom yet. An actual HWPML2X text of a native-authored document with four click-here fields was captured before any fill (Hancom 13.0.0.3457, `tests/fixtures/native_fields`). Each field is a `FIELDBEGIN` with its own `InstId`, its text and a `FIELDEND`. All the begins and ends carry one shared `FieldId`, and an end has no `InstId`, so a begin pairs with its end only by their order in the text; neither id is used as an identity. In an offline replay of that text and of the field values read on the same open, the inventory lists the four fields, and a fill of one of them passes every check before the write and writes only its own `name{{n}}`. The replay derives from the observed list the list forms and the `FieldExist` answer the native session did not read (`GetFieldList` options 0, 1 and 8, and the counted lists), and uses a fake caret and selection. On Hancom 13.0.0.3457 itself, `field_inventory` of that document listed the four fields with the same texts and hashes as the replay. No fill of an existing value, after state, save, reopen or rendering has been captured natively. If a fill renews any data of the field's own begin or end control, the proof stops it as an unknown outcome until a native before/after pair has measured that.
+**Native qualification.** On Hancom 13.0.0.3457 with pyhwpx 1.7.2, one fill has run through the public MCP tools. The document was native-authored, with four click-here fields in its body: 성명, 주소 and 태그 twice.
+
+- `field_inventory` listed the four fields, complete, with the same texts and hashes as the offline replay below.
+- `field_text_exact` filled the body field 성명 (기존성명 → 변경성명) with one `PutFieldText`. It reported body paragraph 0, `siblings_kept` 3 and `format_source` `field`, and the fields then read back with the new value and the other three unchanged.
+- `hwpx_save` made an ordinary save. Compared with the opened file, the saved package has the same members, the same styles and settings (`header.xml` and `settings.xml` byte-equal), and the same four field begin and end pairs with their ids. Its only XML differences are that field's text and the save time, and its previews were regenerated.
+- The saved file reopened with the new value and the other fields unchanged, and `hwpx_proof` rendered it to a one-page PDF and its page PNG.
+
+Not covered by that run:
+
+- **A field in a header or footer:** not filled natively. The whole-area comparison is tested offline only.
+- **A repeated name filled with `occurrence`:** not run natively.
+- **Saved proof:** the save reply's `saved_proof` was null, so `hwpx verify-saved` does not apply. The saved package was checked by reading it.
+- **Review coverage:** the review of the reopened file was `partial`. Its control coverage was unverified, because the control list was not read to the end. Pages, paragraphs, text and format were complete.
+- **Undo:** a fill's Undo stays refused (`undo_not_counted`), as above.
+
+The before text of that document is kept in `tests/fixtures/native_fields`, as Hancom 13.0.0.3457 wrote it before any fill. Each field is a `FIELDBEGIN` with its own `InstId`, its text and a `FIELDEND`. All the begins and ends carry one shared `FieldId`, and an end has no `InstId`, so a begin pairs with its end only by their order in the text; neither id is used as an identity.
+
+In an offline replay of that text and of the field values read on the same open, the inventory lists the four fields, and a fill of one of them passes every check before the write and writes only its own `name{{n}}`. The replay derives from the observed list the list forms and the `FieldExist` answer the native session did not read (`GetFieldList` options 0, 1 and 8, and the counted lists), and uses a fake caret and selection.
+
+If a fill renews any data of the field's own begin or end control, the proof stops it as an unknown outcome. The fill above renewed none.
