@@ -28,6 +28,7 @@ from pydantic import ValidationError
 from starlette.datastructures import Headers
 from starlette.responses import JSONResponse, Response
 
+from app import style_rules
 from hwpx_mcp import parity
 from hwpx_mcp import review as review_rules
 from hwpx_mcp.job_schema import METADATA_ROUTES, SUBMIT_ROUTES
@@ -158,6 +159,14 @@ def rejection_summary(value: dict[str, Any]) -> dict[str, Any]:
         'found_page': failed.get('found_page'),
         'session_held': value.get('native_custody_held') is True or (coded is not None and coded.group(1) == 'native_custody_held'),
     }
+    # A held style edit's fixed stopping site and answer shape, when both are the backend's own allowlisted labels.
+    site, returned = diagnostic.get('native_site'), diagnostic.get('native_return')
+    if type(site) is str and type(returned) is str and site in style_rules.NATIVE_SITES and returned in style_rules.NATIVE_RETURNS:
+        summary.update(native_site=site, native_return=returned)
+    # A held style edit's proof facts: which predicate failed for which style or place, when exactly of their fixed shape.
+    proof = style_rules.style_proof_facts(failed.get('style_proof'))
+    if proof is not None:
+        summary['style_proof'] = proof
     return {key: item for key, item in summary.items() if item is not None}
 
 
@@ -1013,7 +1022,13 @@ def build_app(settings: Settings | None = None):
                                 'click-here fields, not [[BR::NAME]] placeholders): field_inventory lists each click-here, cell and text box field with its name, occurrence, '
                                 'kind, current text and hash (name= reads one name); field_text_exact fills one click-here field bound by name+expected_hash, and by '
                                 'occurrence with expected_occurrences when the name repeats (field_occurrence_required otherwise), with new_text on one line, never writing '
-                                'another field of the same name; its Undo is refused. Layout and objects: layout_inspect, layout_exact (page_setup, columns, '
+                                'another field of the same name; its Undo is refused. Named styles: style_inventory lists each style with its kind, definitions, hash and, '
+                                'for a paragraph style, the paragraphs using it (name= lists one style\'s uses in full); style_apply_exact applies one bound by '
+                                'style_name+expected_style_hash to an exact paragraph target (paragraph style) or range (character style); style_create_exact creates '
+                                'one paragraph style from an existing paragraph style bound by expected_based_on_hash and the list by expected_styles_hash, with '
+                                'character properties only; style_update_exact changes one paragraph style\'s character properties with every use bound by '
+                                'expected_uses+expected_uses_hash and all_uses=true. A character style to create, a rename and paragraph properties are refused '
+                                '(style_kind_unsupported, style_rename_unsupported, style_variant_unsupported). Their Undo is refused. Layout and objects: layout_inspect, layout_exact (page_setup, columns, '
                                 'section_insert, section_delete, hanging_indent), object_insert_exact (footnote, endnote, memo, hyperlink, bookmark, equation, line, '
                                 'rectangle, ellipse, header, footer). Legacy control-inventory engines: control_inventory, table_frame_inventory, '
                                 'exact_control_select_proof, table_cell_structure_exact, control_delete_exact, control_move_resize_exact, control_join_previous_exact, '

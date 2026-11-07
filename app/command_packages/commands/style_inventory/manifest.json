@@ -1,0 +1,14 @@
+{
+  "op": "style_inventory",
+  "version": "local-cli/style-inventory/v1-package",
+  "summary": "List the document's named styles with index, name, English name, kind, next style, resolved character and paragraph properties and hash, and for a paragraph style the paragraphs that use it; optionally one name.",
+  "module": "app.command_packages.commands.style_inventory.run",
+  "read_only": true,
+  "dirty_default": false,
+  "allowed_keys": [
+    "op",
+    "operation",
+    "label",
+    "name"
+  ]
+}

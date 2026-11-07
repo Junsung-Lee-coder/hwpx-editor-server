@@ -142,6 +142,17 @@ BUNDLE_SAMPLES: dict[str, list[dict]] = {
                          {'name': '서명', 'occurrence': 2, 'expected_occurrences': 2, 'expected_hash': 'sha256:' + 'f' * 24, 'confirm_layout': True, 'new_text': ''}],
     'table_cell_text_exact': [{'table_id': 'tbl:1011', 'expected_hash': 'sha256:' + 'b' * 24, 'expected_page': 1, 'expected_rows': 3, 'expected_cols': 3,
                                'cells': [{'address': 'B2', 'expected_text': '1,200', 'text': '1,350'}, {'address': 'C1', 'expected_text': '', 'text': 'Filled'}], 'confirm_layout': True}],
+    'style_inventory': [{}, {'name': '개요 1'}],
+    'style_apply_exact': [{'style_name': '개요 1', 'expected_style_hash': 'sha256:' + 'a' * 24, 'paragraph_index': 2, 'expected_text': '제목', 'expected_page': 1, 'confirm_layout': True},
+                          {'style_name': '강조', 'expected_style_hash': 'sha256:' + 'b' * 24, 'match': '중요한 말', 'expected_page': 1, 'confirm_layout': True}],
+    'style_create_exact': [{'name': '보고서 제목', 'kind': 'paragraph', 'based_on': '본문', 'expected_based_on_hash': 'sha256:' + 'c' * 24,
+                            'expected_styles_hash': 'sha256:' + 'd' * 24, 'size_pt': 16, 'bold': True, 'align': 'center', 'confirm_layout': True},
+                           {'name': '빨간 강조', 'english_name': 'Red Emphasis', 'kind': 'character', 'based_on': '바탕글', 'expected_based_on_hash': 'sha256:' + 'c' * 24,
+                            'expected_styles_hash': 'sha256:' + 'd' * 24, 'text_color': '#C00000', 'confirm_layout': True}],
+    'style_update_exact': [{'style_name': '본문', 'expected_style_hash': 'sha256:' + 'e' * 24, 'expected_uses': 3, 'expected_uses_hash': 'sha256:' + 'f' * 24,
+                            'all_uses': True, 'font_family': '함초롬돋움', 'line_spacing_type': 'percent', 'line_spacing_value': 180, 'confirm_layout': True},
+                           {'style_name': '개요 5', 'expected_style_hash': 'sha256:' + 'e' * 24, 'expected_uses': 0, 'expected_uses_hash': 'sha256:' + 'f' * 24,
+                            'new_name': '소제목', 'confirm_layout': True}],
 }
 
 # Requests MCP must refuse before any backend call: allowlists and typed limits.
@@ -158,6 +169,10 @@ BUNDLE_REFUSALS: dict[str, list[dict]] = {
     'object_insert_exact': [{'kind': 'picture', 'expected_pos': [0, 0, 0], 'confirm_mutation': True},
                             {'kind': 'hyperlink', 'expected_pos': [0, 0, 0], 'url': 'javascript:alert(1)', 'display_text': 'x', 'confirm_mutation': True}],
     'set_text_file': [{'text': 'x', 'format': 'HWPML2X', 'option': 'insertfile'}],
+    'style_create_exact': [{'name': '새것', 'kind': 'character', 'based_on': '본문', 'expected_based_on_hash': 'sha256:' + 'c' * 24,
+                            'expected_styles_hash': 'sha256:' + 'd' * 24, 'align': 'center', 'confirm_layout': True}],
+    'style_update_exact': [{'style_name': '본문', 'expected_style_hash': 'sha256:' + 'e' * 24, 'expected_uses': 1, 'expected_uses_hash': 'sha256:' + 'f' * 24,
+                            'all_uses': True, 'confirm_layout': True}],
     # Table-only legacy engines fail on a non-table control with a runtime error, which holds the session
     # (found on Hancom 2024 with a section-definition target); MCP refuses such a target before the backend.
     'table_cell_structure_exact': [{**SCOPED, 'target_id': 'ctrl/0/secd/no-inst'}],

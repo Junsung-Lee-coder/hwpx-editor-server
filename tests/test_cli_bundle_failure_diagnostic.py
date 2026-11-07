@@ -400,5 +400,88 @@ class BundleFailureDiagnosticTests(unittest.TestCase):
         self.assertEqual(session.command_status()['native_diagnostic']['causal_class'], 'ValueError')
 
 
+
+class NativeSiteLabelTests(unittest.TestCase):
+    """The style engine's fixed failure-site labels: only exact allowlisted strings on an exact NativeNumberingReadFailure, read
+    without calling anything the exception or its values define."""
+
+    def labelled(self, cls=nn.NativeNumberingReadFailure, site='get_default.call', returned='true'):
+        fault = cls('PRIVATE_MESSAGE', code='native_value_unproven') if issubclass(cls, nn.NativeNumberingRefusal) else cls('PRIVATE_MESSAGE')
+        fault.native_site, fault.native_return = site, returned
+        return fault
+
+    def test_an_allowlisted_site_and_return_shape_reach_the_diagnostic(self):
+        diagnostic = rt._native_diagnostic('bundle_step', self.labelled())  # noqa: SLF001
+        self.assertEqual((diagnostic['causal_class'], diagnostic['native_site'], diagnostic['native_return']),
+                         ('NativeNumberingReadFailure', 'get_default.call', 'true'))
+        self.assertNotIn('PRIVATE', json.dumps(diagnostic))
+
+    def test_unknown_or_foreign_values_and_other_classes_carry_no_label(self):
+        callbacks = []
+
+        class Hostile(str):
+            def __eq__(self, other):
+                callbacks.append('eq')
+                return True
+
+            def __hash__(self):
+                callbacks.append('hash')
+                return hash('get_default.call')
+
+        cases = [self.labelled(site='PRIVATE_SITE'), self.labelled(returned='PRIVATE_SHAPE'), self.labelled(site=Hostile('get_default.call')),
+                 self.labelled(returned=Hostile('true')), self.labelled(site=1), self.labelled(cls=nn.NativeNumberingRefusal),
+                 self.labelled(cls=nn.NativeNumberingMutationError), self.labelled(cls=RuntimeError)]
+        for number, fault in enumerate(cases):
+            with self.subTest(case=number):
+                callbacks.clear()
+                diagnostic = rt._native_diagnostic('bundle_step', fault)  # noqa: SLF001
+                self.assertNotIn('native_site', diagnostic)
+                self.assertNotIn('native_return', diagnostic)
+                self.assertEqual(callbacks, [])
+                self.assertNotIn('PRIVATE', json.dumps(diagnostic))
+
+    def test_a_colliding_foreign_key_or_a_replaced_dictionary_is_never_called(self):
+        callbacks = []
+
+        class Key:
+            def __hash__(self):
+                return hash('native_site')
+
+            def __eq__(self, other):
+                callbacks.append('key_eq')
+                return False
+
+        class ForeignDict(dict):
+            def items(self):
+                callbacks.append('items')
+                raise AssertionError('PRIVATE')
+
+        collided = self.labelled()
+        BaseException.__dict__['__dict__'].__get__(collided)[Key()] = 'PRIVATE'
+        replaced = self.labelled()
+        replaced.__dict__ = ForeignDict(native_site='get_default.call', native_return='true', code='native_value_unproven')
+        for name, fault in (('collision', collided), ('replaced', replaced)):
+            with self.subTest(case=name):
+                callbacks.clear()
+                diagnostic = rt._native_diagnostic('bundle_step', fault)  # noqa: SLF001
+                self.assertEqual(callbacks, [])
+                if name == 'replaced':
+                    self.assertNotIn('native_site', diagnostic)
+                else:
+                    self.assertEqual(diagnostic.get('native_site'), 'get_default.call', 'the exact str key is still read')
+
+
+
+class RetiredStyleCodeTests(unittest.TestCase):
+    def test_a_retired_style_code_is_no_longer_projected_and_the_live_ones_are(self):
+        """style_action_target_mismatch went with StyleChangeToCurrentShape; no engine produces it any more."""
+        retired = nn.NativeNumberingRefusal('PRIVATE', code='style_action_target_mismatch')
+        self.assertEqual(rt._native_diagnostic('bundle_step', retired)['refusal_code'], 'UNKNOWN')  # noqa: SLF001
+        for code in ('style_rename_unsupported', 'style_variant_unsupported', 'style_kind_unsupported', 'style_action_unavailable'):
+            with self.subTest(code=code):
+                live = nn.NativeNumberingRefusal('PRIVATE', code=code)
+                self.assertEqual(rt._native_diagnostic('bundle_step', live)['refusal_code'], code)  # noqa: SLF001
+
+
 if __name__ == '__main__':
     unittest.main()

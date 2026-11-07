@@ -1,0 +1,33 @@
+{
+  "op": "style_update_exact",
+  "version": "local-cli/style-update-exact/v1-package",
+  "summary": "Change one existing paragraph style's character properties by one StyleDirectEdit, with every paragraph using it bound and confirmed; those paragraphs take the new definitions; a rename and paragraph properties are refused before any write.",
+  "module": "app.command_packages.commands.style_update_exact.run",
+  "read_only": false,
+  "dirty_default": true,
+  "allowed_keys": [
+    "op",
+    "operation",
+    "label",
+    "style_name",
+    "expected_style_hash",
+    "new_name",
+    "new_english_name",
+    "expected_uses",
+    "expected_uses_hash",
+    "all_uses",
+    "font_family",
+    "size_pt",
+    "bold",
+    "italic",
+    "underline",
+    "text_color",
+    "align",
+    "left_indent_pt",
+    "right_indent_pt",
+    "first_line_indent_pt",
+    "line_spacing_type",
+    "line_spacing_value",
+    "confirm_layout"
+  ]
+}

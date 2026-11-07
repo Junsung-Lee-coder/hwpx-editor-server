@@ -1,0 +1,1969 @@
+{
+ "absent_refusal": {
+  "after": {
+   "caret_in_table_cell": null,
+   "current_paragraph_preview": null,
+   "cursor_summary": null,
+   "document_is_modified": null,
+   "observation_status": "omitted_guarded_envelope",
+   "selection_summary": null
+  },
+  "artifacts": {},
+  "before": {
+   "caret_in_table_cell": null,
+   "current_paragraph_preview": null,
+   "cursor_summary": null,
+   "document_is_modified": null,
+   "observation_status": "omitted_guarded_envelope",
+   "selection_summary": null
+  },
+  "command": "command-bundle",
+  "current_paragraph_preview": null,
+  "cursor_summary": null,
+  "dirty": false,
+  "ok": false,
+  "selection_summary": null,
+  "semantic_ok": false,
+  "steps": [
+   {
+    "after": {
+     "observation_status": "omitted_guarded_envelope"
+    },
+    "before": {
+     "observation_status": "omitted_guarded_envelope"
+    },
+    "dirty": false,
+    "error": "UNKNOWN: Edit refused before any change; original state and preservation verified.",
+    "failure_diagnostic": {
+     "causal_class": "NativeNumberingRefusal",
+     "cause2_class": "UNKNOWN",
+     "cause_class": "UNKNOWN",
+     "refusal_code": "native_unavailable",
+     "site": "bundle_step"
+    },
+    "index": 1,
+    "label": "wire",
+    "mutation": {
+     "may_have_persisted": false,
+     "rollback": {}
+    },
+    "mutation_may_have_persisted": false,
+    "ok": false,
+    "op": "style_apply_exact",
+    "refusal_code": "native_unavailable",
+    "refusal_message": "native HAction is unavailable on this machine",
+    "rollback": {}
+   }
+  ],
+  "summary": "command-bundle stopped: 1/1 step(s)",
+  "warnings": []
+ },
+ "apply": {
+  "after": {
+   "caret_in_table_cell": null,
+   "current_paragraph_preview": null,
+   "cursor_summary": null,
+   "document_is_modified": null,
+   "observation_status": "omitted_guarded_envelope",
+   "selection_summary": null
+  },
+  "artifacts": {},
+  "before": {
+   "caret_in_table_cell": null,
+   "current_paragraph_preview": null,
+   "cursor_summary": null,
+   "document_is_modified": null,
+   "observation_status": "omitted_guarded_envelope",
+   "selection_summary": null
+  },
+  "command": "command-bundle",
+  "current_paragraph_preview": null,
+  "cursor_summary": null,
+  "dirty": true,
+  "ok": true,
+  "selection_summary": null,
+  "semantic_ok": true,
+  "steps": [
+   {
+    "after": {
+     "observation_status": "omitted_guarded_envelope"
+    },
+    "before": {
+     "observation_status": "omitted_guarded_envelope"
+    },
+    "dirty": true,
+    "index": 1,
+    "label": "wire",
+    "ok": true,
+    "op": "style_apply_exact",
+    "result": {
+     "mutation": "style-apply-exact",
+     "read_only": false,
+     "result": {
+      "changed": true,
+      "native_actions": [
+       "Execute:Style"
+      ],
+      "paragraphs": [
+       {
+        "after": {
+         "paragraph": {
+          "align": "justify",
+          "first_line_indent_pt": 0.0,
+          "left_indent_pt": 0.0,
+          "line_spacing_type": "percent",
+          "line_spacing_value": 160,
+          "right_indent_pt": 0.0
+         },
+         "segments": [
+          {
+           "bold": true,
+           "font_family": "함초롬바탕",
+           "italic": false,
+           "size_pt": 12.0,
+           "text": "바탕 둘째 문단",
+           "text_color": "#000000",
+           "underline": false
+          }
+         ],
+         "segments_cut": false,
+         "style": "개요 1"
+        },
+        "before": {
+         "paragraph": {
+          "align": "justify",
+          "first_line_indent_pt": 0.0,
+          "left_indent_pt": 0.0,
+          "line_spacing_type": "percent",
+          "line_spacing_value": 160,
+          "right_indent_pt": 0.0
+         },
+         "segments": [
+          {
+           "bold": false,
+           "font_family": "함초롬바탕",
+           "italic": false,
+           "size_pt": 10.0,
+           "text": "바탕 둘째 문단",
+           "text_color": "#000000",
+           "underline": false
+          }
+         ],
+         "segments_cut": false,
+         "style": "바탕글"
+        },
+        "characters": "style",
+        "context": "body",
+        "paragraph_index": 3,
+        "style_after": "개요 1",
+        "style_before": "바탕글",
+        "text": "바탕 둘째 문단"
+       }
+      ],
+      "status": "applied"
+     },
+     "schema_version": "local-cli/style-apply-exact/v1",
+     "style": {
+      "hash": "sha256:88ecb4936adc459748e48b14",
+      "index": 2,
+      "kind": "paragraph",
+      "name": "개요 1"
+     },
+     "target": {
+      "kind": "paragraph",
+      "native_block": [
+       0,
+       3,
+       0,
+       0,
+       3,
+       8
+      ],
+      "paragraphs": [
+       {
+        "context": "body",
+        "paragraph_index": 3,
+        "text": "바탕 둘째 문단"
+       }
+      ]
+     },
+     "undo": {
+      "native_editing_actions": 1,
+      "post_state_sha256": "37bbc556ef7ba735c84af3ad5f16cb44413cbff1b9912878b5c4599f196d69f0",
+      "pre_state_sha256": "3e447167549dc6852c8d67ab69b6e8bde11850850f3a395c01d0132a5c3e7cb9"
+     },
+     "warnings": [
+      "Rendered proof of every page is required before accepting the working copy; this operation only reports native call results."
+     ]
+    },
+    "warnings": [
+     "Rendered proof of every page is required before accepting the working copy; this operation only reports native call results."
+    ]
+   }
+  ],
+  "summary": "command-bundle succeeded: 1/1 step(s)",
+  "warnings": [
+   "Rendered proof of every page is required before accepting the working copy; this operation only reports native call results."
+  ]
+ },
+ "capability_hold": {
+  "after": {
+   "caret_in_table_cell": null,
+   "current_paragraph_preview": null,
+   "cursor_summary": null,
+   "document_is_modified": null,
+   "selection_summary": null
+  },
+  "artifacts": {},
+  "before": {
+   "caret_in_table_cell": null,
+   "current_paragraph_preview": null,
+   "cursor_summary": null,
+   "document_is_modified": null,
+   "observation_status": "omitted_guarded_envelope",
+   "selection_summary": null
+  },
+  "command": "command-bundle",
+  "current_paragraph_preview": null,
+  "cursor_summary": null,
+  "dirty": false,
+  "native_custody_held": true,
+  "ok": false,
+  "selection_summary": null,
+  "semantic_ok": false,
+  "steps": [
+   {
+    "after": {},
+    "before": {
+     "observation_status": "omitted_guarded_envelope"
+    },
+    "dirty": false,
+    "error": "UNKNOWN: Native command failed; outcome is unproven.",
+    "failure_diagnostic": {
+     "causal_class": "NativeNumberingReadFailure",
+     "cause2_class": "UNKNOWN",
+     "cause_class": "UNKNOWN",
+     "refusal_code": "UNKNOWN",
+     "site": "bundle_step"
+    },
+    "index": 1,
+    "label": "wire",
+    "mutation": {
+     "may_have_persisted": false,
+     "rollback": {}
+    },
+    "mutation_may_have_persisted": false,
+    "native_custody_held": true,
+    "ok": false,
+    "op": "style_apply_exact",
+    "rollback": {}
+   }
+  ],
+  "summary": "command-bundle stopped: 1/1 step(s)",
+  "warnings": []
+ },
+ "create": {
+  "after": {
+   "caret_in_table_cell": null,
+   "current_paragraph_preview": null,
+   "cursor_summary": null,
+   "document_is_modified": null,
+   "observation_status": "omitted_guarded_envelope",
+   "selection_summary": null
+  },
+  "artifacts": {},
+  "before": {
+   "caret_in_table_cell": null,
+   "current_paragraph_preview": null,
+   "cursor_summary": null,
+   "document_is_modified": null,
+   "observation_status": "omitted_guarded_envelope",
+   "selection_summary": null
+  },
+  "command": "command-bundle",
+  "current_paragraph_preview": null,
+  "cursor_summary": null,
+  "dirty": true,
+  "ok": true,
+  "selection_summary": null,
+  "semantic_ok": true,
+  "steps": [
+   {
+    "after": {
+     "observation_status": "omitted_guarded_envelope"
+    },
+    "before": {
+     "observation_status": "omitted_guarded_envelope"
+    },
+    "dirty": true,
+    "index": 1,
+    "label": "wire",
+    "ok": true,
+    "op": "style_create_exact",
+    "result": {
+     "based_on": {
+      "hash": "sha256:3ae6bb5c12d8de8fcad190db",
+      "index": 1,
+      "name": "본문"
+     },
+     "mutation": "style-create-exact",
+     "next_binding": {
+      "expected_style_hash": "sha256:e307fd267f49ad11e4f18bf9",
+      "expected_styles_hash": "sha256:e1e67b389506ce3c4a71238d",
+      "style_name": "강조 본문"
+     },
+     "read_only": false,
+     "requested": {
+      "character": {
+       "bold": true,
+       "size_pt": 14.0
+      },
+      "paragraph": {}
+     },
+     "result": {
+      "changed": true,
+      "native_actions": [
+       "Execute:StyleAddNew"
+      ],
+      "pattern_paragraph": 1,
+      "status": "created"
+     },
+     "schema_version": "local-cli/style-create-exact/v1",
+     "style": {
+      "character": {
+       "bold": true,
+       "font_family": "함초롬바탕",
+       "italic": false,
+       "size_pt": 14.0,
+       "text_color": "#000000",
+       "underline": false
+      },
+      "character_rest": "90efb798e85e0407",
+      "english_name": "강조 본문",
+      "hash": "sha256:e307fd267f49ad11e4f18bf9",
+      "index": 2,
+      "kind": "paragraph",
+      "lock_form": false,
+      "name": "강조 본문",
+      "next_style": {
+       "index": 2,
+       "name": "강조 본문"
+      },
+      "numbering": null,
+      "paragraph": {
+       "align": "justify",
+       "first_line_indent_pt": 0.0,
+       "left_indent_pt": 15.0,
+       "line_spacing_type": "percent",
+       "line_spacing_value": 160,
+       "right_indent_pt": 0.0
+      },
+      "paragraph_rest": "3e66b67ab6d04b8c",
+      "uses": {
+       "by_context": {
+        "body": 0,
+        "footer": 0,
+        "header": 0,
+        "other": 0,
+        "table_cell": 0
+       },
+       "hash": "sha256:4f53cda18c2baa0c0354bb5f",
+       "plain": 0,
+       "recorded": true,
+       "rows": [],
+       "rows_complete": true,
+       "total": 0
+      }
+     },
+     "undo": {
+      "native_editing_actions": 1,
+      "post_state_sha256": "3171356f92b3d8394e0ff5545a78f9c53c09651096ed4d304b0bcdb78b28aa13",
+      "pre_state_sha256": "3e447167549dc6852c8d67ab69b6e8bde11850850f3a395c01d0132a5c3e7cb9"
+     },
+     "warnings": [
+      "Rendered proof of every page is required before accepting the working copy; this operation only reports native call results."
+     ]
+    },
+    "warnings": [
+     "Rendered proof of every page is required before accepting the working copy; this operation only reports native call results."
+    ]
+   }
+  ],
+  "summary": "command-bundle succeeded: 1/1 step(s)",
+  "warnings": [
+   "Rendered proof of every page is required before accepting the working copy; this operation only reports native call results."
+  ]
+ },
+ "document_text_hold": {
+  "after": {
+   "caret_in_table_cell": null,
+   "current_paragraph_preview": null,
+   "cursor_summary": null,
+   "document_is_modified": null,
+   "selection_summary": null
+  },
+  "artifacts": {},
+  "before": {
+   "caret_in_table_cell": null,
+   "current_paragraph_preview": null,
+   "cursor_summary": null,
+   "document_is_modified": null,
+   "observation_status": "omitted_guarded_envelope",
+   "selection_summary": null
+  },
+  "command": "command-bundle",
+  "current_paragraph_preview": null,
+  "cursor_summary": null,
+  "dirty": false,
+  "native_custody_held": true,
+  "ok": false,
+  "selection_summary": null,
+  "semantic_ok": false,
+  "steps": [
+   {
+    "after": {},
+    "before": {
+     "observation_status": "omitted_guarded_envelope"
+    },
+    "dirty": false,
+    "error": "UNKNOWN: Native command failed; outcome is unproven.",
+    "failure_diagnostic": {
+     "causal_class": "NativeNumberingReadFailure",
+     "cause2_class": "UNKNOWN",
+     "cause_class": "UNKNOWN",
+     "native_return": "empty",
+     "native_site": "document.text",
+     "refusal_code": "UNKNOWN",
+     "site": "bundle_step"
+    },
+    "index": 1,
+    "label": "wire",
+    "mutation": {
+     "may_have_persisted": false,
+     "rollback": {}
+    },
+    "mutation_may_have_persisted": false,
+    "native_custody_held": true,
+    "ok": false,
+    "op": "style_inventory",
+    "rollback": {}
+   }
+  ],
+  "summary": "command-bundle stopped: 1/1 step(s)",
+  "warnings": []
+ },
+ "get_default_hold": {
+  "after": {
+   "caret_in_table_cell": null,
+   "current_paragraph_preview": null,
+   "cursor_summary": null,
+   "document_is_modified": null,
+   "selection_summary": null
+  },
+  "artifacts": {},
+  "before": {
+   "caret_in_table_cell": null,
+   "current_paragraph_preview": null,
+   "cursor_summary": null,
+   "document_is_modified": null,
+   "observation_status": "omitted_guarded_envelope",
+   "selection_summary": null
+  },
+  "command": "command-bundle",
+  "current_paragraph_preview": null,
+  "cursor_summary": null,
+  "dirty": false,
+  "native_custody_held": true,
+  "ok": false,
+  "selection_summary": null,
+  "semantic_ok": false,
+  "steps": [
+   {
+    "after": {},
+    "before": {
+     "observation_status": "omitted_guarded_envelope"
+    },
+    "dirty": false,
+    "error": "UNKNOWN: Native command failed; outcome is unproven.",
+    "failure_diagnostic": {
+     "causal_class": "NativeNumberingReadFailure",
+     "cause2_class": "UNKNOWN",
+     "cause_class": "UNKNOWN",
+     "native_return": "int",
+     "native_site": "get_default.call",
+     "refusal_code": "UNKNOWN",
+     "site": "bundle_step"
+    },
+    "index": 1,
+    "label": "wire",
+    "mutation": {
+     "may_have_persisted": false,
+     "rollback": {}
+    },
+    "mutation_may_have_persisted": false,
+    "native_custody_held": true,
+    "ok": false,
+    "op": "style_create_exact",
+    "rollback": {}
+   }
+  ],
+  "summary": "command-bundle stopped: 1/1 step(s)",
+  "warnings": []
+ },
+ "held": {
+  "after": {
+   "caret_in_table_cell": null,
+   "current_paragraph_preview": null,
+   "cursor_summary": null,
+   "document_is_modified": null,
+   "selection_summary": null
+  },
+  "artifacts": {},
+  "before": {
+   "caret_in_table_cell": null,
+   "current_paragraph_preview": null,
+   "cursor_summary": null,
+   "document_is_modified": null,
+   "observation_status": "omitted_guarded_envelope",
+   "selection_summary": null
+  },
+  "command": "command-bundle",
+  "current_paragraph_preview": null,
+  "cursor_summary": null,
+  "dirty": true,
+  "native_custody_held": true,
+  "ok": false,
+  "selection_summary": null,
+  "semantic_ok": false,
+  "steps": [
+   {
+    "after": {},
+    "before": {
+     "observation_status": "omitted_guarded_envelope"
+    },
+    "dirty": true,
+    "error": "LocalCliMutationError: style update outcome is not as requested: header:s0:both paragraph 0 does not show the style's new definitions; paragraph 1 does not show the style's new definitions; paragraph 2 does not show the style's new definitions; paragraph 4 does not show the style's new definitions; nothing was rolled back",
+    "failure_diagnostic": {
+     "causal_class": "LocalCliMutationError",
+     "cause2_class": "UNKNOWN",
+     "cause_class": "NativeNumberingMutationError",
+     "refusal_code": "UNKNOWN",
+     "site": "bundle_step"
+    },
+    "index": 1,
+    "label": "wire",
+    "mutation": {
+     "may_have_persisted": true,
+     "rollback": {}
+    },
+    "mutation_may_have_persisted": true,
+    "native_custody_held": true,
+    "ok": false,
+    "op": "style_update_exact",
+    "outcome_detail": "style update outcome is not as requested: header:s0:both paragraph 0 does not show the style's new definitions; paragraph 1 does not show the style's new definitions; paragraph 2 does not show the style's new definitions; paragraph 4 does not show the style's new definitions; nothing was rolled back",
+    "rollback": {},
+    "style_proof": {
+     "added": null,
+     "command": "style_update_exact",
+     "matched": 5,
+     "new_styles": 5,
+     "old_styles": 5,
+     "problem_count": 4,
+     "problems": [
+      {
+       "predicate": "target_paragraph",
+       "where": "header:s0:both paragraph 0"
+      },
+      {
+       "predicate": "target_paragraph",
+       "where": "paragraph 1"
+      },
+      {
+       "predicate": "target_paragraph",
+       "where": "paragraph 2"
+      },
+      {
+       "predicate": "target_paragraph",
+       "where": "paragraph 4"
+      }
+     ],
+     "problems_cut": false,
+     "schema": "style-proof/v1"
+    }
+   }
+  ],
+  "summary": "command-bundle stopped: 1/1 step(s)",
+  "warnings": []
+ },
+ "inventory": {
+  "after": {
+   "caret_in_table_cell": null,
+   "current_paragraph_preview": null,
+   "cursor_summary": null,
+   "document_is_modified": null,
+   "observation_status": "omitted_guarded_envelope",
+   "selection_summary": null
+  },
+  "artifacts": {},
+  "before": {
+   "caret_in_table_cell": null,
+   "current_paragraph_preview": null,
+   "cursor_summary": null,
+   "document_is_modified": null,
+   "observation_status": "omitted_guarded_envelope",
+   "selection_summary": null
+  },
+  "command": "command-bundle",
+  "current_paragraph_preview": null,
+  "cursor_summary": null,
+  "dirty": false,
+  "ok": true,
+  "selection_summary": null,
+  "semantic_ok": true,
+  "steps": [
+   {
+    "after": {
+     "observation_status": "omitted_guarded_envelope"
+    },
+    "before": {
+     "observation_status": "omitted_guarded_envelope"
+    },
+    "dirty": false,
+    "index": 1,
+    "label": "wire",
+    "ok": true,
+    "op": "style_inventory",
+    "result": {
+     "character_styles": 2,
+     "count": 5,
+     "duplicate_names": [],
+     "paragraph_styles": 3,
+     "read_only": true,
+     "schema_version": "local-cli/style-inventory/v1",
+     "styles": [
+      {
+       "character": {
+        "bold": false,
+        "font_family": "함초롬바탕",
+        "italic": false,
+        "size_pt": 10.0,
+        "text_color": "#000000",
+        "underline": false
+       },
+       "character_rest": "90efb798e85e0407",
+       "english_name": "Normal",
+       "hash": "sha256:618b982603a5c9e15ca63ca2",
+       "index": 0,
+       "kind": "paragraph",
+       "lock_form": false,
+       "name": "바탕글",
+       "next_style": {
+        "index": 0,
+        "name": "바탕글"
+       },
+       "numbering": null,
+       "paragraph": {
+        "align": "justify",
+        "first_line_indent_pt": 0.0,
+        "left_indent_pt": 0.0,
+        "line_spacing_type": "percent",
+        "line_spacing_value": 160,
+        "right_indent_pt": 0.0
+       },
+       "paragraph_rest": "3e66b67ab6d04b8c",
+       "uses": {
+        "by_context": {
+         "body": 7,
+         "footer": 1,
+         "header": 0,
+         "other": 0,
+         "table_cell": 3
+        },
+        "hash": "sha256:3d9e5a5fa15595fb900fef76",
+        "plain": 10,
+        "recorded": true,
+        "rows": [
+         {
+          "area": null,
+          "area_paragraph": null,
+          "context": "body",
+          "paragraph_index": 0,
+          "plain": true,
+          "text": "문서 제목",
+          "text_truncated": false
+         },
+         {
+          "area": "footer:s0:both",
+          "area_paragraph": 0,
+          "context": "footer",
+          "paragraph_index": null,
+          "plain": true,
+          "text": "꼬리 문구",
+          "text_truncated": false
+         },
+         {
+          "area": null,
+          "area_paragraph": null,
+          "context": "body",
+          "paragraph_index": 3,
+          "plain": true,
+          "text": "바탕 둘째 문단",
+          "text_truncated": false
+         },
+         {
+          "area": null,
+          "area_paragraph": null,
+          "context": "body",
+          "paragraph_index": 4,
+          "plain": true,
+          "text": "",
+          "text_truncated": false
+         },
+         {
+          "area": null,
+          "area_paragraph": null,
+          "context": "table_cell",
+          "paragraph_index": 6,
+          "plain": true,
+          "text": "셀 둘",
+          "text_truncated": false
+         },
+         {
+          "area": null,
+          "area_paragraph": null,
+          "context": "table_cell",
+          "paragraph_index": 7,
+          "plain": true,
+          "text": "셀 셋",
+          "text_truncated": false
+         },
+         {
+          "area": null,
+          "area_paragraph": null,
+          "context": "table_cell",
+          "paragraph_index": 8,
+          "plain": true,
+          "text": "셀 넷",
+          "text_truncated": false
+         },
+         {
+          "area": null,
+          "area_paragraph": null,
+          "context": "body",
+          "paragraph_index": 9,
+          "plain": true,
+          "text": "범위 첫째",
+          "text_truncated": false
+         },
+         {
+          "area": null,
+          "area_paragraph": null,
+          "context": "body",
+          "paragraph_index": 10,
+          "plain": true,
+          "text": "범위 둘째",
+          "text_truncated": false
+         },
+         {
+          "area": null,
+          "area_paragraph": null,
+          "context": "body",
+          "paragraph_index": 11,
+          "plain": false,
+          "text": "번호 문단 꼬리",
+          "text_truncated": false
+         },
+         {
+          "area": null,
+          "area_paragraph": null,
+          "context": "body",
+          "paragraph_index": 12,
+          "plain": true,
+          "text": "마지막 문단",
+          "text_truncated": false
+         }
+        ],
+        "rows_complete": true,
+        "total": 11
+       }
+      },
+      {
+       "character": {
+        "bold": false,
+        "font_family": "함초롬바탕",
+        "italic": false,
+        "size_pt": 10.0,
+        "text_color": "#000000",
+        "underline": false
+       },
+       "character_rest": "90efb798e85e0407",
+       "english_name": "Body",
+       "hash": "sha256:3ae6bb5c12d8de8fcad190db",
+       "index": 1,
+       "kind": "paragraph",
+       "lock_form": false,
+       "name": "본문",
+       "next_style": {
+        "index": 1,
+        "name": "본문"
+       },
+       "numbering": null,
+       "paragraph": {
+        "align": "justify",
+        "first_line_indent_pt": 0.0,
+        "left_indent_pt": 15.0,
+        "line_spacing_type": "percent",
+        "line_spacing_value": 160,
+        "right_indent_pt": 0.0
+       },
+       "paragraph_rest": "3e66b67ab6d04b8c",
+       "uses": {
+        "by_context": {
+         "body": 2,
+         "footer": 0,
+         "header": 1,
+         "other": 0,
+         "table_cell": 1
+        },
+        "hash": "sha256:0cdb869d4d7cedd33b990050",
+        "plain": 3,
+        "recorded": true,
+        "rows": [
+         {
+          "area": "header:s0:both",
+          "area_paragraph": 0,
+          "context": "header",
+          "paragraph_index": null,
+          "plain": true,
+          "text": "머리 본문",
+          "text_truncated": false
+         },
+         {
+          "area": null,
+          "area_paragraph": null,
+          "context": "body",
+          "paragraph_index": 1,
+          "plain": true,
+          "text": "본문 첫 문단",
+          "text_truncated": false
+         },
+         {
+          "area": null,
+          "area_paragraph": null,
+          "context": "body",
+          "paragraph_index": 2,
+          "plain": false,
+          "text": "본문 둘째 굵은말 끝",
+          "text_truncated": false
+         },
+         {
+          "area": null,
+          "area_paragraph": null,
+          "context": "table_cell",
+          "paragraph_index": 5,
+          "plain": true,
+          "text": "셀 본문",
+          "text_truncated": false
+         }
+        ],
+        "rows_complete": true,
+        "total": 4
+       }
+      },
+      {
+       "character": {
+        "bold": true,
+        "font_family": "함초롬바탕",
+        "italic": false,
+        "size_pt": 12.0,
+        "text_color": "#000000",
+        "underline": false
+       },
+       "character_rest": "90efb798e85e0407",
+       "english_name": "Outline 1",
+       "hash": "sha256:88ecb4936adc459748e48b14",
+       "index": 2,
+       "kind": "paragraph",
+       "lock_form": false,
+       "name": "개요 1",
+       "next_style": {
+        "index": 2,
+        "name": "개요 1"
+       },
+       "numbering": {
+        "kind": "outline",
+        "level": 1
+       },
+       "paragraph": {
+        "align": "justify",
+        "first_line_indent_pt": 0.0,
+        "left_indent_pt": 0.0,
+        "line_spacing_type": "percent",
+        "line_spacing_value": 160,
+        "right_indent_pt": 0.0
+       },
+       "paragraph_rest": "3e66b67ab6d04b8c",
+       "uses": {
+        "by_context": {
+         "body": 0,
+         "footer": 0,
+         "header": 0,
+         "other": 0,
+         "table_cell": 0
+        },
+        "hash": "sha256:4f53cda18c2baa0c0354bb5f",
+        "plain": 0,
+        "recorded": true,
+        "rows": [],
+        "rows_complete": true,
+        "total": 0
+       }
+      },
+      {
+       "character": {
+        "bold": true,
+        "font_family": "함초롬바탕",
+        "italic": false,
+        "size_pt": 10.0,
+        "text_color": "#FF0000",
+        "underline": false
+       },
+       "character_rest": "90efb798e85e0407",
+       "english_name": "Emphasis",
+       "hash": "sha256:df7c8d74886e78ae141a7588",
+       "index": 3,
+       "kind": "character",
+       "lock_form": false,
+       "name": "강조",
+       "next_style": {
+        "index": 0,
+        "name": "바탕글"
+       },
+       "numbering": null,
+       "paragraph": null,
+       "paragraph_rest": null,
+       "uses": {
+        "recorded": false
+       }
+      },
+      {
+       "character": {
+        "bold": false,
+        "font_family": "함초롬바탕",
+        "italic": false,
+        "size_pt": 9.0,
+        "text_color": "#000000",
+        "underline": false
+       },
+       "character_rest": "90efb798e85e0407",
+       "english_name": "Page Number",
+       "hash": "sha256:8b84b7b4823d6683d074d500",
+       "index": 4,
+       "kind": "character",
+       "lock_form": false,
+       "name": "쪽 번호",
+       "next_style": {
+        "index": 0,
+        "name": "바탕글"
+       },
+       "numbering": null,
+       "paragraph": null,
+       "paragraph_rest": null,
+       "uses": {
+        "recorded": false
+       }
+      }
+     ],
+     "styles_hash": "sha256:3bfb15944d374ece482392ab",
+     "warnings": []
+    },
+    "warnings": []
+   }
+  ],
+  "summary": "command-bundle succeeded: 1/1 step(s)",
+  "warnings": []
+ },
+ "legacy_hold": {
+  "after": {
+   "caret_in_table_cell": null,
+   "current_paragraph_preview": null,
+   "cursor_summary": null,
+   "document_is_modified": null,
+   "selection_summary": null
+  },
+  "artifacts": {},
+  "before": {
+   "caret_in_table_cell": null,
+   "current_paragraph_preview": null,
+   "cursor_summary": null,
+   "document_is_modified": null,
+   "observation_status": "omitted_guarded_envelope",
+   "selection_summary": null
+  },
+  "command": "command-bundle",
+  "current_paragraph_preview": null,
+  "cursor_summary": null,
+  "dirty": false,
+  "native_custody_held": true,
+  "ok": false,
+  "selection_summary": null,
+  "semantic_ok": false,
+  "steps": [
+   {
+    "after": {},
+    "before": {
+     "observation_status": "omitted_guarded_envelope"
+    },
+    "dirty": false,
+    "error": "UNKNOWN: Native command failed; outcome is unproven.",
+    "failure_diagnostic": {
+     "causal_class": "NativeNumberingReadFailure",
+     "cause2_class": "UNKNOWN",
+     "cause_class": "UNKNOWN",
+     "native_return": "true",
+     "native_site": "get_default.call",
+     "refusal_code": "UNKNOWN",
+     "site": "bundle_step"
+    },
+    "index": 1,
+    "label": "wire",
+    "mutation": {
+     "may_have_persisted": false,
+     "rollback": {}
+    },
+    "mutation_may_have_persisted": false,
+    "native_custody_held": true,
+    "ok": false,
+    "op": "style_create_exact",
+    "rollback": {}
+   }
+  ],
+  "summary": "command-bundle stopped: 1/1 step(s)",
+  "warnings": []
+ },
+ "next_style_refusal": {
+  "after": {
+   "caret_in_table_cell": null,
+   "current_paragraph_preview": null,
+   "cursor_summary": null,
+   "document_is_modified": null,
+   "observation_status": "omitted_guarded_envelope",
+   "selection_summary": null
+  },
+  "artifacts": {},
+  "before": {
+   "caret_in_table_cell": null,
+   "current_paragraph_preview": null,
+   "cursor_summary": null,
+   "document_is_modified": null,
+   "observation_status": "omitted_guarded_envelope",
+   "selection_summary": null
+  },
+  "command": "command-bundle",
+  "current_paragraph_preview": null,
+  "cursor_summary": null,
+  "dirty": false,
+  "ok": false,
+  "selection_summary": null,
+  "semantic_ok": false,
+  "steps": [
+   {
+    "after": {
+     "observation_status": "omitted_guarded_envelope"
+    },
+    "before": {
+     "observation_status": "omitted_guarded_envelope"
+    },
+    "dirty": false,
+    "error": "UNKNOWN: Edit refused before any change; original state and preservation verified.",
+    "failure_diagnostic": {
+     "causal_class": "NativeNumberingRefusal",
+     "cause2_class": "UNKNOWN",
+     "cause_class": "UNKNOWN",
+     "refusal_code": "style_kind_unsupported",
+     "site": "bundle_step"
+    },
+    "index": 1,
+    "label": "wire",
+    "mutation": {
+     "may_have_persisted": false,
+     "rollback": {}
+    },
+    "mutation_may_have_persisted": false,
+    "ok": false,
+    "op": "style_create_exact",
+    "refusal_code": "style_kind_unsupported",
+    "refusal_message": "next_style names a character style; the next paragraph takes a paragraph style",
+    "rollback": {}
+   }
+  ],
+  "summary": "command-bundle stopped: 1/1 step(s)",
+  "warnings": []
+ },
+ "proof_hold": {
+  "after": {
+   "caret_in_table_cell": null,
+   "current_paragraph_preview": null,
+   "cursor_summary": null,
+   "document_is_modified": null,
+   "selection_summary": null
+  },
+  "artifacts": {},
+  "before": {
+   "caret_in_table_cell": null,
+   "current_paragraph_preview": null,
+   "cursor_summary": null,
+   "document_is_modified": null,
+   "observation_status": "omitted_guarded_envelope",
+   "selection_summary": null
+  },
+  "command": "command-bundle",
+  "current_paragraph_preview": null,
+  "cursor_summary": null,
+  "dirty": true,
+  "native_custody_held": true,
+  "ok": false,
+  "selection_summary": null,
+  "semantic_ok": false,
+  "steps": [
+   {
+    "after": {},
+    "before": {
+     "observation_status": "omitted_guarded_envelope"
+    },
+    "dirty": true,
+    "error": "LocalCliMutationError: style create outcome is not as requested: the new style's next style is 강조, not 개요 1; nothing was rolled back",
+    "failure_diagnostic": {
+     "causal_class": "LocalCliMutationError",
+     "cause2_class": "UNKNOWN",
+     "cause_class": "NativeNumberingMutationError",
+     "refusal_code": "UNKNOWN",
+     "site": "bundle_step"
+    },
+    "index": 1,
+    "label": "wire",
+    "mutation": {
+     "may_have_persisted": true,
+     "rollback": {}
+    },
+    "mutation_may_have_persisted": true,
+    "native_custody_held": true,
+    "ok": false,
+    "op": "style_create_exact",
+    "outcome_detail": "style create outcome is not as requested: the new style's next style is 강조, not 개요 1; nothing was rolled back",
+    "rollback": {},
+    "style_proof": {
+     "added": {
+      "index": 5,
+      "name": "보고서 본문"
+     },
+     "command": "style_create_exact",
+     "matched": 5,
+     "new_styles": 6,
+     "old_styles": 5,
+     "problem_count": 1,
+     "problems": [
+      {
+       "expected": "개요 1",
+       "fields": [
+        "next"
+       ],
+       "found": "강조",
+       "name": "보고서 본문",
+       "new_index": 5,
+       "predicate": "new_style_wrong"
+      }
+     ],
+     "problems_cut": false,
+     "schema": "style-proof/v1"
+    }
+   }
+  ],
+  "summary": "command-bundle stopped: 1/1 step(s)",
+  "warnings": []
+ },
+ "refusal": {
+  "after": {
+   "caret_in_table_cell": null,
+   "current_paragraph_preview": null,
+   "cursor_summary": null,
+   "document_is_modified": null,
+   "observation_status": "omitted_guarded_envelope",
+   "selection_summary": null
+  },
+  "artifacts": {},
+  "before": {
+   "caret_in_table_cell": null,
+   "current_paragraph_preview": null,
+   "cursor_summary": null,
+   "document_is_modified": null,
+   "observation_status": "omitted_guarded_envelope",
+   "selection_summary": null
+  },
+  "command": "command-bundle",
+  "current_paragraph_preview": null,
+  "cursor_summary": null,
+  "dirty": false,
+  "ok": false,
+  "selection_summary": null,
+  "semantic_ok": false,
+  "steps": [
+   {
+    "after": {
+     "observation_status": "omitted_guarded_envelope"
+    },
+    "before": {
+     "observation_status": "omitted_guarded_envelope"
+    },
+    "dirty": false,
+    "error": "UNKNOWN: Edit refused before any change; original state and preservation verified.",
+    "failure_diagnostic": {
+     "causal_class": "NativeNumberingRefusal",
+     "cause2_class": "UNKNOWN",
+     "cause_class": "UNKNOWN",
+     "refusal_code": "style_hash_mismatch",
+     "site": "bundle_step"
+    },
+    "index": 1,
+    "label": "wire",
+    "mutation": {
+     "may_have_persisted": false,
+     "rollback": {}
+    },
+    "mutation_may_have_persisted": false,
+    "ok": false,
+    "op": "style_apply_exact",
+    "refusal_code": "style_hash_mismatch",
+    "refusal_message": "the style is not as style_inventory reported it; read the inventory again",
+    "rollback": {}
+   }
+  ],
+  "summary": "command-bundle stopped: 1/1 step(s)",
+  "warnings": []
+ },
+ "rename_refusal": {
+  "after": {
+   "caret_in_table_cell": null,
+   "current_paragraph_preview": null,
+   "cursor_summary": null,
+   "document_is_modified": null,
+   "observation_status": "omitted_guarded_envelope",
+   "selection_summary": null
+  },
+  "artifacts": {},
+  "before": {
+   "caret_in_table_cell": null,
+   "current_paragraph_preview": null,
+   "cursor_summary": null,
+   "document_is_modified": null,
+   "observation_status": "omitted_guarded_envelope",
+   "selection_summary": null
+  },
+  "command": "command-bundle",
+  "current_paragraph_preview": null,
+  "cursor_summary": null,
+  "dirty": false,
+  "ok": false,
+  "selection_summary": null,
+  "semantic_ok": false,
+  "steps": [
+   {
+    "after": {
+     "observation_status": "omitted_guarded_envelope"
+    },
+    "before": {
+     "observation_status": "omitted_guarded_envelope"
+    },
+    "dirty": false,
+    "error": "UNKNOWN: Edit refused before any change; original state and preservation verified.",
+    "failure_diagnostic": {
+     "causal_class": "NativeNumberingRefusal",
+     "cause2_class": "UNKNOWN",
+     "cause_class": "UNKNOWN",
+     "refusal_code": "style_rename_unsupported",
+     "site": "bundle_step"
+    },
+    "index": 1,
+    "label": "wire",
+    "mutation": {
+     "may_have_persisted": false,
+     "rollback": {}
+    },
+    "mutation_may_have_persisted": false,
+    "ok": false,
+    "op": "style_update_exact",
+    "refusal_code": "style_rename_unsupported",
+    "refusal_message": "a rename has no documented mechanism: StyleDirectEdit's NameLocal selects the style to change and is never written as a new name; change the style's properties only; nothing was written",
+    "rollback": {}
+   }
+  ],
+  "summary": "command-bundle stopped: 1/1 step(s)",
+  "warnings": []
+ },
+ "shape_refusal": {
+  "after": {
+   "caret_in_table_cell": null,
+   "current_paragraph_preview": null,
+   "cursor_summary": null,
+   "document_is_modified": null,
+   "observation_status": "omitted_guarded_envelope",
+   "selection_summary": null
+  },
+  "artifacts": {},
+  "before": {
+   "caret_in_table_cell": null,
+   "current_paragraph_preview": null,
+   "cursor_summary": null,
+   "document_is_modified": null,
+   "observation_status": "omitted_guarded_envelope",
+   "selection_summary": null
+  },
+  "command": "command-bundle",
+  "current_paragraph_preview": null,
+  "cursor_summary": null,
+  "dirty": false,
+  "ok": false,
+  "selection_summary": null,
+  "semantic_ok": false,
+  "steps": [
+   {
+    "after": {
+     "observation_status": "omitted_guarded_envelope"
+    },
+    "before": {
+     "observation_status": "omitted_guarded_envelope"
+    },
+    "dirty": false,
+    "error": "UNKNOWN: Edit refused before any change; original state and preservation verified.",
+    "failure_diagnostic": {
+     "causal_class": "NativeNumberingRefusal",
+     "cause2_class": "UNKNOWN",
+     "cause_class": "UNKNOWN",
+     "refusal_code": "style_shape_unverified",
+     "site": "bundle_step"
+    },
+    "index": 1,
+    "label": "wire",
+    "mutation": {
+     "may_have_persisted": false,
+     "rollback": {}
+    },
+    "mutation_may_have_persisted": false,
+    "ok": false,
+    "op": "style_update_exact",
+    "refusal_code": "style_shape_unverified",
+    "refusal_message": "the character shape read at the style's use holds no item BorderFill, so it is not the whole shape the change must write; nothing was written",
+    "rollback": {}
+   }
+  ],
+  "summary": "command-bundle stopped: 1/1 step(s)",
+  "warnings": []
+ },
+ "technical_hold": {
+  "after": {
+   "caret_in_table_cell": null,
+   "current_paragraph_preview": null,
+   "cursor_summary": null,
+   "document_is_modified": null,
+   "selection_summary": null
+  },
+  "artifacts": {},
+  "before": {
+   "caret_in_table_cell": null,
+   "current_paragraph_preview": null,
+   "cursor_summary": null,
+   "document_is_modified": null,
+   "observation_status": "omitted_guarded_envelope",
+   "selection_summary": null
+  },
+  "command": "command-bundle",
+  "current_paragraph_preview": null,
+  "cursor_summary": null,
+  "dirty": false,
+  "native_custody_held": true,
+  "ok": false,
+  "selection_summary": null,
+  "semantic_ok": false,
+  "steps": [
+   {
+    "after": {},
+    "before": {
+     "observation_status": "omitted_guarded_envelope"
+    },
+    "dirty": false,
+    "error": "UNKNOWN: Native command failed; outcome is unproven.",
+    "failure_diagnostic": {
+     "causal_class": "NativeNumberingReadFailure",
+     "cause2_class": "UNKNOWN",
+     "cause_class": "RuntimeError",
+     "refusal_code": "UNKNOWN",
+     "site": "bundle_step"
+    },
+    "index": 1,
+    "label": "wire",
+    "mutation": {
+     "may_have_persisted": false,
+     "rollback": {}
+    },
+    "mutation_may_have_persisted": false,
+    "native_custody_held": true,
+    "ok": false,
+    "op": "style_apply_exact",
+    "rollback": {}
+   }
+  ],
+  "summary": "command-bundle stopped: 1/1 step(s)",
+  "warnings": []
+ },
+ "update": {
+  "after": {
+   "caret_in_table_cell": null,
+   "current_paragraph_preview": null,
+   "cursor_summary": null,
+   "document_is_modified": null,
+   "observation_status": "omitted_guarded_envelope",
+   "selection_summary": null
+  },
+  "artifacts": {},
+  "before": {
+   "caret_in_table_cell": null,
+   "current_paragraph_preview": null,
+   "cursor_summary": null,
+   "document_is_modified": null,
+   "observation_status": "omitted_guarded_envelope",
+   "selection_summary": null
+  },
+  "command": "command-bundle",
+  "current_paragraph_preview": null,
+  "cursor_summary": null,
+  "dirty": true,
+  "ok": true,
+  "selection_summary": null,
+  "semantic_ok": true,
+  "steps": [
+   {
+    "after": {
+     "observation_status": "omitted_guarded_envelope"
+    },
+    "before": {
+     "observation_status": "omitted_guarded_envelope"
+    },
+    "dirty": true,
+    "index": 1,
+    "label": "wire",
+    "ok": true,
+    "op": "style_update_exact",
+    "result": {
+     "mutation": "style-update-exact",
+     "next_binding": {
+      "expected_style_hash": "sha256:da0d0de3f5c28edd8e9a0be7",
+      "expected_uses": 4,
+      "expected_uses_hash": "sha256:b0908e3a333af6d6b350292d",
+      "style_name": "본문"
+     },
+     "read_only": false,
+     "requested": {
+      "character": {
+       "size_pt": 11.0
+      },
+      "new_english_name": null,
+      "new_name": null,
+      "paragraph": {}
+     },
+     "result": {
+      "affected": {
+       "by_context": {
+        "body": 2,
+        "footer": 0,
+        "header": 1,
+        "other": 0,
+        "table_cell": 1
+       },
+       "rows": [
+        {
+         "after": {
+          "paragraph": {
+           "align": "justify",
+           "first_line_indent_pt": 0.0,
+           "left_indent_pt": 15.0,
+           "line_spacing_type": "percent",
+           "line_spacing_value": 160,
+           "right_indent_pt": 0.0
+          },
+          "segments": [
+           {
+            "bold": false,
+            "font_family": "함초롬바탕",
+            "italic": false,
+            "size_pt": 11.0,
+            "text": "머리 본문",
+            "text_color": "#000000",
+            "underline": false
+           }
+          ],
+          "segments_cut": false,
+          "style": "본문"
+         },
+         "area": "header:s0:both",
+         "area_paragraph": 0,
+         "before": {
+          "paragraph": {
+           "align": "justify",
+           "first_line_indent_pt": 0.0,
+           "left_indent_pt": 15.0,
+           "line_spacing_type": "percent",
+           "line_spacing_value": 160,
+           "right_indent_pt": 0.0
+          },
+          "segments": [
+           {
+            "bold": false,
+            "font_family": "함초롬바탕",
+            "italic": false,
+            "size_pt": 10.0,
+            "text": "머리 본문",
+            "text_color": "#000000",
+            "underline": false
+           }
+          ],
+          "segments_cut": false,
+          "style": "본문"
+         },
+         "context": "header",
+         "paragraph_index": null,
+         "plain": true,
+         "text": "머리 본문",
+         "text_truncated": false
+        },
+        {
+         "after": {
+          "paragraph": {
+           "align": "justify",
+           "first_line_indent_pt": 0.0,
+           "left_indent_pt": 15.0,
+           "line_spacing_type": "percent",
+           "line_spacing_value": 160,
+           "right_indent_pt": 0.0
+          },
+          "segments": [
+           {
+            "bold": false,
+            "font_family": "함초롬바탕",
+            "italic": false,
+            "size_pt": 11.0,
+            "text": "본문 첫 문단",
+            "text_color": "#000000",
+            "underline": false
+           }
+          ],
+          "segments_cut": false,
+          "style": "본문"
+         },
+         "area": null,
+         "area_paragraph": null,
+         "before": {
+          "paragraph": {
+           "align": "justify",
+           "first_line_indent_pt": 0.0,
+           "left_indent_pt": 15.0,
+           "line_spacing_type": "percent",
+           "line_spacing_value": 160,
+           "right_indent_pt": 0.0
+          },
+          "segments": [
+           {
+            "bold": false,
+            "font_family": "함초롬바탕",
+            "italic": false,
+            "size_pt": 10.0,
+            "text": "본문 첫 문단",
+            "text_color": "#000000",
+            "underline": false
+           }
+          ],
+          "segments_cut": false,
+          "style": "본문"
+         },
+         "context": "body",
+         "paragraph_index": 1,
+         "plain": true,
+         "text": "본문 첫 문단",
+         "text_truncated": false
+        },
+        {
+         "after": {
+          "paragraph": {
+           "align": "justify",
+           "first_line_indent_pt": 0.0,
+           "left_indent_pt": 15.0,
+           "line_spacing_type": "percent",
+           "line_spacing_value": 160,
+           "right_indent_pt": 0.0
+          },
+          "segments": [
+           {
+            "bold": false,
+            "font_family": "함초롬바탕",
+            "italic": false,
+            "size_pt": 11.0,
+            "text": "본문 둘째 문단",
+            "text_color": "#000000",
+            "underline": false
+           }
+          ],
+          "segments_cut": false,
+          "style": "본문"
+         },
+         "area": null,
+         "area_paragraph": null,
+         "before": {
+          "paragraph": {
+           "align": "justify",
+           "first_line_indent_pt": 0.0,
+           "left_indent_pt": 15.0,
+           "line_spacing_type": "percent",
+           "line_spacing_value": 160,
+           "right_indent_pt": 0.0
+          },
+          "segments": [
+           {
+            "bold": false,
+            "font_family": "함초롬바탕",
+            "italic": false,
+            "size_pt": 10.0,
+            "text": "본문 둘째 문단",
+            "text_color": "#000000",
+            "underline": false
+           }
+          ],
+          "segments_cut": false,
+          "style": "본문"
+         },
+         "context": "body",
+         "paragraph_index": 2,
+         "plain": true,
+         "text": "본문 둘째 문단",
+         "text_truncated": false
+        },
+        {
+         "after": {
+          "paragraph": {
+           "align": "justify",
+           "first_line_indent_pt": 0.0,
+           "left_indent_pt": 15.0,
+           "line_spacing_type": "percent",
+           "line_spacing_value": 160,
+           "right_indent_pt": 0.0
+          },
+          "segments": [
+           {
+            "bold": false,
+            "font_family": "함초롬바탕",
+            "italic": false,
+            "size_pt": 11.0,
+            "text": "셀 본문",
+            "text_color": "#000000",
+            "underline": false
+           }
+          ],
+          "segments_cut": false,
+          "style": "본문"
+         },
+         "area": null,
+         "area_paragraph": null,
+         "before": {
+          "paragraph": {
+           "align": "justify",
+           "first_line_indent_pt": 0.0,
+           "left_indent_pt": 15.0,
+           "line_spacing_type": "percent",
+           "line_spacing_value": 160,
+           "right_indent_pt": 0.0
+          },
+          "segments": [
+           {
+            "bold": false,
+            "font_family": "함초롬바탕",
+            "italic": false,
+            "size_pt": 10.0,
+            "text": "셀 본문",
+            "text_color": "#000000",
+            "underline": false
+           }
+          ],
+          "segments_cut": false,
+          "style": "본문"
+         },
+         "context": "table_cell",
+         "paragraph_index": 4,
+         "plain": true,
+         "text": "셀 본문",
+         "text_truncated": false
+        }
+       ],
+       "total": 4
+      },
+      "changed": true,
+      "native_actions": [
+       "Execute:StyleDirectEdit"
+      ],
+      "pattern_paragraph": 1,
+      "status": "updated"
+     },
+     "schema_version": "local-cli/style-update-exact/v1",
+     "style_after": {
+      "character": {
+       "bold": false,
+       "font_family": "함초롬바탕",
+       "italic": false,
+       "size_pt": 11.0,
+       "text_color": "#000000",
+       "underline": false
+      },
+      "character_rest": "90efb798e85e0407",
+      "english_name": "Body",
+      "hash": "sha256:da0d0de3f5c28edd8e9a0be7",
+      "index": 1,
+      "kind": "paragraph",
+      "lock_form": false,
+      "name": "본문",
+      "next_style": {
+       "index": 1,
+       "name": "본문"
+      },
+      "numbering": null,
+      "paragraph": {
+       "align": "justify",
+       "first_line_indent_pt": 0.0,
+       "left_indent_pt": 15.0,
+       "line_spacing_type": "percent",
+       "line_spacing_value": 160,
+       "right_indent_pt": 0.0
+      },
+      "paragraph_rest": "3e66b67ab6d04b8c",
+      "uses": {
+       "by_context": {
+        "body": 2,
+        "footer": 0,
+        "header": 1,
+        "other": 0,
+        "table_cell": 1
+       },
+       "hash": "sha256:b0908e3a333af6d6b350292d",
+       "plain": 4,
+       "recorded": true,
+       "rows": [],
+       "rows_complete": false,
+       "total": 4
+      }
+     },
+     "style_before": {
+      "character": {
+       "bold": false,
+       "font_family": "함초롬바탕",
+       "italic": false,
+       "size_pt": 10.0,
+       "text_color": "#000000",
+       "underline": false
+      },
+      "character_rest": "90efb798e85e0407",
+      "english_name": "Body",
+      "hash": "sha256:3ae6bb5c12d8de8fcad190db",
+      "index": 1,
+      "kind": "paragraph",
+      "lock_form": false,
+      "name": "본문",
+      "next_style": {
+       "index": 1,
+       "name": "본문"
+      },
+      "numbering": null,
+      "paragraph": {
+       "align": "justify",
+       "first_line_indent_pt": 0.0,
+       "left_indent_pt": 15.0,
+       "line_spacing_type": "percent",
+       "line_spacing_value": 160,
+       "right_indent_pt": 0.0
+      },
+      "paragraph_rest": "3e66b67ab6d04b8c",
+      "uses": {
+       "by_context": {
+        "body": 2,
+        "footer": 0,
+        "header": 1,
+        "other": 0,
+        "table_cell": 1
+       },
+       "hash": "sha256:b0908e3a333af6d6b350292d",
+       "plain": 4,
+       "recorded": true,
+       "rows": [],
+       "rows_complete": false,
+       "total": 4
+      }
+     },
+     "undo": {
+      "native_editing_actions": 1,
+      "post_state_sha256": "f361f053f5cd3384d1b922f303fd501ebe0091629b4dd2edd632daf6d4de9335",
+      "pre_state_sha256": "e62a8480574ba2532977876f490d98d72a7d19d6c27d76abf58f15d61ab7c76c"
+     },
+     "warnings": [
+      "Rendered proof of every page is required before accepting the working copy; this operation only reports native call results."
+     ]
+    },
+    "warnings": [
+     "Rendered proof of every page is required before accepting the working copy; this operation only reports native call results."
+    ]
+   }
+  ],
+  "summary": "command-bundle succeeded: 1/1 step(s)",
+  "warnings": [
+   "Rendered proof of every page is required before accepting the working copy; this operation only reports native call results."
+  ]
+ },
+ "update_proof_hold": {
+  "after": {
+   "caret_in_table_cell": null,
+   "current_paragraph_preview": null,
+   "cursor_summary": null,
+   "document_is_modified": null,
+   "selection_summary": null
+  },
+  "artifacts": {},
+  "before": {
+   "caret_in_table_cell": null,
+   "current_paragraph_preview": null,
+   "cursor_summary": null,
+   "document_is_modified": null,
+   "observation_status": "omitted_guarded_envelope",
+   "selection_summary": null
+  },
+  "command": "command-bundle",
+  "current_paragraph_preview": null,
+  "cursor_summary": null,
+  "dirty": true,
+  "native_custody_held": true,
+  "ok": false,
+  "selection_summary": null,
+  "semantic_ok": false,
+  "steps": [
+   {
+    "after": {},
+    "before": {
+     "observation_status": "omitted_guarded_envelope"
+    },
+    "dirty": true,
+    "error": "LocalCliMutationError: style update outcome is not as requested: the style's character shape is not the old one with the requested properties; nothing was rolled back",
+    "failure_diagnostic": {
+     "causal_class": "LocalCliMutationError",
+     "cause2_class": "UNKNOWN",
+     "cause_class": "NativeNumberingMutationError",
+     "refusal_code": "UNKNOWN",
+     "site": "bundle_step"
+    },
+    "index": 1,
+    "label": "wire",
+    "mutation": {
+     "may_have_persisted": true,
+     "rollback": {}
+    },
+    "mutation_may_have_persisted": true,
+    "native_custody_held": true,
+    "ok": false,
+    "op": "style_update_exact",
+    "outcome_detail": "style update outcome is not as requested: the style's character shape is not the old one with the requested properties; nothing was rolled back",
+    "rollback": {},
+    "style_proof": {
+     "added": null,
+     "command": "style_update_exact",
+     "matched": 5,
+     "new_styles": 5,
+     "old_styles": 5,
+     "problem_count": 1,
+     "problems": [
+      {
+       "character_item_count": 1,
+       "character_items": [
+        "attr_shadecolor"
+       ],
+       "fields": [
+        "character"
+       ],
+       "name": "본문",
+       "new_index": 1,
+       "old_index": 1,
+       "predicate": "changed_style_wrong",
+       "size_expected": 11.0,
+       "size_found": 11.0,
+       "unrequested_changed": true
+      }
+     ],
+     "problems_cut": false,
+     "schema": "style-proof/v1"
+    }
+   }
+  ],
+  "summary": "command-bundle stopped: 1/1 step(s)",
+  "warnings": []
+ },
+ "variant_refusal": {
+  "after": {
+   "caret_in_table_cell": null,
+   "current_paragraph_preview": null,
+   "cursor_summary": null,
+   "document_is_modified": null,
+   "observation_status": "omitted_guarded_envelope",
+   "selection_summary": null
+  },
+  "artifacts": {},
+  "before": {
+   "caret_in_table_cell": null,
+   "current_paragraph_preview": null,
+   "cursor_summary": null,
+   "document_is_modified": null,
+   "observation_status": "omitted_guarded_envelope",
+   "selection_summary": null
+  },
+  "command": "command-bundle",
+  "current_paragraph_preview": null,
+  "cursor_summary": null,
+  "dirty": false,
+  "ok": false,
+  "selection_summary": null,
+  "semantic_ok": false,
+  "steps": [
+   {
+    "after": {
+     "observation_status": "omitted_guarded_envelope"
+    },
+    "before": {
+     "observation_status": "omitted_guarded_envelope"
+    },
+    "dirty": false,
+    "error": "UNKNOWN: Edit refused before any change; original state and preservation verified.",
+    "failure_diagnostic": {
+     "causal_class": "NativeNumberingRefusal",
+     "cause2_class": "UNKNOWN",
+     "cause_class": "UNKNOWN",
+     "refusal_code": "style_variant_unsupported",
+     "site": "bundle_step"
+    },
+    "index": 1,
+    "label": "wire",
+    "mutation": {
+     "may_have_persisted": false,
+     "rollback": {}
+    },
+    "mutation_may_have_persisted": false,
+    "ok": false,
+    "op": "style_create_exact",
+    "refusal_code": "style_variant_unsupported",
+    "refusal_message": "paragraph properties (align) for a new style are not shown by Hancom's StyleAddNew example, which sets only the character shape; create the style without them; nothing was written",
+    "rollback": {}
+   }
+  ],
+  "summary": "command-bundle stopped: 1/1 step(s)",
+  "warnings": []
+ }
+}

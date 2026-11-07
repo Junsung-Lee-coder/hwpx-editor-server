@@ -551,6 +551,15 @@ def validate_step_for_op(op: str, *, service: Any, index: int, step: dict[str, A
             (native_fields.validate_inventory_step if op == 'field_inventory' else native_fields.validate_fill_step)(step)
         except native_fields.NativeNumberingInputError as exc:
             _raise(error_type, f'command-bundle step {index} {op}: {exc}')
+    elif op in {'style_inventory', 'style_apply_exact', 'style_create_exact', 'style_update_exact'}:
+        from app import native_styles
+
+        validate = {'style_inventory': native_styles.validate_inventory_step, 'style_apply_exact': native_styles.validate_apply_step,
+                    'style_create_exact': native_styles.validate_create_step, 'style_update_exact': native_styles.validate_update_step}[op]
+        try:
+            validate(step)
+        except native_styles.NativeNumberingInputError as exc:
+            _raise(error_type, f'command-bundle step {index} {op}: {exc}')
     elif op in {'control_inventory', 'table_frame_inventory', 'export_pdf', 'where'}:
         pass
     else:
@@ -697,6 +706,15 @@ def run_step_for_op(op: str, *, service: Any, handle: Any, step: dict[str, Any],
     if op == 'field_text_exact':
         result = service._bundle_field_text_exact(handle.hwp, step, on_mutating=handle.mark_mutating_intent)  # noqa: SLF001
         # The value already present is a proven no-op, not a new dirty delta.
+        return result, result['result']['changed'] is not False, list(result.get('warnings') or [])
+    if op == 'style_inventory':
+        result = service._bundle_style_inventory(handle.hwp, step)  # noqa: SLF001
+        return result, False, list(result.get('warnings') or [])
+    if op in {'style_apply_exact', 'style_create_exact', 'style_update_exact'}:
+        run = {'style_apply_exact': service._bundle_style_apply_exact, 'style_create_exact': service._bundle_style_create_exact,  # noqa: SLF001
+               'style_update_exact': service._bundle_style_update_exact}[op]  # noqa: SLF001
+        result = run(handle.hwp, step, on_mutating=handle.mark_mutating_intent)
+        # A style or definition already present is a proven no-op, not a new dirty delta.
         return result, result['result']['changed'] is not False, list(result.get('warnings') or [])
     if op == 'paragraph_delete_exact':
         result = service._bundle_paragraph_delete_exact(handle.hwp, step)  # noqa: SLF001

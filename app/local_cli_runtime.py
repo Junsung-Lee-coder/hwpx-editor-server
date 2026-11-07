@@ -166,6 +166,21 @@ def _native_diagnostic(site: object, error: BaseException) -> dict[str, str]:
                 from app.step_refusal import step_diagnostic_allowed
                 if step_diagnostic_allowed(step_phase, step_reason):
                     diagnostic.update(step_phase=step_phase, step_reason=step_reason)
+        if type(error) is NativeNumberingReadFailure:
+            # A held style edit's fixed site and answer shape (app.style_rules): exact str keys and values in the allowlists only.
+            data = BaseException.__dict__['__dict__'].__get__(error)
+            site_label = returned = None
+            if type(data) is dict and len(data) <= 16:
+                for key, value in dict.items(data):
+                    if type(key) is str and type(value) is str:
+                        if key == 'native_site':
+                            site_label = value
+                        elif key == 'native_return':
+                            returned = value
+            if type(site_label) is str and type(returned) is str:
+                from app.style_rules import NATIVE_RETURNS, NATIVE_SITES
+                if site_label in NATIVE_SITES and returned in NATIVE_RETURNS:
+                    diagnostic.update(native_site=site_label, native_return=returned)
         current = error
         for field in ('causal_class', 'cause_class', 'cause2_class'):
             label = _exception_label(current)
@@ -209,6 +224,10 @@ def _native_diagnostic(site: object, error: BaseException) -> dict[str, str]:
                             'field_not_found', 'field_count_mismatch', 'field_occurrence_required', 'field_hash_mismatch', 'field_kind_unsupported',
                             'field_multi_paragraph', 'field_text_unreadable', 'field_census_budget', 'field_name_unaddressable', 'field_census_unusable',
                             'field_text_unprovable',
+                            'style_model_unusable', 'style_not_found', 'style_name_ambiguous', 'style_hash_mismatch', 'styles_hash_mismatch',
+                            'style_kind_unsupported', 'style_name_taken', 'style_without_plain_body_use', 'style_action_unavailable',
+                            'style_uses_unconfirmed', 'style_uses_mismatch', 'style_use_has_own_format', 'style_uses_too_many',
+                            'style_variant_unsupported', 'style_rename_unsupported', 'style_shape_unverified',
                             'table_not_found', 'table_identity_ambiguous', 'table_grid_mismatch', 'table_state_stale', 'table_too_large', 'table_would_be_empty', 'table_geometry_unknown',
                             'cell_out_of_range', 'cell_covered_by_merge', 'cell_not_merged', 'range_cuts_merged_cell', 'range_too_small', 'merged_cell_crosses_lines', 'merged_split_rows_unsupported',
                             'line_inside_merged_cell', 'removed_content_mismatch', 'edge_not_in_target', 'edge_held_by_wider_neighbour', 'cells_text_unsupported', 'table_would_overflow', 'column_widths_mismatch', 'column_too_narrow', 'fill_kind_unsupported', 'target_table_not_entered', 'target_cell_unreachable',
@@ -425,7 +444,7 @@ def _bounded_command_result(value: Any) -> Any:
                     continue
                 compact_steps.append({
                     field: _bounded_journal_value(step[field], key_hint=field)
-                    for field in ('index', 'label', 'op', 'ok', 'dirty', 'error', 'mutation')
+                    for field in ('index', 'label', 'op', 'ok', 'dirty', 'error', 'mutation', 'style_proof')
                     if field in step
                 })
             result[key] = compact_steps
