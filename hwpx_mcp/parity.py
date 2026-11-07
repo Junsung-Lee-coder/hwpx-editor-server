@@ -84,6 +84,30 @@ BUNDLE_OPS: dict[str, dict[str, Any]] = {
     'field_text_exact': _exposed(SESSION_TOOLS, note='fills one existing click-here field bound by name, its occurrence when the name repeats, and its hash, with one '
                                                      'PutFieldText of its own name{{n}} (never the bare name, which writes every field of it); proven from the field list and '
                                                      'the document text; undo is refused (undo_not_counted): its native Undo is not measured; native qualification is incomplete'),
+    'style_inventory': _exposed(SESSION_TOOLS, note='read-only list of the named styles from the document text: index, name, English name, kind '
+                                                    '(paragraph or character), next style, lock, resolved character and paragraph properties and the hash that binds '
+                                                    'each, the styles_hash of the whole list, and for a paragraph style its uses (body, table cells, other lists, '
+                                                    'headers, footers; plain or with a format of their own; at most 50 rows, 1000 with name=, and a uses hash); '
+                                                    'the text records no use of a character style'),
+    'style_apply_exact': _exposed(SESSION_TOOLS, note='applies one existing style bound by style_name+expected_style_hash with one Style action (the action the '
+                                                      'ActionTable labels for Hangul 2005 and earlier; StyleEx takes the same set): a paragraph '
+                                                      'style to the paragraphs of an exact target, a character style to an exact range; proven from the document '
+                                                      'text; undo is refused (undo_not_counted): its native Undo is not measured; native qualification is incomplete'),
+    'style_create_exact': _exposed(SESSION_TOOLS, note='creates one named paragraph style from an existing paragraph style bound by hash, plus requested '
+                                                       'character properties, with one StyleAddNew of the legacy action family (CreateAction, CreateSet, '
+                                                       'GetDefault answering the int 1 measured natively, SetItem, the CharShape sub-set set back, Execute '
+                                                       'answering True), as Hancom\'s 2025 developer-forum example writes it; next_style must be a paragraph '
+                                                       'style; no paragraph changes; a character style '
+                                                       '(style_kind_unsupported) and paragraph properties (style_variant_unsupported) are refused before any '
+                                                       'write; undo is refused (undo_not_counted); native qualification is incomplete'),
+    'style_update_exact': _exposed(SESSION_TOOLS, note='changes one paragraph style\'s character properties with one StyleDirectEdit of the legacy action '
+                                                       'family, NameLocal selecting the style, as Hancom\'s 2024 developer-forum example writes it for Hangul '
+                                                       '2018 and later, the style\'s whole character shape read first as IHwpObject.CharShape at its plain use '
+                                                       'with only the requested items written into it and set on the action\'s set as Automation\'s copy rule '
+                                                       'requires, with every use bound by expected_uses+expected_uses_hash and all_uses=true; refused when '
+                                                       'a use has a format of its own or the read shape is not whole or not the style\'s own (style_shape_unverified); a rename (style_rename_unsupported) and paragraph properties '
+                                                       '(style_variant_unsupported) are refused before any write; undo is refused (undo_not_counted); native '
+                                                       'qualification is incomplete'),
     'control_inventory': _exposed(SESSION_TOOLS, note='read-only native control list with target_id/expected_hash'),
     'picture_inventory': _exposed(SESSION_TOOLS, note='read-only structural picture census with exact SHAPEOBJECT identity/hash, frame, crop, media and explicit unqualified edit/history bounds'),
     'picture_replace_exact': _exposed(SESSION_TOOLS, note='implemented body-picture PNG replacement, same decoded aspect ratio, current GetCtrlInstID mapping before selection; final native qualification incomplete; Undo/Redo refused before dispatch'),
@@ -138,7 +162,7 @@ GUARDED = frozenset({'page_number_apply', 'official_numbering_apply', 'paragraph
                      'character_format_exact', 'paragraph_format_exact', 'table_inventory', 'table_read', 'table_edit_exact',
                      'table_style_exact', 'table_width_exact', 'table_create_exact', 'text_replace_exact', 'table_cell_text_exact',
                      'header_footer_inventory', 'header_footer_text_exact', 'header_footer_format_exact', 'field_inventory', 'field_text_exact',
-                     'picture_inventory', 'picture_replace_exact', 'picture_crop_exact', 'picture_layout_exact'})
+                     'style_inventory', 'style_apply_exact', 'style_create_exact', 'style_update_exact', 'picture_inventory', 'picture_replace_exact', 'picture_crop_exact', 'picture_layout_exact'})
 # Ops that publish mutation intent at their first native edit (app.step_refusal.DEFERRED_INTENT_OPS): before it they
 # refuse with a fixed refusal_code only from their own exact reads; anything else holds the session.
 DEFERRED = frozenset({'layout_exact', 'object_insert_exact', 'paragraph_rehome_exact'})

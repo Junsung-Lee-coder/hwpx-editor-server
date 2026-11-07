@@ -1,0 +1,33 @@
+{
+  "op": "style_create_exact",
+  "version": "local-cli/style-create-exact/v1-package",
+  "summary": "Create one new named paragraph style from an existing paragraph style's definitions and the requested character properties, by one StyleAddNew; a character style and paragraph properties are refused before any write; no paragraph changes.",
+  "module": "app.command_packages.commands.style_create_exact.run",
+  "read_only": false,
+  "dirty_default": true,
+  "allowed_keys": [
+    "op",
+    "operation",
+    "label",
+    "name",
+    "english_name",
+    "kind",
+    "based_on",
+    "expected_based_on_hash",
+    "expected_styles_hash",
+    "next_style",
+    "font_family",
+    "size_pt",
+    "bold",
+    "italic",
+    "underline",
+    "text_color",
+    "align",
+    "left_indent_pt",
+    "right_indent_pt",
+    "first_line_indent_pt",
+    "line_spacing_type",
+    "line_spacing_value",
+    "confirm_layout"
+  ]
+}

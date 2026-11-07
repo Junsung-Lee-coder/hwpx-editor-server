@@ -4,6 +4,8 @@ Existing header/footer inventory and exact text/direct formatting: [API guide](H
 
 Existing named fields (click-here 누름틀, cell and text box fields): inventory by name and occurrence, and filling one click-here field: [guide](FIELDS.md).
 
+Named styles (스타일): inventory with definitions and uses, applying one by name to an exact paragraph or range, creating one and changing one: [guide](STYLES.md).
+
 기존 HWPX REST 서버를 MCP 클라이언트에서 호출하는 별도 프로세스입니다. 설치 프로그램이나 기존 서버의 시작 방식을 바꾸지 않습니다. 이 패키지는 로컬 개발·검증용 소스이며 운영 환경의 설치 절차를 대신하지 않습니다. 각 환경에서 실행한 검사 결과를 확인하세요.
 
 ## 연결 조건

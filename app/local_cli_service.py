@@ -71,7 +71,7 @@ from app.local_cli_runtime import (
     save_document,
     snapshot_live_location,
 )
-from app import native_format, native_numbering, native_numbering_census, native_paragraph_edit, native_table
+from app import native_format, native_numbering, native_numbering_census, native_paragraph_edit, native_table, style_rules
 from app.local_cli_type_guard import type_insert_guard_reason
 from app.step_refusal import DEFERRED_INTENT_OPS, PHASE_DIAGNOSTIC_OPS, STEP_REFUSAL_CODES, LocalCliStepRefusal, StepControl
 from app.command_packages.runtime import get_command_package_registry
@@ -123,6 +123,7 @@ from app.local_cli_layout import LocalCliLayoutMixin
 from app.local_cli_object_insert import LocalCliObjectInsertMixin
 from app.local_cli_bundle_header_footer import LocalCliBundleHeaderFooterMixin
 from app.local_cli_bundle_fields import LocalCliBundleFieldsMixin
+from app.local_cli_bundle_styles import LocalCliBundleStylesMixin
 from app.local_cli_bundle_text import LocalCliBundleTextMixin
 from app.media_guard import MediaGuardError, media_change_reasons, media_inventory, public_counts
 
@@ -158,6 +159,10 @@ _BUNDLE_UNDO_POLICY: dict[str, str] = {
     'header_footer_format_exact': 'counted_native_edit',
     # One PutFieldText of the field's own occurrence. Its native Undo was not measured, so a fill is never counted as an Undo step.
     'field_text_exact': 'refuse',
+    # One Style, StyleAddNew or StyleDirectEdit. Their native Undo was not measured, so none is counted as an Undo step.
+    'style_apply_exact': 'refuse',
+    'style_create_exact': 'refuse',
+    'style_update_exact': 'refuse',
     # One Execute is not a measured Undo transaction. A picture step is counted
     # ONLY when an explicitly configured HWPX profile declares that kind's native
     # Undo/Redo steps and the step recorded its complete package states; a
@@ -195,6 +200,7 @@ _GUARDED_BUNDLE_OPS = frozenset({
     'picture_inventory', 'picture_replace_exact', 'picture_crop_exact', 'picture_layout_exact',
     'header_footer_inventory', 'header_footer_text_exact', 'header_footer_format_exact',
     'field_inventory', 'field_text_exact',
+    'style_inventory', 'style_apply_exact', 'style_create_exact', 'style_update_exact',
 })
 _COUNTED_POLICIES = frozenset({'counted_native_edit', 'counted_any_native_edit', 'counted_state_edit'})
 
@@ -449,6 +455,7 @@ class LocalCliService(
     LocalCliBundleTextMixin,
     LocalCliBundleHeaderFooterMixin,
     LocalCliBundleFieldsMixin,
+    LocalCliBundleStylesMixin,
 ):
     def __init__(self, *, settings: Any, interactive_sessions: Any):
         self.settings = settings
@@ -1681,7 +1688,8 @@ class LocalCliService(
                     )
                 if step.get('op') in {'character_format_exact', 'paragraph_format_exact'} and all(key in raw_result for key in ('target', 'requested', 'result')):
                     result.update(native_format.public_report(raw_result))
-                if step.get('op') in {'table_inventory', 'table_read', 'table_edit_exact', 'table_style_exact', 'table_width_exact', 'table_create_exact', 'text_replace_exact', 'table_cell_text_exact', 'header_footer_inventory', 'header_footer_text_exact', 'header_footer_format_exact', 'field_inventory', 'field_text_exact'}:
+                if step.get('op') in {'table_inventory', 'table_read', 'table_edit_exact', 'table_style_exact', 'table_width_exact', 'table_create_exact', 'text_replace_exact', 'table_cell_text_exact', 'header_footer_inventory', 'header_footer_text_exact', 'header_footer_format_exact', 'field_inventory', 'field_text_exact',
+                                       'style_inventory', 'style_apply_exact', 'style_create_exact', 'style_update_exact'}:
                     # The caller asked for these values and they are bounded where they are built; the journal copy stays bounded and redacted.
                     result.update(raw_result)
                 if step.get('op') in {'picture_inventory', 'picture_replace_exact', 'picture_crop_exact', 'picture_layout_exact'}:
@@ -3058,6 +3066,12 @@ class LocalCliService(
             'header_footer_inventory': {'op', 'label', 'operation'},
             'field_inventory': {'op', 'label', 'operation', 'name'},
             'field_text_exact': {'op', 'operation', 'label', 'name', 'occurrence', 'expected_occurrences', 'expected_hash', 'new_text', 'confirm_layout'},
+            'style_inventory': {'op', 'label', 'operation', 'name'},
+            'style_apply_exact': {'op', 'operation', 'label', 'style_name', 'expected_style_hash', 'match', 'through_match', 'paragraph_index', 'expected_text', 'expected_page', 'confirm_layout'},
+            'style_create_exact': {'op', 'operation', 'label', 'name', 'english_name', 'kind', 'based_on', 'expected_based_on_hash', 'expected_styles_hash', 'next_style', 'confirm_layout',
+                                   'font_family', 'size_pt', 'bold', 'italic', 'underline', 'text_color', 'align', 'left_indent_pt', 'right_indent_pt', 'first_line_indent_pt', 'line_spacing_type', 'line_spacing_value'},
+            'style_update_exact': {'op', 'operation', 'label', 'style_name', 'expected_style_hash', 'new_name', 'new_english_name', 'expected_uses', 'expected_uses_hash', 'all_uses', 'confirm_layout',
+                                   'font_family', 'size_pt', 'bold', 'italic', 'underline', 'text_color', 'align', 'left_indent_pt', 'right_indent_pt', 'first_line_indent_pt', 'line_spacing_type', 'line_spacing_value'},
             'header_footer_text_exact': {'op', 'operation', 'label', 'kind', 'section', 'apply_to', 'expected_area_hash', 'expected_affected_sections', 'old_text', 'new_text', 'match', 'occurrence',
                                          'expected_occurrences', 'paragraph_index', 'expected_text', 'format_from', 'confirm_layout'},
             'header_footer_format_exact': {'op', 'operation', 'label', 'kind', 'section', 'apply_to', 'expected_area_hash', 'expected_affected_sections', 'match', 'paragraph_index', 'expected_text', 'confirm_layout',
@@ -7493,7 +7507,10 @@ class LocalCliService(
                         error_text = ('Formatting refused before any edit; original state and preservation verified.' if step.get('op') in {'character_format_exact', 'paragraph_format_exact', 'table_inventory', 'table_read', 'table_edit_exact', 'table_style_exact', 'table_width_exact', 'table_create_exact'}
                                       # field_inventory issues field list and field text reads only and runs no state check after a refusal.
                                       else 'Field listing refused; it only read the field list and field texts, nothing was written, and no state check was run.' if step.get('op') == 'field_inventory'
-                                      else 'Edit refused before any change; original state and preservation verified.' if step.get('op') in {'text_replace_exact', 'table_cell_text_exact', 'header_footer_inventory', 'header_footer_text_exact', 'header_footer_format_exact', 'field_text_exact'}
+                                      # style_inventory reads the document text once and runs no state check after a refusal.
+                                      else 'Style listing refused; it only read the document text, nothing was written, and no state check was run.' if step.get('op') == 'style_inventory'
+                                      else 'Edit refused before any change; original state and preservation verified.' if step.get('op') in {'text_replace_exact', 'table_cell_text_exact', 'header_footer_inventory', 'header_footer_text_exact', 'header_footer_format_exact', 'field_text_exact',
+                                                                                                                                         'style_apply_exact', 'style_create_exact', 'style_update_exact'}
                                       else 'Numbering preflight refused; original state and preservation verified.')
                     rollback = {}
                     if not step_refused and (type(exc) is LocalCliMutationError or type(exc) is LocalCliRuntimeError):
@@ -7524,9 +7541,18 @@ class LocalCliService(
                             'rollback': rollback,
                         },
                     }
-                    if type(exc) is LocalCliMutationError and step.get('op') in {'table_edit_exact', 'table_style_exact', 'table_width_exact', 'table_create_exact', 'text_replace_exact', 'table_cell_text_exact', 'header_footer_text_exact', 'header_footer_format_exact', 'field_text_exact'}:
+                    if type(exc) is LocalCliMutationError and step.get('op') in {'table_edit_exact', 'table_style_exact', 'table_width_exact', 'table_create_exact', 'text_replace_exact', 'table_cell_text_exact', 'header_footer_text_exact', 'header_footer_format_exact', 'field_text_exact',
+                                                                       'style_apply_exact', 'style_create_exact', 'style_update_exact'}:
                         # These messages name cells and properties, never document text, and say why the outcome is not proven.
                         status['outcome_detail'] = error_text[:800]
+                    if type(exc) is LocalCliMutationError and step.get('op') in style_rules.STYLE_PROOF_COMMANDS:
+                        # A held style edit's proof facts, only when exactly of their fixed shape; a fault here never changes the outcome or its custody.
+                        try:
+                            proof = style_rules.style_proof_facts(dict.get(BaseException.__dict__['__dict__'].__get__(exc), 'style_proof'))
+                        except Exception:  # noqa: BLE001
+                            proof = None
+                        if proof is not None:
+                            status['style_proof'] = proof
                     if step_refused and not mutation_may_have_persisted:
                         status['refusal_code'] = step_refusal_code
                     elif target_refused and not mutation_may_have_persisted:
@@ -7534,7 +7560,8 @@ class LocalCliService(
                         status['refusal_code'] = (exc.code if type(exc) is _NumberingSemanticRefusal or type(exc) is _NumberingCleanRefusal
                                                   else _native_diagnostic('bundle_step', exc)['refusal_code'])
                         args = BaseException.__dict__['args'].__get__(exc)
-                        if step.get('op') in {'character_format_exact', 'paragraph_format_exact', 'page_number_apply', 'table_inventory', 'table_read', 'table_edit_exact', 'table_style_exact', 'table_width_exact', 'table_create_exact', 'text_replace_exact', 'table_cell_text_exact', 'header_footer_inventory', 'header_footer_text_exact', 'header_footer_format_exact', 'field_inventory', 'field_text_exact', 'picture_inventory', 'picture_replace_exact', 'picture_crop_exact', 'picture_layout_exact'} and type(args) is tuple and len(args) == 1 and type(args[0]) is str:
+                        if step.get('op') in {'character_format_exact', 'paragraph_format_exact', 'page_number_apply', 'table_inventory', 'table_read', 'table_edit_exact', 'table_style_exact', 'table_width_exact', 'table_create_exact', 'text_replace_exact', 'table_cell_text_exact', 'header_footer_inventory', 'header_footer_text_exact', 'header_footer_format_exact', 'field_inventory', 'field_text_exact', 'picture_inventory', 'picture_replace_exact', 'picture_crop_exact', 'picture_layout_exact',
+                                           'style_inventory', 'style_apply_exact', 'style_create_exact', 'style_update_exact'} and type(args) is tuple and len(args) == 1 and type(args[0]) is str:
                             status['refusal_message'] = args[0][:400]
                         if type(exc) is NativeNumberingRefusal:
                             found_page = BaseException.__dict__['__dict__'].__get__(exc).get('found_page')

@@ -4,7 +4,7 @@ from __future__ import annotations
 from typing import Annotated, Any, Literal, Union
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
-from app import field_rules
+from app import field_rules, style_rules
 from app.models import CellMarginsGetRequest
 from hwpx_mcp import job_schema as jobs
 from hwpx_mcp import operations as ops
@@ -631,6 +631,121 @@ class FieldTextStep(Closed):
         return self
 
 
+StyleName = Annotated[str, Field(min_length=1, max_length=64, description='An exact style name as style_inventory lists it.')]
+StyleHash = Annotated[str, Field(pattern=r'^sha256:[0-9a-f]{24}$')]
+
+
+def _style_name(value):
+    # The backend's own rule (app.style_rules, pure): the same verdict for every name the backend would read.
+    problem = None if value is None else style_rules.name_problem(value)
+    if problem is not None:
+        raise ValueError(problem)
+    return value
+
+
+class StyleInventoryStep(Closed):
+    op: Literal['style_inventory']
+    label: Label = 'mcp:style-inventory'
+    name: StyleName | None = Field(default=None, description='Only this style, with up to 1000 of its uses listed; counts are of the whole list.')
+
+    @field_validator('name')
+    @classmethod
+    def a_style_name(cls, value):
+        return _style_name(value)
+
+
+class StyleApplyStep(_FormatTarget):
+    op: Literal['style_apply_exact']
+    label: Label = 'mcp:style-apply-exact'
+    style_name: StyleName
+    expected_style_hash: StyleHash = Field(description='The hash style_inventory reported for this style.')
+
+    @field_validator('style_name')
+    @classmethod
+    def a_style_name(cls, value):
+        return _style_name(value)
+
+
+class _StyleProperties(Closed):
+    """A style's character and paragraph properties, by the formatting commands' own names and limits. style_create_exact and
+    style_update_exact refuse the paragraph ones (style_variant_unsupported) before any write."""
+    font_family: Annotated[str, Field(min_length=1, max_length=64, pattern=r'^[^@\s](.*\S)?$')] | None = None
+    size_pt: float | None = Field(default=None, ge=0.1, le=4096.0, description='Points, in steps of 0.1.')
+    bold: bool | None = None
+    italic: bool | None = None
+    underline: bool | None = None
+    text_color: Annotated[str, Field(pattern=r'^#[0-9A-Fa-f]{6}$')] | None = Field(default=None, description='#RRGGBB.')
+    align: Literal['left', 'center', 'right', 'justify'] | None = None
+    left_indent_pt: float | None = Field(default=None, ge=0.0, le=570.2)
+    right_indent_pt: float | None = Field(default=None, ge=0.0, le=570.2)
+    first_line_indent_pt: float | None = Field(default=None, ge=-570.2, le=570.2)
+    line_spacing_type: Literal['percent', 'fixed', 'between_lines', 'at_least'] | None = None
+    line_spacing_value: float | None = Field(default=None, ge=0.0, le=841.8)
+    confirm_layout: Literal[True]
+
+    def _requested(self) -> tuple[dict[str, Any], dict[str, Any]]:
+        character = {key: value for key in ('font_family', 'size_pt', 'bold', 'italic', 'underline', 'text_color') if (value := getattr(self, key)) is not None}
+        paragraph = {key: value for key in ('align', 'left_indent_pt', 'right_indent_pt', 'first_line_indent_pt', 'line_spacing_type', 'line_spacing_value')
+                     if (value := getattr(self, key)) is not None}
+        common = {'match': 'x', 'expected_page': 1, 'confirm_layout': True}
+        try:
+            if character:
+                CharacterFormatStep.model_validate({'op': 'character_format_exact', **common, **character})
+            if paragraph:
+                ParagraphFormatStep.model_validate({'op': 'paragraph_format_exact', **common, **paragraph})
+        except ValidationError as exc:
+            raise ValueError('; '.join(str(item.get('msg')) for item in exc.errors())) from None
+        return character, paragraph
+
+
+class StyleCreateStep(_StyleProperties):
+    op: Literal['style_create_exact']
+    label: Label = 'mcp:style-create-exact'
+    name: StyleName = Field(description='The new style name; no style may have it yet.')
+    english_name: StyleName | None = Field(default=None, description='The new English name; the name when omitted.')
+    kind: Literal['paragraph', 'character'] = Field(description='paragraph; a character style is refused (style_kind_unsupported) before any write.')
+    based_on: StyleName = Field(description='An existing paragraph style whose definitions the new style starts from.')
+    expected_based_on_hash: StyleHash = Field(description='The hash style_inventory reported for based_on.')
+    expected_styles_hash: StyleHash = Field(description='The styles_hash style_inventory reported for the whole list.')
+    next_style: StyleName | None = Field(default=None, description='A paragraph style only: the existing style the next paragraph takes; the new style itself when omitted.')
+
+    @field_validator('name', 'english_name', 'based_on', 'next_style')
+    @classmethod
+    def a_style_name(cls, value):
+        return _style_name(value)
+
+    @model_validator(mode='after')
+    def kind_and_properties(self):
+        _character, paragraph = self._requested()
+        if self.kind == 'character' and (paragraph or self.next_style is not None):
+            raise ValueError('a character style has no paragraph properties and no next_style')
+        return self
+
+
+class StyleUpdateStep(_StyleProperties):
+    op: Literal['style_update_exact']
+    label: Label = 'mcp:style-update-exact'
+    style_name: StyleName
+    expected_style_hash: StyleHash = Field(description='The hash style_inventory reported for this style.')
+    new_name: StyleName | None = Field(default=None, description='A rename is refused (style_rename_unsupported) before any write.')
+    new_english_name: StyleName | None = Field(default=None, description='A rename is refused (style_rename_unsupported) before any write.')
+    expected_uses: int = Field(ge=0, le=1_000_000, description='The number of paragraphs using the style, as style_inventory reported it.')
+    expected_uses_hash: StyleHash = Field(description='The uses hash style_inventory reported for this style.')
+    all_uses: bool = Field(default=False, description='Required true when the style has uses: every paragraph using it takes the changed definitions.')
+
+    @field_validator('style_name', 'new_name', 'new_english_name')
+    @classmethod
+    def a_style_name(cls, value):
+        return _style_name(value)
+
+    @model_validator(mode='after')
+    def something_to_change(self):
+        character, paragraph = self._requested()
+        if not character and not paragraph and self.new_name is None and self.new_english_name is None:
+            raise ValueError('style_update_exact needs at least one property, new_name or new_english_name')
+        return self
+
+
 class PictureInventoryStep(Closed):
     op: Literal['picture_inventory']
     label: Label = 'mcp:picture-inventory'
@@ -678,7 +793,8 @@ class PictureLayoutStep(PictureBinding):
 _EXACT_STEPS = (ContextStep, SelectionStep, ReadbackStep, CellFormatStep, PageNumberStep, OfficialNumberingStep, ParagraphInsertStep,
                 ParagraphRemoveStep, CharacterFormatStep, ParagraphFormatStep, TableInventoryStep, TableReadStep, TableEditStep,
                 TableStyleStep, TableWidthStep, TableCreateStep, TextReplaceStep, TableCellTextStep, HeaderFooterInventoryStep,
-                HeaderFooterTextStep, HeaderFooterFormatStep, FieldInventoryStep, FieldTextStep, PictureInventoryStep, PictureReplaceStep, PictureCropStep, PictureLayoutStep)
+                HeaderFooterTextStep, HeaderFooterFormatStep, FieldInventoryStep, FieldTextStep, StyleInventoryStep, StyleApplyStep, StyleCreateStep,
+                StyleUpdateStep, PictureInventoryStep, PictureReplaceStep, PictureCropStep, PictureLayoutStep)
 # One command-bundle step: every backend bundle op MCP exposes (hwpx_mcp/parity.py BUNDLE_OPS).
 BundleStep = Annotated[Union[(*_EXACT_STEPS, *ops.NEW_BUNDLE_STEPS)], Field(discriminator='op')]
 _REST_STEPS = tuple(model for _path, model in ops.REST_OPS.values())

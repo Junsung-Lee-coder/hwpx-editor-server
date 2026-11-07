@@ -1,0 +1,21 @@
+{
+  "op": "style_apply_exact",
+  "version": "local-cli/style-apply-exact/v1-package",
+  "summary": "Apply one existing named style, bound by its name and hash, to an exact paragraph or range: a paragraph style to the paragraphs, a character style to the text.",
+  "module": "app.command_packages.commands.style_apply_exact.run",
+  "read_only": false,
+  "dirty_default": true,
+  "allowed_keys": [
+    "op",
+    "operation",
+    "label",
+    "style_name",
+    "expected_style_hash",
+    "match",
+    "through_match",
+    "paragraph_index",
+    "expected_text",
+    "expected_page",
+    "confirm_layout"
+  ]
+}
