@@ -14,6 +14,18 @@ jobs:
     name: Portable source gates
     runs-on: ubuntu-latest
     steps:
+      - name: Prepare private portable temporary directory
+        shell: bash
+        run: |
+          set -euo pipefail
+          : "${RUNNER_TEMP:?RUNNER_TEMP is required}"
+          : "${GITHUB_ENV:?GITHUB_ENV is required}"
+          [[ "$RUNNER_TEMP" = /* && "$GITHUB_ENV" = /* ]]
+          test -d "$RUNNER_TEMP"
+          umask 077
+          job_temp="$(mktemp -d -- "$RUNNER_TEMP/hwpx-portable.XXXXXXXX")"
+          mkdir -- "$job_temp/tmp"
+          printf 'TMPDIR=%s\nTMP=%s\nTEMP=%s\n' "$job_temp/tmp" "$job_temp/tmp" "$job_temp/tmp" >> "$GITHUB_ENV"
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           fetch-depth: 0

@@ -17,12 +17,14 @@ try:
         find_python_source_hygiene_violations,
         is_prohibited_member,
         is_public_test_fixture_member,
+        FIXED_NATIVE_TEST_FIXTURES,
     )
 except ImportError:  # direct script execution
     from source_bundle_policy import (
         find_python_source_hygiene_violations,
         is_prohibited_member,
         is_public_test_fixture_member,
+        FIXED_NATIVE_TEST_FIXTURES,
     )
 
 
@@ -612,6 +614,9 @@ def _stage_source_paths(
                     raise SourceBundleError(
                         f"source member bytes do not match Git tree {git_commit}: {relative.as_posix()}"
                     )
+            fixed_authority = FIXED_NATIVE_TEST_FIXTURES.get(relative.as_posix())
+            if fixed_authority is not None and (size, digest.hexdigest()) != fixed_authority:
+                raise SourceBundleError(f"fixed test fixture bytes do not match independent authority: {relative.as_posix()}")
             metadata.append({
                 "path": _safe_member_name(relative.as_posix()),
                 "size": size,

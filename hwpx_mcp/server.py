@@ -159,6 +159,11 @@ def rejection_summary(value: dict[str, Any]) -> dict[str, Any]:
         'found_page': failed.get('found_page'),
         'session_held': value.get('native_custody_held') is True or (coded is not None and coded.group(1) == 'native_custody_held'),
     }
+    from app.open_failure import public_failure
+    detail_object = value.get('detail')
+    open_failure = public_failure(detail_object.get('open_failure')) if type(detail_object) is dict else None
+    if open_failure is not None:
+        summary.update(reason='open_failed', message='Local CLI open failed.', open_failure=open_failure)
     # A held style edit's fixed stopping site and answer shape, when both are the backend's own allowlisted labels.
     site, returned = diagnostic.get('native_site'), diagnostic.get('native_return')
     if type(site) is str and type(returned) is str and site in style_rules.NATIVE_SITES and returned in style_rules.NATIVE_RETURNS:
@@ -192,6 +197,13 @@ class Facade:
             if not isinstance(value, dict):
                 raise BackendFailure('BACKEND_INVALID_RESPONSE', 'Backend did not return a JSON object.')
             if response.status_code >= 400 or (require_ok and value.get('ok') is not True):
+                if path == '/local-cli/open' and type(value.get('detail')) is dict and 'open_failure' in value['detail']:
+                    # Preserve only the new fixed diagnostic, not foreign detail
+                    # fields, exception names/messages or arbitrary class labels.
+                    from app.open_failure import public_failure
+                    diagnostic = public_failure(value['detail']['open_failure'])
+                    value = {'detail': {'message': 'Local CLI open failed.', **(
+                        {'open_failure': diagnostic} if diagnostic is not None else {})}}
                 # Preserve journal identifiers and backend evidence, not the
                 # exception/HTTP request (which could contain credentials).
                 summary = rejection_summary(value)
@@ -1015,7 +1027,13 @@ def build_app(settings: Settings | None = None):
                                 'paragraph; table_cell_text_exact to write the whole text of cells of one bound table, each with its expected_text, returning the next '
                                 'binding). Existing text: text_replace_exact replaces one exact range of body or table-cell text, found by old_text, a longer match, '
                                 'occurrence with expected_occurrences, or paragraph_index with expected_text; the new text keeps the replaced text\'s format, and text '
-                                'in several formats needs format_from=last_character. Existing headers and footers: header_footer_inventory lists each with its section, '
+                                'in several formats needs format_from=last_character. Native text containers: text_container_inventory lists text boxes, captions and footnotes; '
+                                'text_container_read returns complete target_id+expected_hash text (never use a preview as expected_text). text_container_text_exact replaces the whole '
+                                'expected_text of one body-owned single-list, single-paragraph, uniform-format container. Native shape GroupLevel must be zero; '
+                                'nonzero is refused before navigation and malformed/conflicting grouping holds. Leading caption/note AUTONUM is kept. text_box_create '
+                                'creates one inline horizontal text box with caller text, width_mm/height_mm 5..200, exact expected_pos and confirm_layout=true; '
+                                'the first creation read proves the pristine paragraph/offset and actual finite noncollapsed geometry before more SDK work. '
+                                'All container variants are native-unqualified and Undo is refused. Existing headers and footers: header_footer_inventory lists each with its section, '
                                 'apply_to (both, odd or even pages), text, page number fields and hash; header_footer_text_exact replaces one exact range of its text and '
                                 'header_footer_format_exact sets character or paragraph format in it, bound by kind+section+apply_to+expected_area_hash + the exact expected_affected_sections array for shared owners (a section '
                                 'showing an earlier section\'s area is refused as area_inherited, naming that section). Existing named fields (the document\'s own '

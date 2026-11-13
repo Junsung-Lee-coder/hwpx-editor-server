@@ -489,6 +489,66 @@ class Reconcile(Closed):
 AreaHash = Annotated[str, Field(pattern=r'^sha256:[0-9a-f]{24}$', description='The hash header_footer_inventory reported for this area.')]
 
 
+class TextContainerInventoryStep(Closed):
+    op: Literal['text_container_inventory']
+    label: Label = 'mcp:text-container-inventory'
+
+
+class _TextContainerBinding(Closed):
+    target_id: Annotated[str, Field(pattern=r'^(text_box|caption|footnote):[0-9]{1,10}$')]
+    expected_hash: AreaHash
+
+    @model_validator(mode='after')
+    def validate_native_binding(self):
+        from app.native_text_containers import nn, validate_step
+        try:
+            validate_step(self.model_dump())
+        except nn.NativeNumberingInputError as exc:
+            raise ValueError(str(exc)) from exc
+        return self
+
+
+class TextContainerReadStep(_TextContainerBinding):
+    op: Literal['text_container_read']
+    label: Label = 'mcp:text-container-read'
+
+
+class TextContainerTextStep(_TextContainerBinding):
+    op: Literal['text_container_text_exact']
+    label: Label = 'mcp:text-container-text-exact'
+    expected_text: Annotated[str, Field(min_length=1, max_length=20000, description='Complete current container text, never a preview or substring.')]
+    new_text: Annotated[str, Field(min_length=1, max_length=2000)]
+    confirm_layout: Literal[True]
+
+    @model_validator(mode='after')
+    def validate_native_contract(self):
+        from app.native_text_containers import nn, validate_step
+        try:
+            validate_step(self.model_dump())
+        except nn.NativeNumberingInputError as exc:
+            raise ValueError(str(exc)) from exc
+        return self
+
+
+class TextBoxCreateStep(Closed):
+    op: Literal['text_box_create']
+    label: Label = 'mcp:text-box-create'
+    text: Annotated[str, Field(min_length=1, max_length=2000)]
+    width_mm: Annotated[float, Field(ge=5, le=200)]
+    height_mm: Annotated[float, Field(ge=5, le=200)]
+    expected_pos: list[Annotated[int, Field(ge=0, lt=2**31)]] = Field(min_length=3, max_length=3)
+    confirm_layout: Literal[True]
+
+    @model_validator(mode='after')
+    def validate_native_contract(self):
+        from app.native_text_containers import nn, validate_step
+        try:
+            validate_step(self.model_dump())
+        except nn.NativeNumberingInputError as exc:
+            raise ValueError(str(exc)) from exc
+        return self
+
+
 class HeaderFooterInventoryStep(Closed):
     op: Literal['header_footer_inventory']
     label: Label = 'mcp:header-footer-inventory'
@@ -794,7 +854,8 @@ _EXACT_STEPS = (ContextStep, SelectionStep, ReadbackStep, CellFormatStep, PageNu
                 ParagraphRemoveStep, CharacterFormatStep, ParagraphFormatStep, TableInventoryStep, TableReadStep, TableEditStep,
                 TableStyleStep, TableWidthStep, TableCreateStep, TextReplaceStep, TableCellTextStep, HeaderFooterInventoryStep,
                 HeaderFooterTextStep, HeaderFooterFormatStep, FieldInventoryStep, FieldTextStep, StyleInventoryStep, StyleApplyStep, StyleCreateStep,
-                StyleUpdateStep, PictureInventoryStep, PictureReplaceStep, PictureCropStep, PictureLayoutStep)
+                StyleUpdateStep, PictureInventoryStep, PictureReplaceStep, PictureCropStep, PictureLayoutStep,
+                TextContainerInventoryStep, TextContainerReadStep, TextContainerTextStep, TextBoxCreateStep)
 # One command-bundle step: every backend bundle op MCP exposes (hwpx_mcp/parity.py BUNDLE_OPS).
 BundleStep = Annotated[Union[(*_EXACT_STEPS, *ops.NEW_BUNDLE_STEPS)], Field(discriminator='op')]
 _REST_STEPS = tuple(model for _path, model in ops.REST_OPS.values())

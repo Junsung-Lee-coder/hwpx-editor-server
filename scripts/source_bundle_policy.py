@@ -72,10 +72,19 @@ def is_prohibited_member(raw_name: str) -> bool:
     return False
 
 
-# Tracked synthetic inputs that exported tests read. Only the ``fixtures``
+# Tracked regression inputs that exported tests read. Only the ``fixtures``
 # directory directly under ``tests/`` is such an input; every other directory
 # named ``fixtures`` stays excluded by RUNTIME_DIR_NAMES above.
 PUBLIC_TEST_FIXTURE_ROOT = ('tests', 'fixtures')
+
+# Native constructor regression payloads: exact paths, independent size/SHA pins.
+# These are permitted only in test_fixture_files; runtime exclusions are unchanged.
+FIXED_NATIVE_TEST_FIXTURES = {
+    'tests/fixtures/native_text_box_constructor/native-fields-seed.hwpx': (
+        18028, '94713acdd8052a7c886482d005f6b9750356c950e91691b95b3159b0e1d96243'),
+    'tests/fixtures/native_text_box_constructor/native-inline-40x20.hwpx': (
+        18827, 'd3e89abb1e9e9d381c69de9d85c0e4c8ba5973a08ff0653803ea31730a2e2971'),
+}
 
 
 def public_test_fixture_policy_name(raw_name: str) -> str | None:
@@ -83,7 +92,8 @@ def public_test_fixture_policy_name(raw_name: str) -> str | None:
 
     ``tests/fixtures/a/b.xml`` is checked as ``tests/a/b.xml``: lifting the one
     ``fixtures`` component is the only exemption, so runtime directories,
-    document/archive suffixes and private names inside the root still apply.
+    document/archive suffixes and private names inside the root still apply;
+    only the two independently pinned native fixture paths have a suffix exception.
     """
 
     parts = PurePosixPath(str(raw_name).replace('\\', '/')).parts
@@ -95,6 +105,8 @@ def public_test_fixture_policy_name(raw_name: str) -> str | None:
 def is_public_test_fixture_member(raw_name: str) -> bool:
     """Return whether a member is a test fixture a source bundle may carry."""
 
+    if str(raw_name) in FIXED_NATIVE_TEST_FIXTURES:
+        return True
     policy_name = public_test_fixture_policy_name(raw_name)
     return policy_name is not None and not is_prohibited_member(policy_name)
 

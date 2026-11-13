@@ -15,6 +15,7 @@ try:
         find_python_source_hygiene_violations,
         is_prohibited_member,
         is_public_test_fixture_member,
+        FIXED_NATIVE_TEST_FIXTURES,
         public_test_fixture_policy_name,
     )
 except ImportError:  # direct script execution
@@ -22,6 +23,7 @@ except ImportError:  # direct script execution
         find_python_source_hygiene_violations,
         is_prohibited_member,
         is_public_test_fixture_member,
+        FIXED_NATIVE_TEST_FIXTURES,
         public_test_fixture_policy_name,
     )
 
@@ -144,15 +146,20 @@ def _safe_member_name(raw: str) -> str:
 def _safe_test_fixture_member_name(raw: str) -> str:
     """Validate a ``tests/fixtures/`` member; only that ``fixtures`` name is exempt.
 
-    The rest of the path must pass every unsafe-path, runtime and private-name
-    check of an ordinary member.
+    Ordinary fixture paths retain every unsafe-path, runtime and private-name
+    check. The two exact native document paths have a suffix-only exception;
+    their canonical names and independent byte authority remain mandatory.
     """
 
     name = str(raw).replace("\\", "/")
     policy_name = public_test_fixture_policy_name(name)
     if policy_name is None or not is_public_test_fixture_member(name):
         raise SourceBundleVerificationError(f"not an allowed test fixture member: {raw!r}")
-    _safe_member_name(policy_name)
+    fixed_authority = FIXED_NATIVE_TEST_FIXTURES.get(name)
+    if fixed_authority is None:
+        _safe_member_name(policy_name)
+    elif str(raw) != name:
+        raise SourceBundleVerificationError(f"unsafe archive member path: {raw!r}")
     if PurePosixPath(name).as_posix() != name:
         raise SourceBundleVerificationError(f"unsafe archive member path: {raw!r}")
     return name
@@ -626,6 +633,9 @@ def _verify_source_bundle_open(
             or not _is_sha256_hex(item.get("sha256"))
         ):
             raise SourceBundleVerificationError(f"source manifest contains invalid metadata for: {name}")
+        fixed_authority = FIXED_NATIVE_TEST_FIXTURES.get(name)
+        if fixed_authority is not None and (size, str(item['sha256'])) != fixed_authority:
+            raise SourceBundleVerificationError(f"fixed test fixture metadata does not match independent authority: {name}")
         expected_fixtures[key] = {"path": name, "size": size, "sha256": str(item["sha256"])}
     declared_fixture_count = manifest.get("test_fixture_file_count", 0)
     if (
