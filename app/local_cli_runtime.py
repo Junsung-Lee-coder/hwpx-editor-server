@@ -17,6 +17,7 @@ import uuid
 from typing import Any, Callable
 
 from app.atomic_json import read_json_object, update_json_object
+from app.open_failure import record_failure
 from app.edit_ops import _capture_nearby_text_context, _snapshot_cursor_context
 from app.native_actions import NativeActionRunner
 from app.runtime_state import update_runtime_status, utc_now_iso
@@ -166,12 +167,18 @@ def _native_diagnostic(site: object, error: BaseException) -> dict[str, str]:
                 from app.step_refusal import step_diagnostic_allowed
                 if step_diagnostic_allowed(step_phase, step_reason):
                     diagnostic.update(step_phase=step_phase, step_reason=step_reason)
-        if type(error) is NativeNumberingReadFailure:
-            # A held style edit's fixed site and answer shape (app.style_rules): exact str keys and values in the allowlists only.
+        if type(error) is NativeNumberingReadFailure or type(error) is NativeNumberingMutationError:
+            # Exact producer's cached fixed fields, including a mutation wrapper's
+            # pre-carried read capsule. Never traverse causes to recover labels.
             data = BaseException.__dict__['__dict__'].__get__(error)
             site_label = returned = None
+            ctrlid_observation = binding_observation = None
             if type(data) is dict and len(data) <= 16:
                 for key, value in dict.items(data):
+                    if type(key) is str and key == '_container_binding_observation':
+                        binding_observation = value
+                    if type(key) is str and key == '_container_ctrlid_observation':
+                        ctrlid_observation = value
                     if type(key) is str and type(value) is str:
                         if key == 'native_site':
                             site_label = value
@@ -179,8 +186,33 @@ def _native_diagnostic(site: object, error: BaseException) -> dict[str, str]:
                             returned = value
             if type(site_label) is str and type(returned) is str:
                 from app.style_rules import NATIVE_RETURNS, NATIVE_SITES
-                if site_label in NATIVE_SITES and returned in NATIVE_RETURNS:
+                from app.native_text_containers import NATIVE_READ_RETURNS, NATIVE_READ_SITES
+                if ((type(error) is NativeNumberingReadFailure
+                     and site_label in NATIVE_SITES and returned in NATIVE_RETURNS)
+                        or (site_label in NATIVE_READ_SITES and returned in NATIVE_READ_RETURNS)):
                     diagnostic.update(native_site=site_label, native_return=returned)
+                    if ctrlid_observation is not None:
+                        # Existing bundle/worker paths commit owning HOLD before
+                        # this fallible projection. No SDK/raw-object inspection.
+                        try:
+                            from app.native_text_containers import _project_ctrlid, CTRLID_DIAGNOSTIC_FIELDS
+                            fields = _project_ctrlid(ctrlid_observation)
+                            if (type(fields) is tuple and len(fields) == 6
+                                    and all(type(v) is str and len(v) <= 128 for v in fields)):
+                                for name, value in zip(CTRLID_DIAGNOSTIC_FIELDS, fields):
+                                    diagnostic[name] = value
+                        except BaseException:
+                            pass  # optional publication cannot replace first fault/debt
+                    if site_label == 'container.binding.document' and binding_observation is not None:
+                        try:
+                            from app.native_text_containers import _project_binding, BINDING_DIAGNOSTIC_FIELDS
+                            fields = _project_binding(binding_observation)
+                            if (type(fields) is tuple and len(fields) == 7
+                                    and all(type(v) is str and len(v) <= 128 for v in fields)):
+                                for name, value in zip(BINDING_DIAGNOSTIC_FIELDS, fields):
+                                    diagnostic[name] = value
+                        except BaseException:
+                            pass  # no raw documents or text enter public diagnostics
         current = error
         for field in ('causal_class', 'cause_class', 'cause2_class'):
             label = _exception_label(current)
@@ -220,6 +252,11 @@ def _native_diagnostic(site: object, error: BaseException) -> dict[str, str]:
                             'target_not_found', 'target_not_in_body', 'target_unidentifiable', 'target_unlocatable',
                             'text_readback_unavailable',
                             'area_not_found', 'area_inherited', 'area_ambiguous', 'area_hash_mismatch', 'area_unlocatable',
+                            'container_not_found', 'container_hash_mismatch', 'container_text_mismatch', 'container_unlocatable',
+                            'container_identity_unavailable', 'container_nested_owner', 'container_owner_shared', 'container_multi_paragraph',
+                            'container_has_controls', 'container_text_unsupported', 'container_mixed_format', 'container_selection_present',
+                            'container_wrong_caret', 'container_state_unproven',
+                            'container_grouped_owner',
                             'affected_sections_required', 'affected_sections_mismatch',
                             'field_not_found', 'field_count_mismatch', 'field_occurrence_required', 'field_hash_mismatch', 'field_kind_unsupported',
                             'field_multi_paragraph', 'field_text_unreadable', 'field_census_budget', 'field_name_unaddressable', 'field_census_unusable',
@@ -1995,6 +2032,18 @@ class LocalCliLiveSession:
             # Existing bundle failure caller; custody is already published.
             # Private journal only, no new SDK reads or release authority.
             command.reconciliation_data['bundle_failure_diagnostic'] = _native_diagnostic('bundle_step', cause)
+            # Actual owning HOLD is already published above. Same PRIVATE command
+            # journal/permission/lifetime only; never a public artifact or result.
+            try:
+                from app.native_text_containers import _private_binding
+                operands = _private_binding(cause)
+                data = command.reconciliation_data
+                if (type(operands) is dict and type(data) is dict
+                        and all(type(k) is str and k != 'container_binding_comparison' for k in dict.keys(data))):
+                    dict.__setitem__(data, 'container_binding_comparison', operands)
+                    self._persist_command(command)
+            except BaseException:
+                pass  # optional evidence I/O cannot replace original cause/debt
 
     def _settle_held_command(
         self,
@@ -2733,6 +2782,7 @@ class LocalCliLiveSession:
                 pending.future.set_exception(LocalCliRuntimeError(_HELD_CLOSE_MESSAGE))
 
     def _run(self) -> None:
+        open_stage = 'runtime_initialize'
         pythoncom = None
         coinitialized = False
         hwp = None
@@ -2747,8 +2797,10 @@ class LocalCliLiveSession:
                 pythoncom.CoInitialize()
                 coinitialized = True
 
+            open_stage = 'runtime_sdk_import'
             from pyhwpx import Hwp  # type: ignore
 
+            open_stage = 'runtime_preflight'
             process_session = current_windows_session_snapshot()
             update_runtime_status(
                 self.log_path,
@@ -2763,8 +2815,10 @@ class LocalCliLiveSession:
                     f"current process session_id={process_session.get('session_id')} session_name={process_session.get('session_name')!r}."
                 )
 
+            open_stage = 'runtime_process_baseline'
             before_native = _native_close_processes()
             self._constructor_invoked = True
+            open_stage = 'runtime_constructor'
             hwp = create_hwp_instance_with_recovery(
                 Hwp,
                 log_path=self.log_path,
@@ -2772,6 +2826,7 @@ class LocalCliLiveSession:
                 detail=f'open {self.source_filename}',
             )
             self._active_hwp = hwp
+            open_stage = 'runtime_owner_binding'
             if before_native is not None:
                 # Bind the original constructor object, not an injected close API.
                 if type(hwp) is not Hwp or hwp.on_quit is not False:
@@ -2794,6 +2849,7 @@ class LocalCliLiveSession:
                     'process': _bind_native_close_process(hwnd, before_native),
                 }
                 windows = docs = None  # no child COM references survive into finalization
+            open_stage = 'runtime_post_constructor'
             update_runtime_status(
                 self.log_path,
                 phase='local_cli_create_hwp_instance_succeeded',
@@ -2804,6 +2860,7 @@ class LocalCliLiveSession:
                 },
                 append_history=True,
             )
+            open_stage = 'runtime_watchdog'
             watchdog_stop, watchdog_thread = start_runtime_watchdog(
                 self.log_path,
                 # Observers run off the owning STA. Never give them the SDK
@@ -2815,6 +2872,7 @@ class LocalCliLiveSession:
                     'run_label': 'local-cli-open',
                 },
             )
+            open_stage = 'runtime_document_open'
             hwp = open_document_with_recovery(
                 Hwp=Hwp,
                 hwp=hwp,
@@ -2824,6 +2882,7 @@ class LocalCliLiveSession:
                 max_attempts=1,
                 probe_attempts=1,
             )
+            open_stage = 'runtime_ready_report'
             update_runtime_status(
                 self.log_path,
                 phase='local_cli_document_ready',
@@ -2854,6 +2913,7 @@ class LocalCliLiveSession:
                     )
                 if not self._quarantined:
                     return
+            open_stage = 'runtime_location'
             startup_location = snapshot_live_location(
                 hwp=hwp,
                 source_filename=self.source_filename,
@@ -2861,6 +2921,7 @@ class LocalCliLiveSession:
                 include_nearby_context=False,
                 include_document_snapshot=False,
             )
+            open_stage = 'runtime_start_result'
             if not self._start_future.done():
                 self._start_future.set_result({'ok': True, 'location': startup_location})
             startup_command = self._commands_by_id.get(f'{self.session_id}:start')
@@ -3084,7 +3145,12 @@ class LocalCliLiveSession:
             wrapped.__cause__ = exc
             self._terminal_error = wrapped
             if not self._start_future.done():
-                self._start_future.set_exception(wrapped)
+                try:
+                    record_failure(wrapped, open_stage, origin=exc)
+                except BaseException:
+                    pass  # metadata cannot displace the original startup error
+                finally:
+                    self._start_future.set_exception(wrapped)
         finally:
             self._finalize(
                 hwp=hwp,
@@ -3123,12 +3189,16 @@ class LocalCliRuntimeManager:
                 self._sessions.pop(session_id, None)
             if existing is not None and existing.is_alive():
                 raise LocalCliRuntimeError(f'Local CLI live session already exists: {session_id}')
-            live_session = LocalCliLiveSession(
-                session_id=session_id,
-                session_root=session_root,
-                working_copy_path=working_copy_path,
-                source_filename=source_filename,
-            )
+            try:
+                live_session = LocalCliLiveSession(
+                    session_id=session_id,
+                    session_root=session_root,
+                    working_copy_path=working_copy_path,
+                    source_filename=source_filename,
+                )
+            except Exception as exc:
+                record_failure(exc, 'runtime_session_create')
+                raise
             self._sessions[session_id] = live_session
             self._session_roots[session_id] = session_root
         try:

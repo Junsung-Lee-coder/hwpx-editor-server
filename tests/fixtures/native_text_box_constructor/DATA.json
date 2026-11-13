@@ -1,0 +1,33 @@
+{
+  "schema": "native-textbox-constructor-regression-data/v1",
+  "provenance": "Original unconverted Hancom GUI HWPML2.x and HWPX saved from one held native-created empty inline text box; original bytes authenticated independently before tests. DATA only, not immediate GetTextFile/native feature proof.",
+  "files": {
+    "native-fields-seed.hwpx": {
+      "bytes": 18028,
+      "sha256": "94713acdd8052a7c886482d005f6b9750356c950e91691b95b3159b0e1d96243"
+    },
+    "native-inline-40x20.hml": {
+      "bytes": 31799,
+      "sha256": "54027fba990230dc4e9e533b97d185213f883910bf426a27b164a117aba8c5b4"
+    },
+    "native-inline-40x20.hwpx": {
+      "bytes": 18827,
+      "sha256": "d3e89abb1e9e9d381c69de9d85c0e4c8ba5973a08ff0653803ea31730a2e2971"
+    }
+  },
+  "independent_native_before_request_position": [
+    0,
+    0,
+    238
+  ],
+  "baseline_model_limit": "No original pre-create live HWPML retained. Test before-model removes only new rectangle and optional newly emitted zero-width end CHAR from genuine after-format; compares projected body/field content with independent untouched HWPX seed. Never called native before evidence.",
+  "observed_rectangle_hu": [
+    11339,
+    5669
+  ],
+  "observed_unlinked_PARALIST": {
+    "LinkListID": "0",
+    "LinkListIDNext": "0"
+  },
+  "HWPX_current_size_not_legacy_contract": "curSz0x0 is not manufactured into HWPML; actual HML lacks CurWidth/CurHeight."
+}

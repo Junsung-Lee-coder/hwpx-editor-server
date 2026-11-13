@@ -1,0 +1,1 @@
+{"op":"text_container_read","version":"local-cli/text-container-read/v1-package","summary":"Read complete text of one native container bound by exact identity and hash.","module":"app.command_packages.commands.text_container_read.run","read_only":true,"dirty_default":false,"allowed_keys":["op","operation","label","target_id","expected_hash"]}

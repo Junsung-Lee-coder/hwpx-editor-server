@@ -1,0 +1,231 @@
+{
+  "schema": "hshapeobject-requested-members/v1",
+  "independent_full_generated_sha256": "f9ed176b04b25ea8eb3e837aba4825d3d3e73ce7484350ddf4b6678005f5a3fc",
+  "generated_file_executed": false,
+  "class": "HShapeObject",
+  "members": [
+    {
+      "name": "WidthRelTo",
+      "getter": {
+        "line": 8282,
+        "ast": [
+          16425,
+          2,
+          [
+            18,
+            0
+          ],
+          [],
+          "WidthRelTo",
+          null
+        ],
+        "source": "(16425, 2, (18, 0), (), \"WidthRelTo\", None)"
+      },
+      "putter": {
+        "line": 8368,
+        "ast": [
+          [
+            16425,
+            {
+              "symbol": "LCID"
+            },
+            4,
+            0
+          ],
+          []
+        ],
+        "source": "((16425, LCID, 4, 0),())"
+      },
+      "getter_vartype": 18,
+      "putter_vartype": "NOT_ENCODED_IN_GENERATED_PROP_MAP_PUT; do not infer a value descriptor from dispatch metadata"
+    },
+    {
+      "name": "HeightRelTo",
+      "getter": {
+        "line": 8220,
+        "ast": [
+          16427,
+          2,
+          [
+            18,
+            0
+          ],
+          [],
+          "HeightRelTo",
+          null
+        ],
+        "source": "(16427, 2, (18, 0), (), \"HeightRelTo\", None)"
+      },
+      "putter": {
+        "line": 8306,
+        "ast": [
+          [
+            16427,
+            {
+              "symbol": "LCID"
+            },
+            4,
+            0
+          ],
+          []
+        ],
+        "source": "((16427, LCID, 4, 0),())"
+      },
+      "getter_vartype": 18,
+      "putter_vartype": "NOT_ENCODED_IN_GENERATED_PROP_MAP_PUT; do not infer a value descriptor from dispatch metadata"
+    },
+    {
+      "name": "Width",
+      "getter": {
+        "line": 8281,
+        "ast": [
+          16426,
+          2,
+          [
+            3,
+            0
+          ],
+          [],
+          "Width",
+          null
+        ],
+        "source": "(16426, 2, (3, 0), (), \"Width\", None)"
+      },
+      "putter": {
+        "line": 8367,
+        "ast": [
+          [
+            16426,
+            {
+              "symbol": "LCID"
+            },
+            4,
+            0
+          ],
+          []
+        ],
+        "source": "((16426, LCID, 4, 0),())"
+      },
+      "getter_vartype": 3,
+      "putter_vartype": "NOT_ENCODED_IN_GENERATED_PROP_MAP_PUT; do not infer a value descriptor from dispatch metadata"
+    },
+    {
+      "name": "Height",
+      "getter": {
+        "line": 8219,
+        "ast": [
+          16428,
+          2,
+          [
+            3,
+            0
+          ],
+          [],
+          "Height",
+          null
+        ],
+        "source": "(16428, 2, (3, 0), (), \"Height\", None)"
+      },
+      "putter": {
+        "line": 8305,
+        "ast": [
+          [
+            16428,
+            {
+              "symbol": "LCID"
+            },
+            4,
+            0
+          ],
+          []
+        ],
+        "source": "((16428, LCID, 4, 0),())"
+      },
+      "getter_vartype": 3,
+      "putter_vartype": "NOT_ENCODED_IN_GENERATED_PROP_MAP_PUT; do not infer a value descriptor from dispatch metadata"
+    },
+    {
+      "name": "TreatAsChar",
+      "getter": {
+        "line": 8275,
+        "ast": [
+          16415,
+          2,
+          [
+            18,
+            0
+          ],
+          [],
+          "TreatAsChar",
+          null
+        ],
+        "source": "(16415, 2, (18, 0), (), \"TreatAsChar\", None)"
+      },
+      "putter": {
+        "line": 8361,
+        "ast": [
+          [
+            16415,
+            {
+              "symbol": "LCID"
+            },
+            4,
+            0
+          ],
+          []
+        ],
+        "source": "((16415, LCID, 4, 0),())"
+      },
+      "getter_vartype": 18,
+      "putter_vartype": "NOT_ENCODED_IN_GENERATED_PROP_MAP_PUT; do not infer a value descriptor from dispatch metadata"
+    },
+    {
+      "name": "AdjustTextbox",
+      "getter": {
+        "line": 8202,
+        "ast": [
+          16471,
+          2,
+          [
+            18,
+            0
+          ],
+          [],
+          "AdjustTextbox",
+          null
+        ],
+        "source": "(16471, 2, (18, 0), (), \"AdjustTextbox\", None)"
+      },
+      "putter": {
+        "line": 8288,
+        "ast": [
+          [
+            16471,
+            {
+              "symbol": "LCID"
+            },
+            4,
+            0
+          ],
+          []
+        ],
+        "source": "((16471, LCID, 4, 0),())"
+      },
+      "getter_vartype": 18,
+      "putter_vartype": "NOT_ENCODED_IN_GENERATED_PROP_MAP_PUT; do not infer a value descriptor from dispatch metadata"
+    }
+  ],
+  "hset_setitem": {
+    "class": "HSet",
+    "method": "SetItem",
+    "line": 8038,
+    "source": "def SetItem(self, itemid=defaultNamedNotOptArg, newVal=defaultNamedNotOptArg):\r\n\t\t'method SetItem'\r\n\t\treturn self._oleobj_.InvokeTypes(15000, LCID, 1, (24, 0), ((8, 1), (12, 1)),itemid\r\n\t\t\t, newVal)",
+    "inputs": {
+      "itemid": 8,
+      "newVal": 12
+    },
+    "return_vartype": 24,
+    "not_legacy_IDHwpParameterSet": true,
+    "meaning": "Generic BSTR item ID / VARIANT value / VOID; a raw item bag is not a generated attribute namespace."
+  }
+}

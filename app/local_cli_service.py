@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping
 
 from fastapi import HTTPException, UploadFile
+from app.open_failure import failure_from_exception, record_failure
 
 from app.atomic_json import atomic_write_json, path_lock, read_json_object
 from app.edit_ops import (
@@ -124,6 +125,7 @@ from app.local_cli_object_insert import LocalCliObjectInsertMixin
 from app.local_cli_bundle_header_footer import LocalCliBundleHeaderFooterMixin
 from app.local_cli_bundle_fields import LocalCliBundleFieldsMixin
 from app.local_cli_bundle_styles import LocalCliBundleStylesMixin
+from app.native_text_containers import LocalCliBundleTextContainersMixin
 from app.local_cli_bundle_text import LocalCliBundleTextMixin
 from app.media_guard import MediaGuardError, media_change_reasons, media_inventory, public_counts
 
@@ -159,6 +161,8 @@ _BUNDLE_UNDO_POLICY: dict[str, str] = {
     'header_footer_format_exact': 'counted_native_edit',
     # One PutFieldText of the field's own occurrence. Its native Undo was not measured, so a fill is never counted as an Undo step.
     'field_text_exact': 'refuse',
+    'text_container_text_exact': 'refuse',
+    'text_box_create': 'refuse',
     # One Style, StyleAddNew or StyleDirectEdit. Their native Undo was not measured, so none is counted as an Undo step.
     'style_apply_exact': 'refuse',
     'style_create_exact': 'refuse',
@@ -199,6 +203,7 @@ _GUARDED_BUNDLE_OPS = frozenset({
     'table_width_exact', 'table_create_exact', 'text_replace_exact', 'table_cell_text_exact',
     'picture_inventory', 'picture_replace_exact', 'picture_crop_exact', 'picture_layout_exact',
     'header_footer_inventory', 'header_footer_text_exact', 'header_footer_format_exact',
+    'text_container_inventory', 'text_container_read', 'text_container_text_exact', 'text_box_create',
     'field_inventory', 'field_text_exact',
     'style_inventory', 'style_apply_exact', 'style_create_exact', 'style_update_exact',
 })
@@ -456,6 +461,7 @@ class LocalCliService(
     LocalCliBundleHeaderFooterMixin,
     LocalCliBundleFieldsMixin,
     LocalCliBundleStylesMixin,
+    LocalCliBundleTextContainersMixin,
 ):
     def __init__(self, *, settings: Any, interactive_sessions: Any):
         self.settings = settings
@@ -1689,7 +1695,7 @@ class LocalCliService(
                 if step.get('op') in {'character_format_exact', 'paragraph_format_exact'} and all(key in raw_result for key in ('target', 'requested', 'result')):
                     result.update(native_format.public_report(raw_result))
                 if step.get('op') in {'table_inventory', 'table_read', 'table_edit_exact', 'table_style_exact', 'table_width_exact', 'table_create_exact', 'text_replace_exact', 'table_cell_text_exact', 'header_footer_inventory', 'header_footer_text_exact', 'header_footer_format_exact', 'field_inventory', 'field_text_exact',
-                                       'style_inventory', 'style_apply_exact', 'style_create_exact', 'style_update_exact'}:
+                                       'text_container_inventory', 'text_container_read', 'text_container_text_exact', 'text_box_create', 'style_inventory', 'style_apply_exact', 'style_create_exact', 'style_update_exact'}:
                     # The caller asked for these values and they are bounded where they are built; the journal copy stays bounded and redacted.
                     result.update(raw_result)
                 if step.get('op') in {'picture_inventory', 'picture_replace_exact', 'picture_crop_exact', 'picture_layout_exact'}:
@@ -3064,6 +3070,10 @@ class LocalCliService(
             'picture_crop_exact': {'op', 'operation', 'label', 'target_id', 'expected_hash', 'confirm_layout', 'left', 'top', 'right', 'bottom'},
             'picture_layout_exact': {'op', 'operation', 'label', 'target_id', 'expected_hash', 'confirm_layout', 'mode', 'horizontal_offset_mm', 'vertical_offset_mm'},
             'header_footer_inventory': {'op', 'label', 'operation'},
+            'text_container_inventory': {'op', 'operation', 'label'},
+            'text_container_read': {'op', 'operation', 'label', 'target_id', 'expected_hash'},
+            'text_container_text_exact': {'op', 'operation', 'label', 'target_id', 'expected_hash', 'expected_text', 'new_text', 'confirm_layout'},
+            'text_box_create': {'op', 'operation', 'label', 'text', 'width_mm', 'height_mm', 'expected_pos', 'confirm_layout'},
             'field_inventory': {'op', 'label', 'operation', 'name'},
             'field_text_exact': {'op', 'operation', 'label', 'name', 'occurrence', 'expected_occurrences', 'expected_hash', 'new_text', 'confirm_layout'},
             'style_inventory': {'op', 'label', 'operation', 'name'},
@@ -4487,7 +4497,12 @@ class LocalCliService(
 
         session_id = uuid.uuid4().hex
         session_root = self.sessions_root / session_id
-        ensure_session_layout(session_root)
+        open_stage = 'session_layout'
+        try:
+            ensure_session_layout(session_root)
+        except Exception as exc:
+            record_failure(exc, open_stage)
+            raise
         upload_dir = session_root / 'upload'
         working_dir = session_root / 'working'
         uploaded_path = upload_dir / f'original{suffix}'
@@ -4495,6 +4510,7 @@ class LocalCliService(
         size_bytes = 0
 
         try:
+            open_stage = 'upload_write'
             with uploaded_path.open('wb') as target:
                 while True:
                     chunk = await file.read(1024 * 1024)
@@ -4507,7 +4523,9 @@ class LocalCliService(
             if size_bytes <= 0:
                 raise LocalCliServiceError('Empty upload is not allowed.', status_code=400)
 
+            open_stage = 'working_copy'
             shutil.copy2(uploaded_path, working_copy_path)
+            open_stage = 'interactive_record'
             try:
                 session = self.interactive_sessions.open_session(
                     source_path=working_copy_path,
@@ -4519,7 +4537,9 @@ class LocalCliService(
                     session_id=session_id,
                 )
             except Exception as exc:
-                raise LocalCliServiceError(str(exc), status_code=409) from exc
+                failure = LocalCliServiceError('Local CLI session record failed.', status_code=409)
+                record_failure(failure, open_stage, origin=exc)
+                raise failure from exc
 
             resolved_session_id = str(session.get('session_id') or '').strip()
             if not resolved_session_id:
@@ -4530,6 +4550,7 @@ class LocalCliService(
                     status_code=500,
                 )
 
+            open_stage = 'runtime_open'
             try:
                 runtime_open = self.runtime_manager.open_session(
                     session_id=session_id,
@@ -4598,6 +4619,7 @@ class LocalCliService(
                     f'command_id={exc.command_id}; run command-reconcile before retrying.',
                     status_code=504,
                 ) from exc
+            open_stage = 'binding_commit'
             location = runtime_open.get('location') if isinstance(runtime_open.get('location'), dict) else {}
 
             binding = {
@@ -4637,7 +4659,12 @@ class LocalCliService(
                 'working_copy_id': session_id,
                 'cursor_summary': location.get('cursor_summary'),
             }
-        except Exception:
+        except Exception as exc:
+            if not isinstance(exc, (LocalCliServiceError, LocalCliRuntimeTimeoutError)) or (
+                isinstance(exc, LocalCliServiceError) and exc.status_code >= 500
+                and not isinstance(exc.__cause__, LocalCliRuntimeTimeoutError)
+            ):
+                record_failure(exc, open_stage)
             if session_id:
                 runtime_close_ok = False
                 try:
@@ -7507,6 +7534,8 @@ class LocalCliService(
                         error_text = ('Formatting refused before any edit; original state and preservation verified.' if step.get('op') in {'character_format_exact', 'paragraph_format_exact', 'table_inventory', 'table_read', 'table_edit_exact', 'table_style_exact', 'table_width_exact', 'table_create_exact'}
                                       # field_inventory issues field list and field text reads only and runs no state check after a refusal.
                                       else 'Field listing refused; it only read the field list and field texts, nothing was written, and no state check was run.' if step.get('op') == 'field_inventory'
+                                      else 'Container read refused; only document evidence was read and no mutation or navigation was issued.' if step.get('op') in {'text_container_inventory', 'text_container_read'}
+                                      else 'Container edit refused before any change; native navigation, if entered, was restored and preservation verified.' if step.get('op') in {'text_container_text_exact', 'text_box_create'}
                                       # style_inventory reads the document text once and runs no state check after a refusal.
                                       else 'Style listing refused; it only read the document text, nothing was written, and no state check was run.' if step.get('op') == 'style_inventory'
                                       else 'Edit refused before any change; original state and preservation verified.' if step.get('op') in {'text_replace_exact', 'table_cell_text_exact', 'header_footer_inventory', 'header_footer_text_exact', 'header_footer_format_exact', 'field_text_exact',
@@ -7561,7 +7590,7 @@ class LocalCliService(
                                                   else _native_diagnostic('bundle_step', exc)['refusal_code'])
                         args = BaseException.__dict__['args'].__get__(exc)
                         if step.get('op') in {'character_format_exact', 'paragraph_format_exact', 'page_number_apply', 'table_inventory', 'table_read', 'table_edit_exact', 'table_style_exact', 'table_width_exact', 'table_create_exact', 'text_replace_exact', 'table_cell_text_exact', 'header_footer_inventory', 'header_footer_text_exact', 'header_footer_format_exact', 'field_inventory', 'field_text_exact', 'picture_inventory', 'picture_replace_exact', 'picture_crop_exact', 'picture_layout_exact',
-                                           'style_inventory', 'style_apply_exact', 'style_create_exact', 'style_update_exact'} and type(args) is tuple and len(args) == 1 and type(args[0]) is str:
+                                           'text_container_inventory', 'text_container_read', 'text_container_text_exact', 'text_box_create', 'style_inventory', 'style_apply_exact', 'style_create_exact', 'style_update_exact'} and type(args) is tuple and len(args) == 1 and type(args[0]) is str:
                             status['refusal_message'] = args[0][:400]
                         if type(exc) is NativeNumberingRefusal:
                             found_page = BaseException.__dict__['__dict__'].__get__(exc).get('found_page')
@@ -8386,11 +8415,25 @@ class LocalCliService(
 
 
 
-def as_http_error(exc: Exception) -> HTTPException:
-    if isinstance(exc, LocalCliServiceError):
+def as_http_error(exc: Exception, *, open_failure_stage: str | None = None) -> HTTPException:
+    try:
+        if open_failure_stage is not None and (not issubclass(type(exc), (LocalCliServiceError, LocalCliRuntimeTimeoutError)) or (
+            issubclass(type(exc), LocalCliServiceError) and exc.status_code >= 500
+            and not issubclass(type(exc.__cause__), LocalCliRuntimeTimeoutError)
+        )):
+            record_failure(exc, open_failure_stage)
+        open_failure = failure_from_exception(exc)
+    except BaseException:
+        open_failure = None  # preserve original HTTP error/status if reporting is unavailable
+    if open_failure is not None:
+        status = exc.status_code if issubclass(type(exc), LocalCliServiceError) else 500
+        return HTTPException(status_code=status, detail={
+            'message': 'Local CLI open failed.', 'open_failure': open_failure,
+        })
+    if issubclass(type(exc), LocalCliServiceError):
         return HTTPException(status_code=exc.status_code, detail=exc.message)
     if type(exc) is LocalCliUndoRefused:
         return HTTPException(status_code=409, detail=f'{exc.code}: {_HISTORY_REFUSALS[exc.code]}')
-    if isinstance(exc, LocalCliRuntimeError):
+    if issubclass(type(exc), LocalCliRuntimeError):
         return HTTPException(status_code=500, detail='Local CLI native operation failed.')
     return HTTPException(status_code=500, detail='Local CLI request failed.')

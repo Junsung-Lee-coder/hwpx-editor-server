@@ -4,6 +4,8 @@ Existing header/footer inventory and exact text/direct formatting: [API guide](d
 
 Existing named fields (click-here 누름틀, cell and text box fields): inventory by name and occurrence, and filling one click-here field: [guide](docs/FIELDS.md).
 
+Native text containers: one inline horizontal 40 × 20 mm text box has been tested through creation, ordinary Save, saved-file reopen and complete text read, native PDF/all-page PNG output, and normal public close. Existing-box edits, captions, footnotes, history and other geometry remain implemented or restricted as documented, not native-qualified by that test: [guide](docs/NATIVE_TEXT_CONTAINERS.md).
+
 Named styles (스타일): inventory with definitions and uses, applying one by name to an exact paragraph or range, creating one and changing one: [guide](docs/STYLES.md).
 
 Existing pictures (inventory, replacement, crop, layout) and the optional saved-HWPX package proof, verified save and history contract: [guide](docs/EXISTING_PICTURES.md).

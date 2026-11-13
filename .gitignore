@@ -123,3 +123,10 @@ renders/
 /one-control-mutation-manifest.json
 /*.manifest.json
 /manifest.json
+
+# Exact authenticated constructor regression inputs, never runtime documents.
+!/tests/
+!/tests/fixtures/
+!/tests/fixtures/native_text_box_constructor/
+!/tests/fixtures/native_text_box_constructor/native-fields-seed.hwpx
+!/tests/fixtures/native_text_box_constructor/native-inline-40x20.hwpx

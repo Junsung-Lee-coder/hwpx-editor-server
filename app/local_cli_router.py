@@ -184,7 +184,7 @@ def build_local_cli_router(*, settings: Any, interactive_sessions: Any, service:
         try:
             return await service.open_upload(file=file, session_label=session_label)
         except Exception as exc:
-            raise as_http_error(exc) from exc
+            raise as_http_error(exc, open_failure_stage='open_dispatch') from exc
 
     @router.post('/local-cli/find')
     def local_cli_find(request: LocalCliFindRequest) -> dict[str, Any]:

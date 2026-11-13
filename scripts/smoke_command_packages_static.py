@@ -54,6 +54,10 @@ class _ValidationService:
 
 
 _VALIDATION_SAMPLES: dict[str, dict[str, object]] = {
+    'text_container_inventory': {},
+    'text_container_read': {'target_id': 'text_box:101', 'expected_hash': 'sha256:' + 'a' * 24},
+    'text_container_text_exact': {'target_id': 'text_box:101', 'expected_hash': 'sha256:' + 'a' * 24, 'expected_text': 'Box text', 'new_text': 'New box text', 'confirm_layout': True},
+    'text_box_create': {'text': 'Caller text', 'width_mm': 40, 'height_mm': 20, 'expected_pos': [0, 1, 0], 'confirm_layout': True},
     'context': {},
     'selection_proof': {},
     'control_inventory': {'section_anchor': 'A'},
