@@ -12,6 +12,10 @@ HWPML2X is read-only evidence, never an editing format.
   `text_complete=false`, `text_chars`, and a 300-character `text_preview`.
 - `text_container_read`: `target_id`, `expected_hash`. Returns the complete
   container text and the same binding. Never substitute the preview for text.
+- `text_container_body_caret`: `target_id`, `expected_hash`, complete
+  `expected_text`, `confirm_navigation=true`. Moves an unselected caret to the
+  body anchor of one exact editable text box; navigation only, with no content
+  change. See [body-caret navigation](text-container-body-caret.md).
 - `text_container_text_exact`: `target_id`, `expected_hash`, complete
   `expected_text` (1..20,000 characters), `new_text` (1..2,000 characters),
   `confirm_layout=true`. Replaces the entire text, not a substring or occurrence.
@@ -164,9 +168,32 @@ empty required owner, Next fault/budget exhaustion or any failed proof remains H
 Full census witness equality is checked BEFORE an additional HML read, so that
 read cannot erase getter drift. Full resolved document signature and the read's
 outgoing witness must also match; every foreign subtree/HEAD/field/style/media/
-numbering/outline/body participates. For exact-edit's sole intermediate append,
-request-bound old+new text must match exactly and only that paragraph's text
-characters are masked, retaining all formats/prefix controls/foreign content.
+numbering/outline/body participates. Exact replacement now proves the selected
+old range, strictly deletes it first, verifies the exact same target is empty
+with the complete non-target/shape/format signature unchanged, then advances
+binding only to that proved empty snapshot and rechecks its native owner before
+inserting the replacement. It never deliberately constructs old+new content.
+The authorized target-only text projection admits an empty plain CHAR/TEXT slot
+(including TEXT retaining a protected AUTONUM); all CHAR attributes, run/end
+formats, prefix control subtrees and other paragraphs remain exact. Raw document
+signatures do not receive this empty-text projection. The retained legacy append
+diagnostic helper still requires exact request-bound old+new text; it is not the
+current replacement consumer and has an explicitly synthetic producer fixture.
+
+Before the first destructive Delete, document-read/action preparation is finished
+and the actual Run callable is resolved and validated as an SDK observation.
+The original admitted owner/model/native route is independently rechecked with
+fresh ParentCtrl and census/context evidence. The exact live linear selection
+is then checked against that original range. Ordinary witness equality alone
+is preparation-purity evidence, never independent owner authority. Only then
+is the already prepared callable invoked; HAction/Run/parameter getters are
+not reacquired between this proof and Delete. Invalid getters and noncallable
+methods are technical first faults, not clean semantic refusals. Request intent
+and dirty/history/custody remain conservative; a zero-Delete refusal is not a
+claim that no navigation or request intent existed. This closes source-owned
+preparation gaps without claiming atomic attestation against arbitrary external
+changes during COM execution.
+
 After complete original post-edit/post-create preservation/geometry/read-purity
 proof, binding context advances to that proven after-model before final owner
 check. No unvalidated fresh snapshot supplies its own authority or cleanup path.
@@ -231,6 +258,23 @@ native_binding_phase, native_binding_expected, native_binding_observed,
 native_binding_xml_owner, native_binding_expected_hml_length and
 native_binding_observed_hml_length. Logical fingerprints preserve the existing
 `sha256:` +24hex operand exactly (96-bit truncation, NOT a new full256-bit proof).
+
+Legacy append diagnostic producer contract (not the current replacement path):
+after an exact successful InsertText.Execute and a healthy full-HML read,
+owner.selection_identity may persist one `container_binding_precomparison`
+pair BEFORE the binding comparison runs. Both exact HML strings (at most65536
+characters each), full UTF16LE/surrogatepass SHA256, XML owner and the actually
+returned exact True are PRIVATE command-journal evidence only. The optional
+`container_binding_precomparison_write_returned` flag distinguishes a returned
+write from unavailable/failed storage. No SDK getter is added, no private
+content enters public result/status, no held-root scan or post-HOLD getter is
+permitted, and no existing identity/preservation/native-return predicate is
+changed. Occupied slots, foreign types, oversized data and storage/digest
+failure leave this supplemental evidence unavailable without changing the
+original product result or first-fault custody. These diagnostic fields do not
+establish the raw mutator return, SDK window identity or native acceptance.
+The replacement path avoids the legacy append state.
+
 Append text fingerprints are optional UTF16LE SHA256 computed ONLY after HOLD;
 count mismatch reports actual count, not an unread peer value. No raw HML/text,
 exception message, arbitrary attribute/type-name/repr or opaque object projected.
@@ -368,20 +412,43 @@ visually checked, and healthy normal public close. Saved-package preservation
 and the delivered text/layout were independently checked for that exact workflow.
 The test qualifies that bounded workflow, not all inputs admitted by the schema.
 
-Existing-box replacement, drawing/picture captions, footnotes, other dimensions
-or orientations, and history are NOT native-qualified by this test. Inventory
-and read evidence is limited to the tested created/saved textbox; it does not
-qualify every other owner type. Portable models are not native evidence.
-Conservative per-variant runtime capability metadata is unchanged; the bounded
-workflow result does not promote every creation or edit variant to qualified.
+A separate limited native observation for existing-box editing covers one
+singleton inline horizontal 40 × 20 mm text box: inventory, complete text read,
+body-caret navigation, whole-text replacement changing one digit on one line
+without changing its length, and ordinary Save. The exact saved package was
+subsequently reopened, inventoried and read completely, rendered to a one-page
+native PDF and its complete PNG page set, and closed through the public API
+with normal native-process exit.
 
-Undo/Redo are deliberately not counted and native history is refused after a
-changed container command. Source/model tests are not a native edit claim.
-Use the existing save/retrieve/reopen/PDF/all-page PNG workflow on an owned
-fixture and independently compare the saved HWPX package before accepting any
-variant. In particular, preserve every non-target control, style definition and
-original media member, and verify the actual note/caption numbering, frame,
-text and page layout after reopen. Do not continue native calls after a HOLD.
+For that existing-box observation, the saved package comparison retained
+non-target content; the observed changes were the intended text leaf, caret
+location, modification date and two previews. The saved caret is at the box's
+body anchor rather than the original internal box position. The native render
+shows the saved result; no native render of the baseline exists, so
+before/after visual preservation is **not established**.
+
+The existing-box observation does not establish full native qualification of
+existing-box editing. The automatic `hwpx_proof` response of that run reported
+`review_status: partial` and `coverage.status: partial`.
+Native control inventory and page numbering were unverified, not proven absent.
+Verification before the original close did not complete. A successful later
+reopen/read/render/close does not retroactively complete that check.
+
+Other documents, captions, footnotes, dimensions, orientations, multi-line or
+different-length text, history and other hosts or Hancom versions are not
+qualified by the creation test or by the existing-box observation. Runtime
+per-operation `native_qualification: not_run` metadata is deliberately
+unchanged. Portable SDK models are source-contract tests, not native evidence.
+
+Undo/Redo are deliberately not supported for container edits. The
+`text_container_text_exact` and `text_container_body_caret` history policies
+refuse Undo; generic history support does not override these refusals.
+
+For any new variant, use an owned disposable fixture and check ordinary Save,
+retrieve the entire saved package, reopen that exact file, read the complete
+container, and inspect native PDF and every PNG page. Independently compare
+non-target controls, styles, media, numbering, frame, text and page layout.
+Do not continue native calls after a HOLD.
 
 ### Positional ABI and host scope
 

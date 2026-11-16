@@ -426,6 +426,7 @@ _BUNDLE_ALLOWED_OPS = {
     'object_insert_exact',
     'text_container_inventory',
     'text_container_read',
+    'text_container_body_caret',
     'text_container_text_exact',
     'text_box_create',
     'layout_exact',

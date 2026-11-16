@@ -1,6 +1,7 @@
 """Prospective closed-census product proof. No claim about box14 topology/native cause."""
 import copy,json,os,unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 from xml.etree import ElementTree as E
 from app import native_text_containers as nt
@@ -30,6 +31,52 @@ def create_head(m,events,where=1,*,omit=False,kind='gso',point=(0,0,238),ident=N
 def record(case,label,m,result,events):
  p=Path(os.environ['TMPDIR']).parent/'empty-census-evidence';p.mkdir(exist_ok=True)
  (p/(case.id().split('.')[-1]+'-'+label+'.json')).write_text(json.dumps({'test':case.id(),'label':label,'result':result,'events':events,'calls':m.h.calls,'held':m.own.session._native_custody_held,'cleanup':m.own.cleanup_events(),'scope':'Portable declared SDK/native-authored-format proof, NOT native acceptance.'},default=str,ensure_ascii=True))
+
+def replacement(case,*,after_insert=None,before_delete=None):
+ """One real text_container_text_exact through the owning runtime, with an empty-kind census.
+
+ The SDK model only records and injects; it never decides ownership, range or whether Delete may run.
+ after_insert: InsertText also writes '!' into the 'target' or a 'foreign' paragraph.
+ before_delete: (stage, location) makes the same document change after the Delete callable was
+ prepared ('run') or inside the last census before Delete ('census').
+ """
+ own,trace,request=setup(case);h=own.hwp;raw,action=h.hwp,h.HAction;run,execute,failure=action.Run,h.execute,nt._Native._failure
+ lid=next(k for k,c in h.owners.items() if c is not None and c.CtrlID=='gso' and c.GetCtrlInstID()==EDIT_ID)
+ text=lambda p:''.join(a['c'] for a in p['atoms'] if 'c' in a)
+ document=lambda:(text(h.lists[lid][0]),[text(p) for p in h.body])
+ o=SimpleNamespace(own=own,h=h,trace=trace,request=request,lid=lid,initial=document(),start=len(h.calls),events=[],changed=[],faults=[],deletes=[],prepared=[])
+ def change(location):
+  para=h.lists[lid][0] if location=='target' else h.body[0]
+  para['atoms'].append({'cs':para['atoms'][-1]['cs'],'c':'!'});o.changed.append(location);h.calls.append(('SDK_DOCUMENT_CHANGE',location))
+ def insert(name,items):
+  ret=execute(name,items)
+  if name=='InsertText' and after_insert:change(after_insert)
+  return ret
+ class Prepared:
+  def __getattr__(self,name):return getattr(action,name)
+  @property
+  def Run(self):
+   if not o.deletes:
+    o.prepared.append(len(h.calls))
+    if before_delete and before_delete[0]=='run' and not o.changed:change(before_delete[1])
+   def invoke(name):
+    if name=='Delete':
+     owner=h.owners.get(h.cursor[0])
+     o.deletes.append({'selection':h.selection,'owner':(owner.CtrlID,owner.GetCtrlInstID()) if owner is not None else None,'document':document()})
+    return run(name)
+   return invoke
+ class Boundary:
+  def __getattr__(self,name):return getattr(raw,name)
+  @property
+  def HAction(self):return Prepared()
+ def census():
+  if o.prepared and not o.deletes and before_delete and before_delete[0]=='census' and not o.changed:change(before_delete[1])
+ def fault(native,message,site,returned):
+  o.faults.append((len(h.calls),len(trace),site,native.issued));return failure(native,message,site,returned)
+ h.execute=insert;h.hwp=Boundary()
+ with patch.object(ContainersHwp,'HeadCtrl',property(lambda _:link([Empty(o.events,census),Control('gso',(0,1,4),EDIT_ID,o.events)]))),patch.object(nt._Native,'_failure',fault):o.reply,o.error=own.run(request)
+ o.calls=h.calls[o.start:];o.mutators=[c[:2] for c in o.calls if c[0] in ('Run','Execute')];o.selects=[c for c in o.calls if c[0]=='select_text']
+ return o
 
 class EmptyCensusProduct(unittest.TestCase):
  def run_create(self,head_args,*,effect=None):
@@ -111,20 +158,36 @@ class EmptyCensusProduct(unittest.TestCase):
     with patch.object(ContainersHwp,'HeadCtrl',property(lambda _:link([Empty(events),Control('gso',(0,1,4),EDIT_ID,events)]))):
      with self.assertRaises(Exception):nt._binding(native,model,item)
     self.assertTrue(native.failed);self.assertEqual(h.executes(),[])
- def test_intermediate_request_bound_append_rejects_wrong_target_or_foreign_text_before_Delete(self):
+ def test_post_insert_wrong_target_or_foreign_text_holds_after_the_one_legal_Delete_without_follow_on(self):
+  # The replacement deletes the proven old range first and inserts afterwards, so damage done by
+  # InsertText can only be seen after that one Delete. It must then hold with no further SDK call.
   for location in ('target','foreign'):
    with self.subTest(location=location):
-    own,_,request=setup(self);h=own.hwp;events=[];old=h.execute;changed=[]
-    def execute(name,items):
-     ret=old(name,items)
-     if name=='InsertText':
-      para=h.lists[h.cursor[0]][h.cursor[1]] if location=='target' else h.body[0]
-      para['atoms'].append({'cs':para['atoms'][-1]['cs'],'c':'!'});changed.append(True)
-     return ret
-    h.execute=execute
-    with patch.object(ContainersHwp,'HeadCtrl',property(lambda _:link([Empty(events),Control('gso',(0,1,4),EDIT_ID,events)]))):r,error=own.run(request)
-    self.assertIsNone(error);self.assertTrue(changed);self.assertFalse(r['ok']);self.assertTrue(r['dirty']);self.assertTrue(own.session._native_custody_held)
-    self.assertNotIn(('Run','Delete'),h.calls);self.assertEqual(own.cleanup_events(),[])
+    o=replacement(self,after_insert=location);h,r,size=o.h,o.reply,len(o.request['expected_text'])
+    self.assertIsNone(o.error);self.assertEqual(o.mutators,[('Run','Delete'),('Execute','InsertText')],'one Delete, before the one InsertText, and no second destructive call')
+    self.assertEqual(o.selects,[('select_text',0,0,0,size,o.lid)]);self.assertEqual(o.deletes,[{'selection':(o.lid,0,0,o.lid,0,size),'owner':('gso',EDIT_ID),'document':o.initial}],'Delete ran on the exact old range of the bound native owner while the document was unchanged')
+    self.assertEqual(o.changed,[location]);self.assertFalse(r['ok']);self.assertTrue(r['dirty']);self.assertTrue(o.own.session._native_custody_held)
+    self.assertEqual([f[2:] for f in o.faults],[('complete_document_preservation',True)]);self.assertEqual((len(h.calls),len(o.trace)),o.faults[0][:2],'no SDK call of any kind after the detected damage')
+    after=o.calls[o.calls.index(('SDK_DOCUMENT_CHANGE',location))+1:];self.assertEqual([c for c in after if c[0] not in ('GetPos','GetSelectedPos','get_text_file')],[],'only the proof reads follow the damaging InsertText')
+    d=r['steps'][0].get('failure_diagnostic') or {};self.assertEqual((d.get('causal_class'),d.get('native_site')),('NativeNumberingMutationError','container.complete_document_preservation'));self.assertEqual(o.own.cleanup_events(),[])
+ def test_target_or_foreign_text_drift_up_to_the_final_census_proof_issues_no_Delete(self):
+  # Counterpart before the first mutator: the same target/foreign change, made by the SDK after the
+  # Delete callable is prepared or inside the last census before Delete, is caught by the proof read
+  # of the empty-kind census. Neither Delete nor InsertText may then be issued. The first run without
+  # any change is the control: the same instrumented scenario succeeds with one exact Delete.
+  o=replacement(self);size=len(o.request['expected_text'])
+  self.assertIsNone(o.error);self.assertTrue(o.reply['ok'],o.reply);self.assertFalse(o.own.session._native_custody_held);self.assertEqual((o.faults,o.changed,len(o.prepared)),([],[],1))
+  self.assertEqual(o.mutators,[('Run','Delete'),('Execute','InsertText')]);self.assertEqual(o.deletes,[{'selection':(o.lid,0,0,o.lid,0,size),'owner':('gso',EDIT_ID),'document':o.initial}])
+  for stage in ('run','census'):
+   for location in ('target','foreign'):
+    with self.subTest(stage=stage,location=location):
+     o=replacement(self,before_delete=(stage,location));h,r=o.h,o.reply
+     self.assertIsNone(o.error);self.assertEqual(o.changed,[location],'the SDK change must actually fire before Delete');self.assertFalse(r['ok']);self.assertTrue(o.own.session._native_custody_held)
+     self.assertEqual(o.mutators,[],'no Delete and no InsertText after document drift before Delete');self.assertEqual(o.deletes,[])
+     self.assertEqual([f[2:] for f in o.faults],[('binding.document',False)]);self.assertEqual((len(h.calls),len(o.trace)),o.faults[0][:2],'no SDK call after the first fault')
+     d=r['steps'][0].get('failure_diagnostic') or {};self.assertEqual((d.get('native_site'),d.get('native_binding_branch'),d.get('native_binding_phase')),('container.binding.document','full_signature','owner.selection_identity'))
+     # Request intent was announced before this final proof, so the refusal keeps the conservative dirty debt.
+     self.assertTrue(r['dirty']);self.assertEqual(o.own.cleanup_events(),[])
  def test_added_document_read_fault_has_zero_subsequent_SDK_calls(self):
   own,_,request=setup(self);h=own.hwp;events=[]
   def bad(fmt,option):h.calls.append(('EMPTY_PROOF_FAULT',));return '<broken'

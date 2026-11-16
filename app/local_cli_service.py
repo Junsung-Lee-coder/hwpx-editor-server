@@ -161,6 +161,8 @@ _BUNDLE_UNDO_POLICY: dict[str, str] = {
     'header_footer_format_exact': 'counted_native_edit',
     # One PutFieldText of the field's own occurrence. Its native Undo was not measured, so a fill is never counted as an Undo step.
     'field_text_exact': 'refuse',
+    # Caret/save debt is not a qualified native content-history transaction.
+    'text_container_body_caret': 'refuse',
     'text_container_text_exact': 'refuse',
     'text_box_create': 'refuse',
     # One Style, StyleAddNew or StyleDirectEdit. Their native Undo was not measured, so none is counted as an Undo step.
@@ -203,7 +205,7 @@ _GUARDED_BUNDLE_OPS = frozenset({
     'table_width_exact', 'table_create_exact', 'text_replace_exact', 'table_cell_text_exact',
     'picture_inventory', 'picture_replace_exact', 'picture_crop_exact', 'picture_layout_exact',
     'header_footer_inventory', 'header_footer_text_exact', 'header_footer_format_exact',
-    'text_container_inventory', 'text_container_read', 'text_container_text_exact', 'text_box_create',
+    'text_container_inventory', 'text_container_read', 'text_container_body_caret', 'text_container_text_exact', 'text_box_create',
     'field_inventory', 'field_text_exact',
     'style_inventory', 'style_apply_exact', 'style_create_exact', 'style_update_exact',
 })
@@ -1695,7 +1697,7 @@ class LocalCliService(
                 if step.get('op') in {'character_format_exact', 'paragraph_format_exact'} and all(key in raw_result for key in ('target', 'requested', 'result')):
                     result.update(native_format.public_report(raw_result))
                 if step.get('op') in {'table_inventory', 'table_read', 'table_edit_exact', 'table_style_exact', 'table_width_exact', 'table_create_exact', 'text_replace_exact', 'table_cell_text_exact', 'header_footer_inventory', 'header_footer_text_exact', 'header_footer_format_exact', 'field_inventory', 'field_text_exact',
-                                       'text_container_inventory', 'text_container_read', 'text_container_text_exact', 'text_box_create', 'style_inventory', 'style_apply_exact', 'style_create_exact', 'style_update_exact'}:
+                                       'text_container_inventory', 'text_container_read', 'text_container_body_caret', 'text_container_text_exact', 'text_box_create', 'style_inventory', 'style_apply_exact', 'style_create_exact', 'style_update_exact'}:
                     # The caller asked for these values and they are bounded where they are built; the journal copy stays bounded and redacted.
                     result.update(raw_result)
                 if step.get('op') in {'picture_inventory', 'picture_replace_exact', 'picture_crop_exact', 'picture_layout_exact'}:
@@ -3072,6 +3074,7 @@ class LocalCliService(
             'header_footer_inventory': {'op', 'label', 'operation'},
             'text_container_inventory': {'op', 'operation', 'label'},
             'text_container_read': {'op', 'operation', 'label', 'target_id', 'expected_hash'},
+            'text_container_body_caret': {'op', 'operation', 'label', 'target_id', 'expected_hash', 'expected_text', 'confirm_navigation'},
             'text_container_text_exact': {'op', 'operation', 'label', 'target_id', 'expected_hash', 'expected_text', 'new_text', 'confirm_layout'},
             'text_box_create': {'op', 'operation', 'label', 'text', 'width_mm', 'height_mm', 'expected_pos', 'confirm_layout'},
             'field_inventory': {'op', 'label', 'operation', 'name'},
@@ -7590,7 +7593,7 @@ class LocalCliService(
                                                   else _native_diagnostic('bundle_step', exc)['refusal_code'])
                         args = BaseException.__dict__['args'].__get__(exc)
                         if step.get('op') in {'character_format_exact', 'paragraph_format_exact', 'page_number_apply', 'table_inventory', 'table_read', 'table_edit_exact', 'table_style_exact', 'table_width_exact', 'table_create_exact', 'text_replace_exact', 'table_cell_text_exact', 'header_footer_inventory', 'header_footer_text_exact', 'header_footer_format_exact', 'field_inventory', 'field_text_exact', 'picture_inventory', 'picture_replace_exact', 'picture_crop_exact', 'picture_layout_exact',
-                                           'text_container_inventory', 'text_container_read', 'text_container_text_exact', 'text_box_create', 'style_inventory', 'style_apply_exact', 'style_create_exact', 'style_update_exact'} and type(args) is tuple and len(args) == 1 and type(args[0]) is str:
+                                           'text_container_inventory', 'text_container_read', 'text_container_body_caret', 'text_container_text_exact', 'text_box_create', 'style_inventory', 'style_apply_exact', 'style_create_exact', 'style_update_exact'} and type(args) is tuple and len(args) == 1 and type(args[0]) is str:
                             status['refusal_message'] = args[0][:400]
                         if type(exc) is NativeNumberingRefusal:
                             found_page = BaseException.__dict__['__dict__'].__get__(exc).get('found_page')

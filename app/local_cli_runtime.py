@@ -1446,6 +1446,8 @@ class LocalCliRuntimeHandle:
     register_step_refusal: Callable[[BaseException], None] | None = None
     # Owning-STA private HWPX copy custody (app/hwpx_saved_proof.py); None off the real runtime.
     hwpx_proof: Any = None
+    # Optional same-command PRIVATE diagnostic; no native or release authority.
+    record_binding_precomparison: Callable[[tuple], None] | None = None
 
 
 def _new_hwpx_state() -> dict[str, Any]:
@@ -2019,6 +2021,53 @@ class LocalCliLiveSession:
                 or self._terminal_error is not None):
             raise LocalCliRuntimeError('Pre-Save observation lost healthy owning-STA authority.')
         return diagnostic
+
+    def _capture_container_binding_precomparison(self, observation: tuple) -> None:
+        """Bounded one-pair receipt while healthy, before owner comparison/latch.
+
+        Existing PRIVATE command journal/permissions/lifetime only. No SDK,
+        public projection, new path, retry permission or acceptance decision.
+        Missing/oversize/write-failed evidence remains unavailable.
+        """
+        try:
+            command = self._active_command
+            if (threading.current_thread() is not self._thread or command is None
+                    or command.name != 'command-bundle' or self._native_custody_held
+                    or command.custody_held or command.timed_out or self._closing
+                    or self._terminal_error is not None):
+                return
+            if type(observation) is not tuple or len(observation) != 5:
+                return
+            import re
+            phase, before, after, owner, returned = observation
+            if type(phase) is not str or phase != 'owner.selection_identity':
+                return
+            if (type(before) is not str or type(after) is not str
+                    or not 0 < len(before) <= 65536 or not 0 < len(after) <= 65536
+                    or type(owner) is not str or len(owner) > 40
+                    or re.fullmatch(r'(text_box|caption|footnote):[0-9]{1,10}', owner) is None
+                    or returned is not True):
+                return
+            data = command.reconciliation_data
+            key = 'container_binding_precomparison'
+            receipt = 'container_binding_precomparison_write_returned'
+            if (type(data) is not dict or len(data) > 16
+                    or any(type(k) is not str for k in dict.keys(data))
+                    or key in data or receipt in data):
+                return
+            import hashlib
+            payload = {'schema': 'container-binding-precomparison/v1', 'phase': phase,
+                'timing': 'healthy_before_binding_comparison', 'xml_owner': owner,
+                'expected_hml': before, 'observed_hml': after,
+                'expected_hml_sha256_utf16le': hashlib.sha256(before.encode('utf-16-le', errors='surrogatepass')).hexdigest(),
+                'observed_hml_sha256_utf16le': hashlib.sha256(after.encode('utf-16-le', errors='surrogatepass')).hexdigest(),
+                'insert_execute_returned': True, 'insert_execute_raw': returned}
+            dict.__setitem__(data, key, payload)
+            dict.__setitem__(data, receipt, False)
+            self._persist_command(command)
+            dict.__setitem__(data, receipt, True)
+        except BaseException:
+            pass  # supplemental storage cannot replace outcome/debt/first error
 
     def _hold_active_command_custody(self, reason: str, cause: BaseException | None = None, *, may_have_mutated: bool = True) -> None:
         command = self._active_command
@@ -2900,6 +2949,7 @@ class LocalCliLiveSession:
                 mark_mutating_intent=self._mark_mutating_intent,
                 observe_pre_save=self._observe_pre_save_is_modified,
                 hwpx_proof=_HwpxProofCustody(self),
+                record_binding_precomparison=self._capture_container_binding_precomparison,
             )
             self._active_hwp = hwp
             self._active_handle = handle

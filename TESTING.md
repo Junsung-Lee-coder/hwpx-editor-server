@@ -1,5 +1,30 @@
 # Testing
 
+## Text-container validation scope
+
+Portable source tests use explicit SDK models; they do not exercise Hancom.
+One inline horizontal 40 × 20 mm text box has been tested natively through
+creation, ordinary Save, saved-file reopen and complete text read, native
+PDF/all-page PNG output, and normal public close. A separate limited native
+observation covers one existing singleton inline horizontal 40 × 20 mm text
+box: inventory, complete read, body-caret navigation, whole-text replacement
+changing one digit on one line without changing its length, and ordinary Save.
+Reopening the exact saved package confirmed the container and its complete
+text; a one-page native PDF and its complete PNG page set were produced, and
+public close completed with normal native exit.
+
+That existing-box observation does not establish full native qualification of
+existing-box editing. The automatic proof response's `review_status` and
+`coverage.status` remained `partial`; native control inventory and page
+numbering were unverified, not proven absent. Verification before the original
+close did not complete. The saved package was compared with its baseline, but
+no baseline native render exists for a before/after visual-preservation
+comparison. This observation does not qualify other documents, container
+kinds, geometries, multi-line or different-length text, Undo/Redo, or another
+host/version. Runtime `native_qualification: not_run` and container history
+refusals remain unchanged.
+See [the container contracts](docs/NATIVE_TEXT_CONTAINERS.md).
+
 ## Native save and normal close contract
 
 `save` reads exact typed `IsModified` on the healthy owning STA and journals it before proceeding. Exact `False` deliberately skips ordinary Save as a **clean no-op**; the working-copy/file/custody/location readbacks still run. It does not fabricate a Save return or clear prior dirty evidence. Exact `True` calls the unchanged ordinary Save once; native False, errors, UNKNOWN and receipt/readback failures retain custody, with no forced Save or retry. Historical failed Saves remain failures.
