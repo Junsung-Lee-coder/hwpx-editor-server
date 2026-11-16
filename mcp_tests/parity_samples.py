@@ -27,6 +27,7 @@ _RANGE_FLAT = [value for row in _RANGE_CELLS for value in row]
 BUNDLE_SAMPLES: dict[str, list[dict]] = {
     'text_container_inventory': [{}],
     'text_container_read': [{'target_id': 'text_box:101', 'expected_hash': HASH24}],
+    'text_container_body_caret': [{'target_id': 'text_box:101', 'expected_hash': HASH24, 'expected_text': 'Portable model', 'confirm_navigation': True}],
     'text_container_text_exact': [{'target_id': 'text_box:101', 'expected_hash': HASH24, 'expected_text': 'Box text', 'new_text': 'New box text', 'confirm_layout': True}],
     'text_box_create': [{'text': 'Caller text', 'width_mm': 40, 'height_mm': 20, 'expected_pos': [0, 1, 0], 'confirm_layout': True}],
     'context': [{}],

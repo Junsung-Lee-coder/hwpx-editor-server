@@ -535,7 +535,7 @@ def validate_step_for_op(op: str, *, service: Any, index: int, step: dict[str, A
             native_picture.validate_step(step)
         except native_picture.nn.NativeNumberingInputError as exc:
             _raise(error_type, f'command-bundle step {index} {op}: {exc}')
-    elif op in {'text_container_inventory', 'text_container_read', 'text_container_text_exact', 'text_box_create'}:
+    elif op in {'text_container_inventory', 'text_container_read', 'text_container_body_caret', 'text_container_text_exact', 'text_box_create'}:
         from app import native_text_containers
         try:
             native_text_containers.validate_step(step)
@@ -698,8 +698,9 @@ def run_step_for_op(op: str, *, service: Any, handle: Any, step: dict[str, Any],
         run = service._bundle_text_replace_exact if op == 'text_replace_exact' else service._bundle_table_cell_text_exact  # noqa: SLF001
         result = run(handle.hwp, step, on_mutating=handle.mark_mutating_intent)
         return result, True, list(result.get('warnings') or [])
-    if op in {'text_container_inventory', 'text_container_read', 'text_container_text_exact', 'text_box_create'}:
-        result = service._bundle_text_container(handle.hwp, step, on_mutating=handle.mark_mutating_intent)
+    if op in {'text_container_inventory', 'text_container_read', 'text_container_body_caret', 'text_container_text_exact', 'text_box_create'}:
+        result = service._bundle_text_container(handle.hwp, step, on_mutating=handle.mark_mutating_intent,
+            record_binding_precomparison=getattr(handle, 'record_binding_precomparison', None))
         return result, result.get('result', {}).get('changed', False), list(result.get('warnings') or [])
     if op == 'header_footer_inventory':
         result = service._bundle_header_footer_inventory(handle.hwp, step)  # noqa: SLF001

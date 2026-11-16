@@ -17,7 +17,7 @@ from app.native_numbering_census import (
     CensusError, MAX_HWPML_CHARS, _DOCTYPE, _MAX_DEPTH, _Resolver, _Unresolved, _attr, _name,
 )
 
-OPS = ('text_container_inventory', 'text_container_read', 'text_container_text_exact', 'text_box_create')
+OPS = ('text_container_inventory', 'text_container_read', 'text_container_body_caret', 'text_container_text_exact', 'text_box_create')
 ENVELOPE = {'op', 'operation', 'label'}
 # Observational labels only: never admission, restoration, retry or close authority.
 # These are the existing source call/check names, plus the pure parser's phases.
@@ -294,6 +294,7 @@ BINDING = {'target_id', 'expected_hash'}
 FIELDS = {
     'text_container_inventory': ENVELOPE,
     'text_container_read': ENVELOPE | BINDING,
+    'text_container_body_caret': ENVELOPE | BINDING | {'expected_text', 'confirm_navigation'},
     'text_container_text_exact': ENVELOPE | BINDING | {'expected_text', 'new_text', 'confirm_layout'},
     'text_box_create': ENVELOPE | {'text', 'width_mm', 'height_mm', 'expected_pos', 'confirm_layout'},
 }
@@ -317,9 +318,10 @@ def _valid_raw_selection(value):
 
 
 class LocalCliBundleTextContainersMixin:
-    def _bundle_text_container(self, hwp, step, on_mutating=None):
+    def _bundle_text_container(self, hwp, step, on_mutating=None, *, record_binding_precomparison=None):
         return {'schema_version': 'local-cli/text-containers/v1',
-                **execute(hwp, step, on_mutating=on_mutating)}
+                **execute(hwp, step, on_mutating=on_mutating,
+                          record_binding_precomparison=record_binding_precomparison)}
 
 
 def _hash(value):
@@ -335,7 +337,13 @@ def validate_step(step):
     if op not in FIELDS or set(step) - FIELDS[op]:
         raise nn.NativeNumberingInputError('Unknown text container operation or fields.')
     result = dict(step)
-    if op in ('text_container_read', 'text_container_text_exact'):
+    if op == 'text_container_body_caret':
+        if step.get('confirm_navigation') is not True:
+            raise nn.NativeNumberingInputError('confirm_navigation must be true.')
+        text = step.get('expected_text')
+        if type(text) is not str or not 1 <= len(text) <= 20000 or any(ord(c) < 32 or 0x7f <= ord(c) < 0xa0 or 0xd800 <= ord(c) <= 0xdfff for c in text):
+            raise nn.NativeNumberingInputError('expected_text must be complete single-line text.')
+    if op in ('text_container_read', 'text_container_text_exact', 'text_container_body_caret'):
         if type(step.get('target_id')) is not str or not re.fullmatch(r'(text_box|caption|footnote):[0-9]{1,10}', step['target_id']):
             raise nn.NativeNumberingInputError('target_id must be the exact inventory identity.')
         if int(step['target_id'].split(':')[1]) >= 2**32:
@@ -505,9 +513,11 @@ def _target(model, step):
 
 class _Native:
     """One exact raw interface, a first-fault latch, no alias or post-fault call."""
-    def __init__(self, hwp):
+    def __init__(self, hwp, *, record_binding_precomparison=None):
         self.failed = False
         self.issued = False
+        self._record_binding_precomparison = record_binding_precomparison
+        self._insert_execute_return = None
         self._ctrlid_observation = None
         self._last_call = None
         self.com = self.call('raw_interface', lambda: hwp.hwp, 'object')
@@ -688,7 +698,20 @@ class _Native:
         if on_mutating:
             on_mutating()
         self.issued = True
-        self.call('InsertText.Execute', lambda: action.Execute('InsertText', hset), 'true')
+        self._insert_execute_return = self.call('InsertText.Execute', lambda: action.Execute('InsertText', hset), 'true')
+
+    def capture_precomparison(self, model, fresh, item, phase):
+        # Same already-validated read pair, BEFORE the comparison can fault.
+        # No getter, acceptance decision, fallback or post-latch work here.
+        if (self.failed or self._record_binding_precomparison is None
+                or phase != 'owner.selection_identity' or '_binding_text' not in item
+                or self._insert_execute_return is not True):
+            return
+        try:
+            self._record_binding_precomparison((phase, model['_source_hml'],
+                fresh['_source_hml'], item['target_id'], self._insert_execute_return))
+        except BaseException:
+            pass  # optional private evidence cannot alter acceptance/first fault
 
 
 def _document_view_caret(model):
@@ -767,6 +790,11 @@ def _signature(model, *, mask=None, remove=None, element=None, remove_shell=None
                     content.append(['tail', char.tail])
             if not list(run):
                 content.append(['empty_run', end])
+            elif e is mask and all(_name(child) == 'autonum' for child in run):
+                # A target emptied after a protected leading number can retain
+                # only AUTONUM in TEXT. Keep that subtree exact, and project the
+                # empty plain-text slot with the unchanged run format.
+                content.append(['empty_run', end])
             if run.tail:
                 content.append(['run_tail', run.tail])
         if e is mask:
@@ -775,6 +803,16 @@ def _signature(model, *, mask=None, remove=None, element=None, remove_shell=None
             seen = set()
             masked = []
             for token in content:
+                # A proven target deletion retains the same CHAR/run format but
+                # has no codepoint. Only that authorized target text slot is
+                # projected; raw signatures and every nontext token stay exact.
+                if len(token) == 3 and type(token[0]) is str and token[0] == 'empty_char':
+                    token = [token[1], token[2], '']
+                elif len(token) == 2 and type(token[0]) is str and token[0] == 'empty_run':
+                    # A schema-empty TEXT has no CHAR attributes. This only
+                    # equals an original plain CHAR with an empty attribute map;
+                    # explicit CHAR attributes still fail preservation.
+                    token = [token[1], [], '']
                 if len(token) == 3 and type(token[2]) is str:
                     key = json.dumps(token[:2], sort_keys=True)
                     if key not in seen:
@@ -885,6 +923,8 @@ def _binding(native, model, item, *, phase='direct'):
         # Census purity FIRST: a subsequent read must not erase getter drift.
         # Preserve all foreign content as well as the positively bound targets.
         fresh = native.read()
+        if phase == 'owner.selection_identity' and '_binding_text' in item:
+            native.capture_precomparison(model, fresh, item, phase)
         branch, expected_signature, observed_signature = 'full_signature', None, None
         observed_text = peer_count = None
         try:
@@ -965,9 +1005,51 @@ def _locate(native, model, item):
     return matches[0]
 
 
-def execute(hwp, step, *, on_mutating=None):
+def _body_caret(native, before, item, request, on_mutating):
+    """One exact owner-bound navigation; no guessed coordinate, selector or fallback."""
+    if item['kind'] != 'text_box' or not item['editable']:
+        _refuse('container_not_editable', 'Body caret navigation requires one editable textbox.')
+    if item['text'] != request['expected_text']:
+        _refuse('container_text_mismatch', 'Complete expected textbox text is stale.')
+    entry = native.witness()
+    if entry[2] != 0 or nn._parse_selected_pos(entry[1]) or entry[3] is not None:
+        _refuse('container_selection_present', 'An unselected caret is required before navigation.')
+    bound = _binding(native, before, item)
+    if native.witness() != entry:
+        native.hold('binding.state')
+    # Use the independent native census row, not a calculated XML text offset.
+    points = [point for point, ident in bound[3] if ident == bound[2]]
+    if len(points) != 1 or points[0][0] != 0:
+        native.hold('binding.census')
+    point = points[0]
+    try:
+        # Serialized caret navigation creates save/custody debt, not a content-edit claim.
+        native.issued = True
+        if on_mutating is not None:
+            on_mutating()
+        native.at(point)
+        witness = native.witness()
+        if witness[0] != point or witness[2] != 0 or nn._parse_selected_pos(witness[1]) or witness[3] is not None:
+            native.hold('caret_identity')
+        after = native.read_unchanged(before, 'body_caret_preservation')
+        later = _target(after, request)
+        if later['text'] != request['expected_text'] or _binding(native, after, later) != bound:
+            native.hold('binding.document')
+        if native.witness() != witness:
+            native.hold('caret_identity')
+        return {'read_only': False, 'container': public(later, complete=True),
+                'anchor_basis': 'native_GetAnchorPos_exact_owner_census', 'body_anchor': list(point),
+                'cursor': {'pos': list(point), 'has_selection': False, 'selected_pos': []},
+                'result': {'changed': True, 'status': 'positioned', 'navigation_only': True, 'content_changed': False},
+                'preservation': 'complete_document_unchanged_navigation_only',
+                'warnings': ['Future native navigation/save qualification required.']}
+    except nn.NativeNumberingReadFailure as exc:
+        raise _mutation_failure('Body caret navigation is unproven; first fault retained, no follow-on.', exc) from exc
+
+
+def execute(hwp, step, *, on_mutating=None, record_binding_precomparison=None):
     request = validate_step(step)
-    native = _Native(hwp)
+    native = _Native(hwp, record_binding_precomparison=record_binding_precomparison)
     before = native.read()
     op = step['op']
     if op == 'text_container_inventory':
@@ -975,6 +1057,8 @@ def execute(hwp, step, *, on_mutating=None):
     item = _target(before, request) if op != 'text_box_create' else None
     if op == 'text_container_read':
         return {'read_only': True, 'container': public(item, complete=True), 'warnings': []}
+    if op == 'text_container_body_caret':
+        return _body_caret(native, before, item, request, on_mutating)
     if op == 'text_container_text_exact':
         # Pure entered-document admission comes BEFORE native caret/navigation.
         # A grouped owner is not visited merely to restore a caret never moved.
@@ -999,16 +1083,46 @@ def execute(hwp, step, *, on_mutating=None):
         start = sum(a['width'] for a in atoms[:first])
         last = sum(a['width'] for a in atoms)
         native.select(lid, start, last, item)
-        native.at((lid, 0, last))
-        _require_owner(native, item, 'insertion_owner')
+        # Never double the contents before deleting the old range. The actual
+        # captured append state changed current height/scale/rotation centre;
+        # those are real preservation operands, not benign metadata to mask.
+        selected = native.witness()
         native.read_unchanged(before, 'pre_insert_document_drift')
-        if native.state() != ((lid, 0, last), ()):
-            native.hold('pre_insert_document_drift')
-        native.insert(request['new_text'], on_mutating)
-        item['_binding_text'] = item['text'] + request['new_text']
-        native.select(lid, start, last, item)
         action = native.call('HAction.delete', lambda: native.com.HAction, 'object')
-        native.call('Delete', lambda: action.Run('Delete'), 'true')
+        # Resolve the actual callable BEFORE the final identity proof. A COM
+        # method lookup is itself an external entry and must not reopen the gap.
+        delete_run = native.call('Delete.Run', lambda: action.Run, 'object')
+        if not callable(delete_run):
+            native.hold('Delete.Run')
+        if native.witness() != selected:
+            native.hold('selection_identity')  # preparation purity, not authority
+        if on_mutating:
+            on_mutating()
+        # Reuse the ORIGINAL admitted route/model, never a fresh self-authorized
+        # snapshot. Ordinary selected-text witnesses omit ParentCtrl/census.
+        _require_owner(native, item, 'selection_identity')
+        pos, selection = native.state()
+        if pos[0] != lid or selection != (lid, 0, start, lid, 0, last):
+            native.hold('selection_identity')
+        native.issued = True
+        native.call('Delete', lambda: delete_run('Delete'), 'true')
+        # FIRST post-Delete proof: no owner/caret getter or insertion until the
+        # exact target is empty and all formatting/shape/non-target data match.
+        emptied = native.read()
+        peers = [x for x in emptied['containers'] if x['target_id'] == item['target_id']]
+        if (len(peers) != 1 or peers[0]['text'] != '' or len(peers[0]['_rows']) != 1
+                or _signature(before, mask=item['_rows'][0]['element']) !=
+                   _signature(emptied, mask=peers[0]['_rows'][0]['element'])):
+            native.hold('binding.document')
+        if native.state() != ((lid, 0, start), ()):
+            native.hold('selection_identity')
+        # Advance the binding only to the exact empty snapshot just proved
+        # against the original whole-document preservation signature. Keep its
+        # parsed owner object and the independently observed native route paired.
+        empty_item = peers[0]
+        empty_item['_native_binding'] = (emptied, item['_native_binding'][1])
+        _require_owner(native, empty_item, 'insertion_owner')
+        native.insert(request['new_text'], on_mutating)
         post_read_state = native.witness()
         after = native.read()
         later = _target(after, {**request, 'expected_hash': next((x['hash'] for x in after['containers'] if x['target_id'] == item['target_id']), '')})

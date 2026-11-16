@@ -513,6 +513,20 @@ class TextContainerReadStep(_TextContainerBinding):
     label: Label = 'mcp:text-container-read'
 
 
+class TextContainerBodyCaretStep(_TextContainerBinding):
+    op: Literal['text_container_body_caret']
+    label: Label = 'mcp:text-container-body-caret'
+    expected_text: Annotated[str, Field(min_length=1, max_length=20000)]
+    confirm_navigation: Literal[True]
+
+    @model_validator(mode='before')
+    @classmethod
+    def strict_navigation(cls, value):
+        if isinstance(value, dict) and value.get('confirm_navigation') is not True:
+            raise ValueError('confirm_navigation requires exact boolean true')
+        return value
+
+
 class TextContainerTextStep(_TextContainerBinding):
     op: Literal['text_container_text_exact']
     label: Label = 'mcp:text-container-text-exact'
@@ -855,7 +869,7 @@ _EXACT_STEPS = (ContextStep, SelectionStep, ReadbackStep, CellFormatStep, PageNu
                 TableStyleStep, TableWidthStep, TableCreateStep, TextReplaceStep, TableCellTextStep, HeaderFooterInventoryStep,
                 HeaderFooterTextStep, HeaderFooterFormatStep, FieldInventoryStep, FieldTextStep, StyleInventoryStep, StyleApplyStep, StyleCreateStep,
                 StyleUpdateStep, PictureInventoryStep, PictureReplaceStep, PictureCropStep, PictureLayoutStep,
-                TextContainerInventoryStep, TextContainerReadStep, TextContainerTextStep, TextBoxCreateStep)
+                TextContainerInventoryStep, TextContainerReadStep, TextContainerBodyCaretStep, TextContainerTextStep, TextBoxCreateStep)
 # One command-bundle step: every backend bundle op MCP exposes (hwpx_mcp/parity.py BUNDLE_OPS).
 BundleStep = Annotated[Union[(*_EXACT_STEPS, *ops.NEW_BUNDLE_STEPS)], Field(discriminator='op')]
 _REST_STEPS = tuple(model for _path, model in ops.REST_OPS.values())

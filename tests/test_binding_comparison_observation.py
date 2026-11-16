@@ -8,6 +8,7 @@ from tests.test_empty_ctrlid_product import create_head,ContainersHwp
 from tests.test_native_container_identity import setup,NATIVE
 from tests.native_census_state_review_models import Control,link
 from tests.test_empty_ctrlid_product import Empty
+from tests.legacy_append_diagnostic_model import legacy_append_model
 SECRET='PRIVATE-HML-OPERAND-NOT-FOR-PUBLIC'
 
 def mismatch(case,sid='custody-session-0001'):
@@ -50,7 +51,7 @@ class BindingComparisonObservation(unittest.TestCase):
     p=h.lists[h.cursor[0]][h.cursor[1]];p['atoms'].append({'cs':p['atoms'][-1]['cs'],'c':'!'})
    return ret
   h.execute=execute
-  with patch.object(ContainersHwp,'HeadCtrl',property(lambda _:link([Empty(events),Control('gso',(0,1,4),NATIVE,events)]))):r,e=own.run(request)
+  with patch.object(nt,'execute',legacy_append_model),patch.object(ContainersHwp,'HeadCtrl',property(lambda _:link([Empty(events),Control('gso',(0,1,4),NATIVE,events)]))):r,e=own.run(request)
   self.assertIsNone(e);self.assertFalse(r['ok']);self.assertTrue(own.session._native_custody_held);self.assertNotIn(('Run','Delete'),h.calls)
   c=max(own.session._commands_by_id.values(),key=lambda c:c.sequence);p=c.reconciliation_data.get('container_binding_comparison');self.assertIs(type(p),dict);self.assertEqual(p['branch'],'append_text')
   self.assertEqual(p['expected_text'],'Original container'+request['new_text']);self.assertEqual(p['observed_text'],p['expected_text']+'!');self.assertEqual(own.cleanup_events(),[])
@@ -98,7 +99,7 @@ class BindingComparisonObservation(unittest.TestCase):
       with patch.object(nt.hashlib,'sha256',fail_digest):return project(cap)
      return project(cap)
     h.execute=execute
-    with patch.object(ContainersHwp,'HeadCtrl',property(lambda _:link([Empty(events),Control('gso',(0,1,4),NATIVE,events)]))),patch.object(nt,'_project_binding',publication):r,e=own.run(request)
+    with patch.object(nt,'execute',legacy_append_model),patch.object(ContainersHwp,'HeadCtrl',property(lambda _:link([Empty(events),Control('gso',(0,1,4),NATIVE,events)]))),patch.object(nt,'_project_binding',publication):r,e=own.run(request)
     self.assertIsNone(e);self.assertFalse(r['ok']);self.assertTrue(own.session._native_custody_held);self.assertEqual(own.cleanup_events(),[])
     c=max(own.session._commands_by_id.values(),key=lambda c:c.sequence);p=c.reconciliation_data['container_binding_comparison'];self.assertEqual(p['branch'],'append_signature' if fault=='foreign' else 'append_text')
     self.assertNotIn(('Run','Delete'),h.calls)
@@ -116,7 +117,7 @@ class BindingComparisonObservation(unittest.TestCase):
     return E.tostring(root,encoding='unicode')
    return text
   h.GetTextFile=source
-  with patch.object(ContainersHwp,'HeadCtrl',property(lambda _:link([Empty(events),Control('gso',(0,1,4),NATIVE,events)]))):r,e=own.run(request)
+  with patch.object(nt,'execute',legacy_append_model),patch.object(ContainersHwp,'HeadCtrl',property(lambda _:link([Empty(events),Control('gso',(0,1,4),NATIVE,events)]))):r,e=own.run(request)
   self.assertIsNone(e);self.assertFalse(r['ok']);self.assertTrue(own.session._native_custody_held);self.assertEqual(own.cleanup_events(),[])
   c=max(own.session._commands_by_id.values(),key=lambda c:c.sequence);p=c.reconciliation_data['container_binding_comparison'];self.assertEqual(p['branch'],'append_peer_count');self.assertEqual(p['observed_peer_count'],0)
   self.assertIsNone(p['observed_signature']);self.assertIsNone(p['observed_text']);self.assertNotIn(('Run','Delete'),h.calls)

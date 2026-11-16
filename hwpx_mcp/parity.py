@@ -51,6 +51,7 @@ _UNGUARDED = ('not a guarded exact engine: any backend error in the step, includ
 BUNDLE_OPS: dict[str, dict[str, Any]] = {
     'text_container_inventory': _exposed(SESSION_TOOLS, note='Read-only native text-box/caption/footnote inventory; bounded text is explicitly marked complete or preview-only. Native qualification not run.'),
     'text_container_read': _exposed(SESSION_TOOLS, note='Complete text of one target_id+expected_hash container; no native qualification claim.'),
+    'text_container_body_caret': _exposed(SESSION_TOOLS, note='Guarded textbox target/hash/fulltext to native GetAnchorPos body caret; navigation save debt, no arbitrary coordinates or native qualification claim.'),
     'text_container_text_exact': _exposed(SESSION_TOOLS, note='Replace complete expected_text in one body-owned single-list single-paragraph native object. Uniform format only; leading caption/note AUTONUM retained. Shape component GroupLevel must be zero (documented default allowed); nonzero is refused before navigation and malformed/conflicting grouping holds. Exact section outline bindings are preserved. Undo refused; native qualification not run.'),
     'text_box_create': _exposed(SESSION_TOOLS, note='Create one inline horizontal native text box, 5..200 mm absolute HWPUNIT dimensions, at the pristine expected_pos body paragraph/offset. First creation read must prove exact location plus actual noncollapsed points, component extents and finite unscaled/unrotated transforms before navigation or text insertion. Undo refused; native qualification not run.'),
     'context': _exposed(SESSION_TOOLS),
@@ -162,7 +163,7 @@ BUNDLE_OPS: dict[str, dict[str, Any]] = {
 
 # Backend ops with a semantic pre-edit refusal path (local_cli_service._GUARDED_BUNDLE_OPS); every other
 # exposed op reports a backend error as an unknown outcome that holds the session.
-GUARDED = frozenset({'text_container_inventory', 'text_container_read', 'text_container_text_exact', 'text_box_create','page_number_apply', 'official_numbering_apply', 'paragraph_insert_exact', 'paragraph_remove_exact',
+GUARDED = frozenset({'text_container_inventory', 'text_container_read', 'text_container_body_caret', 'text_container_text_exact', 'text_box_create','page_number_apply', 'official_numbering_apply', 'paragraph_insert_exact', 'paragraph_remove_exact',
                      'character_format_exact', 'paragraph_format_exact', 'table_inventory', 'table_read', 'table_edit_exact',
                      'table_style_exact', 'table_width_exact', 'table_create_exact', 'text_replace_exact', 'table_cell_text_exact',
                      'header_footer_inventory', 'header_footer_text_exact', 'header_footer_format_exact', 'field_inventory', 'field_text_exact',

@@ -1,5 +1,27 @@
 # HWPX MCP 어댑터
 
+## 글상자 기능의 검증 범위
+
+인라인 가로형 40 × 20 mm 글상자 하나는 생성, 일반 저장, 저장본 다시 열기와
+전체 텍스트 읽기, 네이티브 PDF·전체 쪽 PNG 출력, 공개 `close` 정상 종료까지
+실기기에서 시험했습니다. 이와 별도로 기존 글상자 편집에 대해 실기기에서
+제한적으로 확인한 범위는 기존 단일 인라인 가로형 40 × 20 mm 글상자 하나의
+목록·전체 읽기·본문 캐럿 이동, 한 줄에서 길이를 유지하며 숫자 한 자리만
+바꾸는 전체 텍스트 교체와 일반 저장입니다. 같은 저장본을 다시 열어 글상자와
+전체 텍스트를 읽고, 1쪽 네이티브 PDF 및 전체 PNG를 생성한 뒤 공개 `close`로
+한글이 정상 종료되는 것을 확인했습니다.
+
+이 기존 글상자 확인만으로 기존 글상자 편집의 완전한 네이티브 검증이 이루어진
+것은 아닙니다. 그 실행에서 `hwpx_proof` 응답의 `review_status`와
+`coverage.status`는 `partial`이었고 네이티브 컨트롤 목록과 쪽 번호는
+미검증이었습니다. 해당 컨트롤이 없다고 확인한 것은 아닙니다. 최초 종료
+전 저장 검증은 완료되지 않았고, 기준 문서의 네이티브 렌더가 없어 편집 전후
+시각적 보존 비교도 성립하지 않습니다. 다른 문서·컨테이너 종류·크기·여러 줄·
+길이가 달라지는 교체·Undo/Redo·다른 호스트에는 이 결과를 확장할 수 없습니다.
+런타임의 `native_qualification: not_run`과 글상자 편집·본문 캐럿 이동의
+Undo 거부 정책은 그대로입니다.
+자세한 계약은 [글상자 API 안내](NATIVE_TEXT_CONTAINERS.md)에 있습니다.
+
 Existing header/footer inventory and exact text/direct formatting: [API guide](HEADER_FOOTER.md).
 
 Existing named fields (click-here 누름틀, cell and text box fields): inventory by name and occurrence, and filling one click-here field: [guide](FIELDS.md).
